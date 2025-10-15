@@ -1,0 +1,569 @@
+//! In-memory graph storage implementation
+//!
+//! Implements:
+//! - REQ-GRAPH-001: Property graph data model
+//! - REQ-MEM-001: In-memory storage
+//! - REQ-MEM-003: Memory-optimized data structures
+
+use super::edge::Edge;
+use super::node::Node;
+use super::property::PropertyMap;
+use super::types::{EdgeId, EdgeType, Label, NodeId};
+use std::collections::{HashMap, HashSet};
+use thiserror::Error;
+
+/// Errors that can occur during graph operations
+#[derive(Error, Debug, PartialEq)]
+pub enum GraphError {
+    #[error("Node {0} not found")]
+    NodeNotFound(NodeId),
+
+    #[error("Edge {0} not found")]
+    EdgeNotFound(EdgeId),
+
+    #[error("Node {0} already exists")]
+    NodeAlreadyExists(NodeId),
+
+    #[error("Edge {0} already exists")]
+    EdgeAlreadyExists(EdgeId),
+
+    #[error("Invalid edge: source node {0} does not exist")]
+    InvalidEdgeSource(NodeId),
+
+    #[error("Invalid edge: target node {0} does not exist")]
+    InvalidEdgeTarget(NodeId),
+}
+
+pub type GraphResult<T> = Result<T, GraphError>;
+
+/// In-memory graph storage
+///
+/// Uses hash maps for O(1) lookup performance:
+/// - nodes: NodeId -> Node
+/// - edges: EdgeId -> Edge
+/// - outgoing: NodeId -> Vec<EdgeId> (adjacency list for outgoing edges)
+/// - incoming: NodeId -> Vec<EdgeId> (adjacency list for incoming edges)
+/// - label_index: Label -> Vec<NodeId> (index for fast label lookups)
+#[derive(Debug)]
+pub struct GraphStore {
+    /// Node storage
+    nodes: HashMap<NodeId, Node>,
+
+    /// Edge storage
+    edges: HashMap<EdgeId, Edge>,
+
+    /// Outgoing edges for each node (adjacency list)
+    outgoing: HashMap<NodeId, Vec<EdgeId>>,
+
+    /// Incoming edges for each node (adjacency list)
+    incoming: HashMap<NodeId, Vec<EdgeId>>,
+
+    /// Label index for fast lookups
+    label_index: HashMap<Label, HashSet<NodeId>>,
+
+    /// Edge type index for fast lookups
+    edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>,
+
+    /// Next node ID
+    next_node_id: u64,
+
+    /// Next edge ID
+    next_edge_id: u64,
+}
+
+impl GraphStore {
+    /// Create a new empty graph store
+    pub fn new() -> Self {
+        GraphStore {
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+            outgoing: HashMap::new(),
+            incoming: HashMap::new(),
+            label_index: HashMap::new(),
+            edge_type_index: HashMap::new(),
+            next_node_id: 1,
+            next_edge_id: 1,
+        }
+    }
+
+    /// Create a node with auto-generated ID and single label
+    pub fn create_node(&mut self, label: impl Into<Label>) -> NodeId {
+        let node_id = NodeId::new(self.next_node_id);
+        self.next_node_id += 1;
+
+        let label = label.into();
+        let node = Node::new(node_id, label.clone());
+
+        // Add to label index
+        self.label_index
+            .entry(label)
+            .or_insert_with(HashSet::new)
+            .insert(node_id);
+
+        // Initialize adjacency lists
+        self.outgoing.insert(node_id, Vec::new());
+        self.incoming.insert(node_id, Vec::new());
+
+        self.nodes.insert(node_id, node);
+        node_id
+    }
+
+    /// Create a node with multiple labels and properties
+    pub fn create_node_with_properties(
+        &mut self,
+        labels: Vec<Label>,
+        properties: PropertyMap,
+    ) -> NodeId {
+        let node_id = NodeId::new(self.next_node_id);
+        self.next_node_id += 1;
+
+        let node = Node::new_with_properties(node_id, labels.clone(), properties);
+
+        // Add to label indices
+        for label in labels {
+            self.label_index
+                .entry(label)
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+        }
+
+        // Initialize adjacency lists
+        self.outgoing.insert(node_id, Vec::new());
+        self.incoming.insert(node_id, Vec::new());
+
+        self.nodes.insert(node_id, node);
+        node_id
+    }
+
+    /// Get a node by ID
+    pub fn get_node(&self, id: NodeId) -> Option<&Node> {
+        self.nodes.get(&id)
+    }
+
+    /// Get a mutable node by ID
+    pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(&id)
+    }
+
+    /// Check if a node exists
+    pub fn has_node(&self, id: NodeId) -> bool {
+        self.nodes.contains_key(&id)
+    }
+
+    /// Delete a node and all its connected edges
+    pub fn delete_node(&mut self, id: NodeId) -> GraphResult<Node> {
+        let node = self.nodes.remove(&id).ok_or(GraphError::NodeNotFound(id))?;
+
+        // Remove from label indices
+        for label in &node.labels {
+            if let Some(node_set) = self.label_index.get_mut(label) {
+                node_set.remove(&id);
+            }
+        }
+
+        // Remove all connected edges
+        let outgoing_edges = self.outgoing.remove(&id).unwrap_or_default();
+        let incoming_edges = self.incoming.remove(&id).unwrap_or_default();
+
+        for edge_id in outgoing_edges.iter().chain(incoming_edges.iter()) {
+            if let Some(edge) = self.edges.remove(edge_id) {
+                // Remove from edge type index
+                if let Some(edge_set) = self.edge_type_index.get_mut(&edge.edge_type) {
+                    edge_set.remove(edge_id);
+                }
+
+                // Clean up adjacency lists
+                if let Some(adj) = self.incoming.get_mut(&edge.target) {
+                    adj.retain(|&eid| eid != *edge_id);
+                }
+                if let Some(adj) = self.outgoing.get_mut(&edge.source) {
+                    adj.retain(|&eid| eid != *edge_id);
+                }
+            }
+        }
+
+        Ok(node)
+    }
+
+    /// Create an edge between two nodes
+    pub fn create_edge(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: impl Into<EdgeType>,
+    ) -> GraphResult<EdgeId> {
+        // Validate nodes exist
+        if !self.has_node(source) {
+            return Err(GraphError::InvalidEdgeSource(source));
+        }
+        if !self.has_node(target) {
+            return Err(GraphError::InvalidEdgeTarget(target));
+        }
+
+        let edge_id = EdgeId::new(self.next_edge_id);
+        self.next_edge_id += 1;
+
+        let edge_type = edge_type.into();
+        let edge = Edge::new(edge_id, source, target, edge_type.clone());
+
+        // Update adjacency lists
+        self.outgoing.get_mut(&source).unwrap().push(edge_id);
+        self.incoming.get_mut(&target).unwrap().push(edge_id);
+
+        // Update edge type index
+        self.edge_type_index
+            .entry(edge_type)
+            .or_insert_with(HashSet::new)
+            .insert(edge_id);
+
+        self.edges.insert(edge_id, edge);
+        Ok(edge_id)
+    }
+
+    /// Create an edge with properties
+    pub fn create_edge_with_properties(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: impl Into<EdgeType>,
+        properties: PropertyMap,
+    ) -> GraphResult<EdgeId> {
+        // Validate nodes exist
+        if !self.has_node(source) {
+            return Err(GraphError::InvalidEdgeSource(source));
+        }
+        if !self.has_node(target) {
+            return Err(GraphError::InvalidEdgeTarget(target));
+        }
+
+        let edge_id = EdgeId::new(self.next_edge_id);
+        self.next_edge_id += 1;
+
+        let edge_type = edge_type.into();
+        let edge = Edge::new_with_properties(edge_id, source, target, edge_type.clone(), properties);
+
+        // Update adjacency lists
+        self.outgoing.get_mut(&source).unwrap().push(edge_id);
+        self.incoming.get_mut(&target).unwrap().push(edge_id);
+
+        // Update edge type index
+        self.edge_type_index
+            .entry(edge_type)
+            .or_insert_with(HashSet::new)
+            .insert(edge_id);
+
+        self.edges.insert(edge_id, edge);
+        Ok(edge_id)
+    }
+
+    /// Get an edge by ID
+    pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
+        self.edges.get(&id)
+    }
+
+    /// Get a mutable edge by ID
+    pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
+        self.edges.get_mut(&id)
+    }
+
+    /// Check if an edge exists
+    pub fn has_edge(&self, id: EdgeId) -> bool {
+        self.edges.contains_key(&id)
+    }
+
+    /// Delete an edge
+    pub fn delete_edge(&mut self, id: EdgeId) -> GraphResult<Edge> {
+        let edge = self.edges.remove(&id).ok_or(GraphError::EdgeNotFound(id))?;
+
+        // Remove from edge type index
+        if let Some(edge_set) = self.edge_type_index.get_mut(&edge.edge_type) {
+            edge_set.remove(&id);
+        }
+
+        // Remove from adjacency lists
+        if let Some(adj) = self.outgoing.get_mut(&edge.source) {
+            adj.retain(|&eid| eid != id);
+        }
+        if let Some(adj) = self.incoming.get_mut(&edge.target) {
+            adj.retain(|&eid| eid != id);
+        }
+
+        Ok(edge)
+    }
+
+    /// Get all outgoing edges from a node
+    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
+        self.outgoing
+            .get(&node_id)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&id| self.edges.get(&id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all incoming edges to a node
+    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
+        self.incoming
+            .get(&node_id)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&id| self.edges.get(&id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all nodes with a specific label
+    pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
+        self.label_index
+            .get(label)
+            .map(|node_ids| {
+                node_ids
+                    .iter()
+                    .filter_map(|&id| self.nodes.get(&id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all edges of a specific type
+    pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<&Edge> {
+        self.edge_type_index
+            .get(edge_type)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&id| self.edges.get(&id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get total number of nodes
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get total number of edges
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Get all nodes in the graph
+    pub fn all_nodes(&self) -> Vec<&Node> {
+        self.nodes.values().collect()
+    }
+
+    /// Clear all data from the graph
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+        self.outgoing.clear();
+        self.incoming.clear();
+        self.label_index.clear();
+        self.edge_type_index.clear();
+        self.next_node_id = 1;
+        self.next_edge_id = 1;
+    }
+}
+
+impl Default for GraphStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_and_get_node() {
+        let mut store = GraphStore::new();
+        let node_id = store.create_node("Person");
+
+        assert_eq!(store.node_count(), 1);
+        let node = store.get_node(node_id).unwrap();
+        assert_eq!(node.id, node_id);
+        assert!(node.has_label(&Label::new("Person")));
+    }
+
+    #[test]
+    fn test_create_node_with_properties() {
+        let mut store = GraphStore::new();
+        let mut props = PropertyMap::new();
+        props.insert("name".to_string(), "Alice".into());
+        props.insert("age".to_string(), 30i64.into());
+
+        let node_id = store.create_node_with_properties(
+            vec![Label::new("Person"), Label::new("Employee")],
+            props,
+        );
+
+        let node = store.get_node(node_id).unwrap();
+        assert_eq!(node.label_count(), 2);
+        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(node.get_property("age").unwrap().as_integer(), Some(30));
+    }
+
+    #[test]
+    fn test_create_and_get_edge() {
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let node2 = store.create_node("Person");
+
+        let edge_id = store.create_edge(node1, node2, "KNOWS").unwrap();
+
+        assert_eq!(store.edge_count(), 1);
+        let edge = store.get_edge(edge_id).unwrap();
+        assert_eq!(edge.source, node1);
+        assert_eq!(edge.target, node2);
+        assert_eq!(edge.edge_type, EdgeType::new("KNOWS"));
+    }
+
+    #[test]
+    fn test_edge_validation() {
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let invalid_node = NodeId::new(999);
+
+        // Invalid source node
+        let result = store.create_edge(invalid_node, node1, "KNOWS");
+        assert_eq!(result, Err(GraphError::InvalidEdgeSource(invalid_node)));
+
+        // Invalid target node
+        let result = store.create_edge(node1, invalid_node, "KNOWS");
+        assert_eq!(result, Err(GraphError::InvalidEdgeTarget(invalid_node)));
+    }
+
+    #[test]
+    fn test_adjacency_lists() {
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let node2 = store.create_node("Person");
+        let node3 = store.create_node("Person");
+
+        store.create_edge(node1, node2, "KNOWS").unwrap();
+        store.create_edge(node1, node3, "KNOWS").unwrap();
+        store.create_edge(node2, node3, "FOLLOWS").unwrap();
+
+        // Node1 has 2 outgoing edges
+        let outgoing = store.get_outgoing_edges(node1);
+        assert_eq!(outgoing.len(), 2);
+
+        // Node2 has 1 outgoing, 1 incoming
+        let outgoing = store.get_outgoing_edges(node2);
+        assert_eq!(outgoing.len(), 1);
+        let incoming = store.get_incoming_edges(node2);
+        assert_eq!(incoming.len(), 1);
+
+        // Node3 has 0 outgoing, 2 incoming
+        let outgoing = store.get_outgoing_edges(node3);
+        assert_eq!(outgoing.len(), 0);
+        let incoming = store.get_incoming_edges(node3);
+        assert_eq!(incoming.len(), 2);
+    }
+
+    #[test]
+    fn test_label_index() {
+        let mut store = GraphStore::new();
+        store.create_node("Person");
+        store.create_node("Person");
+        store.create_node("Company");
+
+        let persons = store.get_nodes_by_label(&Label::new("Person"));
+        assert_eq!(persons.len(), 2);
+
+        let companies = store.get_nodes_by_label(&Label::new("Company"));
+        assert_eq!(companies.len(), 1);
+    }
+
+    #[test]
+    fn test_edge_type_index() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let n3 = store.create_node("Person");
+
+        store.create_edge(n1, n2, "KNOWS").unwrap();
+        store.create_edge(n2, n3, "KNOWS").unwrap();
+        store.create_edge(n1, n3, "FOLLOWS").unwrap();
+
+        let knows_edges = store.get_edges_by_type(&EdgeType::new("KNOWS"));
+        assert_eq!(knows_edges.len(), 2);
+
+        let follows_edges = store.get_edges_by_type(&EdgeType::new("FOLLOWS"));
+        assert_eq!(follows_edges.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_node() {
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let node2 = store.create_node("Person");
+        store.create_edge(node1, node2, "KNOWS").unwrap();
+
+        assert_eq!(store.node_count(), 2);
+        assert_eq!(store.edge_count(), 1);
+
+        // Delete node1 (should also delete connected edge)
+        let deleted = store.delete_node(node1);
+        assert!(deleted.is_ok());
+        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_delete_edge() {
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let node2 = store.create_node("Person");
+        let edge_id = store.create_edge(node1, node2, "KNOWS").unwrap();
+
+        assert_eq!(store.edge_count(), 1);
+
+        let deleted = store.delete_edge(edge_id);
+        assert!(deleted.is_ok());
+        assert_eq!(store.edge_count(), 0);
+
+        // Edge removed from adjacency lists
+        assert_eq!(store.get_outgoing_edges(node1).len(), 0);
+        assert_eq!(store.get_incoming_edges(node2).len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_edges_between_nodes() {
+        // REQ-GRAPH-008: Multiple edges between same nodes
+        let mut store = GraphStore::new();
+        let node1 = store.create_node("Person");
+        let node2 = store.create_node("Person");
+
+        let edge1 = store.create_edge(node1, node2, "KNOWS").unwrap();
+        let edge2 = store.create_edge(node1, node2, "WORKS_WITH").unwrap();
+        let edge3 = store.create_edge(node1, node2, "KNOWS").unwrap();
+
+        assert_eq!(store.edge_count(), 3);
+        assert_ne!(edge1, edge2);
+        assert_ne!(edge1, edge3);
+
+        let outgoing = store.get_outgoing_edges(node1);
+        assert_eq!(outgoing.len(), 3);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut store = GraphStore::new();
+        store.create_node("Person");
+        store.create_node("Person");
+
+        assert_eq!(store.node_count(), 2);
+
+        store.clear();
+        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.edge_count(), 0);
+    }
+}

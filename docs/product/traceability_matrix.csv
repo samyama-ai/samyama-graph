@@ -1,0 +1,101 @@
+requirement_id,requirement_name,persona_ids,workflow_ids,usecase_ids,testcase_ids,coverage_percentage,priority,verification_status
+REQ-DIST-001,Distributed deployment across multiple nodes,P001|P004|P006,WF001|WF004|WF007|WF015,UC007|UC016|UC025,TC017|TC028|TC036,90%,Critical,Partial
+REQ-DIST-002,Automatic data sharding,P001|P004,WF007,,,40%,High,Not Started
+REQ-DIST-003,Horizontal scaling,P001|P004,WF007|WF015,UC017,TC029,75%,Critical,Partial
+REQ-DIST-004,Fault tolerance with automatic failover,P001|P004,WF004|WF010,UC004|UC020,TC011|TC032,95%,Critical,Verified
+REQ-DIST-005,Data consistency across nodes,P001|P004|P009,WF004|WF011,UC016,TC028,85%,Critical,Verified
+REQ-DIST-006,Replication for high availability,P001|P004,WF004|WF007,UC004,TC012,85%,Critical,Verified
+REQ-GRAPH-001,Property graph data model,P002|P003,WF002|WF014,UC001|UC014,TC001|TC013,100%,Critical,Verified
+REQ-GRAPH-002,Nodes with labels,P002|P003,WF002|WF014,UC001,TC001|TC002,100%,Critical,Verified
+REQ-GRAPH-003,Edges with types,P002,WF002|WF014,UC001,TC003|TC013,100%,Critical,Verified
+REQ-GRAPH-004,Properties on nodes and edges,P002,WF002,UC001,TC005,100%,Critical,Verified
+REQ-GRAPH-005,Multiple property data types,P002,WF002,UC001,TC005,100%,Critical,Verified
+REQ-GRAPH-006,Multiple labels per node,P002,WF002,UC001,TC002,100%,Critical,Verified
+REQ-GRAPH-007,Directed edges,P002,WF002,UC001,TC003,100%,Critical,Verified
+REQ-GRAPH-008,Multiple edges between nodes,P002,WF002,UC001,TC004,100%,Critical,Verified
+REQ-CYPHER-001,OpenCypher query language,P002|P003|P010,WF002|WF008|WF012|WF014,UC001|UC011|UC014|UC022,TC001|TC022|TC023,95%,Critical,Verified
+REQ-CYPHER-002,OpenCypher pattern matching,P002|P003,WF002|WF008,,TC009,70%,Critical,Partial
+REQ-CYPHER-003,CRUD operations via Cypher,P002|P003,WF002|WF008|WF014,UC001|UC013|UC022,TC001|TC003|TC013|TC025,95%,Critical,Verified
+REQ-CYPHER-004,Cypher aggregation functions,P002,WF008,UC018,TC030,85%,High,Verified
+REQ-CYPHER-005,Cypher path queries,P002|P003,WF005|WF008,UC003|UC014,TC014|TC026,90%,High,Verified
+REQ-CYPHER-006,Variable-length path patterns,P002|P003,WF005|WF008,UC003|UC014,TC009|TC039,90%,High,Verified
+REQ-CYPHER-007,WHERE clauses and filtering,P002,WF008,,TC009,70%,High,Partial
+REQ-CYPHER-008,ORDER BY and LIMIT clauses,P002,WF008,UC018,TC030,85%,High,Verified
+REQ-CYPHER-009,Query optimization,P002|P003,WF008,UC006,TC015|TC016|TC040,90%,Critical,Partial
+REQ-TENANT-001,Multiple isolated tenants,P005,WF003,UC002,TC006,95%,Critical,Verified
+REQ-TENANT-002,Isolated data per tenant,P005,WF003,UC002,TC006,95%,Critical,Verified
+REQ-TENANT-003,Tenant resource quotas,P005,WF003,UC002|UC015,TC007|TC027,100%,Critical,Verified
+REQ-TENANT-004,Tenant authentication/authorization,P005|P008,WF003|WF009,UC002,TC008,90%,Critical,Verified
+REQ-TENANT-005,Prevent cross-tenant access,P005|P008,WF003,UC015,TC037,95%,Critical,Verified
+REQ-TENANT-006,Tenant-level monitoring,P005,WF003,UC002,,70%,High,Not Started
+REQ-TENANT-007,Dynamic tenant creation/deletion,P005,WF003,UC002,TC006,85%,High,Partial
+REQ-TENANT-008,Tenant-level backup/restore,P005,WF006,,,50%,High,Not Started
+REQ-REDIS-001,RESP protocol implementation,P002|P004,WF001|WF002,UC001,TC001,80%,Critical,Verified
+REQ-REDIS-002,Redis client connections,P002|P010,WF002|WF012,UC001|UC021,TC001|TC021|TC033,90%,Critical,Verified
+REQ-REDIS-003,Redis authentication,P002|P008,WF009,UC021,TC033,75%,Critical,Partial
+REQ-REDIS-004,Redis-compatible graph commands,P002,WF002,UC001,TC001,80%,Critical,Verified
+REQ-REDIS-005,Redis clustering protocol,P004,,,,40%,High,Not Started
+REQ-REDIS-006,Standard Redis client library compatibility,P002|P010,WF012,UC011,TC023,85%,High,Verified
+REQ-REDIS-007,Redis pipelining for batch ops,P002,WF014,UC013,TC025,90%,High,Verified
+REQ-REDIS-008,Redis pub/sub (optional),P002,,,,0%,Low,Not Started
+REQ-MEM-001,Primary in-memory storage,P001|P002|P003,WF005,UC003,TC010,85%,Critical,Verified
+REQ-MEM-002,Efficient memory management,P001,,,TC010,60%,High,Partial
+REQ-MEM-003,Memory-optimized data structures,P001,,,TC010,60%,High,Partial
+REQ-MEM-004,Memory usage monitoring,P001|P004,WF010,UC009,TC020,85%,High,Verified
+REQ-MEM-005,Memory eviction policies,P001,,UC015,,60%,High,Partial
+REQ-MEM-006,Configurable memory limits per tenant,P005,WF003,UC002|UC015,TC007|TC027,95%,Critical,Verified
+REQ-MEM-007,Optimize memory layout for cache locality,P001,,,TC010,50%,High,Not Started
+REQ-PERSIST-001,Persistence to disk,P001,WF006,UC005,TC013,85%,Critical,Verified
+REQ-PERSIST-002,Write-Ahead Logging,P001,WF006,UC024,TC022|TC035,90%,Critical,Verified
+REQ-PERSIST-003,Configurable persistence strategies,P001,,,TC022,60%,High,Partial
+REQ-PERSIST-004,Automatic recovery from disk,P001|P004,WF006|WF013,UC005|UC024,TC014|TC035,90%,Critical,Verified
+REQ-PERSIST-005,Data consistency memory/disk,P001,WF006,UC005,TC014,85%,Critical,Verified
+REQ-PERSIST-006,Incremental persistence,P001,,,,40%,High,Not Started
+REQ-PERSIST-007,Snapshot creation for backup,P001,WF006,UC005,TC013,90%,Critical,Verified
+REQ-PERSIST-008,Configurable persistence intervals,P001,WF006,,,60%,Medium,Not Started
+REQ-PERSIST-009,Compression for persisted data,P001,WF006,,TC013,70%,High,Partial
+REQ-PERF-001,Simple pattern match < 10ms p99,P002|P009,WF002|WF008|WF010|WF011,UC001|UC006|UC010,TC009|TC021,95%,Critical,Verified
+REQ-PERF-002,10K read queries per second,P004|P009,WF010|WF011,UC010,TC021,90%,Critical,Verified
+REQ-PERF-003,1K write ops per second,P004|P009,WF014,UC013,TC022,85%,Critical,Verified
+REQ-PERF-004,Linear scaling with nodes,P004|P006,WF007|WF015,UC017,TC029,80%,High,Partial
+REQ-PERF-005,Support billions of nodes/edges,P003,WF005,UC003,TC010,85%,Critical,Verified
+REQ-PERF-006,Minimize memory overhead < 20%,P001,,,TC010,60%,High,Partial
+REQ-PERF-007,Sub-millisecond cached traversal,P003,WF005,UC003,TC009|TC010,85%,High,Verified
+REQ-PERF-008,Configurable durability/performance,P001,,,,40%,Medium,Not Started
+REQ-PERF-009,Async persistence < 5% read impact,P001,,,TC022,60%,High,Partial
+REQ-PERF-010,Recovery time proportional to WAL,P001,,,,40%,Medium,Not Started
+REQ-SCALE-001,Scale from 1 to 100+ nodes,P004|P006,WF007|WF015,UC017|UC025,TC029,80%,Critical,Partial
+REQ-SCALE-002,Support MB to TB datasets,P003|P006,WF015,,,60%,High,Not Started
+REQ-SCALE-003,1000+ concurrent connections per node,P004|P009,WF011,UC010,TC021,85%,High,Verified
+REQ-SCALE-004,100+ tenants per cluster,P005,WF003,,,60%,High,Not Started
+REQ-AVAIL-001,99.9% uptime SLA,P001|P004|P006,WF004|WF010|WF015,UC009|UC025,TC020,85%,Critical,Verified
+REQ-AVAIL-002,Recover from node failure < 30s,P001|P004|P009,WF004|WF011,UC004|UC020,TC011|TC032,95%,Critical,Verified
+REQ-AVAIL-003,No data loss on node failure,P001|P004|P009,WF004|WF011,UC004|UC016|UC020,TC012|TC028|TC032,95%,Critical,Verified
+REQ-AVAIL-004,Rolling upgrades without downtime,P001|P004,WF013,UC012,TC024,90%,Critical,Partial
+REQ-AVAIL-005,Automatic health checks,P001|P004,WF010,UC009,TC020,85%,High,Verified
+REQ-SEC-001,Authentication support,P008,WF009,UC008|UC021,TC008|TC033,90%,Critical,Verified
+REQ-SEC-002,TLS/SSL for connections,P008,WF009,UC008,TC018,95%,Critical,Verified
+REQ-SEC-003,Role-based access control,P008,WF009,UC008,TC019,90%,Critical,Verified
+REQ-SEC-004,Encryption at rest,P008,WF009,UC008,,70%,Critical,Partial
+REQ-SEC-005,Audit logging for security events,P008,WF009,UC019,TC031,95%,Critical,Verified
+REQ-SEC-006,Prevent injection attacks,P008,WF009,,,60%,Critical,Not Started
+REQ-OPS-001,Provide detailed metrics,P001|P004,WF010,UC009|UC023,TC020|TC034,90%,Critical,Verified
+REQ-OPS-002,Integration with Prometheus/Grafana,P004,WF010,UC023,TC034,90%,High,Verified
+REQ-OPS-003,Query execution plans for debugging,P002,WF008,UC006,TC015,85%,High,Verified
+REQ-OPS-004,Structured logging,P004|P008,WF010|WF009,UC019,TC031,85%,High,Verified
+REQ-OPS-005,Online backups without interruption,P001,WF006,UC005,TC013,90%,Critical,Verified
+REQ-OPS-006,Point-in-time recovery,P001,WF006,UC024,TC035,85%,Critical,Partial
+REQ-OPS-007,Backup to external storage,P001,WF006,UC005,TC013,90%,Critical,Verified
+REQ-OPS-008,Verify backup integrity,P001,WF006,UC005,TC013|TC014,90%,Critical,Verified
+REQ-OPS-009,Configuration via files/env vars,P004,WF001,,,60%,High,Not Started
+REQ-OPS-010,Management API for cluster ops,P004,WF007,UC007,TC038,85%,High,Verified
+REQ-OPS-011,Dynamic reconfiguration,P001|P004,WF013,UC012,TC024,75%,High,Partial
+REQ-COMPAT-001,Client drivers for major languages,P002|P003|P010,WF002|WF012,UC011|UC014|UC021,TC023|TC033,85%,High,Verified
+REQ-COMPAT-002,Deploy on major cloud platforms,P004|P006,WF015,UC025,TC036,75%,High,Partial
+REQ-COMPAT-003,Containerized deployment,P004,WF001|WF007,UC007,TC017,90%,High,Verified
+REQ-COMPAT-004,REST API in addition to RESP,P002|P010,WF012,UC011,,60%,Medium,Not Started
+REQ-DEV-001,Unit tests > 80% coverage,P009,WF011,,,70%,Critical,Partial
+REQ-DEV-002,Integration tests for distributed,P009,WF011,UC020,TC028|TC032,85%,Critical,Verified
+REQ-DEV-003,Performance benchmarks,P009,WF011,UC010,TC009|TC010|TC021|TC022|TC029,90%,High,Verified
+REQ-DEV-004,Documentation for all APIs,P002,WF002,,,50%,High,Not Started
+REQ-DEV-005,Open-source license,All,,,100%,Medium,Verified
