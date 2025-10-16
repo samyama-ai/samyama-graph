@@ -39,11 +39,18 @@
 //! - ✅ REQ-REDIS-004: Redis-compatible graph commands
 //! - ✅ REQ-REDIS-006: Redis client library compatibility
 //!
-//! ## Phase 3 - Persistence & Multi-Tenancy (In Progress)
+//! ## Phase 3 - Persistence & Multi-Tenancy (Complete)
 //!
-//! - 🚧 REQ-PERSIST-001: RocksDB persistence
-//! - 🚧 REQ-PERSIST-002: Write-Ahead Logging
-//! - 🚧 REQ-TENANT-001 through REQ-TENANT-008: Multi-tenancy with resource quotas
+//! - ✅ REQ-PERSIST-001: RocksDB persistence
+//! - ✅ REQ-PERSIST-002: Write-Ahead Logging
+//! - ✅ REQ-TENANT-001 through REQ-TENANT-008: Multi-tenancy with resource quotas
+//!
+//! ## Phase 4 - High Availability (In Progress)
+//!
+//! - 🚧 REQ-HA-001: Raft consensus protocol
+//! - 🚧 REQ-HA-002: Leader election and automatic failover
+//! - 🚧 REQ-HA-003: Log replication across cluster nodes
+//! - 🚧 REQ-HA-004: Cluster membership management
 //!
 //! ## Example Usage
 //!
@@ -79,6 +86,7 @@ pub mod graph;
 pub mod query;
 pub mod protocol;
 pub mod persistence;
+pub mod raft;
 
 // Re-export main types for convenience
 pub use graph::{
@@ -99,6 +107,12 @@ pub use persistence::{
     PersistentStorage, StorageError, StorageResult,
     Tenant, TenantManager, ResourceQuotas, ResourceUsage, TenantError, TenantResult,
     Wal, WalEntry, WalError, WalResult,
+};
+
+pub use raft::{
+    RaftNode, RaftNodeId, RaftError, RaftResult,
+    GraphStateMachine, Request as RaftRequest, Response as RaftResponse,
+    ClusterConfig, ClusterManager, NodeId as RaftNodeIdWithAddr,
 };
 
 /// Version information
