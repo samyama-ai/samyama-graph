@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "High-performance distributed graph database with OpenCypher support"
 license = "Apache-2.0"
-repository = "https://github.com/VaidhyaMegha/samyama_graph"
+repository = "https://github.com/VaidhyaMegha/samyama-graph"
 
 [dependencies]
 # Core dependencies
