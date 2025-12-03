@@ -33,7 +33,13 @@ impl QueryEngine {
         Self {}
     }
 
-    /// Parse and execute a Cypher query
+    /// Parse a query and check if it requires mutation (CREATE, DELETE, etc.)
+    pub fn needs_mutation(&self, query_str: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let query = parse_query(query_str)?;
+        Ok(!query.is_read_only())
+    }
+
+    /// Parse and execute a read-only Cypher query
     pub fn execute(
         &self,
         query_str: &str,
@@ -42,11 +48,110 @@ impl QueryEngine {
         // Parse query
         let query = parse_query(query_str)?;
 
-        // Execute query
+        // If it's a mutation query, return an error
+        if !query.is_read_only() {
+            return Err("Use execute_mutation for CREATE/DELETE/MERGE queries".into());
+        }
+
+        // Execute read-only query
         let executor = QueryExecutor::new(store);
         let result = executor.execute(&query)?;
 
         Ok(result)
+    }
+
+    /// Parse and execute a mutation query (CREATE, DELETE, MERGE)
+    pub fn execute_mutation(
+        &self,
+        query_str: &str,
+        store: &mut crate::graph::GraphStore,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        // Parse query
+        let query = parse_query(query_str)?;
+
+        // Handle CREATE clause
+        if let Some(ref create_clause) = query.create_clause {
+            let mut created_nodes: std::collections::HashMap<String, crate::graph::NodeId> =
+                std::collections::HashMap::new();
+
+            for path in &create_clause.pattern.paths {
+                // Create start node
+                let start_node_id = if !path.start.labels.is_empty() {
+                    let label = &path.start.labels[0];
+                    let node_id = store.create_node(label.clone());
+
+                    // Set properties if any
+                    if let Some(ref props) = path.start.properties {
+                        if let Some(node) = store.get_node_mut(node_id) {
+                            for (key, value) in props {
+                                node.set_property(key.clone(), value.clone());
+                            }
+                        }
+                    }
+
+                    // Track variable for edge creation
+                    if let Some(ref var) = path.start.variable {
+                        created_nodes.insert(var.clone(), node_id);
+                    }
+
+                    Some(node_id)
+                } else {
+                    None
+                };
+
+                // Create segments (edges and nodes)
+                let mut prev_node_id = start_node_id;
+                for segment in &path.segments {
+                    // Create target node
+                    let target_node_id = if !segment.node.labels.is_empty() {
+                        let label = &segment.node.labels[0];
+                        let node_id = store.create_node(label.clone());
+
+                        // Set properties if any
+                        if let Some(ref props) = segment.node.properties {
+                            if let Some(node) = store.get_node_mut(node_id) {
+                                for (key, value) in props {
+                                    node.set_property(key.clone(), value.clone());
+                                }
+                            }
+                        }
+
+                        // Track variable
+                        if let Some(ref var) = segment.node.variable {
+                            created_nodes.insert(var.clone(), node_id);
+                        }
+
+                        Some(node_id)
+                    } else {
+                        None
+                    };
+
+                    // Create edge if both nodes exist
+                    if let (Some(src), Some(tgt)) = (prev_node_id, target_node_id) {
+                        if !segment.edge.types.is_empty() {
+                            let edge_type = &segment.edge.types[0];
+                            let _ = store.create_edge(src, tgt, edge_type.clone());
+                        }
+                    }
+
+                    prev_node_id = target_node_id;
+                }
+            }
+
+            // Return empty result for CREATE
+            return Ok(RecordBatch {
+                records: vec![],
+                columns: vec!["created".to_string()],
+            });
+        }
+
+        // If there's also a MATCH clause, use the normal executor path
+        if !query.match_clauses.is_empty() {
+            let executor = QueryExecutor::new(store);
+            return Ok(executor.execute(&query)?);
+        }
+
+        Err("Query must have either MATCH or CREATE clause".into())
     }
 }
 

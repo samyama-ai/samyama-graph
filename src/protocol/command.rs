@@ -93,10 +93,27 @@ impl CommandHandler {
 
         debug!("Executing query: {}", query_str);
 
-        // Execute query
-        let store_guard = store.read().await;
-        let result = self.query_engine.execute(&query_str, &*store_guard);
-        drop(store_guard);
+        // Check if this is a mutation query
+        let needs_mutation = match self.query_engine.needs_mutation(&query_str) {
+            Ok(needs) => needs,
+            Err(e) => {
+                error!("Parse error: {}", e);
+                return RespValue::Error(format!("ERR {}", e));
+            }
+        };
+
+        // Execute query with appropriate lock
+        let result = if needs_mutation {
+            let mut store_guard = store.write().await;
+            let result = self.query_engine.execute_mutation(&query_str, &mut *store_guard);
+            drop(store_guard);
+            result
+        } else {
+            let store_guard = store.read().await;
+            let result = self.query_engine.execute(&query_str, &*store_guard);
+            drop(store_guard);
+            result
+        };
 
         match result {
             Ok(batch) => {

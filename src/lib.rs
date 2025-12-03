@@ -45,12 +45,24 @@
 //! - ✅ REQ-PERSIST-002: Write-Ahead Logging
 //! - ✅ REQ-TENANT-001 through REQ-TENANT-008: Multi-tenancy with resource quotas
 //!
-//! ## Phase 4 - High Availability (In Progress)
+//! ## Phase 4 - High Availability (Complete)
 //!
-//! - 🚧 REQ-HA-001: Raft consensus protocol
-//! - 🚧 REQ-HA-002: Leader election and automatic failover
-//! - 🚧 REQ-HA-003: Log replication across cluster nodes
-//! - 🚧 REQ-HA-004: Cluster membership management
+//! - ✅ REQ-HA-001: Raft consensus protocol
+//! - ✅ REQ-HA-002: Leader election and automatic failover
+//! - ✅ REQ-HA-003: Log replication across cluster nodes
+//! - ✅ REQ-HA-004: Cluster membership management
+//!
+//! ## Phase 5 - RDF/SPARQL Support (Foundation)
+//!
+//! - ✅ REQ-RDF-001: RDF data model (triples/quads)
+//! - ✅ REQ-RDF-002: RDF triple store with indexing
+//! - ✅ REQ-RDF-004: Named graphs support
+//! - 🚧 REQ-RDF-003: RDF serialization formats (Turtle, RDF/XML, N-Triples, JSON-LD)
+//! - 🚧 REQ-RDF-005: RDFS reasoning
+//! - 🚧 REQ-RDF-006: Property graph ↔ RDF mapping
+//! - 🚧 REQ-SPARQL-001: SPARQL 1.1 query language
+//! - 🚧 REQ-SPARQL-002: SPARQL HTTP protocol
+//! - 🚧 REQ-SPARQL-003: Query forms (SELECT, CONSTRUCT, ASK, DESCRIBE)
 //!
 //! ## Example Usage
 //!
@@ -87,6 +99,8 @@ pub mod query;
 pub mod protocol;
 pub mod persistence;
 pub mod raft;
+pub mod rdf;
+pub mod sparql;
 
 // Re-export main types for convenience
 pub use graph::{
@@ -113,6 +127,23 @@ pub use raft::{
     RaftNode, RaftNodeId, RaftError, RaftResult,
     GraphStateMachine, Request as RaftRequest, Response as RaftResponse,
     ClusterConfig, ClusterManager, NodeId as RaftNodeIdWithAddr,
+};
+
+pub use rdf::{
+    RdfStore, RdfStoreError, RdfStoreResult,
+    NamedNode, BlankNode, Literal, Triple, Quad,
+    RdfTerm, RdfSubject, RdfPredicate, RdfObject,
+    TriplePattern, QuadPattern,
+    GraphToRdfMapper, RdfToGraphMapper, MappingConfig, MappingError,
+    NamespaceManager, Namespace,
+    RdfFormat, RdfParser, RdfSerializer,
+    RdfsReasoner, InferenceRule,
+};
+
+pub use sparql::{
+    SparqlEngine, SparqlError, SparqlResult,
+    SparqlResults, ResultFormat, QuerySolution,
+    SparqlParser, SparqlExecutor,
 };
 
 /// Version information
