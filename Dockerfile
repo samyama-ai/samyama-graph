@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.83-bookworm AS builder
 
 # Install build dependencies for RocksDB
 RUN apt-get update && apt-get install -y \
@@ -10,22 +10,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy dependency files first for caching
+# Copy all source files
 COPY Cargo.toml Cargo.lock ./
-
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "pub fn version() -> &'static str { \"0.1.0\" }" > src/lib.rs
-
-# Build dependencies only (this layer will be cached)
-RUN cargo build --release && rm -rf src
-
-# Copy actual source code
 COPY src ./src
 
-# Touch main.rs to ensure it gets rebuilt
-RUN touch src/main.rs
-
-# Build the actual application
+# Build the application
 RUN cargo build --release
 
 # Runtime stage
@@ -50,6 +39,7 @@ EXPOSE 6379
 
 # Set environment variables
 ENV RUST_LOG=info
+ENV BIND_ADDRESS=0.0.0.0
 
 # Run the server
 CMD ["samyama"]
