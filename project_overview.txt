@@ -1,0 +1,133 @@
+# Samyama Graph Database - Project Overview
+
+## Introduction
+Samyama Graph Database is a high-performance, distributed graph database built in Rust. It's designed to handle complex graph operations with a focus on performance, reliability, and scalability. The project implements a custom graph storage engine with support for distributed transactions, high availability, and ACID compliance.
+
+## Core Architecture
+
+### 1. System Layers
+1. **Client Layer**: Supports multiple protocols including Redis (RESP), HTTP, and gRPC
+2. **Protocol Layer**: Handles request/response serialization and protocol-specific logic
+3. **Query Processing**: Includes parsing, validation, planning, optimization, and execution
+4. **Storage Layer**: Manages graph data structures (nodes, edges, properties, indices)
+5. **Persistence**: Uses Write-Ahead Logging (WAL) and RocksDB for durable storage
+6. **Infrastructure**: Memory management, transactions, locking, and monitoring
+
+### 2. Key Components
+- **Graph Manager**: Central component managing all graph operations
+- **Node/Edge Stores**: Specialized storage for graph elements
+- **Index Store**: Optimized for fast lookups
+- **Transaction Manager**: Ensures ACID properties
+- **Query Engine**: Processes and optimizes graph queries
+- **Raft Consensus**: For distributed coordination and fault tolerance
+
+## Technology Stack
+
+### Core Technologies
+- **Language**: Rust (for memory safety and performance)
+- **Storage**: Custom graph store with RocksDB for persistence
+- **Networking**: RESP (Redis Serialization Protocol) via Tokio
+- **Query Language**: Custom implementation of OpenCypher
+- **Consensus**: Raft (using openraft)
+- **Serialization**: Apache Arrow / Cap'n Proto
+- **Monitoring**: Prometheus + OpenTelemetry
+
+### Why Rust?
+- Memory safety without garbage collection
+- Zero-cost abstractions
+- Fearless concurrency
+- Modern tooling (Cargo, rustfmt, clippy)
+- Excellent performance characteristics
+
+## Features
+
+### 1. High Availability
+- Raft-based consensus protocol
+- Automatic leader election
+- Node failure detection and recovery
+- Cluster membership management
+
+### 2. Performance Optimizations
+- In-memory graph store for hot data
+- Custom data structures for graph operations
+- Efficient property storage and indexing
+- Query optimization and execution planning
+
+### 3. Data Model
+- Property graph model
+- Support for labeled nodes and relationships
+- Typed properties
+- Schema-optional design
+
+### 4. Query Capabilities
+- Graph pattern matching
+- Traversal operations
+- Aggregations and computations
+- Support for complex graph algorithms
+
+## Example Usage
+
+The project includes example implementations demonstrating key features:
+
+### 1. Cluster Demo (`cluster_demo.rs`)
+Demonstrates:
+- Raft cluster setup with 3 nodes
+- Leader election simulation
+- Cluster health monitoring
+- Data replication across nodes
+- Fault tolerance
+
+### 2. Persistence Demo (`persistence_demo.rs`)
+Shows:
+- Data persistence mechanisms
+- Write-Ahead Logging (WAL)
+- Snapshot management
+- Recovery procedures
+
+## Getting Started
+
+### Prerequisites
+- Rust 1.75+ toolchain
+- Cargo (Rust's package manager)
+- RocksDB development libraries
+
+### Building
+```bash
+# Clone the repository
+git clone <repository-url>
+cd samyama-graph
+
+# Build in release mode
+cargo build --release
+```
+
+### Running Examples
+```bash
+# Run cluster demo
+cargo run --example cluster_demo
+
+# Run persistence demo
+cargo run --example persistence_demo
+```
+
+## Monitoring and Observability
+- Built-in metrics collection
+- Distributed tracing
+- Integration with Prometheus and Grafana
+- Health check endpoints
+
+## Performance Characteristics
+- Low-latency query processing
+- High throughput for concurrent operations
+- Efficient memory usage through Rust's ownership model
+- Scalable architecture for distributed deployments
+
+## Future Roadmap
+- Enhanced query optimization
+- Additional storage backends
+- Extended query language features
+- Improved monitoring and observability
+- Client libraries for multiple languages
+
+## Conclusion
+Samyama Graph Database is a modern, high-performance graph database that combines Rust's safety and performance with a robust distributed architecture. Its modular design allows for flexibility in deployment while maintaining strong consistency and reliability guarantees. The project is well-suited for applications requiring complex graph operations with high availability and performance requirements.
