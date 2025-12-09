@@ -1,0 +1,109 @@
+// OpenCypher Grammar for Pest Parser
+// Implements basic subset of OpenCypher for Phase 2
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
+
+// Query structure
+query = { SOI ~ statement ~ ";"? ~ EOI }
+statement = { match_stmt | create_stmt }
+
+// MATCH clause
+match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
+where_clause = { ^"WHERE" ~ expression }
+return_clause = { ^"RETURN" ~ distinct? ~ return_items }
+distinct = { ^"DISTINCT" }
+order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
+limit_clause = { ^"LIMIT" ~ integer }
+
+// CREATE clause
+create_stmt = { ^"CREATE" ~ pattern }
+
+// Pattern matching
+pattern = { path ~ ("," ~ path)* }
+path = { node ~ (edge_pattern ~ node)* }
+
+// Node pattern: (n:Person {name: "Alice"})
+node = { "(" ~ variable? ~ labels? ~ properties? ~ ")" }
+labels = { (":" ~ label)+ }
+label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Edge pattern: -[:KNOWS]-> or <-[:KNOWS]- or -[:KNOWS]-
+edge_pattern = {
+    ("<-" ~ edge_detail ~ "-") |
+    ("-" ~ edge_detail ~ "->") |
+    ("-" ~ edge_detail ~ "-")
+}
+edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ "]" }
+edge_types = { (":" ~ edge_type)+ }
+edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Variable length: *1..5 or * or *3..
+length_pattern = { "*" ~ (range_pattern | integer)? }
+range_pattern = { integer? ~ ".." ~ integer? }
+
+// Properties: {name: "Alice", age: 30}
+properties = { "{" ~ property_list? ~ "}" }
+property_list = { property ~ ("," ~ property)* }
+property = { property_key ~ ":" ~ value }
+property_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// RETURN items
+return_items = { return_item ~ ("," ~ return_item)* }
+return_item = { expression ~ (^"AS" ~ variable)? }
+
+// ORDER BY items
+order_items = { order_item ~ ("," ~ order_item)* }
+order_item = { expression ~ order_direction? }
+order_direction = { ^"ASC" | ^"DESC" }
+
+// Expressions
+expression = { term ~ (binary_op ~ term)* }
+term = { unary_op* ~ primary }
+primary = {
+    function_call |
+    property_access |
+    variable |
+    value |
+    "(" ~ expression ~ ")"
+}
+
+property_access = { variable ~ "." ~ property_key }
+function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
+function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Operators
+binary_op = {
+    "==" | "!=" | "<=" | ">=" | "<" | ">" |
+    ^"AND" | ^"OR" |
+    "+" | "-" | "*" | "/" | "%" |
+    ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS"
+}
+
+unary_op = {
+    ^"NOT" | "-" |
+    ^"IS" ~ ^"NULL" | ^"IS" ~ ^"NOT" ~ ^"NULL"
+}
+
+// Values
+value = {
+    null |
+    boolean |
+    float |
+    integer |
+    string |
+    list |
+    map
+}
+
+null = { ^"NULL" }
+boolean = { ^"TRUE" | ^"FALSE" }
+integer = @{ "-"? ~ ASCII_DIGIT+ }
+float = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)? }
+string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" | "'" ~ (!"'" ~ ANY)* ~ "'" }
+list = { "[" ~ (value ~ ("," ~ value)*)? ~ "]" }
+map = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
+map_entry = { (string | property_key) ~ ":" ~ value }
+
+// Variable names
+variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
