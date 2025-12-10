@@ -3,3 +3,4 @@
 # Generated banking demo data
 docs/banking/data/
 src/docs/banking/data/transactions.tsv
+*.tsv
