@@ -7,9 +7,10 @@ use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
-    // Added CreateNodeOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator},
+    // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator},
 };
+use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::HashMap;  // Added for CREATE properties
 
 /// Execution plan - a tree of physical operators
@@ -39,9 +40,16 @@ impl QueryPlanner {
 
     /// Plan a query
     pub fn plan(&self, query: &Query, _store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
-        // Start with MATCH clause
+        // Handle CREATE-only queries (no MATCH required)
+        // Example: CREATE (n:Person {name: "Alice"})
         if query.match_clauses.is_empty() {
-            return Err(ExecutionError::PlanningError("Query must have at least one MATCH clause".to_string()));
+            if let Some(create_clause) = &query.create_clause {
+                // Route to CREATE-specific planning
+                return self.plan_create_only(create_clause);
+            }
+            return Err(ExecutionError::PlanningError(
+                "Query must have at least one MATCH or CREATE clause".to_string()
+            ));
         }
 
         let match_clause = &query.match_clauses[0];
@@ -82,9 +90,12 @@ impl QueryPlanner {
             operator = Box::new(LimitOperator::new(operator, limit));
         }
 
+        // Return execution plan
+        // MATCH-only queries are read-only (is_write: false)
         Ok(ExecutionPlan {
             root: operator,
             output_columns,
+            is_write: false,
         })
     }
 
@@ -161,6 +172,99 @@ impl QueryPlanner {
         }
 
         Ok(projections)
+    }
+
+    /// Plan a CREATE-only query (no MATCH clause)
+    /// Supports:
+    /// - CREATE (n:Person {name: "Alice", age: 30})
+    /// - CREATE (a:Person)-[:KNOWS]->(b:Person)
+    /// - CREATE (a:Person)-[:KNOWS {since: 2020}]->(b:Person)
+    fn plan_create_only(&self, create_clause: &CreateClause) -> ExecutionResult<ExecutionPlan> {
+        let pattern = &create_clause.pattern;
+
+        // Collect all nodes to create from the pattern
+        // Each node has: (labels, properties, variable_name)
+        let mut nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+        let mut output_columns: Vec<String> = Vec::new();
+
+        // Collect edges to create: (source_var, target_var, edge_type, properties, edge_var)
+        let mut edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+
+        for path in &pattern.paths {
+            // Add start node
+            let start = &path.start;
+            let labels: Vec<Label> = start.labels.clone();
+            let properties: HashMap<String, PropertyValue> = start.properties.clone().unwrap_or_default();
+            let variable = start.variable.clone();
+
+            // Track output column if variable exists
+            if let Some(ref var) = variable {
+                output_columns.push(var.clone());
+            }
+
+            nodes_to_create.push((labels, properties, variable.clone()));
+
+            // Track current source variable for edge creation
+            let mut current_source_var = variable;
+
+            // Add nodes and edges from path segments (if any)
+            // Example: CREATE (a:Person)-[:KNOWS]->(b:Person)
+            for segment in &path.segments {
+                let node = &segment.node;
+                let node_labels: Vec<Label> = node.labels.clone();
+                let node_properties: HashMap<String, PropertyValue> = node.properties.clone().unwrap_or_default();
+                let node_variable = node.variable.clone();
+
+                if let Some(ref var) = node_variable {
+                    output_columns.push(var.clone());
+                }
+
+                nodes_to_create.push((node_labels, node_properties, node_variable.clone()));
+
+                // Extract edge information
+                let edge = &segment.edge;
+                let edge_type = edge.types.first()
+                    .cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let edge_properties: HashMap<String, PropertyValue> = edge.properties.clone().unwrap_or_default();
+                let edge_variable = edge.variable.clone();
+
+                // Create edge between source and target nodes
+                // For CREATE, we need both variables to be defined
+                if let (Some(source_var), Some(target_var)) = (&current_source_var, &node_variable) {
+                    edges_to_create.push((
+                        source_var.clone(),
+                        target_var.clone(),
+                        edge_type,
+                        edge_properties,
+                        edge_variable,
+                    ));
+                }
+
+                // Update source variable for next segment
+                current_source_var = node_variable;
+            }
+        }
+
+        // Build the operator chain
+        // First: CreateNodeOperator to create all nodes
+        let node_operator: OperatorBox = Box::new(CreateNodeOperator::new(nodes_to_create));
+
+        // If there are edges to create, chain CreateEdgeOperator
+        let final_operator: OperatorBox = if edges_to_create.is_empty() {
+            node_operator
+        } else {
+            // Create edges after nodes are created
+            // We need a special combined operator that creates nodes first, then edges
+            Box::new(CreateNodesAndEdgesOperator::new(node_operator, edges_to_create))
+        };
+
+        // Return execution plan with is_write: true (this mutates the graph)
+        Ok(ExecutionPlan {
+            root: final_operator,
+            output_columns,
+            is_write: true,
+        })
     }
 }
 

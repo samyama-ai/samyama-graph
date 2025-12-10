@@ -563,9 +563,9 @@ impl PhysicalOperator for CreateNodeOperator {
                     for label in labels.iter().skip(1) {
                         node.add_label(label.clone());
                     }
-                    // Set properties
+                    // Set properties using Node's set_property method
                     for (key, value) in properties {
-                        node.properties.set(key.clone(), value.clone());
+                        node.set_property(key.clone(), value.clone());
                     }
                 }
 
@@ -665,10 +665,10 @@ impl PhysicalOperator for CreateEdgeOperator {
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
                         .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                    // Set properties on edge
+                    // Set properties on edge using Edge's set_property method
                     if let Some(edge) = store.get_edge_mut(edge_id) {
                         for (key, value) in properties {
-                            edge.properties.set(key.clone(), value.clone());
+                            edge.set_property(key.clone(), value.clone());
                         }
                     }
 
@@ -704,6 +704,125 @@ impl PhysicalOperator for CreateEdgeOperator {
         self.current = 0;
         self.processed = false;
         self.created_edges.clear();
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+}
+
+/// Combined operator for CREATE patterns with both nodes and edges
+/// Example: CREATE (a:Person)-[:KNOWS]->(b:Person)
+/// This operator first creates all nodes, then creates edges between them
+pub struct CreateNodesAndEdgesOperator {
+    /// Node creation operator
+    node_operator: OperatorBox,
+    /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
+    edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    /// Variable to NodeId mapping (built during node creation)
+    var_to_node_id: HashMap<String, NodeId>,
+    /// Created edges
+    created_edges: Vec<(crate::graph::EdgeId, crate::graph::Edge, Option<String>)>,
+    /// Current phase: 0 = creating nodes, 1 = creating edges, 2 = returning results
+    phase: usize,
+    /// Current index for returning results
+    result_index: usize,
+    /// All results to return (nodes first, then edges)
+    results: Vec<(Option<String>, Value)>,
+}
+
+impl CreateNodesAndEdgesOperator {
+    /// Create a new CreateNodesAndEdgesOperator
+    pub fn new(
+        node_operator: OperatorBox,
+        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    ) -> Self {
+        Self {
+            node_operator,
+            edges_to_create,
+            var_to_node_id: HashMap::new(),
+            created_edges: Vec::new(),
+            phase: 0,
+            result_index: 0,
+            results: Vec::new(),
+        }
+    }
+}
+
+impl PhysicalOperator for CreateNodesAndEdgesOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CreateNodesAndEdgesOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        // Phase 0: Create all nodes and collect their IDs
+        if self.phase == 0 {
+            while let Some(record) = self.node_operator.next_mut(store)? {
+                // Extract variable and node from record
+                for (var, value) in record.bindings().iter() {
+                    if let Value::Node(node_id, node) = value {
+                        self.var_to_node_id.insert(var.clone(), *node_id);
+                        self.results.push((Some(var.clone()), Value::Node(*node_id, node.clone())));
+                    }
+                }
+            }
+            self.phase = 1;
+        }
+
+        // Phase 1: Create all edges
+        if self.phase == 1 {
+            for (source_var, target_var, edge_type, properties, edge_var) in &self.edges_to_create {
+                let source_id = self.var_to_node_id.get(source_var)
+                    .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
+                let target_id = self.var_to_node_id.get(target_var)
+                    .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
+
+                let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
+                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+                // Set properties on edge
+                if let Some(edge) = store.get_edge_mut(edge_id) {
+                    for (key, value) in properties {
+                        edge.set_property(key.clone(), value.clone());
+                    }
+                }
+
+                // Get the created edge for returning
+                if let Some(edge) = store.get_edge(edge_id) {
+                    self.created_edges.push((edge_id, edge.clone(), edge_var.clone()));
+                    if edge_var.is_some() {
+                        self.results.push((edge_var.clone(), Value::Edge(edge_id, edge.clone())));
+                    }
+                }
+            }
+            self.phase = 2;
+        }
+
+        // Phase 2: Return results one by one
+        if self.result_index >= self.results.len() {
+            return Ok(None);
+        }
+
+        let (var, value) = &self.results[self.result_index];
+        self.result_index += 1;
+
+        let mut record = Record::new();
+        if let Some(v) = var {
+            record.bind(v.clone(), value.clone());
+        }
+
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.node_operator.reset();
+        self.var_to_node_id.clear();
+        self.created_edges.clear();
+        self.phase = 0;
+        self.result_index = 0;
+        self.results.clear();
     }
 
     fn is_mutating(&self) -> bool {
