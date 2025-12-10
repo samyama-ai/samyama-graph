@@ -2,19 +2,30 @@
 //!
 //! Implements ADR-007 (Volcano Iterator Model)
 
-use crate::graph::{GraphStore, Label, NodeId};
+use crate::graph::{GraphStore, Label, NodeId, EdgeType};
 use crate::query::ast::{Expression, BinaryOp, Direction};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Physical operator trait - all operators implement this
 pub trait PhysicalOperator: Send {
-    /// Get the next record from this operator
+    /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
+
+    /// Get the next record from this operator (write operations that mutate the store)
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        // Default implementation calls the read-only version
+        self.next(store)
+    }
 
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
+
+    /// Returns true if this operator mutates the graph store
+    fn is_mutating(&self) -> bool {
+        false
+    }
 }
 
 /// Type alias for boxed operators
@@ -500,6 +511,203 @@ impl PhysicalOperator for LimitOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.count = 0;
+    }
+}
+
+/// Create node operator: CREATE (n:Person {name: "Alice"})
+pub struct CreateNodeOperator {
+    /// Nodes to create (label, properties, variable)
+    nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)>,
+    /// Created node IDs (for returning)
+    created_nodes: Vec<(NodeId, Option<String>)>,
+    /// Current index for iteration
+    current: usize,
+    /// Whether creation has been executed
+    executed: bool,
+}
+
+impl CreateNodeOperator {
+    /// Create a new CreateNodeOperator
+    pub fn new(nodes: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)>) -> Self {
+        Self {
+            nodes_to_create: nodes,
+            created_nodes: Vec::new(),
+            current: 0,
+            executed: false,
+        }
+    }
+}
+
+impl PhysicalOperator for CreateNodeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        // Read-only version cannot create nodes
+        Err(ExecutionError::RuntimeError(
+            "CreateNodeOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        // First call: create all nodes
+        if !self.executed {
+            for (labels, properties, variable) in &self.nodes_to_create {
+                // Use first label as primary, or empty string if none
+                let primary_label = labels.first()
+                    .map(|l| l.clone())
+                    .unwrap_or_else(|| Label::new(""));
+
+                let node_id = store.create_node(primary_label);
+
+                // Set properties on the created node
+                if let Some(node) = store.get_node_mut(node_id) {
+                    // Add additional labels
+                    for label in labels.iter().skip(1) {
+                        node.add_label(label.clone());
+                    }
+                    // Set properties
+                    for (key, value) in properties {
+                        node.properties.set(key.clone(), value.clone());
+                    }
+                }
+
+                self.created_nodes.push((node_id, variable.clone()));
+            }
+            self.executed = true;
+        }
+
+        // Return created nodes one by one
+        if self.current >= self.created_nodes.len() {
+            return Ok(None);
+        }
+
+        let (node_id, variable) = &self.created_nodes[self.current];
+        self.current += 1;
+
+        let node = store.get_node(*node_id)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("Created node {:?} not found", node_id)))?;
+
+        let mut record = Record::new();
+        if let Some(var) = variable {
+            record.bind(var.clone(), Value::Node(*node_id, node.clone()));
+        }
+
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.current = 0;
+        // Note: We don't reset executed flag - nodes are already created
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+}
+
+/// Create edge operator: CREATE (a)-[:KNOWS]->(b)
+pub struct CreateEdgeOperator {
+    /// Input operator (provides source/target nodes from MATCH)
+    input: Option<OperatorBox>,
+    /// Edge pattern to create: (source_var, target_var, edge_type, properties, edge_var)
+    edge_pattern: (String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>),
+    /// Created edges
+    created_edges: Vec<(crate::graph::EdgeId, Option<String>)>,
+    /// Current index
+    current: usize,
+    /// Whether we've processed input
+    processed: bool,
+}
+
+impl CreateEdgeOperator {
+    /// Create a new CreateEdgeOperator
+    pub fn new(
+        input: Option<OperatorBox>,
+        source_var: String,
+        target_var: String,
+        edge_type: EdgeType,
+        properties: HashMap<String, PropertyValue>,
+        edge_var: Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            edge_pattern: (source_var, target_var, edge_type, properties, edge_var),
+            created_edges: Vec::new(),
+            current: 0,
+            processed: false,
+        }
+    }
+}
+
+impl PhysicalOperator for CreateEdgeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        let (source_var, target_var, edge_type, properties, edge_var) = &self.edge_pattern;
+
+        // Process input records and create edges
+        if !self.processed {
+            if let Some(ref mut input) = self.input {
+                // Create edge for each input record
+                while let Some(record) = input.next_mut(store)? {
+                    let source_val = record.get(source_var)
+                        .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
+                    let target_val = record.get(target_var)
+                        .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
+
+                    let (source_id, _) = source_val.as_node()
+                        .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", source_var)))?;
+                    let (target_id, _) = target_val.as_node()
+                        .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", target_var)))?;
+
+                    let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+                    // Set properties on edge
+                    if let Some(edge) = store.get_edge_mut(edge_id) {
+                        for (key, value) in properties {
+                            edge.properties.set(key.clone(), value.clone());
+                        }
+                    }
+
+                    self.created_edges.push((edge_id, edge_var.clone()));
+                }
+            }
+            self.processed = true;
+        }
+
+        // Return created edges one by one
+        if self.current >= self.created_edges.len() {
+            return Ok(None);
+        }
+
+        let (edge_id, variable) = &self.created_edges[self.current];
+        self.current += 1;
+
+        let edge = store.get_edge(*edge_id)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("Created edge {:?} not found", edge_id)))?;
+
+        let mut record = Record::new();
+        if let Some(var) = variable {
+            record.bind(var.clone(), Value::Edge(*edge_id, edge.clone()));
+        }
+
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        if let Some(ref mut input) = self.input {
+            input.reset();
+        }
+        self.current = 0;
+        self.processed = false;
+        self.created_edges.clear();
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
     }
 }
 

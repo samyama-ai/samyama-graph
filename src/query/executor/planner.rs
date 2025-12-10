@@ -3,11 +3,14 @@
 //! Implements basic query optimization (REQ-CYPHER-009)
 
 use crate::graph::GraphStore;
+use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator},
+    // Added CreateNodeOperator for CREATE statement support
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator},
 };
+use std::collections::HashMap;  // Added for CREATE properties
 
 /// Execution plan - a tree of physical operators
 pub struct ExecutionPlan {
@@ -15,6 +18,9 @@ pub struct ExecutionPlan {
     pub root: OperatorBox,
     /// Output column names
     pub output_columns: Vec<String>,
+    /// Whether this plan contains write operations (CREATE/DELETE/SET)
+    /// If true, executor must use next_mut() with mutable GraphStore
+    pub is_write: bool,
 }
 
 /// Query planner
