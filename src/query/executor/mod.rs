@@ -6,8 +6,8 @@ pub mod operator;
 pub mod planner;
 pub mod record;
 
-// Export operators - added CreateNodeOperator and CreateEdgeOperator for CREATE support
-pub use operator::{PhysicalOperator, OperatorBox, CreateNodeOperator, CreateEdgeOperator};
+// Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
+pub use operator::{PhysicalOperator, OperatorBox, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
 pub use planner::{QueryPlanner, ExecutionPlan};
 pub use record::{Record, RecordBatch, Value};
 
@@ -41,7 +41,7 @@ pub enum ExecutionError {
 
 pub type ExecutionResult<T> = Result<T, ExecutionError>;
 
-/// Query executor
+/// Query executor for read-only queries (MATCH, RETURN, etc.)
 pub struct QueryExecutor<'a> {
     store: &'a GraphStore,
     planner: QueryPlanner,
@@ -56,10 +56,17 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-    /// Execute a query and return results
+    /// Execute a read-only query and return results
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
+
+        // Check if this is a write query - if so, error out
+        if plan.is_write {
+            return Err(ExecutionError::RuntimeError(
+                "Cannot execute write query with read-only executor. Use MutQueryExecutor instead.".to_string()
+            ));
+        }
 
         // Execute the plan
         self.execute_plan(plan)
@@ -68,8 +75,53 @@ impl<'a> QueryExecutor<'a> {
     fn execute_plan(&self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
         let mut records = Vec::new();
 
-        // Pull records from the root operator
+        // Pull records from the root operator (read-only)
         while let Some(record) = plan.root.next(self.store)? {
+            records.push(record);
+        }
+
+        Ok(RecordBatch {
+            records,
+            columns: plan.output_columns,
+        })
+    }
+}
+
+/// Query executor for write queries (CREATE, DELETE, SET, etc.)
+/// Takes mutable reference to GraphStore to allow modifications
+pub struct MutQueryExecutor<'a> {
+    store: &'a mut GraphStore,
+    planner: QueryPlanner,
+}
+
+impl<'a> MutQueryExecutor<'a> {
+    /// Create a new mutable query executor for write operations
+    pub fn new(store: &'a mut GraphStore) -> Self {
+        Self {
+            store,
+            planner: QueryPlanner::new(),
+        }
+    }
+
+    /// Execute a query (read or write) and return results
+    /// For CREATE queries, nodes/edges are created in the graph store
+    pub fn execute(&mut self, query: &Query) -> ExecutionResult<RecordBatch> {
+        // Plan the query (need immutable borrow temporarily)
+        let plan = {
+            let store_ref: &GraphStore = self.store;
+            self.planner.plan(query, store_ref)?
+        };
+
+        // Execute the plan with mutable access
+        self.execute_plan_mut(plan)
+    }
+
+    fn execute_plan_mut(&mut self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
+        let mut records = Vec::new();
+
+        // Pull records from the root operator
+        // Use next_mut() which allows operators to modify the graph store
+        while let Some(record) = plan.root.next_mut(self.store)? {
             records.push(record);
         }
 

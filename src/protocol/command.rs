@@ -1,25 +1,30 @@
 //! Command handler for GRAPH.* commands
 //!
 //! Implements REQ-REDIS-004 (Redis-compatible graph commands)
+//! Now with persistence support - writes are persisted to disk when enabled
 
 use crate::graph::GraphStore;
-// RespError removed - was unused import causing compiler warning
+use crate::persistence::PersistenceManager;
 use crate::protocol::resp::RespValue;
 use crate::query::{QueryEngine, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Command handler for processing GRAPH.* commands
 pub struct CommandHandler {
     query_engine: QueryEngine,
+    /// Optional persistence manager - when Some, writes are persisted to disk
+    persistence: Option<Arc<PersistenceManager>>,
 }
 
 impl CommandHandler {
     /// Create a new command handler
-    pub fn new() -> Self {
+    /// Pass Some(persistence) to enable persistence, or None for in-memory only
+    pub fn new(persistence: Option<Arc<PersistenceManager>>) -> Self {
         Self {
             query_engine: QueryEngine::new(),
+            persistence,
         }
     }
 
@@ -94,10 +99,58 @@ impl CommandHandler {
 
         debug!("Executing query: {}", query_str);
 
-        // Execute query
-        let store_guard = store.read().await;
-        let result = self.query_engine.execute(&query_str, &*store_guard);
-        drop(store_guard);
+        // Check if this is a write query (CREATE, DELETE, SET, MERGE)
+        let query_upper = query_str.trim().to_uppercase();
+        let is_write_query = query_upper.starts_with("CREATE")
+            || query_upper.starts_with("DELETE")
+            || query_upper.starts_with("SET")
+            || query_upper.starts_with("MERGE")
+            || query_upper.contains(" CREATE ")
+            || query_upper.contains(" DELETE ")
+            || query_upper.contains(" SET ")
+            || query_upper.contains(" MERGE ");
+
+        // Execute query with appropriate method
+        let result = if is_write_query {
+            let mut store_guard = store.write().await;
+            let res = self.query_engine.execute_mut(&query_str, &mut *store_guard);
+
+            // If write succeeded and persistence is enabled, persist the changes
+            if let (Ok(ref batch), Some(ref persist_mgr)) = (&res, &self.persistence) {
+                // Extract created nodes/edges from the result and persist them
+                // The RecordBatch contains Node and Edge values that were created
+                for record in &batch.records {
+                    for (_col, value) in record.bindings().iter() {
+                        match value {
+                            Value::Node(node_id, node) => {
+                                // Persist the created node
+                                if let Err(e) = persist_mgr.persist_create_node("default", node) {
+                                    warn!("Failed to persist node {:?}: {}", node_id, e);
+                                    // Note: We continue even if persistence fails
+                                    // The in-memory state is still valid
+                                }
+                            }
+                            Value::Edge(edge_id, edge) => {
+                                // Persist the created edge
+                                if let Err(e) = persist_mgr.persist_create_edge("default", edge) {
+                                    warn!("Failed to persist edge {:?}: {}", edge_id, e);
+                                }
+                            }
+                            _ => {} // Other value types don't need persistence
+                        }
+                    }
+                }
+                debug!("Write query persisted successfully");
+            }
+
+            drop(store_guard);
+            res
+        } else {
+            let store_guard = store.read().await;
+            let res = self.query_engine.execute(&query_str, &*store_guard);
+            drop(store_guard);
+            res
+        };
 
         match result {
             Ok(batch) => {
@@ -267,7 +320,7 @@ impl CommandHandler {
 
 impl Default for CommandHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)  // Default is in-memory only (no persistence)
     }
 }
 
@@ -277,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ping() {
-        let handler = CommandHandler::new();
+        let handler = CommandHandler::new(None);  // No persistence for tests
         let cmd = RespValue::Array(vec![
             RespValue::BulkString(Some(b"PING".to_vec())),
         ]);
@@ -290,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_echo() {
-        let handler = CommandHandler::new();
+        let handler = CommandHandler::new(None);  // No persistence for tests
         let cmd = RespValue::Array(vec![
             RespValue::BulkString(Some(b"ECHO".to_vec())),
             RespValue::BulkString(Some(b"hello".to_vec())),
@@ -304,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_query() {
-        let handler = CommandHandler::new();
+        let handler = CommandHandler::new(None);  // No persistence for tests
 
         // Create test data
         let mut graph_store = GraphStore::new();

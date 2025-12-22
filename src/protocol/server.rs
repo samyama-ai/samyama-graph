@@ -3,6 +3,7 @@
 //! Implements REQ-REDIS-001, REQ-REDIS-002 (RESP server, Redis clients)
 
 use crate::graph::GraphStore;
+use crate::persistence::PersistenceManager;
 use crate::protocol::resp::{RespValue, RespError};
 use crate::protocol::command::CommandHandler;
 use bytes::BytesMut;
@@ -21,6 +22,8 @@ pub struct ServerConfig {
     pub port: u16,
     /// Maximum connections
     pub max_connections: usize,
+    /// Data directory for persistence (None = in-memory only)
+    pub data_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -29,6 +32,7 @@ impl Default for ServerConfig {
             address: "127.0.0.1".to_string(),
             port: 6379,
             max_connections: 10000,
+            data_path: Some("./samyama_data".to_string()),
         }
     }
 }
@@ -41,16 +45,36 @@ pub struct RespServer {
     store: Arc<RwLock<GraphStore>>,
     /// Command handler
     handler: Arc<CommandHandler>,
+    /// Optional persistence manager for durability
+    /// When Some, writes are persisted to disk via WAL + RocksDB
+    persistence: Option<Arc<PersistenceManager>>,
 }
 
 impl RespServer {
-    /// Create a new RESP server
+    /// Create a new RESP server (in-memory only, no persistence)
     pub fn new(config: ServerConfig, store: Arc<RwLock<GraphStore>>) -> Self {
-        let handler = Arc::new(CommandHandler::new());
+        let handler = Arc::new(CommandHandler::new(None));
         Self {
             config,
             store,
             handler,
+            persistence: None,
+        }
+    }
+
+    /// Create a new RESP server with persistence enabled
+    /// Data will be persisted to disk via WAL + RocksDB
+    pub fn new_with_persistence(
+        config: ServerConfig,
+        store: Arc<RwLock<GraphStore>>,
+        persistence: Arc<PersistenceManager>,
+    ) -> Self {
+        let handler = Arc::new(CommandHandler::new(Some(Arc::clone(&persistence))));
+        Self {
+            config,
+            store,
+            handler,
+            persistence: Some(persistence),
         }
     }
 
@@ -146,7 +170,9 @@ mod tests {
     fn test_server_creation() {
         let config = ServerConfig::default();
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        let _server = RespServer::new(config, store);
+        let server = RespServer::new(config, store);
+        // In-memory server should have no persistence
+        assert!(server.persistence.is_none());
     }
 
     #[tokio::test]
@@ -154,7 +180,7 @@ mod tests {
         // This is a basic test structure
         // Real integration tests would require a running server
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        let handler = Arc::new(CommandHandler::new());
+        let handler = Arc::new(CommandHandler::new(None));  // No persistence for tests
 
         // Would need to set up mock socket for full test
         drop(store);
