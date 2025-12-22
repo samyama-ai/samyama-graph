@@ -514,6 +514,80 @@ impl PhysicalOperator for LimitOperator {
     }
 }
 
+/// Cartesian product operator: MATCH (a:X), (b:Y)
+/// Produces all combinations of records from left and right inputs
+pub struct CartesianProductOperator {
+    left: OperatorBox,
+    right: OperatorBox,
+    left_records: Vec<Record>,
+    left_index: usize,
+    current_right: Option<Record>,
+    left_materialized: bool,
+}
+
+impl CartesianProductOperator {
+    pub fn new(left: OperatorBox, right: OperatorBox) -> Self {
+        Self {
+            left,
+            right,
+            left_records: Vec::new(),
+            left_index: 0,
+            current_right: None,
+            left_materialized: false,
+        }
+    }
+
+    fn materialize_left(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        if self.left_materialized {
+            return Ok(());
+        }
+        while let Some(record) = self.left.next(store)? {
+            self.left_records.push(record);
+        }
+        self.left_materialized = true;
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for CartesianProductOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.materialize_left(store)?;
+        if self.left_records.is_empty() {
+            return Ok(None);
+        }
+        loop {
+            if self.current_right.is_none() {
+                self.current_right = self.right.next(store)?;
+                self.left_index = 0;
+                if self.current_right.is_none() {
+                    return Ok(None);
+                }
+            }
+            if self.left_index < self.left_records.len() {
+                let left_record = &self.left_records[self.left_index];
+                let right_record = self.current_right.as_ref().unwrap();
+                let mut merged = left_record.clone();
+                for (key, value) in right_record.bindings() {
+                    merged.bind(key.clone(), value.clone());
+                }
+                self.left_index += 1;
+                return Ok(Some(merged));
+            } else {
+                self.current_right = None;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.left.reset();
+        self.right.reset();
+        self.left_records.clear();
+        self.left_index = 0;
+        self.current_right = None;
+        self.left_materialized = false;
+    }
+}
+
 /// Create node operator: CREATE (n:Person {name: "Alice"})
 pub struct CreateNodeOperator {
     /// Nodes to create (label, properties, variable)
@@ -823,6 +897,107 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
         self.phase = 0;
         self.result_index = 0;
         self.results.clear();
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+}
+
+/// Operator for MATCH...CREATE queries
+/// Example: MATCH (a:Trial {id: 'NCT001'}), (b:Condition {mesh_id: 'D001'}) CREATE (a)-[:STUDIES]->(b)
+/// This operator takes matched nodes and creates edges between them
+pub struct MatchCreateEdgeOperator {
+    /// Input operator (MATCH results)
+    input: OperatorBox,
+    /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
+    edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    /// Whether edges have been created for current batch
+    done: bool,
+    /// Results to return
+    results: Vec<Record>,
+    /// Current result index
+    result_index: usize,
+}
+
+impl MatchCreateEdgeOperator {
+    /// Create a new MatchCreateEdgeOperator
+    pub fn new(
+        input: OperatorBox,
+        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    ) -> Self {
+        Self {
+            input,
+            edges_to_create,
+            done: false,
+            results: Vec::new(),
+            result_index: 0,
+        }
+    }
+}
+
+impl PhysicalOperator for MatchCreateEdgeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "MatchCreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        // First pass: process all matched records and create edges
+        if !self.done {
+            while let Some(record) = self.input.next_mut(store)? {
+                // For each matched record, create the specified edges
+                for (source_var, target_var, edge_type, properties, _edge_var) in &self.edges_to_create {
+                    // Get source node ID from record bindings
+                    let source_id = match record.get(source_var) {
+                        Some(Value::Node(id, _)) => *id,
+                        _ => continue, // Skip if source not found
+                    };
+
+                    // Get target node ID from record bindings
+                    let target_id = match record.get(target_var) {
+                        Some(Value::Node(id, _)) => *id,
+                        _ => continue, // Skip if target not found
+                    };
+
+                    // Create the edge
+                    let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+                    // Set properties on edge
+                    if let Some(edge) = store.get_edge_mut(edge_id) {
+                        for (key, value) in properties {
+                            edge.set_property(key.clone(), value.clone());
+                        }
+                    }
+
+                    // Build result record with the created edge
+                    let mut result_record = record.clone();
+                    if let Some(edge) = store.get_edge(edge_id) {
+                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, edge.clone()));
+                    }
+                    self.results.push(result_record);
+                }
+            }
+            self.done = true;
+        }
+
+        // Return results one by one
+        if self.result_index >= self.results.len() {
+            return Ok(None);
+        }
+
+        let result = self.results[self.result_index].clone();
+        self.result_index += 1;
+        Ok(Some(result))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.done = false;
+        self.results.clear();
+        self.result_index = 0;
     }
 
     fn is_mutating(&self) -> bool {

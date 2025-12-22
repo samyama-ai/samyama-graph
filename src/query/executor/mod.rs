@@ -6,8 +6,8 @@ pub mod operator;
 pub mod planner;
 pub mod record;
 
-// Export operators - added CreateNodeOperator and CreateEdgeOperator for CREATE support
-pub use operator::{PhysicalOperator, OperatorBox, CreateNodeOperator, CreateEdgeOperator};
+// Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
+pub use operator::{PhysicalOperator, OperatorBox, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
 pub use planner::{QueryPlanner, ExecutionPlan};
 pub use record::{Record, RecordBatch, Value};
 

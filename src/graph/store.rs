@@ -390,6 +390,73 @@ impl GraphStore {
         self.next_node_id = 1;
         self.next_edge_id = 1;
     }
+
+    // ============================================================
+    // Recovery methods - used to rebuild graph from persisted data
+    // ============================================================
+
+    /// Insert a recovered node (used during recovery from persistence)
+    /// Unlike create_node(), this preserves the node's existing ID
+    pub fn insert_recovered_node(&mut self, node: Node) {
+        let node_id = node.id;
+
+        // Update label indices for all labels
+        for label in &node.labels {
+            self.label_index
+                .entry(label.clone())
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+        }
+
+        // Initialize adjacency lists
+        self.outgoing.entry(node_id).or_insert_with(Vec::new);
+        self.incoming.entry(node_id).or_insert_with(Vec::new);
+
+        // Insert the node
+        self.nodes.insert(node_id, node);
+
+        // Update next_node_id to be higher than any recovered node
+        if node_id.as_u64() >= self.next_node_id {
+            self.next_node_id = node_id.as_u64() + 1;
+        }
+    }
+
+    /// Insert a recovered edge (used during recovery from persistence)
+    /// Unlike create_edge(), this preserves the edge's existing ID
+    /// Note: Source and target nodes must already exist
+    pub fn insert_recovered_edge(&mut self, edge: Edge) -> GraphResult<()> {
+        let edge_id = edge.id;
+        let source = edge.source;
+        let target = edge.target;
+
+        // Validate nodes exist
+        if !self.has_node(source) {
+            return Err(GraphError::InvalidEdgeSource(source));
+        }
+        if !self.has_node(target) {
+            return Err(GraphError::InvalidEdgeTarget(target));
+        }
+
+        // Update adjacency lists
+        self.outgoing.get_mut(&source).unwrap().push(edge_id);
+        self.incoming.get_mut(&target).unwrap().push(edge_id);
+
+        // Update edge type index
+        self.edge_type_index
+            .entry(edge.edge_type.clone())
+            .or_insert_with(HashSet::new)
+            .insert(edge_id);
+
+        // Insert the edge
+        self.edges.insert(edge_id, edge);
+
+        // Update next_edge_id to be higher than any recovered edge
+        if edge_id.as_u64() >= self.next_edge_id {
+            self.next_edge_id = edge_id.as_u64() + 1;
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for GraphStore {

@@ -1,6 +1,7 @@
-use samyama::{GraphStore, QueryEngine, RespServer, ServerConfig};
+use samyama::{GraphStore, QueryEngine, RespServer, ServerConfig, PersistenceManager};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
@@ -137,30 +138,85 @@ fn demo_cypher_queries() {
 }
 
 async fn start_server() {
-    let store = Arc::new(RwLock::new(GraphStore::new()));
+    let config = ServerConfig::default();
+    let mut store = GraphStore::new();
 
-    // Add some initial data
-    {
-        let mut graph = store.write().await;
-        let alice = graph.create_node("Person");
-        if let Some(node) = graph.get_node_mut(alice) {
+    // Initialize persistence if data_path is configured
+    let persistence = if let Some(ref data_path) = config.data_path {
+        println!("Initializing persistence at: {}", data_path);
+
+        match PersistenceManager::new(data_path) {
+            Ok(pm) => {
+                // Recover existing data from disk
+                println!("Recovering data from disk...");
+                match pm.recover("default") {
+                    Ok((nodes, edges)) => {
+                        println!("Recovered {} nodes and {} edges from disk", nodes.len(), edges.len());
+
+                        // Rebuild in-memory GraphStore from recovered data
+                        // Insert nodes first (edges depend on nodes existing)
+                        for node in nodes {
+                            store.insert_recovered_node(node);
+                        }
+
+                        // Then insert edges
+                        for edge in edges {
+                            if let Err(e) = store.insert_recovered_edge(edge) {
+                                eprintln!("Warning: Failed to recover edge: {}", e);
+                            }
+                        }
+
+                        info!("Recovery complete. GraphStore has {} nodes, {} edges",
+                              store.node_count(), store.edge_count());
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Recovery failed: {}. Starting with empty graph.", e);
+                    }
+                }
+
+                Some(Arc::new(pm))
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize persistence: {}. Running in-memory only.", e);
+                None
+            }
+        }
+    } else {
+        println!("No data_path configured. Running in-memory only (data will not survive restart).");
+        None
+    };
+
+    // If no data was recovered, add some demo data
+    if store.node_count() == 0 {
+        println!("No existing data found. Adding demo data...");
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
             node.set_property("name", "Alice");
             node.set_property("age", 30i64);
         }
 
-        let bob = graph.create_node("Person");
-        if let Some(node) = graph.get_node_mut(bob) {
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
             node.set_property("name", "Bob");
             node.set_property("age", 25i64);
         }
 
-        graph.create_edge(alice, bob, "KNOWS").unwrap();
+        store.create_edge(alice, bob, "KNOWS").unwrap();
     }
 
-    let config = ServerConfig::default();
-    let server = RespServer::new(config, store);
+    let store = Arc::new(RwLock::new(store));
 
-    println!("✅ Server ready. Press Ctrl+C to stop.");
+    // Create server with or without persistence
+    let server = if let Some(pm) = persistence {
+        println!("✅ Server ready WITH persistence. Data will be saved to disk.");
+        RespServer::new_with_persistence(config, store, pm)
+    } else {
+        println!("✅ Server ready (in-memory only). Data will NOT survive restart.");
+        RespServer::new(config, store)
+    };
+
+    println!("Connect with: redis-cli -p 6379");
+    println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
     println!();
 
     if let Err(e) = server.start().await {
