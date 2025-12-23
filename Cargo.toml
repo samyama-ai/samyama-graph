@@ -37,6 +37,20 @@ openraft = { version = "0.9", features = ["serde"] }
 async-trait = "0.1"
 serde_yaml = "0.9"
 
+# RDF/SPARQL Support (Phase 5)
+oxrdf = "0.2"              # RDF primitives (IRI, Literal, Triple, Quad)
+oxiri = "0.2"              # IRI handling
+rio_api = "0.8"            # RDF I/O API
+rio_turtle = "0.8"         # Turtle parser/serializer
+rio_xml = "0.8"            # RDF/XML parser/serializer
+spargebra = "0.3"          # SPARQL 1.1 parser
+sparesults = "0.2"         # SPARQL results formats
+axum = "0.7"               # HTTP framework for SPARQL endpoint
+tower = "0.4"              # Middleware
+tower-http = "0.5"         # HTTP utilities
+percent-encoding = "2.3"   # URL encoding
+mime = "0.3"               # MIME types
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"

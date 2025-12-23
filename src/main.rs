@@ -19,14 +19,15 @@ async fn main() {
     demo_cypher_queries();
 
     // Demo 3: RESP Server
+    let bind_addr = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
     println!("\n=== Demo 3: RESP Protocol Server ===");
-    println!("Starting RESP server on 127.0.0.1:6379...");
+    println!("Starting RESP server on {}:6379...", bind_addr);
     println!("Connect with any Redis client:");
     println!("  redis-cli");
     println!("  GRAPH.QUERY mygraph \"MATCH (n:Person) RETURN n\"");
     println!();
 
-    start_server().await;
+    start_server(&bind_addr).await;
 }
 
 fn demo_property_graph() {
@@ -137,8 +138,9 @@ fn demo_cypher_queries() {
     println!("\n✅ All queries executed successfully!");
 }
 
-async fn start_server() {
-    let config = ServerConfig::default();
+async fn start_server(bind_addr: &str) {
+    let mut config = ServerConfig::default();
+    config.address = bind_addr.to_string();
     let mut store = GraphStore::new();
 
     // Initialize persistence if data_path is configured

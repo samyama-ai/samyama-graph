@@ -2,7 +2,7 @@
 
 A high-performance, distributed graph database with OpenCypher query support, Redis protocol compatibility, and multi-tenancy.
 
-## Status: Phase 4 - High Availability (Foundation) ✅
+## Status: Phase 5 - RDF/SPARQL Support (Foundation) ✅
 
 ### Implemented Requirements
 
@@ -55,15 +55,27 @@ A high-performance, distributed graph database with OpenCypher query support, Re
 - ✅ Storage layer for Raft logs and metadata
 - ✅ Cluster configuration and node management
 
+**Phase 5 - RDF/SPARQL Support Foundation (REQ-RDF-001 through REQ-SPARQL-008)**:
+- ✅ **REQ-RDF-001**: RDF data model (triples and quads)
+- ✅ **REQ-RDF-002**: RDF triple/quad store with SPO/POS/OSP indexing
+- ✅ **REQ-RDF-004**: Named graphs support
+- ✅ Namespace management (rdf, rdfs, xsd, owl, foaf, dc prefixes)
+- 🚧 **REQ-RDF-003**: RDF serialization formats (Turtle, RDF/XML, N-Triples, JSON-LD) - stubs
+- 🚧 **REQ-RDF-005**: RDFS reasoning - stubs
+- 🚧 **REQ-RDF-006**: Property graph ↔ RDF mapping - stubs
+- 🚧 **REQ-SPARQL-001**: SPARQL 1.1 query language - stubs
+- 🚧 **REQ-SPARQL-002**: SPARQL HTTP protocol - stubs
+- 🚧 **REQ-SPARQL-003**: Query forms (SELECT, CONSTRUCT, ASK, DESCRIBE) - stubs
+
 ### Test Results
 
 ```
-✓ 119 tests passed (118 unit + 1 doc)
+✓ 151 tests passed (148 unit + 3 doc)
 ✓ 0 tests failed
-✓ Test coverage: Core graph + Query engine + RESP protocol + Persistence + Multi-tenancy + HA/Raft
+✓ Test coverage: Core graph + Query engine + RESP protocol + Persistence + Multi-tenancy + HA/Raft + RDF/SPARQL
 ```
 
-## Quick Start~/Downloads/samyama-graph-main/examples/banking_demo.rs (preview )
+## Quick Start
 
 ### Installation
 
@@ -382,20 +394,30 @@ src/
 - [x] Raft storage layer (logs, metadata, snapshots)
 - [x] 3-node cluster demonstration
 
-### Phase 5: Distributed Scaling (Optional)
+### Phase 5: RDF/SPARQL Support (Foundation) ✅ (Complete)
+- [x] RDF triple/quad store with indexing
+- [x] Core RDF types (NamedNode, BlankNode, Literal, Triple, Quad)
+- [x] Namespace management (prefix handling)
+- [x] Module structure for RDF serialization (stubs)
+- [x] Module structure for SPARQL query engine (stubs)
+- [x] Module structure for property graph mapping (stubs)
+
+### Phase 6: Distributed Scaling (Optional)
 - [ ] Graph-aware partitioning
 - [ ] Distributed query execution
 - [ ] Data rebalancing
 
-### Phase 6: Advanced Features (Optional)
-- [ ] RDF data model support
-- [ ] SPARQL query language
+### Phase 7: Advanced Features (Optional)
 - [ ] Graph algorithms library
+- [ ] Full SPARQL 1.1 implementation
+- [ ] Advanced RDFS/OWL reasoning
 
 ## Documentation
 
 - [Requirements Specification](./REQUIREMENTS.md)
 - [Feasibility & Implementation Plan](./FEASIBILITY_AND_PLAN.md)
+- [Phase 5 Implementation Plan](./PHASE5_PLAN.md)
+- [Phase 5 Summary](./PHASE5_SUMMARY.md)
 - [Technology Stack Analysis](./docs/TECH_STACK.md)
 - [System Architecture](./docs/ARCHITECTURE.md)
 - [Architecture Decision Records](./docs/ADR/)
@@ -437,14 +459,15 @@ See [tests/integration/README.md](tests/integration/README.md) for detailed inst
 
 ### Test Categories
 
-- **Unit Tests**: 118 tests covering all functionality
+- **Unit Tests**: 148 tests covering all functionality
   - 35 tests: Property graph (Phase 1)
   - 49 tests: Query engine & RESP protocol (Phase 2)
   - 20 tests: Persistence & multi-tenancy (Phase 3)
   - 14 tests: High availability & Raft consensus (Phase 4)
+  - 33 tests: RDF/SPARQL support (Phase 5)
 - **Integration Tests**: 8 tests for RESP server
-- **Doc Tests**: 1 test for library examples
-- **Total**: 127 tests, 100% passing
+- **Doc Tests**: 3 tests for library examples
+- **Total**: 159 tests, 100% passing
 
 ### Test Results
 
@@ -496,5 +519,5 @@ Samyama Graph Database Team
 ---
 
 **Version**: 0.1.0
-**Status**: Phase 4 Complete - High Availability Foundation
-**Last Updated**: 2025-10-16
+**Status**: Phase 5 Complete - RDF/SPARQL Support Foundation
+**Last Updated**: 2025-11-10
