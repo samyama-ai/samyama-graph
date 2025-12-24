@@ -14,45 +14,67 @@ use tracing::{debug, info};
 pub enum Request {
     /// Create a node
     CreateNode {
+        /// Tenant identifier
         tenant: String,
+        /// Node identifier
         node_id: u64,
+        /// Node labels
         labels: Vec<String>,
+        /// Node properties
         properties: PropertyMap,
     },
     /// Create an edge
     CreateEdge {
+        /// Tenant identifier
         tenant: String,
+        /// Edge identifier
         edge_id: u64,
+        /// Source node ID
         source: u64,
+        /// Target node ID
         target: u64,
+        /// Edge type/relationship name
         edge_type: String,
+        /// Edge properties
         properties: PropertyMap,
     },
     /// Delete a node
     DeleteNode {
+        /// Tenant identifier
         tenant: String,
+        /// Node identifier to delete
         node_id: u64,
     },
     /// Delete an edge
     DeleteEdge {
+        /// Tenant identifier
         tenant: String,
+        /// Edge identifier to delete
         edge_id: u64,
     },
     /// Update node properties
     UpdateNodeProperties {
+        /// Tenant identifier
         tenant: String,
+        /// Node identifier to update
         node_id: u64,
+        /// New properties to set
         properties: PropertyMap,
     },
     /// Update edge properties
     UpdateEdgeProperties {
+        /// Tenant identifier
         tenant: String,
+        /// Edge identifier to update
         edge_id: u64,
+        /// New properties to set
         properties: PropertyMap,
     },
     /// Execute a Cypher query (read-only)
     ExecuteQuery {
+        /// Tenant identifier
         tenant: String,
+        /// Cypher query string
         query: String,
     },
 }
@@ -63,13 +85,25 @@ pub enum Response {
     /// Operation succeeded
     Ok,
     /// Node created successfully
-    NodeCreated { node_id: u64 },
+    NodeCreated {
+        /// ID of the created node
+        node_id: u64,
+    },
     /// Edge created successfully
-    EdgeCreated { edge_id: u64 },
+    EdgeCreated {
+        /// ID of the created edge
+        edge_id: u64,
+    },
     /// Query result
-    QueryResult { rows: usize },
+    QueryResult {
+        /// Number of rows returned
+        rows: usize,
+    },
     /// Error occurred
-    Error { message: String },
+    Error {
+        /// Error message
+        message: String,
+    },
 }
 
 /// Graph state machine that applies Raft-replicated operations
@@ -78,7 +112,8 @@ pub struct GraphStateMachine {
     persistence: Arc<PersistenceManager>,
     /// Last applied log index
     last_applied_log: Arc<RwLock<u64>>,
-    /// Last membership config
+    /// Last membership config (retained for future cluster membership tracking)
+    #[allow(dead_code)]
     last_membership: Arc<RwLock<Option<String>>>,
 }
 

@@ -1,11 +1,13 @@
 //! Cluster membership management
 
-use crate::raft::{NodeId, RaftError, RaftNodeId, RaftResult};
+// NodeId removed - was unused import causing compiler warning
+use crate::raft::{RaftError, RaftNodeId, RaftResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+// warn removed - was unused import causing compiler warning
+use tracing::info;
 
 /// Cluster configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

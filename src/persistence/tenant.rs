@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+// warn removed - was unused import causing compiler warning
+use tracing::{debug, info};
 
 /// Tenant errors
 #[derive(Error, Debug)]

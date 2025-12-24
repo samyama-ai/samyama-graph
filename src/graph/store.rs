@@ -185,6 +185,27 @@ impl GraphStore {
         Ok(node)
     }
 
+    /// Add a label to an existing node AND update the label index
+    ///
+    /// This is the correct way to add labels to nodes after creation.
+    /// Using `node.add_label()` directly will NOT update the label_index,
+    /// making the node invisible to `get_nodes_by_label()` queries.
+    pub fn add_label_to_node(&mut self, node_id: NodeId, label: impl Into<Label>) -> GraphResult<()> {
+        let label = label.into();
+
+        // Get the node and add the label
+        let node = self.nodes.get_mut(&node_id).ok_or(GraphError::NodeNotFound(node_id))?;
+        node.add_label(label.clone());
+
+        // Update the label index so queries can find this node by the new label
+        self.label_index
+            .entry(label)
+            .or_insert_with(HashSet::new)
+            .insert(node_id);
+
+        Ok(())
+    }
+
     /// Create an edge between two nodes
     pub fn create_edge(
         &mut self,
@@ -368,6 +389,73 @@ impl GraphStore {
         self.edge_type_index.clear();
         self.next_node_id = 1;
         self.next_edge_id = 1;
+    }
+
+    // ============================================================
+    // Recovery methods - used to rebuild graph from persisted data
+    // ============================================================
+
+    /// Insert a recovered node (used during recovery from persistence)
+    /// Unlike create_node(), this preserves the node's existing ID
+    pub fn insert_recovered_node(&mut self, node: Node) {
+        let node_id = node.id;
+
+        // Update label indices for all labels
+        for label in &node.labels {
+            self.label_index
+                .entry(label.clone())
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+        }
+
+        // Initialize adjacency lists
+        self.outgoing.entry(node_id).or_insert_with(Vec::new);
+        self.incoming.entry(node_id).or_insert_with(Vec::new);
+
+        // Insert the node
+        self.nodes.insert(node_id, node);
+
+        // Update next_node_id to be higher than any recovered node
+        if node_id.as_u64() >= self.next_node_id {
+            self.next_node_id = node_id.as_u64() + 1;
+        }
+    }
+
+    /// Insert a recovered edge (used during recovery from persistence)
+    /// Unlike create_edge(), this preserves the edge's existing ID
+    /// Note: Source and target nodes must already exist
+    pub fn insert_recovered_edge(&mut self, edge: Edge) -> GraphResult<()> {
+        let edge_id = edge.id;
+        let source = edge.source;
+        let target = edge.target;
+
+        // Validate nodes exist
+        if !self.has_node(source) {
+            return Err(GraphError::InvalidEdgeSource(source));
+        }
+        if !self.has_node(target) {
+            return Err(GraphError::InvalidEdgeTarget(target));
+        }
+
+        // Update adjacency lists
+        self.outgoing.get_mut(&source).unwrap().push(edge_id);
+        self.incoming.get_mut(&target).unwrap().push(edge_id);
+
+        // Update edge type index
+        self.edge_type_index
+            .entry(edge.edge_type.clone())
+            .or_insert_with(HashSet::new)
+            .insert(edge_id);
+
+        // Insert the edge
+        self.edges.insert(edge_id, edge);
+
+        // Update next_edge_id to be higher than any recovered edge
+        if edge_id.as_u64() >= self.next_edge_id {
+            self.next_edge_id = edge_id.as_u64() + 1;
+        }
+
+        Ok(())
     }
 }
 
@@ -565,5 +653,36 @@ mod tests {
         store.clear();
         assert_eq!(store.node_count(), 0);
         assert_eq!(store.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_add_label_to_node() {
+        let mut store = GraphStore::new();
+        let node_id = store.create_node("Person");
+
+        // Initially only "Person" label is indexed
+        assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 1);
+        assert_eq!(store.get_nodes_by_label(&Label::new("Employee")).len(), 0);
+
+        // Add "Employee" label using the proper method
+        store.add_label_to_node(node_id, "Employee").unwrap();
+
+        // Now both labels should be indexed and queryable
+        assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 1);
+        assert_eq!(store.get_nodes_by_label(&Label::new("Employee")).len(), 1);
+
+        // Verify the node actually has both labels
+        let node = store.get_node(node_id).unwrap();
+        assert!(node.has_label(&Label::new("Person")));
+        assert!(node.has_label(&Label::new("Employee")));
+    }
+
+    #[test]
+    fn test_add_label_to_nonexistent_node() {
+        let mut store = GraphStore::new();
+        let invalid_id = NodeId::new(999);
+
+        let result = store.add_label_to_node(invalid_id, "Employee");
+        assert_eq!(result, Err(GraphError::NodeNotFound(invalid_id)));
     }
 }

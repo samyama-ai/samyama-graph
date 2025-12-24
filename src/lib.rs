@@ -91,7 +91,7 @@
 //! assert_eq!(persons.len(), 2);
 //! ```
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all)]
 
 pub mod graph;

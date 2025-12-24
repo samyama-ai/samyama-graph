@@ -116,25 +116,34 @@ pub struct WhereClause {
 pub enum Expression {
     /// Property access: n.name
     Property {
+        /// Variable name (e.g., "n")
         variable: String,
+        /// Property name (e.g., "name")
         property: String,
     },
     /// Literal value
     Literal(PropertyValue),
     /// Binary operation
     Binary {
+        /// Left operand
         left: Box<Expression>,
+        /// Binary operator
         op: BinaryOp,
+        /// Right operand
         right: Box<Expression>,
     },
     /// Unary operation
     Unary {
+        /// Unary operator
         op: UnaryOp,
+        /// Operand expression
         expr: Box<Expression>,
     },
     /// Function call
     Function {
+        /// Function name
         name: String,
+        /// Function arguments
         args: Vec<Expression>,
     },
     /// Variable reference
@@ -144,34 +153,50 @@ pub enum Expression {
 /// Binary operators
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
-    // Comparison
+    /// Equal to (=)
     Eq,
+    /// Not equal to (<>)
     Ne,
+    /// Less than (<)
     Lt,
+    /// Less than or equal to (<=)
     Le,
+    /// Greater than (>)
     Gt,
+    /// Greater than or equal to (>=)
     Ge,
-    // Logical
+    /// Logical AND
     And,
+    /// Logical OR
     Or,
-    // Arithmetic
+    /// Addition (+)
     Add,
+    /// Subtraction (-)
     Sub,
+    /// Multiplication (*)
     Mul,
+    /// Division (/)
     Div,
+    /// Modulo (%)
     Mod,
-    // String
+    /// String starts with
     StartsWith,
+    /// String ends with
     EndsWith,
+    /// String contains
     Contains,
 }
 
 /// Unary operators
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnaryOp {
+    /// Logical NOT
     Not,
+    /// Numeric negation (-)
     Minus,
+    /// IS NULL check
     IsNull,
+    /// IS NOT NULL check
     IsNotNull,
 }
 

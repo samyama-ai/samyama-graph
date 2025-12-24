@@ -152,6 +152,16 @@ impl Wal {
         debug!("WAL sync mode: {}", sync);
     }
 
+    /// Get current sequence number
+    ///
+    /// Returns the current WAL sequence number which increments with each write.
+    /// This is needed by PersistenceManager::checkpoint() to record the actual
+    /// checkpoint sequence instead of always using 0, which was causing misleading
+    /// output in the banking demo (WAL checkpoint always showed sequence 0).
+    pub fn current_sequence(&self) -> u64 {
+        self.sequence
+    }
+
     /// Append an entry to the WAL
     pub fn append(&mut self, entry: WalEntry) -> WalResult<u64> {
         // Increment sequence

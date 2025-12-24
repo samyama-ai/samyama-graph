@@ -8,15 +8,16 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 query = { SOI ~ statement ~ ";"? ~ EOI }
 statement = { match_stmt | create_stmt }
 
-// MATCH clause
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
+// MATCH clause (can optionally have CREATE to create edges between matched nodes)
+match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ create_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
 where_clause = { ^"WHERE" ~ expression }
+create_clause = { ^"CREATE" ~ pattern }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }
 distinct = { ^"DISTINCT" }
 order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
 limit_clause = { ^"LIMIT" ~ integer }
 
-// CREATE clause
+// Standalone CREATE clause
 create_stmt = { ^"CREATE" ~ pattern }
 
 // Pattern matching

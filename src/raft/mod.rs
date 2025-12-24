@@ -19,7 +19,7 @@ pub use storage::RaftStorage;
 pub use cluster::{ClusterConfig, ClusterManager};
 
 use openraft::Config;
-use std::sync::Arc;
+// Arc removed - was unused import causing compiler warning
 use thiserror::Error;
 
 /// Raft node identifier type

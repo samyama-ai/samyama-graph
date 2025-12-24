@@ -83,6 +83,16 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::where_clause => {
                 query.where_clause = Some(parse_where_clause(inner)?);
             }
+            Rule::create_clause => {
+                // Handle CREATE clause inside MATCH (for MATCH...CREATE pattern)
+                for create_inner in inner.into_inner() {
+                    if create_inner.as_rule() == Rule::pattern {
+                        query.create_clause = Some(CreateClause {
+                            pattern: parse_pattern(create_inner)?,
+                        });
+                    }
+                }
+            }
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }

@@ -58,7 +58,8 @@ struct StoredEdge {
 pub struct PersistentStorage {
     /// RocksDB instance
     db: Arc<DB>,
-    /// Storage path
+    /// Storage path (retained for debugging and future path-based operations)
+    #[allow(dead_code)]
     path: String,
 }
 
@@ -270,7 +271,7 @@ impl PersistentStorage {
     }
 
     /// Create a snapshot
-    pub fn create_snapshot(&self) -> rocksdb::Snapshot {
+    pub fn create_snapshot(&self) -> rocksdb::Snapshot<'_> {
         self.db.snapshot()
     }
 

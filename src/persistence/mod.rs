@@ -18,7 +18,8 @@ pub use wal::{Wal, WalEntry, WalError, WalResult};
 use crate::graph::{Edge, Node, PropertyMap};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{info, warn};
+// warn removed - was unused import causing compiler warning
+use tracing::info;
 
 /// Integrated persistence manager combining WAL, storage, and tenancy
 pub struct PersistenceManager {
@@ -211,8 +212,11 @@ impl PersistenceManager {
         // Flush storage
         self.storage.flush()?;
 
-        // Create WAL checkpoint
-        let sequence = 0; // TODO: Track actual sequence
+        // Create WAL checkpoint with the actual current sequence number
+        // Previously this was hardcoded to 0, which caused misleading output
+        // in the banking demo where WAL checkpoint always showed "sequence 0"
+        // even after writing thousands of entries
+        let sequence = self.wal.lock().unwrap().current_sequence();
         self.wal.lock().unwrap().checkpoint(sequence)?;
 
         info!("Checkpoint created successfully");

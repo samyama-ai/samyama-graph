@@ -12,41 +12,62 @@ use tracing::{debug, error, info};
 pub enum RaftMessage {
     /// Append entries (heartbeat or log replication)
     AppendEntries {
+        /// Leader's term
         term: u64,
+        /// Leader's node ID
         leader_id: RaftNodeId,
+        /// Index of log entry preceding new ones
         prev_log_index: u64,
+        /// Term of prev_log_index entry
         prev_log_term: u64,
+        /// Log entries to replicate
         entries: Vec<Vec<u8>>,
+        /// Leader's commit index
         leader_commit: u64,
     },
     /// Append entries response
     AppendEntriesResponse {
+        /// Current term for leader to update
         term: u64,
+        /// True if follower contained matching entry
         success: bool,
+        /// Last matched log index
         match_index: Option<u64>,
     },
     /// Request vote for leader election
     RequestVote {
+        /// Candidate's term
         term: u64,
+        /// Candidate requesting vote
         candidate_id: RaftNodeId,
+        /// Index of candidate's last log entry
         last_log_index: u64,
+        /// Term of candidate's last log entry
         last_log_term: u64,
     },
     /// Vote response
     VoteResponse {
+        /// Current term for candidate to update
         term: u64,
+        /// True if vote granted
         vote_granted: bool,
     },
     /// Install snapshot
     InstallSnapshot {
+        /// Leader's term
         term: u64,
+        /// Leader's node ID
         leader_id: RaftNodeId,
+        /// Last log index included in snapshot
         last_included_index: u64,
+        /// Last log term included in snapshot
         last_included_term: u64,
+        /// Snapshot data
         data: Vec<u8>,
     },
     /// Snapshot response
     SnapshotResponse {
+        /// Current term for leader to update
         term: u64,
     },
 }
@@ -54,15 +75,19 @@ pub enum RaftMessage {
 /// Network address for a node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAddress {
+    /// Hostname or IP address
     pub host: String,
+    /// Port number
     pub port: u16,
 }
 
 impl NodeAddress {
+    /// Create a new node address
     pub fn new(host: String, port: u16) -> Self {
         Self { host, port }
     }
 
+    /// Convert to host:port string format
     pub fn to_string(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -70,7 +95,8 @@ impl NodeAddress {
 
 /// Raft network manager
 pub struct RaftNetwork {
-    /// Node ID
+    /// Node ID (retained for future node identification in network operations)
+    #[allow(dead_code)]
     node_id: RaftNodeId,
     /// Known peer addresses
     peers: Arc<RwLock<HashMap<RaftNodeId, NodeAddress>>>,

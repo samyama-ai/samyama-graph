@@ -95,10 +95,9 @@ impl RespValue {
             b'$' => Self::decode_bulk_string(buf),
             b'*' => Self::decode_array(buf),
             b'_' => Self::decode_null(buf),
-            _ => Err(RespError::Protocol(format!(
-                "Unknown RESP type: {}",
-                first as char
-            ))),
+            // Handle inline commands (plain text commands not in RESP format)
+            // Redis protocol supports inline commands for simple clients like telnet
+            _ => Self::decode_inline_command(buf),
         }
     }
 
@@ -203,6 +202,85 @@ impl RespValue {
         } else {
             Ok(None)
         }
+    }
+
+    /// Decode inline command (plain text, not RESP formatted)
+    /// Example: GRAPH.QUERY graphname "CREATE (n:Person {name: 'Alice'})"
+    /// Converts to Array of BulkStrings for uniform handling
+    fn decode_inline_command(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+        if let Some(line) = Self::read_line(buf)? {
+            let line_str = String::from_utf8(line)
+                .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
+
+            // Parse the inline command into tokens, respecting quotes
+            let tokens = Self::parse_inline_tokens(&line_str)?;
+
+            if tokens.is_empty() {
+                return Err(RespError::Protocol("Empty inline command".to_string()));
+            }
+
+            // Convert tokens to array of bulk strings
+            let elements: Vec<RespValue> = tokens
+                .into_iter()
+                .map(|t| RespValue::BulkString(Some(t.into_bytes())))
+                .collect();
+
+            Ok(Some(RespValue::Array(elements)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Parse inline command tokens, respecting quoted strings
+    /// "GRAPH.QUERY graph \"CREATE (n)\"" -> ["GRAPH.QUERY", "graph", "CREATE (n)"]
+    fn parse_inline_tokens(line: &str) -> RespResult<Vec<String>> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = line.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => {
+                    in_quotes = !in_quotes;
+                }
+                ' ' | '\t' if !in_quotes => {
+                    if !current.is_empty() {
+                        tokens.push(current.clone());
+                        current.clear();
+                    }
+                }
+                '\\' if in_quotes => {
+                    // Handle escape sequences
+                    if let Some(next) = chars.next() {
+                        match next {
+                            'n' => current.push('\n'),
+                            't' => current.push('\t'),
+                            'r' => current.push('\r'),
+                            '"' => current.push('"'),
+                            '\\' => current.push('\\'),
+                            _ => {
+                                current.push('\\');
+                                current.push(next);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    current.push(c);
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+
+        if in_quotes {
+            return Err(RespError::Protocol("Unclosed quote in inline command".to_string()));
+        }
+
+        Ok(tokens)
     }
 
     /// Read a CRLF-terminated line from the buffer
@@ -337,5 +415,37 @@ mod tests {
         let mut buf = BytesMut::from(&b"$6\r\nfoo"[..]);
         let result = RespValue::decode(&mut buf);
         assert!(matches!(result, Err(RespError::Incomplete)));
+    }
+
+    #[test]
+    fn test_decode_inline_command() {
+        let mut buf = BytesMut::from(&b"PING\r\n"[..]);
+        let val = RespValue::decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            val,
+            RespValue::Array(vec![
+                RespValue::BulkString(Some(b"PING".to_vec())),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_decode_inline_command_with_args() {
+        let mut buf = BytesMut::from(&b"GRAPH.QUERY mygraph \"MATCH (n) RETURN n\"\r\n"[..]);
+        let val = RespValue::decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            val,
+            RespValue::Array(vec![
+                RespValue::BulkString(Some(b"GRAPH.QUERY".to_vec())),
+                RespValue::BulkString(Some(b"mygraph".to_vec())),
+                RespValue::BulkString(Some(b"MATCH (n) RETURN n".to_vec())),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_tokens() {
+        let tokens = RespValue::parse_inline_tokens("SET key \"hello world\"").unwrap();
+        assert_eq!(tokens, vec!["SET", "key", "hello world"]);
     }
 }

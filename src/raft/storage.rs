@@ -46,7 +46,8 @@ impl Default for RaftState {
 
 /// Raft storage manager
 pub struct RaftStorage {
-    /// Storage path
+    /// Storage path (retained for future persistent storage operations)
+    #[allow(dead_code)]
     path: String,
     /// Raft state
     state: Arc<RwLock<RaftState>>,

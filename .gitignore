@@ -1,1 +1,14 @@
 /target
+
+# Project overview
+project_overview.txt
+
+# Temporary files
+temp.txt
+
+# Documentation (generated)
+docs/CREATE_IMPLEMENTATION.md
+
+# Generated banking demo data
+docs/banking/data/
+*.tsv
