@@ -165,12 +165,12 @@ Each stub module contains:
 | **REQ-RDF-002**: RDF triple support | ✅ Complete | `rdf/store.rs` |
 | **REQ-RDF-004**: Named graphs (quads) | ✅ Complete | `rdf/store.rs` |
 | Namespace management | ✅ Complete | `rdf/namespace.rs` |
+| **REQ-RDF-003**: RDF serialization (Turtle, N-Triples, RDF/XML, JSON-LD) | ✅ Complete | `rdf/serialization/` |
 
 ### In Progress (Stubs Created) 🚧
 
 | Requirement | Status | Module |
 |-------------|--------|--------|
-| **REQ-RDF-003**: RDF serialization (Turtle, RDF/XML, etc.) | 🚧 Stub | `rdf/serialization/` |
 | **REQ-RDF-005**: RDFS reasoning | 🚧 Stub | `rdf/schema.rs` |
 | **REQ-RDF-006**: Property graph ↔ RDF mapping | 🚧 Stub | `rdf/mapping.rs` |
 | **REQ-SPARQL-001**: SPARQL 1.1 query language | 🚧 Stub | `sparql/parser.rs` |
@@ -317,16 +317,16 @@ Breakdown:
 
 ## Next Steps: Path to Completion
 
-### Week 1-2: RDF Serialization (Priority 1)
-- [ ] Implement Turtle parser/serializer using rio_turtle
-- [ ] Implement N-Triples format
-- [ ] Implement RDF/XML format
-- [ ] Add JSON-LD support
-- [ ] Integration tests with sample RDF files
+### Week 1-2: RDF Serialization (✅ Complete)
+- [x] Implement Turtle parser/serializer using rio_turtle
+- [x] Implement N-Triples format
+- [x] Implement RDF/XML format
+- [x] Add JSON-LD support (Basic serialization)
+- [x] Integration tests with sample RDF files
 
-**Effort**: 5-10 days, 1 engineer
+**Status**: Completed.
 
-### Week 3-4: Property Graph ↔ RDF Mapping (Priority 2)
+### Week 3-4: Property Graph ↔ RDF Mapping (Priority 1)
 - [ ] Implement graph → RDF mapping
   - Nodes → rdf:type triples
   - Properties → property triples
