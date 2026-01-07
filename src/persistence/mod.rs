@@ -23,6 +23,8 @@ use tracing::info;
 
 /// Integrated persistence manager combining WAL, storage, and tenancy
 pub struct PersistenceManager {
+    /// Base path for all data
+    base_path: std::path::PathBuf,
     /// RocksDB storage
     storage: Arc<PersistentStorage>,
     /// Write-Ahead Log
@@ -34,14 +36,16 @@ pub struct PersistenceManager {
 impl PersistenceManager {
     /// Create a new persistence manager
     pub fn new(base_path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
-        let base_path = base_path.as_ref();
+        let base_path = base_path.as_ref().to_path_buf();
 
         // Create subdirectories
         let storage_path = base_path.join("data");
         let wal_path = base_path.join("wal");
+        let vector_path = base_path.join("vectors");
 
         std::fs::create_dir_all(&storage_path)?;
         std::fs::create_dir_all(&wal_path)?;
+        std::fs::create_dir_all(&vector_path)?;
 
         info!("Initializing persistence manager at: {:?}", base_path);
 
@@ -58,6 +62,7 @@ impl PersistenceManager {
         info!("Tenant manager initialized");
 
         Ok(Self {
+            base_path,
             storage: Arc::new(storage),
             wal: Arc::new(std::sync::Mutex::new(wal)),
             tenants: Arc::new(tenants),
@@ -234,6 +239,20 @@ impl PersistenceManager {
     /// Get storage reference
     pub fn storage(&self) -> &PersistentStorage {
         &self.storage
+    }
+
+    /// Save vector indices to disk
+    pub fn checkpoint_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
+        let vector_path = self.base_path.join("vectors");
+        vector_index.dump_all(&vector_path)
+            .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+
+    /// Load vector indices from disk
+    pub fn recover_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
+        let vector_path = self.base_path.join("vectors");
+        vector_index.load_all(&vector_path)
+            .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 }
 

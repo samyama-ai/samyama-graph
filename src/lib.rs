@@ -101,6 +101,7 @@ pub mod persistence;
 pub mod raft;
 pub mod rdf;
 pub mod sparql;
+pub mod vector;
 
 // Re-export main types for convenience
 pub use graph::{
@@ -144,6 +145,11 @@ pub use sparql::{
     SparqlEngine, SparqlError, SparqlResult,
     SparqlResults, ResultFormat, QuerySolution,
     SparqlParser, SparqlExecutor,
+};
+
+pub use vector::{
+    VectorIndex, VectorIndexManager, IndexKey,
+    DistanceMetric, VectorError, VectorResult,
 };
 
 /// Version information

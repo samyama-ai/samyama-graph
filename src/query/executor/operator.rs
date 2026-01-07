@@ -514,6 +514,92 @@ impl PhysicalOperator for LimitOperator {
     }
 }
 
+/// Vector search operator: CALL db.index.vector.queryNodes(...)
+pub struct VectorSearchOperator {
+    /// Label to search in
+    label: String,
+    /// Property key to search in
+    property_key: String,
+    /// Query vector
+    query_vector: Vec<f32>,
+    /// Number of neighbors to return
+    k: usize,
+    /// Variable name for matched nodes
+    node_var: String,
+    /// Variable name for similarity scores (optional)
+    score_var: Option<String>,
+    /// Search results
+    results: Vec<(NodeId, f32)>,
+    /// Current index in results
+    current: usize,
+}
+
+impl VectorSearchOperator {
+    pub fn new(
+        label: String,
+        property_key: String,
+        query_vector: Vec<f32>,
+        k: usize,
+        node_var: String,
+        score_var: Option<String>,
+    ) -> Self {
+        Self {
+            label,
+            property_key,
+            query_vector,
+            k,
+            node_var,
+            score_var,
+            results: Vec::new(),
+            current: 0,
+        }
+    }
+
+    fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        if !self.results.is_empty() || self.current > 0 {
+            return Ok(());
+        }
+
+        self.results = store.vector_search(
+            &self.label,
+            &self.property_key,
+            &self.query_vector,
+            self.k,
+        ).map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for VectorSearchOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.initialize(store)?;
+
+        if self.current >= self.results.len() {
+            return Ok(None);
+        }
+
+        let (node_id, score) = &self.results[self.current];
+        self.current += 1;
+
+        let node = store.get_node(*node_id)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", node_id)))?;
+
+        let mut record = Record::new();
+        record.bind(self.node_var.clone(), Value::Node(*node_id, node.clone()));
+        
+        if let Some(score_var) = &self.score_var {
+            record.bind(score_var.clone(), Value::Property(PropertyValue::Float(*score as f64)));
+        }
+
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.current = 0;
+    }
+}
+
 /// Cartesian product operator: MATCH (a:X), (b:Y)
 /// Produces all combinations of records from left and right inputs
 pub struct CartesianProductOperator {
@@ -588,6 +674,95 @@ impl PhysicalOperator for CartesianProductOperator {
     }
 }
 
+/// Join operator: Joins two inputs on a shared variable
+pub struct JoinOperator {
+    left: OperatorBox,
+    right: OperatorBox,
+    join_var: String,
+    left_records: HashMap<Value, Vec<Record>>,
+    right_records: Vec<Record>,
+    current_right_index: usize,
+    current_left_list_index: usize,
+    materialized: bool,
+}
+
+impl JoinOperator {
+    pub fn new(left: OperatorBox, right: OperatorBox, join_var: String) -> Self {
+        Self {
+            left,
+            right,
+            join_var,
+            left_records: HashMap::new(),
+            right_records: Vec::new(),
+            current_right_index: 0,
+            current_left_list_index: 0,
+            materialized: false,
+        }
+    }
+
+    fn materialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        if self.materialized {
+            return Ok(());
+        }
+
+        // Materialize left into a hash map
+        while let Some(record) = self.left.next(store)? {
+            if let Some(val) = record.get(&self.join_var) {
+                self.left_records.entry(val.clone()).or_default().push(record);
+            }
+        }
+
+        // Materialize right into a list
+        while let Some(record) = self.right.next(store)? {
+            self.right_records.push(record);
+        }
+
+        self.materialized = true;
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for JoinOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.materialize(store)?;
+
+        while self.current_right_index < self.right_records.len() {
+            let right_record = &self.right_records[self.current_right_index];
+            if let Some(join_val) = right_record.get(&self.join_var) {
+                if let Some(left_list) = self.left_records.get(join_val) {
+                    if self.current_left_list_index < left_list.len() {
+                        let left_record = &left_list[self.current_left_list_index];
+                        self.current_left_list_index += 1;
+
+                        // Merge records
+                        let mut merged = left_record.clone();
+                        for (key, value) in right_record.bindings() {
+                            merged.bind(key.clone(), value.clone());
+                        }
+                        return Ok(Some(merged));
+                    }
+                }
+            }
+            
+            // Move to next right record
+            self.current_right_index += 1;
+            self.current_left_list_index = 0;
+        }
+
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.left.reset();
+        self.right.reset();
+        self.left_records.clear();
+        self.right_records.clear();
+        self.current_right_index = 0;
+        self.current_left_list_index = 0;
+        self.materialized = false;
+    }
+}
+
 /// Create node operator: CREATE (n:Person {name: "Alice"})
 pub struct CreateNodeOperator {
     /// Nodes to create (label, properties, variable)
@@ -631,16 +806,14 @@ impl PhysicalOperator for CreateNodeOperator {
 
                 let node_id = store.create_node(primary_label);
 
-                // Set properties on the created node
-                if let Some(node) = store.get_node_mut(node_id) {
-                    // Add additional labels
-                    for label in labels.iter().skip(1) {
-                        node.add_label(label.clone());
-                    }
-                    // Set properties using Node's set_property method
-                    for (key, value) in properties {
-                        node.set_property(key.clone(), value.clone());
-                    }
+                // Add additional labels
+                for label in labels.iter().skip(1) {
+                    let _ = store.add_label_to_node(node_id, label.clone());
+                }
+
+                // Set properties using store.set_node_property to trigger indexing
+                for (key, value) in properties {
+                    let _ = store.set_node_property(node_id, key.clone(), value.clone());
                 }
 
                 self.created_nodes.push((node_id, variable.clone()));
@@ -670,6 +843,63 @@ impl PhysicalOperator for CreateNodeOperator {
     fn reset(&mut self) {
         self.current = 0;
         // Note: We don't reset executed flag - nodes are already created
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+}
+
+/// Create vector index operator: CREATE VECTOR INDEX ...
+pub struct CreateVectorIndexOperator {
+    label: Label,
+    property_key: String,
+    dimensions: usize,
+    similarity: String,
+    executed: bool,
+}
+
+impl CreateVectorIndexOperator {
+    pub fn new(label: Label, property_key: String, dimensions: usize, similarity: String) -> Self {
+        Self {
+            label,
+            property_key,
+            dimensions,
+            similarity,
+            executed: false,
+        }
+    }
+}
+
+impl PhysicalOperator for CreateVectorIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CreateVectorIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        let metric = match self.similarity.to_lowercase().as_str() {
+            "cosine" => crate::vector::DistanceMetric::Cosine,
+            "l2" => crate::vector::DistanceMetric::L2,
+            _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
+        };
+
+        store.create_vector_index(self.label.as_str(), &self.property_key, self.dimensions, metric)
+            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+        self.executed = true;
+        
+        // Return an empty record or a success record
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
     }
 
     fn is_mutating(&self) -> bool {

@@ -177,6 +177,12 @@ impl PartialEq for Node {
 
 impl Eq for Node {}
 
+impl std::hash::Hash for Node {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,10 +6,24 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
 query = { SOI ~ statement ~ ";"? ~ EOI }
-statement = { match_stmt | create_stmt }
+statement = { create_vector_index_stmt | call_stmt | match_stmt | create_stmt }
 
-// MATCH clause (can optionally have CREATE to create edges between matched nodes)
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ create_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
+// CREATE VECTOR INDEX statement
+create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
+options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
+
+// CALL statement (Standalone or followed by MATCH)
+call_stmt = { call_clause ~ match_stmt_partial? ~ return_clause? }
+match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
+
+// CALL clause
+call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
+procedure_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
+yield_items = { yield_item ~ ("," ~ yield_item)* }
+yield_item = { variable ~ (^"AS" ~ variable)? }
+
+// MATCH clause (can optionally have CALL or CREATE)
+match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ call_clause? ~ create_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
 where_clause = { ^"WHERE" ~ expression }
 create_clause = { ^"CREATE" ~ pattern }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }

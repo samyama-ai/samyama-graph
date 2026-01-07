@@ -138,6 +138,12 @@ impl PartialEq for Edge {
 
 impl Eq for Edge {}
 
+impl std::hash::Hash for Edge {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

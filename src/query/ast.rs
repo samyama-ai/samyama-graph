@@ -22,6 +22,40 @@ pub struct Query {
     pub limit: Option<usize>,
     /// SKIP clause (optional)
     pub skip: Option<usize>,
+    /// CALL clause (optional)
+    pub call_clause: Option<CallClause>,
+    /// CREATE VECTOR INDEX clause (optional)
+    pub create_vector_index_clause: Option<CreateVectorIndexClause>,
+}
+
+/// CREATE VECTOR INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateVectorIndexClause {
+    pub index_name: Option<String>,
+    pub label: Label,
+    pub property_key: String,
+    pub dimensions: usize,
+    pub similarity: String, // 'cosine', 'l2', etc.
+}
+
+/// CALL clause: CALL db.index.vector.queryNodes('Person', 'embedding', [...], 10) YIELD node, score
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallClause {
+    /// Procedure name (e.g., "db.index.vector.queryNodes")
+    pub procedure_name: String,
+    /// Procedure arguments
+    pub arguments: Vec<Expression>,
+    /// YIELD items
+    pub yield_items: Vec<YieldItem>,
+}
+
+/// YIELD item: node AS n, score
+#[derive(Debug, Clone, PartialEq)]
+pub struct YieldItem {
+    /// Name of the yielded variable
+    pub name: String,
+    /// Alias (optional)
+    pub alias: Option<String>,
 }
 
 /// MATCH clause: MATCH (n:Person)-[:KNOWS]->(m)
@@ -252,6 +286,8 @@ impl Query {
             order_by: None,
             limit: None,
             skip: None,
+            call_clause: None,
+            create_vector_index_clause: None,
         }
     }
 

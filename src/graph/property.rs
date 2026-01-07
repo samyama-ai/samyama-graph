@@ -16,6 +16,7 @@ use std::fmt;
 /// - DateTime (as i64 timestamp)
 /// - Array (Vec<PropertyValue>)
 /// - Map (HashMap<String, PropertyValue>)
+/// - Vector (Vec<f32>) for AI/Vector search
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PropertyValue {
     String(String),
@@ -25,7 +26,61 @@ pub enum PropertyValue {
     DateTime(i64), // Unix timestamp in milliseconds
     Array(Vec<PropertyValue>),
     Map(HashMap<String, PropertyValue>),
+    Vector(Vec<f32>),
     Null,
+}
+
+impl Eq for PropertyValue {}
+
+impl std::hash::Hash for PropertyValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            PropertyValue::String(s) => {
+                0.hash(state);
+                s.hash(state);
+            }
+            PropertyValue::Integer(i) => {
+                1.hash(state);
+                i.hash(state);
+            }
+            PropertyValue::Float(f) => {
+                2.hash(state);
+                // Hash the bits of the float
+                f.to_bits().hash(state);
+            }
+            PropertyValue::Boolean(b) => {
+                3.hash(state);
+                b.hash(state);
+            }
+            PropertyValue::DateTime(dt) => {
+                4.hash(state);
+                dt.hash(state);
+            }
+            PropertyValue::Array(arr) => {
+                5.hash(state);
+                arr.hash(state);
+            }
+            PropertyValue::Map(map) => {
+                6.hash(state);
+                // Sort keys for deterministic hashing
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    k.hash(state);
+                    map.get(k).unwrap().hash(state);
+                }
+            }
+            PropertyValue::Vector(v) => {
+                7.hash(state);
+                for val in v {
+                    val.to_bits().hash(state);
+                }
+            }
+            PropertyValue::Null => {
+                8.hash(state);
+            }
+        }
+    }
 }
 
 impl PropertyValue {
@@ -90,6 +145,14 @@ impl PropertyValue {
         }
     }
 
+    /// Get vector value if this is a vector
+    pub fn as_vector(&self) -> Option<&Vec<f32>> {
+        match self {
+            PropertyValue::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+
     /// Get type name as string
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -100,6 +163,7 @@ impl PropertyValue {
             PropertyValue::DateTime(_) => "DateTime",
             PropertyValue::Array(_) => "Array",
             PropertyValue::Map(_) => "Map",
+            PropertyValue::Vector(_) => "Vector",
             PropertyValue::Null => "Null",
         }
     }
@@ -132,6 +196,16 @@ impl fmt::Display for PropertyValue {
                     write!(f, "{}: {}", key, val)?;
                 }
                 write!(f, "}}")
+            }
+            PropertyValue::Vector(v) => {
+                write!(f, "Vector([")?;
+                for (i, val) in v.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, "])")
             }
             PropertyValue::Null => write!(f, "null"),
         }
@@ -187,6 +261,12 @@ impl From<HashMap<String, PropertyValue>> for PropertyValue {
     }
 }
 
+impl From<Vec<f32>> for PropertyValue {
+    fn from(v: Vec<f32>) -> Self {
+        PropertyValue::Vector(v)
+    }
+}
+
 /// Property map for storing node and edge properties
 pub type PropertyMap = HashMap<String, PropertyValue>;
 
@@ -210,6 +290,7 @@ mod tests {
             PropertyValue::Map(HashMap::new()).type_name(),
             "Map"
         );
+        assert_eq!(PropertyValue::Vector(vec![0.1]).type_name(), "Vector");
         assert_eq!(PropertyValue::Null.type_name(), "Null");
     }
 
@@ -226,6 +307,9 @@ mod tests {
 
         let bool_prop: PropertyValue = true.into();
         assert_eq!(bool_prop.as_boolean(), Some(true));
+
+        let vector_prop: PropertyValue = vec![1.0f32, 2.0f32].into();
+        assert_eq!(vector_prop.as_vector(), Some(&vec![1.0f32, 2.0f32]));
     }
 
     #[test]

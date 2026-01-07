@@ -13,7 +13,7 @@ pub struct Record {
 }
 
 /// Value types that can be bound to variables
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     /// A node
     Node(NodeId, Node),

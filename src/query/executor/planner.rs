@@ -8,10 +8,10 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
-use std::collections::HashMap;  // Added for CREATE properties
+use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
 
 /// Execution plan - a tree of physical operators
 pub struct ExecutionPlan {
@@ -40,22 +40,78 @@ impl QueryPlanner {
 
     /// Plan a query
     pub fn plan(&self, query: &Query, _store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
-        // Handle CREATE-only queries (no MATCH required)
-        // Example: CREATE (n:Person {name: "Alice"})
-        if query.match_clauses.is_empty() {
+        // Handle CREATE VECTOR INDEX
+        if let Some(clause) = &query.create_vector_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(CreateVectorIndexOperator::new(
+                    clause.label.clone(),
+                    clause.property_key.clone(),
+                    clause.dimensions,
+                    clause.similarity.clone(),
+                )),
+                output_columns: vec![],
+                is_write: true,
+            });
+        }
+
+        // Handle CREATE-only queries (no MATCH/CALL required)
+        if query.match_clauses.is_empty() && query.call_clause.is_none() {
             if let Some(create_clause) = &query.create_clause {
-                // Route to CREATE-specific planning
                 return self.plan_create_only(create_clause);
             }
             return Err(ExecutionError::PlanningError(
-                "Query must have at least one MATCH or CREATE clause".to_string()
+                "Query must have at least one MATCH, CALL or CREATE clause".to_string()
             ));
         }
 
-        let match_clause = &query.match_clauses[0];
+        let mut operator: Option<OperatorBox> = None;
 
-        // Build operator tree bottom-up
-        let mut operator = self.plan_match(match_clause)?;
+        // 1. Handle MATCH if present
+        if !query.match_clauses.is_empty() {
+            operator = Some(self.plan_match(&query.match_clauses[0])?);
+        }
+
+        // 2. Handle CALL if present
+        if let Some(call_clause) = &query.call_clause {
+            let call_op = self.plan_call(call_clause)?;
+            if let Some(existing_op) = operator {
+                // Check for shared variables to decide between Join and Cartesian Product
+                let mut shared_vars = Vec::new();
+                
+                // Collect variables from MATCH
+                let mut match_vars = HashSet::new();
+                if !query.match_clauses.is_empty() {
+                    let pattern = &query.match_clauses[0].pattern;
+                    for path in &pattern.paths {
+                        if let Some(v) = &path.start.variable { match_vars.insert(v.clone()); }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.node.variable { match_vars.insert(v.clone()); }
+                            if let Some(v) = &seg.edge.variable { match_vars.insert(v.clone()); }
+                        }
+                    }
+                }
+
+                // Check against CALL yield items
+                for item in &call_clause.yield_items {
+                    let var_name = item.alias.as_ref().unwrap_or(&item.name);
+                    if match_vars.contains(var_name) {
+                        shared_vars.push(var_name.clone());
+                    }
+                }
+
+                if !shared_vars.is_empty() {
+                    // Use JoinOperator on the first shared variable
+                    operator = Some(Box::new(JoinOperator::new(existing_op, call_op, shared_vars[0].clone())));
+                } else {
+                    // Fallback to Cartesian Product
+                    operator = Some(Box::new(CartesianProductOperator::new(existing_op, call_op)));
+                }
+            } else {
+                operator = Some(call_op);
+            }
+        }
+
+        let mut operator = operator.unwrap();
 
         // Add WHERE clause if present
         if let Some(where_clause) = &query.where_clause {
@@ -116,16 +172,24 @@ impl QueryPlanner {
             let projections = self.plan_return(return_clause, &mut output_columns)?;
             operator = Box::new(ProjectOperator::new(operator, projections));
         } else {
-            // No explicit RETURN - return all matched variables
-            let pattern = &match_clause.pattern;
-            for path in &pattern.paths {
-                if let Some(var) = &path.start.variable {
-                    output_columns.push(var.clone());
-                }
-                for segment in &path.segments {
-                    if let Some(var) = &segment.node.variable {
+            // No explicit RETURN - return all matched/yielded variables
+            if !query.match_clauses.is_empty() {
+                let pattern = &query.match_clauses[0].pattern;
+                for path in &pattern.paths {
+                    if let Some(var) = &path.start.variable {
                         output_columns.push(var.clone());
                     }
+                    for segment in &path.segments {
+                        if let Some(var) = &segment.node.variable {
+                            output_columns.push(var.clone());
+                        }
+                    }
+                }
+            }
+            
+            if let Some(call_clause) = &query.call_clause {
+                for item in &call_clause.yield_items {
+                    output_columns.push(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
         }
@@ -141,6 +205,59 @@ impl QueryPlanner {
             output_columns,
             is_write,
         })
+    }
+
+    fn plan_call(&self, call_clause: &CallClause) -> ExecutionResult<OperatorBox> {
+        if call_clause.procedure_name == "db.index.vector.queryNodes" {
+            // CALL db.index.vector.queryNodes(label, property, vector, k) YIELD node, score
+            if call_clause.arguments.len() < 4 {
+                return Err(ExecutionError::PlanningError(
+                    "db.index.vector.queryNodes requires 4 arguments: (label, property, query_vector, k)".to_string()
+                ));
+            }
+
+            let label = match &call_clause.arguments[0] {
+                Expression::Literal(PropertyValue::String(s)) => s.clone(),
+                _ => return Err(ExecutionError::PlanningError("First argument (label) must be a string literal".to_string())),
+            };
+
+            let property = match &call_clause.arguments[1] {
+                Expression::Literal(PropertyValue::String(s)) => s.clone(),
+                _ => return Err(ExecutionError::PlanningError("Second argument (property) must be a string literal".to_string())),
+            };
+
+            let query_vector = match &call_clause.arguments[2] {
+                Expression::Literal(PropertyValue::Vector(v)) => v.clone(),
+                _ => return Err(ExecutionError::PlanningError("Third argument (vector) must be a vector literal".to_string())),
+            };
+
+            let k = match &call_clause.arguments[3] {
+                Expression::Literal(PropertyValue::Integer(i)) => *i as usize,
+                _ => return Err(ExecutionError::PlanningError("Fourth argument (k) must be an integer literal".to_string())),
+            };
+
+            let mut node_var = "node".to_string();
+            let mut score_var = None;
+
+            for item in &call_clause.yield_items {
+                if item.name == "node" {
+                    node_var = item.alias.clone().unwrap_or_else(|| item.name.clone());
+                } else if item.name == "score" {
+                    score_var = Some(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                }
+            }
+
+            Ok(Box::new(VectorSearchOperator::new(
+                label,
+                property,
+                query_vector,
+                k,
+                node_var,
+                score_var,
+            )))
+        } else {
+            Err(ExecutionError::PlanningError(format!("Unknown procedure: {}", call_clause.procedure_name)))
+        }
     }
 
     fn plan_match(&self, match_clause: &MatchClause) -> ExecutionResult<OperatorBox> {

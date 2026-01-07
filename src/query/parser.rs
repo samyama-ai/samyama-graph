@@ -60,6 +60,12 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
 fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::create_vector_index_stmt => {
+                parse_create_vector_index_statement(inner, query)?;
+            }
+            Rule::call_stmt => {
+                parse_call_statement(inner, query)?;
+            }
             Rule::match_stmt => {
                 parse_match_statement(inner, query)?;
             }
@@ -72,6 +78,133 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
     Ok(())
 }
 
+fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    let mut index_name = None;
+    let mut label = None;
+    let mut property_key = None;
+    let mut dimensions = 1536; // Default
+    let mut similarity = "cosine".to_string(); // Default
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => {
+                if index_name.is_none() {
+                    index_name = Some(inner.as_str().to_string());
+                }
+            }
+            Rule::label => {
+                label = Some(Label::new(inner.as_str()));
+            }
+            Rule::property_key => {
+                property_key = Some(inner.as_str().to_string());
+            }
+            Rule::options => {
+                let options_map = parse_properties(inner)?;
+                if let Some(PropertyValue::Integer(d)) = options_map.get("dimensions") {
+                    dimensions = *d as usize;
+                }
+                if let Some(PropertyValue::String(s)) = options_map.get("similarity") {
+                    similarity = s.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    query.create_vector_index_clause = Some(CreateVectorIndexClause {
+        index_name,
+        label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
+        property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
+        dimensions,
+        similarity,
+    });
+
+    Ok(())
+}
+
+fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::call_clause => {
+                query.call_clause = Some(parse_call_clause(inner)?);
+            }
+            Rule::match_stmt_partial => {
+                parse_match_statement_partial(inner, query)?;
+            }
+            Rule::return_clause => {
+                query.return_clause = Some(parse_return_clause(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn parse_match_statement_partial(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::pattern => {
+                let pattern = parse_pattern(inner)?;
+                query.match_clauses.push(MatchClause {
+                    pattern,
+                    optional: false,
+                });
+            }
+            Rule::where_clause => {
+                query.where_clause = Some(parse_where_clause(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn parse_call_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<CallClause> {
+    let mut procedure_name = String::new();
+    let mut arguments = Vec::new();
+    let mut yield_items = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::procedure_name => {
+                procedure_name = inner.as_str().to_string();
+            }
+            Rule::expression => {
+                arguments.push(parse_expression(inner)?);
+            }
+            Rule::yield_items => {
+                for yield_pair in inner.into_inner() {
+                    if yield_pair.as_rule() == Rule::yield_item {
+                        yield_items.push(parse_yield_item(yield_pair)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(CallClause {
+        procedure_name,
+        arguments,
+        yield_items,
+    })
+}
+
+fn parse_yield_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<YieldItem> {
+    let mut name = String::new();
+    let mut alias = None;
+
+    let inner: Vec<_> = pair.into_inner().collect();
+    if inner.len() >= 1 {
+        name = inner[0].as_str().to_string();
+    }
+    if inner.len() >= 2 {
+        alias = Some(inner[1].as_str().to_string());
+    }
+
+    Ok(YieldItem { name, alias })
+}
+
 fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     let mut pattern = None;
 
@@ -82,6 +215,9 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             }
             Rule::where_clause => {
                 query.where_clause = Some(parse_where_clause(inner)?);
+            }
+            Rule::call_clause => {
+                query.call_clause = Some(parse_call_clause(inner)?);
             }
             Rule::create_clause => {
                 // Handle CREATE clause inside MATCH (for MATCH...CREATE pattern)
@@ -344,10 +480,25 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
             }
             Rule::list => {
                 let mut items = Vec::new();
+                let mut all_floats = true;
+                let mut float_vals = Vec::new();
+
                 for item in inner.into_inner() {
                     if item.as_rule() == Rule::value {
-                        items.push(parse_value(item)?);
+                        let val = parse_value(item)?;
+                        if let PropertyValue::Float(f) = val {
+                            float_vals.push(f as f32);
+                        } else if let PropertyValue::Integer(i) = val {
+                            float_vals.push(i as f32);
+                        } else {
+                            all_floats = false;
+                        }
+                        items.push(val);
                     }
+                }
+
+                if !float_vals.is_empty() && all_floats {
+                    return Ok(PropertyValue::Vector(float_vals));
                 }
                 return Ok(PropertyValue::Array(items));
             }

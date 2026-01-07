@@ -7,8 +7,9 @@
 
 use super::edge::Edge;
 use super::node::Node;
-use super::property::PropertyMap;
+use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
+use crate::vector::{VectorIndexManager, DistanceMetric, VectorResult};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -64,6 +65,9 @@ pub struct GraphStore {
     /// Edge type index for fast lookups
     edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>,
 
+    /// Vector indices manager
+    pub vector_index: VectorIndexManager,
+
     /// Next node ID
     next_node_id: u64,
 
@@ -81,6 +85,7 @@ impl GraphStore {
             incoming: HashMap::new(),
             label_index: HashMap::new(),
             edge_type_index: HashMap::new(),
+            vector_index: VectorIndexManager::new(),
             next_node_id: 1,
             next_edge_id: 1,
         }
@@ -120,9 +125,9 @@ impl GraphStore {
         let node = Node::new_with_properties(node_id, labels.clone(), properties);
 
         // Add to label indices
-        for label in labels {
+        for label in &labels {
             self.label_index
-                .entry(label)
+                .entry(label.clone())
                 .or_insert_with(HashSet::new)
                 .insert(node_id);
         }
@@ -130,6 +135,15 @@ impl GraphStore {
         // Initialize adjacency lists
         self.outgoing.insert(node_id, Vec::new());
         self.incoming.insert(node_id, Vec::new());
+
+        // Update vector indices
+        for (key, value) in &node.properties {
+            if let PropertyValue::Vector(vec) = value {
+                for label in &node.labels {
+                    let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
+                }
+            }
+        }
 
         self.nodes.insert(node_id, node);
         node_id
@@ -148,6 +162,29 @@ impl GraphStore {
     /// Check if a node exists
     pub fn has_node(&self, id: NodeId) -> bool {
         self.nodes.contains_key(&id)
+    }
+
+    /// Set a property on a node and update vector indices if necessary
+    pub fn set_node_property(
+        &mut self,
+        node_id: NodeId,
+        key: impl Into<String>,
+        value: impl Into<PropertyValue>,
+    ) -> GraphResult<()> {
+        let key_str = key.into();
+        let val = value.into();
+
+        let node = self.nodes.get_mut(&node_id).ok_or(GraphError::NodeNotFound(node_id))?;
+        node.set_property(key_str.clone(), val.clone());
+
+        // Update vector indices if this property is a vector
+        if let PropertyValue::Vector(vec) = val {
+            for label in &node.labels {
+                let _ = self.vector_index.add_vector(label.as_str(), &key_str, node_id, &vec);
+            }
+        }
+
+        Ok(())
     }
 
     /// Delete a node and all its connected edges
@@ -199,9 +236,16 @@ impl GraphStore {
 
         // Update the label index so queries can find this node by the new label
         self.label_index
-            .entry(label)
+            .entry(label.clone())
             .or_insert_with(HashSet::new)
             .insert(node_id);
+
+        // Add node's vector properties to indices for the new label
+        for (key, value) in &node.properties {
+            if let PropertyValue::Vector(vec) = value {
+                let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
+            }
+        }
 
         Ok(())
     }
@@ -387,8 +431,35 @@ impl GraphStore {
         self.incoming.clear();
         self.label_index.clear();
         self.edge_type_index.clear();
+        self.vector_index = VectorIndexManager::new();
         self.next_node_id = 1;
         self.next_edge_id = 1;
+    }
+
+    // ============================================================
+    // Vector Index methods
+    // ============================================================
+
+    /// Create a vector index for a specific label and property
+    pub fn create_vector_index(
+        &self,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index(label, property_key, dimensions, metric)
+    }
+
+    /// Search for nearest neighbors using a vector index
+    pub fn vector_search(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.vector_index.search(label, property_key, query, k)
     }
 
     // ============================================================

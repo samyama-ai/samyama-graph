@@ -51,6 +51,10 @@ tower-http = "0.5"         # HTTP utilities
 percent-encoding = "2.3"   # URL encoding
 mime = "0.3"               # MIME types
 
+# Vector Search (Phase 6)
+hnsw_rs = "0.2.1"
+rand = "0.8"
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"

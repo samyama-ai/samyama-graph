@@ -762,6 +762,39 @@ Build an adapter that translates SPARQL to Cypher, avoiding need to implement fu
 
 ---
 
+### Phase 6: Vector Search & AI Integration (Months 33-36)
+**Team**: 2-3 engineers
+**Duration**: 3 months
+**Risk**: MEDIUM
+
+**Goals**: Transform Samyama into a Graph Vector Database for AI/RAG workloads.
+
+**Requirements Coverage**:
+- ✅ Vector Data Type (REQ-VEC-001)
+- ✅ HNSW Indexing (REQ-VEC-003)
+- ✅ Hybrid Search (REQ-VEC-005)
+
+**Technical Tasks**:
+
+#### 6.1 Vector Engine
+**Tasks**:
+- [ ] Integrate HNSW (hnsw_rs)
+- [ ] Implement Vector property type
+- [ ] Vector Index Management
+- [ ] Persistence for indices
+
+#### 6.2 Query Extensions
+**Tasks**:
+- [ ] `CALL` procedure support in Cypher
+- [ ] `db.index.vector.queryNodes` procedure
+- [ ] Hybrid query execution plan
+
+**Phase 6 Success Criteria**:
+- [ ] Sub-10ms latency for 1536d vector search (100k vectors)
+- [ ] Seamless integration with graph traversals
+
+---
+
 ## Resource Requirements
 
 ### Team Composition
