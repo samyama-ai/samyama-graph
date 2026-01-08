@@ -2,7 +2,7 @@
 
 **Samyama** is a high-performance, distributed, AI-native Graph Vector Database written in **Rust**.
 
-It bridges the gap between **Transactional Graph Databases** (Neo4j), **Vector Databases** (Pinecone), and **Graph Analytics Engines** (NetworkX) by providing a single, unified engine that does it all.
+It bridges the gap between **Transactional Graph Databases**, **Vector Databases**, and **Graph Analytics Engines** by providing a single, unified engine that does it all.
 
 ![Samyama Visualizer](https://via.placeholder.com/800x400.png?text=Samyama+Interactive+Visualizer)
 

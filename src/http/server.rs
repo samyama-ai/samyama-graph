@@ -18,8 +18,13 @@ use rust_embed::RustEmbed;
 struct Assets;
 
 async fn static_handler() -> impl IntoResponse {
-    let index_html = Assets::get("index.html").unwrap();
-    Html(std::str::from_utf8(index_html.data.as_ref()).unwrap().to_string())
+    match Assets::get("index.html") {
+        Some(content) => {
+            let html = std::str::from_utf8(content.data.as_ref()).unwrap_or("Error: Invalid UTF-8 in index.html");
+            Html(html.to_string())
+        },
+        None => Html("<h1>Error: index.html not found</h1><p>Ensure src/http/static/index.html exists and was compiled.</p>".to_string()),
+    }
 }
 
 /// HTTP server managing the Visualizer API and static assets
