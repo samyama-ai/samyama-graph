@@ -26,8 +26,8 @@ Samyama is distributed as a single binary. The Web Visualizer is **embedded** in
 
 ```bash
 # Clone repository
-git clone https://github.com/VaidhyaMegha/samyama_graph.git
-cd samyama_graph
+git clone https://gitlab.com/samyama-ai/samyama-graph
+cd samyama-graph
 
 # Build release binary (This compiles the Rust code AND embeds the Web UI)
 cargo build --release
