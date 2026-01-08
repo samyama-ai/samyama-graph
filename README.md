@@ -1,112 +1,172 @@
 # Samyama Graph Database
 
-A high-performance, distributed graph database with OpenCypher query support, Redis protocol compatibility, multi-tenancy, **Vector Search (Graph RAG)**, and **Native Graph Algorithms**.
+**Samyama** is a high-performance, distributed, AI-native Graph Vector Database written in **Rust**.
 
-## Status: Phase 7 - Graph Analytics ✅
+It bridges the gap between **Transactional Graph Databases** (Neo4j), **Vector Databases** (Pinecone), and **Graph Analytics Engines** (NetworkX) by providing a single, unified engine that does it all.
 
-### Implemented Requirements
+![Samyama Visualizer](https://via.placeholder.com/800x400.png?text=Samyama+Interactive+Visualizer)
 
-**Phase 1 - Property Graph Model**:
-- ✅ **REQ-GRAPH-001**: Property graph data model (Nodes, Edges, Properties, Labels)
-- ✅ **REQ-MEM-001**: In-memory storage with memory-optimized structures
+## 🚀 Key Features
 
-**Phase 2 - Query Engine & RESP Protocol**:
-- ✅ **REQ-CYPHER-001**: OpenCypher query language support
-- ✅ **REQ-CYPHER-009**: Query optimization (Volcano iterator model)
-- ✅ **REQ-REDIS-001**: RESP3 protocol implementation
+*   **⚡ Speed**: 115,000+ Queries Per Second (QPS) for lookups; 800,000+ Nodes/sec ingestion.
+*   **🧠 Vector Search**: Built-in HNSW indexing for millisecond-speed Semantic Search.
+*   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
+*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, and WCC algorithms.
+*   **🛡️ Reliability**: Raft Consensus for High Availability and RocksDB for persistence.
+*   **⚖️ Scalability**: Native Tenant-Level Sharding for horizontal scaling.
+*   **🎨 Visualization**: Built-in interactive Web UI.
 
-**Phase 3 - Persistence & Multi-Tenancy**:
-- ✅ **REQ-PERSIST-001**: RocksDB persistence with Write-Ahead Logging (WAL)
-- ✅ **REQ-TENANT-001**: Multi-tenant namespace isolation
+---
 
-**Phase 4 - High Availability**:
-- ✅ **REQ-HA-001**: Raft consensus protocol for replication and failover
+## 🏁 Getting Started
 
-**Phase 5 - RDF/SPARQL Support (Foundation)**:
-- ✅ **REQ-RDF-001**: RDF triple/quad store with indexing
-- ✅ **REQ-RDF-003**: RDF serialization (Turtle, N-Triples, RDF/XML, JSON-LD)
+### 1. Installation
 
-**Phase 6 - Vector Search & AI Integration**:
-- ✅ **REQ-VEC-001**: Native `Vector` (Vec<f32>) property support
-- ✅ **REQ-VEC-002**: HNSW Indexing for approximate nearest neighbor search
-- ✅ **REQ-VEC-005**: Hybrid Graph RAG query execution
-
-**Phase 7 - Native Graph Algorithms ✅ (New)**:
-- ✅ **REQ-ALGO-001**: PageRank (Centrality)
-- ✅ **REQ-ALGO-002**: Breadth-First Search (BFS)
-- ✅ **REQ-ALGO-003**: Dijkstra's Algorithm (Weighted Shortest Path)
-- ✅ **REQ-ALGO-004**: Weakly Connected Components (Community Detection)
-- ✅ **REQ-ALGO-005**: Cypher `CALL algo.*` procedure integration
-
-### Test Results
-
-```
-✓ 176 tests passed (171 unit + 5 integration)
-✓ 0 tests failed
-✓ Test coverage: Core + Query + RESP + Persistence + HA + RDF + Vector + Algo
-```
-
-## Quick Start
-
-### Installation
+Samyama is distributed as a single binary. You can build it from source:
 
 ```bash
 # Clone repository
 git clone https://github.com/VaidhyaMegha/samyama_graph.git
 cd samyama_graph
 
-# Build
+# Build release binary (Recommended for performance)
 cargo build --release
-
-# Run demos
-cargo run --example graph_rag_demo
-cargo run --example vector_benchmark
 ```
 
-### Usage Examples
+### 2. Run the Server
 
-#### 1. Graph RAG (Vector + Graph Hybrid)
+Start the database server. This launches both the **RESP Protocol Server** (port 6379) and the **Web Visualizer** (port 8080).
 
-```cypher
-CALL db.index.vector.queryNodes('Document', 'embedding', $query_vector, 5) YIELD node, score
-MATCH (author:Person)-[:WROTE]->(node)
-RETURN node.title, author.name, score
+```bash
+./target/release/samyama
 ```
 
-#### 2. Graph Algorithms (Analytics)
-
-```cypher
-// Calculate PageRank to find influential nodes
-CALL algo.pageRank('Person', 'KNOWS') 
-YIELD node, score 
-RETURN node.name, score 
-ORDER BY score DESC LIMIT 5
-
-// Find shortest path
-CALL algo.shortestPath($startNodeId, $endNodeId) 
-YIELD path, cost 
-RETURN cost
+You should see:
+```text
+Samyama Graph Database v0.1.0
+...
+RESP server listening on 127.0.0.1:6379
+Visualizer available at: http://localhost:8080
 ```
 
-## Architecture
+### 3. Use the Web Visualizer
 
-### Module Structure
+Open **[http://localhost:8080](http://localhost:8080)** in your browser.
 
-```
-src/
-├── graph/              # Property Graph (Node, Edge, PropertyValue)
-├── vector/             # Vector Indexing (HNSW, Distance Metrics)
-├── algo/               # Graph Algorithms (PageRank, Pathfinding, WCC)
-├── query/              # Cypher Engine (Parser, Planner, Operators)
-├── protocol/           # RESP Protocol (Redis compatibility)
-├── persistence/        # Storage Engine (RocksDB, WAL)
-├── raft/               # High Availability (Consensus)
-├── rdf/                # RDF Support
-└── sparql/             # SPARQL Support
+*   **Explore**: Run Cypher queries interactively.
+*   **Visualize**: See your data as a force-directed node-link graph.
+*   **Inspect**: Click nodes to view properties and vector embeddings.
+
+### 4. Connect via CLI
+
+You can use any standard Redis client (like `redis-cli`) to talk to Samyama.
+
+```bash
+redis-cli -p 6379
+
+# Create a node
+127.0.0.1:6379> GRAPH.QUERY mygraph "CREATE (n:Person {name: 'Alice', age: 30})"
+
+# Query the graph
+127.0.0.1:6379> GRAPH.QUERY mygraph "MATCH (n:Person) RETURN n"
 ```
 
 ---
 
-**Version**: 0.1.0
-**Status**: Phase 7 Complete - Graph Analytics Engine
-**Last Updated**: 2026-01-08
+## 🧪 Running Examples
+
+We provide several fully functional examples to demonstrate different capabilities.
+
+### 1. Banking / Fraud Detection Demo
+Simulates a banking system with accounts, transactions, and fraud detection patterns.
+
+```bash
+cargo run --release --example banking_demo
+```
+*   **What it does**: Generates synthetic accounts/transactions, builds a graph, and runs queries to find circular money movement (potential money laundering).
+
+### 2. Graph RAG (AI) Demo
+Demonstrates how to combine Vector Search with Graph queries.
+
+```bash
+cargo run --release --example graph_rag_demo
+```
+*   **What it does**: Creates documents with 128d vector embeddings. Runs a hybrid query: *"Find documents semantically similar to this vector that were written by 'Alice'"*.
+
+### 3. Distributed Cluster Demo
+Simulates a 3-node Raft cluster with automatic failover.
+
+```bash
+cargo run --release --example cluster_demo
+```
+*   **What it does**: Spins up 3 in-memory Raft nodes, elects a leader, replicates writes, and simulates a node crash/recovery to prove high availability.
+
+### 4. High-Scale Benchmark
+Pushes the system to its limits (1M+ nodes).
+
+```bash
+# Run with default 10k nodes
+cargo run --release --example full_benchmark
+
+# Run with 1 Million nodes (Requires ~8GB RAM)
+cargo run --release --example full_benchmark 1000000
+```
+
+---
+
+## 📚 Advanced Usage
+
+### Vector Search (AI Integration)
+
+Samyama supports `Vector` as a first-class property type.
+
+1.  **Create Index**:
+    ```cypher
+    CREATE VECTOR INDEX doc_idx FOR (n:Doc) ON (n.embedding) 
+    OPTIONS {dimensions: 1536, similarity: 'cosine'}
+    ```
+
+2.  **Insert Data**:
+    ```cypher
+    CREATE (n:Doc {content: "Hello", embedding: [0.1, 0.9, ...]})
+    ```
+
+3.  **Query**:
+    ```cypher
+    CALL db.index.vector.queryNodes('Doc', 'embedding', $query_vector, 5) 
+    YIELD node, score
+    RETURN node.content, score
+    ```
+
+### Graph Algorithms
+
+Run analytics directly on your data without exporting it.
+
+```cypher
+// Calculate PageRank
+CALL algo.pageRank('Person', 'KNOWS') 
+YIELD node, score 
+RETURN node.name, score 
+ORDER BY score DESC LIMIT 10
+
+// Find Shortest Path (BFS)
+CALL algo.shortestPath($start_id, $end_id) YIELD path, cost
+```
+
+---
+
+## 🛠 Architecture
+
+Samyama is built on a modern Rust stack:
+
+*   **Storage**: **RocksDB** (LSM-Tree) with custom serialization (bincode).
+*   **Consensus**: **Raft** (via `openraft`) for consistency and replication.
+*   **Indexing**: 
+    *   **HNSW** (`hnsw_rs`) for Vectors.
+    *   **B-Tree** (`BTreeMap`) for Properties.
+*   **Query Engine**: **Volcano Iterator Model** with a Cost-Based Optimizer.
+*   **Networking**: **Tokio** (Async I/O) and **Axum** (HTTP).
+
+## License
+
+Apache License 2.0
