@@ -552,18 +552,18 @@ impl GraphStore {
                 for (key, value) in properties {
                     if let PropertyValue::Vector(vec) = &value {
                         for label in &labels {
-                            let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                            let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
                         }
                     }
                     for label in &labels {
-                        self.property_index.index_insert(label, key, value.clone(), id);
+                        self.property_index.index_insert(label, &key, value.clone(), id);
                     }
                 }
             }
             NodeDeleted { id, labels, properties } => {
                 for (key, value) in properties {
                     for label in &labels {
-                        self.property_index.index_remove(label, key, &value, id);
+                        self.property_index.index_remove(label, &key, &value, id);
                     }
                 }
             }
@@ -585,9 +585,9 @@ impl GraphStore {
             LabelAdded { id, label, properties } => {
                 for (key, value) in properties {
                     if let PropertyValue::Vector(vec) = &value {
-                        let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
                     }
-                    self.property_index.index_insert(&label, key, value.clone(), id);
+                    self.property_index.index_insert(&label, &key, value.clone(), id);
                 }
             }
         }
