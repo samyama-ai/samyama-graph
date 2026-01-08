@@ -4,7 +4,7 @@
 
 It bridges the gap between **Transactional Graph Databases**, **Vector Databases**, and **Graph Analytics Engines** by providing a single, unified engine that does it all.
 
-![Samyama Visualizer](./vis.png)
+![Samyama Analytics Visualization](./visualization.svg)
 
 ## 🚀 Key Features
 
