@@ -20,16 +20,16 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 
 ## 🏁 Getting Started
 
-### 1. Installation
+### 1. Installation & Build
 
-Samyama is distributed as a single binary. You can build it from source:
+Samyama is distributed as a single binary. The Web Visualizer is **embedded** into this binary during compilation.
 
 ```bash
 # Clone repository
 git clone https://github.com/VaidhyaMegha/samyama_graph.git
 cd samyama_graph
 
-# Build release binary (Recommended for performance)
+# Build release binary (This compiles the Rust code AND embeds the Web UI)
 cargo build --release
 ```
 
