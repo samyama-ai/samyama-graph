@@ -4,7 +4,7 @@
 
 It bridges the gap between **Transactional Graph Databases**, **Vector Databases**, and **Graph Analytics Engines** by providing a single, unified engine that does it all.
 
-![Samyama Visualizer](https://via.placeholder.com/800x400.png?text=Samyama+Interactive+Visualizer)
+![Samyama Visualizer](./vis.png)
 
 ## 🚀 Key Features
 
@@ -166,6 +166,14 @@ Samyama is built on a modern Rust stack:
     *   **B-Tree** (`BTreeMap`) for Properties.
 *   **Query Engine**: **Volcano Iterator Model** with a Cost-Based Optimizer.
 *   **Networking**: **Tokio** (Async I/O) and **Axum** (HTTP).
+
+## 📖 Documentation
+
+For developers and contributors:
+- [Benchmarks](./docs/BENCHMARKS.md)
+- [Requirements](./docs/REQUIREMENTS.md)
+- [Architecture](./docs/ARCHITECTURE.md)
+- [Roadmap](./ROADMAP.md)
 
 ## License
 
