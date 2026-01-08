@@ -11,18 +11,25 @@ use samyama::query::QueryEngine;
 use samyama::vector::DistanceMetric;
 use std::time::Instant;
 use rand::Rng;
+use std::env;
 
-const NUM_NODES: usize = 10_000;
 const EDGES_PER_NODE: usize = 5;
 const VECTOR_DIM: usize = 128;
 const SEARCH_K: usize = 10;
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+    let num_nodes = if args.len() > 1 {
+        args[1].parse::<usize>().expect("Usage: cargo run --release --example full_benchmark <NUM_NODES>")
+    } else {
+        10_000
+    };
+
     println!("=== Samyama Graph Database Benchmark ===");
     println!("Configuration:");
-    println!("  Nodes: {}", NUM_NODES);
-    println!("  Edges: ~{}", NUM_NODES * EDGES_PER_NODE);
+    println!("  Nodes: {}", num_nodes);
+    println!("  Edges: ~{}", num_nodes * EDGES_PER_NODE);
     println!("  Vector Dim: {}", VECTOR_DIM);
     println!("  Indexing: Async Background Task");
     println!("----------------------------------------");
@@ -46,10 +53,10 @@ async fn main() {
 
     let mut rng = rand::thread_rng();
     let start_ingest = Instant::now();
-    let mut node_ids = Vec::with_capacity(NUM_NODES);
+    let mut node_ids = Vec::with_capacity(num_nodes);
 
     // Bulk create nodes
-    for i in 0..NUM_NODES {
+    for i in 0..num_nodes {
         let vec: Vec<f32> = (0..VECTOR_DIM).map(|_| rng.gen::<f32>()).collect();
         
         let mut props = std::collections::HashMap::new();
@@ -61,15 +68,15 @@ async fn main() {
         node_ids.push(id);
     }
     let ingest_nodes_time = start_ingest.elapsed();
-    println!("  Nodes created: {} in {:.2?}", NUM_NODES, ingest_nodes_time);
-    println!("  Node Rate: {:.0} nodes/sec", NUM_NODES as f64 / ingest_nodes_time.as_secs_f64());
+    println!("  Nodes created: {} in {:.2?}", num_nodes, ingest_nodes_time);
+    println!("  Node Rate: {:.0} nodes/sec", num_nodes as f64 / ingest_nodes_time.as_secs_f64());
 
     // Bulk create edges (Random Graph)
     let start_edges = Instant::now();
     let mut edge_count = 0;
-    for i in 0..NUM_NODES {
+    for i in 0..num_nodes {
         for _ in 0..EDGES_PER_NODE {
-            let target_idx = rng.gen_range(0..NUM_NODES);
+            let target_idx = rng.gen_range(0..num_nodes);
             if i != target_idx {
                 let source = node_ids[i];
                 let target = node_ids[target_idx];
@@ -116,7 +123,7 @@ async fn main() {
 
     // Shortest Path (BFS)
     let start_node = node_ids[0];
-    let end_node = node_ids[NUM_NODES / 2]; // Pick someone in the middle
+    let end_node = node_ids[num_nodes / 2]; // Pick someone in the middle
     
     let start_bfs = Instant::now();
     let sp_query = format!("CALL algo.shortestPath({}, {}) YIELD path, cost RETURN cost", start_node.as_u64(), end_node.as_u64());
@@ -138,8 +145,6 @@ async fn main() {
     println!("  Creating index on :Entity(id)...");
     let create_index_query = "CREATE INDEX ON :Entity(id)";
     engine.execute_mut(create_index_query, &mut store).unwrap();
-    
-    // Wait for backfill (should be fast for 10k nodes)
     
     // Simple 1-hop traversal
     // MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id
