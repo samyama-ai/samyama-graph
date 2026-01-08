@@ -89,9 +89,6 @@ fn test_create_vector_index_query() {
     let ddl = "CREATE VECTOR INDEX person_idx FOR (n:Person) ON (n.embedding) OPTIONS {dimensions: 3, similarity: 'cosine'}";
     engine.execute_mut(ddl, &mut store).unwrap();
     
-    let indices = store.vector_index.list_indices();
-    println!("DEBUG: Indices after DDL: {:?}", indices);
-    
     // 2. Add data
     engine.execute_mut("CREATE (n:Person {name: 'Alice', embedding: [1.0, 0.0, 0.0]})", &mut store).unwrap();
     
@@ -99,7 +96,6 @@ fn test_create_vector_index_query() {
     let query = "CALL db.index.vector.queryNodes('Person', 'embedding', [1.0, 0.1, 0.0], 1) YIELD node RETURN node.name";
     let result = engine.execute(query, &store).unwrap();
     
-    println!("DEBUG: Results: {:?}", result.records);
     assert_eq!(result.records.len(), 1);
     assert_eq!(result.records[0].get("node.name").unwrap().as_property().unwrap().as_string(), Some("Alice"));
 }

@@ -89,7 +89,7 @@ function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Operators
 binary_op = {
-    "==" | "!=" | "<=" | ">=" | "<" | ">" |
+    "==" | "=" | "!=" | "<>" | "<=" | ">=" | "<" | ">" |
     ^"AND" | ^"OR" |
     "+" | "-" | "*" | "/" | "%" |
     ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS"
