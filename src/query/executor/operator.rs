@@ -1235,6 +1235,141 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
     }
 }
 
+/// Algorithm operator: CALL algo.pageRank(...)
+pub struct AlgorithmOperator {
+    /// Procedure name
+    name: String,
+    /// Arguments
+    args: Vec<crate::query::ast::Expression>,
+    /// Result records
+    results: Vec<Record>,
+    /// Current index
+    current: usize,
+    /// Whether algorithm has run
+    executed: bool,
+}
+
+impl AlgorithmOperator {
+    pub fn new(name: String, args: Vec<crate::query::ast::Expression>) -> Self {
+        Self {
+            name,
+            args,
+            results: Vec::new(),
+            current: 0,
+            executed: false,
+        }
+    }
+
+    fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (label?, edge_type?, iterations?)
+        let mut label = None;
+        let mut edge_type = None;
+        let mut config = crate::algo::PageRankConfig::default();
+
+        if self.args.len() > 0 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
+                label = Some(s.clone());
+            }
+        }
+        if self.args.len() > 1 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
+                edge_type = Some(s.clone());
+            }
+        }
+        // TODO: Parse config map for iterations
+
+        let scores = crate::algo::page_rank(store, label.as_deref(), edge_type.as_deref(), config);
+
+        // Convert to records
+        for (node_id, score) in scores {
+            let mut record = Record::new();
+            if let Some(node) = store.get_node(node_id) {
+                record.bind("node".to_string(), Value::Node(node_id, node.clone()));
+                record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+                self.results.push(record);
+            }
+        }
+        
+        // Sort by score descending
+        self.results.sort_by(|a, b| {
+            let score_a = a.get("score").unwrap().as_property().unwrap().as_float().unwrap();
+            let score_b = b.get("score").unwrap().as_property().unwrap().as_float().unwrap();
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(())
+    }
+
+    fn execute_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (source_node, target_node, config?)
+        // Currently we can't easily pass Node objects in CALL arguments from AST literals
+        // So we might need to rely on variable resolution in the planner or simple ID passing for MVP
+        // For MVP, let's assume we pass node IDs (integers)
+        
+        if self.args.len() < 2 {
+            return Err(ExecutionError::RuntimeError("shortestPath requires source and target".to_string()));
+        }
+
+        let source_id = match &self.args[0] {
+            Expression::Literal(PropertyValue::Integer(id)) => NodeId::new(*id as u64),
+            _ => return Err(ExecutionError::TypeError("Source must be integer ID for now".to_string())),
+        };
+
+        let target_id = match &self.args[1] {
+            Expression::Literal(PropertyValue::Integer(id)) => NodeId::new(*id as u64),
+            _ => return Err(ExecutionError::TypeError("Target must be integer ID for now".to_string())),
+        };
+
+        // TODO: weight property from config
+        
+        if let Some(result) = crate::algo::pathfinding::bfs(store, source_id, target_id, None) {
+             let mut record = Record::new();
+             // Return path as list of nodes? Or just cost?
+             record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
+             
+             // Construct path list
+             let mut path_nodes = Vec::new();
+             for nid in result.path {
+                 if let Some(n) = store.get_node(nid) {
+                     path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
+                 }
+             }
+             record.bind("path".to_string(), Value::Property(PropertyValue::Array(path_nodes)));
+             
+             self.results.push(record);
+        }
+
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for AlgorithmOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            match self.name.as_str() {
+                "algo.pageRank" => self.execute_pagerank(store)?,
+                "algo.shortestPath" => self.execute_shortest_path(store)?,
+                _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
+            }
+            self.executed = true;
+        }
+
+        if self.current >= self.results.len() {
+            return Ok(None);
+        }
+
+        let record = self.results[self.current].clone();
+        self.current += 1;
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.current = 0;
+        self.executed = false;
+        self.results.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

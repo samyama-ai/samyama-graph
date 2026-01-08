@@ -793,6 +793,37 @@ Build an adapter that translates SPARQL to Cypher, avoiding need to implement fu
 - [ ] Sub-10ms latency for 1536d vector search (100k vectors)
 - [ ] Seamless integration with graph traversals
 
+### Phase 7: Native Graph Algorithms (Months 36-37)
+**Team**: 1-2 engineers
+**Duration**: 1 month
+**Risk**: LOW-MEDIUM
+
+**Goals**: Add analytics capabilities (PageRank, Pathfinding) to the database.
+
+**Requirements Coverage**:
+- ✅ PageRank (REQ-ALGO-001)
+- ✅ Pathfinding (REQ-ALGO-002/003)
+- ✅ Community Detection (REQ-ALGO-004)
+
+**Technical Tasks**:
+
+#### 7.1 Algorithms Engine
+**Tasks**:
+- [ ] Graph topology projection (optimized view)
+- [ ] PageRank implementation
+- [ ] Dijkstra/BFS implementation
+- [ ] Weakly Connected Components
+
+#### 7.2 Integration
+**Tasks**:
+- [ ] `CALL algo.*` procedure support
+- [ ] Write-back results to graph properties
+
+**Phase 7 Success Criteria**:
+- [ ] Correctly calculate PageRank on test graphs
+- [ ] Find shortest paths with properties
+- [ ] Benchmarks showing >1M traversals/sec
+
 ---
 
 ## Resource Requirements

@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, AlgorithmOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -254,6 +254,11 @@ impl QueryPlanner {
                 k,
                 node_var,
                 score_var,
+            )))
+        } else if call_clause.procedure_name.starts_with("algo.") {
+            Ok(Box::new(AlgorithmOperator::new(
+                call_clause.procedure_name.clone(),
+                call_clause.arguments.clone(),
             )))
         } else {
             Err(ExecutionError::PlanningError(format!("Unknown procedure: {}", call_clause.procedure_name)))
