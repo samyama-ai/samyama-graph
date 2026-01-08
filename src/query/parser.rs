@@ -42,7 +42,7 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
             Rule::query => {
                 for inner in pair.into_inner() {
                     match inner.as_rule() {
-                        Rule::explain => {
+                        Rule::explain_clause => {
                             query.explain = true;
                         }
                         Rule::statement => {

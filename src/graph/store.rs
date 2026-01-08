@@ -11,7 +11,9 @@ use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
 use crate::vector::{VectorIndexManager, DistanceMetric, VectorResult};
 use crate::index::IndexManager;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors that can occur during graph operations
@@ -67,10 +69,13 @@ pub struct GraphStore {
     edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>,
 
     /// Vector indices manager
-    pub vector_index: VectorIndexManager,
+    pub vector_index: Arc<VectorIndexManager>,
 
     /// Property indices manager
-    pub property_index: IndexManager,
+    pub property_index: Arc<IndexManager>,
+
+    /// Async index event sender
+    pub index_sender: Option<UnboundedSender<crate::graph::event::IndexEvent>>,
 
     /// Next node ID
     next_node_id: u64,
@@ -89,10 +94,75 @@ impl GraphStore {
             incoming: HashMap::new(),
             label_index: HashMap::new(),
             edge_type_index: HashMap::new(),
-            vector_index: VectorIndexManager::new(),
-            property_index: IndexManager::new(),
+            vector_index: Arc::new(VectorIndexManager::new()),
+            property_index: Arc::new(IndexManager::new()),
+            index_sender: None,
             next_node_id: 1,
             next_edge_id: 1,
+        }
+    }
+
+    /// Create a new GraphStore with async indexing enabled
+    pub fn with_async_indexing() -> (Self, tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>) {
+        let (tx, rx) = unbounded_channel();
+        let mut store = Self::new();
+        store.index_sender = Some(tx);
+        (store, rx)
+    }
+
+    /// Start the background indexer loop
+    pub async fn start_background_indexer(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
+        vector_index: Arc<VectorIndexManager>,
+        property_index: Arc<IndexManager>,
+    ) {
+        use crate::graph::event::IndexEvent::*;
+        
+        while let Some(event) = receiver.recv().await {
+            match event {
+                NodeCreated { id, labels, properties } => {
+                    for (key, value) in properties {
+                        if let PropertyValue::Vector(vec) = &value {
+                            for label in &labels {
+                                let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                            }
+                        }
+                        for label in &labels {
+                            property_index.index_insert(label, &key, value.clone(), id);
+                        }
+                    }
+                }
+                NodeDeleted { id, labels, properties } => {
+                    for (key, value) in properties {
+                        for label in &labels {
+                            property_index.index_remove(label, &key, &value, id);
+                        }
+                    }
+                }
+                PropertySet { id, labels, key, old_value, new_value } => {
+                    if let Some(old) = old_value {
+                        for label in &labels {
+                            property_index.index_remove(label, &key, &old, id);
+                        }
+                    }
+                    for label in &labels {
+                        property_index.index_insert(label, &key, new_value.clone(), id);
+                    }
+                    if let PropertyValue::Vector(vec) = &new_value {
+                        for label in &labels {
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                        }
+                    }
+                }
+                LabelAdded { id, label, properties } => {
+                    for (key, value) in properties {
+                        if let PropertyValue::Vector(vec) = &value {
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                        }
+                        property_index.index_insert(&label, &key, value.clone(), id);
+                    }
+                }
+            }
         }
     }
 
@@ -141,17 +211,16 @@ impl GraphStore {
         self.outgoing.insert(node_id, Vec::new());
         self.incoming.insert(node_id, Vec::new());
 
-        // Update vector indices
-        for (key, value) in &node.properties {
-            if let PropertyValue::Vector(vec) = value {
-                for label in &node.labels {
-                    let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
-                }
-            }
-            // Update property indices
-            for label in &node.labels {
-                self.property_index.index_insert(label, key, value.clone(), node_id);
-            }
+        let event = crate::graph::event::IndexEvent::NodeCreated {
+            id: node_id,
+            labels: node.labels.iter().cloned().collect(),
+            properties: node.properties.clone(),
+        };
+
+        if let Some(sender) = &self.index_sender {
+            let _ = sender.send(event);
+        } else {
+            self.handle_index_event(event);
         }
 
         self.nodes.insert(node_id, node);
@@ -185,23 +254,20 @@ impl GraphStore {
 
         let node = self.nodes.get_mut(&node_id).ok_or(GraphError::NodeNotFound(node_id))?;
         
-        // Remove old value from index if it existed
-        if let Some(old_val) = node.set_property(key_str.clone(), val.clone()) {
-            for label in &node.labels {
-                self.property_index.index_remove(label, &key_str, &old_val, node_id);
-            }
-        }
+        let old_val = node.set_property(key_str.clone(), val.clone());
 
-        // Update indices for new value
-        for label in &node.labels {
-            self.property_index.index_insert(label, &key_str, val.clone(), node_id);
-        }
+        let event = crate::graph::event::IndexEvent::PropertySet {
+            id: node_id,
+            labels: node.labels.iter().cloned().collect(),
+            key: key_str,
+            old_value: old_val,
+            new_value: val,
+        };
 
-        // Update vector indices if this property is a vector
-        if let PropertyValue::Vector(vec) = val {
-            for label in &node.labels {
-                let _ = self.vector_index.add_vector(label.as_str(), &key_str, node_id, &vec);
-            }
+        if let Some(sender) = &self.index_sender {
+            let _ = sender.send(event);
+        } else {
+            self.handle_index_event(event);
         }
 
         Ok(())
@@ -216,10 +282,18 @@ impl GraphStore {
             if let Some(node_set) = self.label_index.get_mut(label) {
                 node_set.remove(&id);
             }
-            // Remove from property indices
-            for (key, value) in &node.properties {
-                self.property_index.index_remove(label, key, value, id);
-            }
+        }
+
+        let event = crate::graph::event::IndexEvent::NodeDeleted {
+            id,
+            labels: node.labels.iter().cloned().collect(),
+            properties: node.properties.clone(),
+        };
+
+        if let Some(sender) = &self.index_sender {
+            let _ = sender.send(event);
+        } else {
+            self.handle_index_event(event);
         }
 
         // Remove all connected edges
@@ -264,13 +338,16 @@ impl GraphStore {
             .or_insert_with(HashSet::new)
             .insert(node_id);
 
-        // Add node's vector properties to indices for the new label
-        for (key, value) in &node.properties {
-            if let PropertyValue::Vector(vec) = value {
-                let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
-            }
-            // Add to property index
-            self.property_index.index_insert(&label, key, value.clone(), node_id);
+        let event = crate::graph::event::IndexEvent::LabelAdded {
+            id: node_id,
+            label: label.clone(),
+            properties: node.properties.clone(),
+        };
+
+        if let Some(sender) = &self.index_sender {
+            let _ = sender.send(event);
+        } else {
+            self.handle_index_event(event);
         }
 
         Ok(())
@@ -457,10 +534,63 @@ impl GraphStore {
         self.incoming.clear();
         self.label_index.clear();
         self.edge_type_index.clear();
-        self.vector_index = VectorIndexManager::new();
-        self.property_index = IndexManager::new();
+        self.vector_index = Arc::new(VectorIndexManager::new());
+        self.property_index = Arc::new(IndexManager::new());
+        // Keep existing index_sender if any, or reset? Resetting usually means clearing data.
         self.next_node_id = 1;
         self.next_edge_id = 1;
+    }
+
+    // ============================================================
+    // Event Handling
+    // ============================================================
+
+    pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent) {
+        use crate::graph::event::IndexEvent::*;
+        match event {
+            NodeCreated { id, labels, properties } => {
+                for (key, value) in properties {
+                    if let PropertyValue::Vector(vec) = &value {
+                        for label in &labels {
+                            let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                        }
+                    }
+                    for label in &labels {
+                        self.property_index.index_insert(label, key, value.clone(), id);
+                    }
+                }
+            }
+            NodeDeleted { id, labels, properties } => {
+                for (key, value) in properties {
+                    for label in &labels {
+                        self.property_index.index_remove(label, key, &value, id);
+                    }
+                }
+            }
+            PropertySet { id, labels, key, old_value, new_value } => {
+                if let Some(old) = old_value {
+                    for label in &labels {
+                        self.property_index.index_remove(label, &key, &old, id);
+                    }
+                }
+                for label in &labels {
+                    self.property_index.index_insert(label, &key, new_value.clone(), id);
+                }
+                if let PropertyValue::Vector(vec) = &new_value {
+                    for label in &labels {
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                    }
+                }
+            }
+            LabelAdded { id, label, properties } => {
+                for (key, value) in properties {
+                    if let PropertyValue::Vector(vec) = &value {
+                        let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                    }
+                    self.property_index.index_insert(&label, key, value.clone(), id);
+                }
+            }
+        }
     }
 
     // ============================================================

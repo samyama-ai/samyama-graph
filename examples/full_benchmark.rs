@@ -17,21 +17,31 @@ const EDGES_PER_NODE: usize = 5;
 const VECTOR_DIM: usize = 128;
 const SEARCH_K: usize = 10;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Samyama Graph Database Benchmark ===");
     println!("Configuration:");
     println!("  Nodes: {}", NUM_NODES);
     println!("  Edges: ~{}", NUM_NODES * EDGES_PER_NODE);
     println!("  Vector Dim: {}", VECTOR_DIM);
+    println!("  Indexing: Async Background Task");
     println!("----------------------------------------");
 
-    let mut store = GraphStore::new();
+    // Initialize with async indexing
+    let (mut store, rx) = GraphStore::with_async_indexing();
     let engine = QueryEngine::new();
+
+    // Spawn background indexer
+    let v_idx = store.vector_index.clone();
+    let p_idx = store.property_index.clone();
+    tokio::spawn(async move {
+        GraphStore::start_background_indexer(rx, v_idx, p_idx).await;
+    });
 
     // --- 1. Ingestion Benchmark ---
     println!("\n[1] Benchmarking Ingestion...");
     
-    // Create Vector Index first
+    // Create Vector Index first (will be used by background worker)
     store.create_vector_index("Entity", "embedding", VECTOR_DIM, DistanceMetric::Cosine).unwrap();
 
     let mut rng = rand::thread_rng();
@@ -72,6 +82,9 @@ fn main() {
     println!("  Edges created: {} in {:.2?}", edge_count, ingest_edges_time);
     println!("  Edge Rate: {:.0} edges/sec", edge_count as f64 / ingest_edges_time.as_secs_f64());
 
+    // Wait for indexing to catch up before searching
+    println!("  Waiting 2s for background indexing to complete...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // --- 2. Vector Search Benchmark ---
     println!("\n[2] Benchmarking Vector Search (HNSW)...");
@@ -101,11 +114,6 @@ fn main() {
     let pr_time = start_pr.elapsed();
     println!("  PageRank (20 iters): {:.2?} ({} nodes processed)", pr_time, pr_res.records.len());
 
-    // WCC
-    // Currently WCC isn't exposed via CALL in this version, using direct API if needed or skip
-    // Wait, we didn't implement CALL algo.wcc in the previous turn, only PageRank and ShortestPath.
-    // I'll skip WCC via Cypher for now and use direct Rust call if I can, or just stick to PageRank/ShortestPath.
-    
     // Shortest Path (BFS)
     let start_node = node_ids[0];
     let end_node = node_ids[NUM_NODES / 2]; // Pick someone in the middle
@@ -130,6 +138,8 @@ fn main() {
     println!("  Creating index on :Entity(id)...");
     let create_index_query = "CREATE INDEX ON :Entity(id)";
     engine.execute_mut(create_index_query, &mut store).unwrap();
+    
+    // Wait for backfill (should be fast for 10k nodes)
     
     // Simple 1-hop traversal
     // MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id

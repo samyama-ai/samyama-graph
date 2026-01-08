@@ -5,8 +5,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
-query = { SOI ~ explain? ~ statement ~ ";"? ~ EOI }
-explain = { ^"EXPLAIN" }
+query = { SOI ~ explain_clause? ~ statement ~ ";"? ~ EOI }
+explain_clause = { ^"EXPLAIN" }
 statement = { create_vector_index_stmt | create_index_stmt | call_stmt | match_stmt | create_stmt }
 
 // CREATE VECTOR INDEX statement

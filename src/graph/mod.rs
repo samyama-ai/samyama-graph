@@ -11,6 +11,7 @@ pub mod node;
 pub mod property;
 pub mod store;
 pub mod types;
+pub mod event;
 
 // Re-export main types
 pub use edge::Edge;
@@ -18,3 +19,4 @@ pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
 pub use store::{GraphError, GraphResult, GraphStore};
 pub use types::{EdgeId, EdgeType, Label, NodeId};
+pub use event::IndexEvent;

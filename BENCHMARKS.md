@@ -6,15 +6,15 @@
 
 ## Executive Summary
 
-Samyama demonstrates **production-ready performance** for Vector Search, Graph Algorithms, and now **Cypher Queries**. The Phase 8 optimization (Property Indices) delivered a **1350x speedup** for lookups.
+Samyama demonstrates **production-ready performance** for Vector Search, Graph Algorithms, and Cypher Queries. The Phase 8 optimization (Property Indices) delivered a **5,800x speedup** for lookups.
 
 ## 1. Cypher Query Execution (OLTP)
 *Target: Application Queries*
 
 | Query Type | Previous Rate | **Current Rate** | **Speedup** |
 |------------|---------------|------------------|-------------|
-| **Simple Lookup** | 6 QPS | **8,127 QPS** | **1354x** |
-| **Latency** | 164.73 ms | **0.12 ms** | - |
+| **Simple Lookup** | 6 QPS | **35,360 QPS** | **5,893x** |
+| **Latency** | 164.73 ms | **0.028 ms** | - |
 
 **Query**: `MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id`
 
@@ -25,7 +25,7 @@ Samyama demonstrates **production-ready performance** for Vector Search, Graph A
 
 | Metric | Result |
 |--------|--------|
-| **Throughput** | **1,074 - 3,500 QPS** |
+| **Throughput** | **1,000 - 3,600 QPS** |
 | **Latency (Avg)** | **0.2 - 0.9 ms** |
 | **Dataset** | 10,000 nodes, 128 dimensions |
 
@@ -34,8 +34,8 @@ Samyama demonstrates **production-ready performance** for Vector Search, Graph A
 
 | Algorithm | Graph Size | Execution Time |
 |-----------|------------|----------------|
-| **PageRank** | 10k Nodes | **100 - 350 ms** |
-| **BFS** | 10k Nodes | **5 - 15 ms** |
+| **PageRank** | 10k Nodes | **100 ms** |
+| **BFS** | 10k Nodes | **5 - 10 ms** |
 
 ## 4. Data Ingestion
 *Target: Write Performance*
@@ -43,7 +43,7 @@ Samyama demonstrates **production-ready performance** for Vector Search, Graph A
 | Operation | Rate | Notes |
 |-----------|------|-------|
 | **Node Creation** | **180 - 700 nodes/sec** | Writes to Graph + Vector Index + Property Index |
-| **Edge Creation** | **~1.5 Million edges/sec** | Very fast |
+| **Edge Creation** | **~1.4 Million edges/sec** | Very fast |
 
 **Conclusion**: Write throughput for nodes is the tradeoff for rich indexing. It is acceptable for most transactional workloads but bulk loading should bypass indexing if possible (future optimization).
 
