@@ -36,6 +36,8 @@ RUN mkdir -p /data
 
 # Expose RESP protocol port
 EXPOSE 6379
+# Expose Web Visualizer port
+EXPOSE 8080
 
 # Set environment variables
 ENV RUST_LOG=info

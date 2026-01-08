@@ -6,3 +6,9 @@ docs/
 tests/
 examples/
 .claude/
+*_data/
+vectors/
+wal/
+data/
+visualization.svg
+vis.png
