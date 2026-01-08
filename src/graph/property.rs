@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use std::cmp::Ordering;
+
 /// Property value type supporting multiple data types
 ///
 /// Supports:
@@ -31,6 +33,95 @@ pub enum PropertyValue {
 }
 
 impl Eq for PropertyValue {}
+
+impl PartialOrd for PropertyValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PropertyValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use PropertyValue::*;
+        match (self, other) {
+            (Null, Null) => Ordering::Equal,
+            (Null, _) => Ordering::Less,
+            (_, Null) => Ordering::Greater,
+
+            (Boolean(a), Boolean(b)) => a.cmp(b),
+            (Boolean(_), _) => Ordering::Less,
+            (_, Boolean(_)) => Ordering::Greater,
+
+            (Integer(a), Integer(b)) => a.cmp(b),
+            (Integer(_), _) => Ordering::Less,
+            (_, Integer(_)) => Ordering::Greater,
+
+            (Float(a), Float(b)) => a.total_cmp(b),
+            (Float(_), _) => Ordering::Less,
+            (_, Float(_)) => Ordering::Greater,
+
+            (String(a), String(b)) => a.cmp(b),
+            (String(_), _) => Ordering::Less,
+            (_, String(_)) => Ordering::Greater,
+
+            (DateTime(a), DateTime(b)) => a.cmp(b),
+            (DateTime(_), _) => Ordering::Less,
+            (_, DateTime(_)) => Ordering::Greater,
+
+            (Array(a), Array(b)) => a.cmp(b),
+            (Array(_), _) => Ordering::Less,
+            (_, Array(_)) => Ordering::Greater,
+
+            // Maps are not trivially comparable because HashMap doesn't implement Ord.
+            // We'll skip Maps for indexing or define a canonical order (e.g. sorted keys).
+            // For now, let's just use memory address or length as a fallback to satisfy trait?
+            // No, that breaks determinism. 
+            // Let's implement a slow but deterministic comparison for Maps.
+            (Map(a), Map(b)) => {
+                let mut keys_a: Vec<_> = a.keys().collect();
+                let mut keys_b: Vec<_> = b.keys().collect();
+                keys_a.sort();
+                keys_b.sort();
+                
+                // Compare keys first
+                for (ka, kb) in keys_a.iter().zip(keys_b.iter()) {
+                    match ka.cmp(kb) {
+                        Ordering::Equal => {},
+                        ord => return ord,
+                    }
+                }
+                
+                if keys_a.len() != keys_b.len() {
+                    return keys_a.len().cmp(&keys_b.len());
+                }
+                
+                // Compare values
+                for k in keys_a {
+                    let va = a.get(k).unwrap();
+                    let vb = b.get(k).unwrap();
+                    match va.cmp(vb) {
+                        Ordering::Equal => {},
+                        ord => return ord,
+                    }
+                }
+                Ordering::Equal
+            }
+            (Map(_), _) => Ordering::Less,
+            (_, Map(_)) => Ordering::Greater,
+
+            (Vector(a), Vector(b)) => {
+                // Lexicographical comparison using total_cmp for floats
+                for (va, vb) in a.iter().zip(b.iter()) {
+                    match va.total_cmp(vb) {
+                        Ordering::Equal => {},
+                        ord => return ord,
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
+        }
+    }
+}
 
 impl std::hash::Hash for PropertyValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

@@ -42,6 +42,9 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
             Rule::query => {
                 for inner in pair.into_inner() {
                     match inner.as_rule() {
+                        Rule::explain => {
+                            query.explain = true;
+                        }
                         Rule::statement => {
                             parse_statement(inner, &mut query)?;
                         }
@@ -63,6 +66,9 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::create_vector_index_stmt => {
                 parse_create_vector_index_statement(inner, query)?;
             }
+            Rule::create_index_stmt => {
+                parse_create_index_statement(inner, query)?;
+            }
             Rule::call_stmt => {
                 parse_call_statement(inner, query)?;
             }
@@ -75,6 +81,25 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    let mut label = None;
+    let mut property = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::property_key => property = Some(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+
+    query.create_index_clause = Some(CreateIndexClause {
+        label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
+        property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
+    });
     Ok(())
 }
 
@@ -796,5 +821,13 @@ mod tests {
         let ast = result.unwrap();
         assert!(ast.create_clause.is_some());
         assert!(!ast.is_read_only());
+    }
+
+    #[test]
+    fn test_parse_explain() {
+        let query = "EXPLAIN MATCH (n:Person) RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok());
+        assert!(result.unwrap().explain);
     }
 }

@@ -514,6 +514,88 @@ impl PhysicalOperator for LimitOperator {
     }
 }
 
+/// Index scan operator: MATCH (n:Person) WHERE n.id = 1
+pub struct IndexScanOperator {
+    variable: String,
+    label: Label,
+    property: String,
+    op: BinaryOp,
+    value: PropertyValue,
+    node_ids: Vec<NodeId>,
+    current: usize,
+}
+
+impl IndexScanOperator {
+    pub fn new(variable: String, label: Label, property: String, op: BinaryOp, value: PropertyValue) -> Self {
+        Self {
+            variable,
+            label,
+            property,
+            op,
+            value,
+            node_ids: Vec::new(),
+            current: 0,
+        }
+    }
+
+    fn initialize(&mut self, store: &GraphStore) {
+        if !self.node_ids.is_empty() {
+            return;
+        }
+
+        if let Some(index_lock) = store.property_index.get_index(&self.label, &self.property) {
+            let index = index_lock.read().unwrap();
+            self.node_ids = match self.op {
+                BinaryOp::Eq => index.get(&self.value),
+                BinaryOp::Gt => {
+                    use std::ops::Bound::Excluded;
+                    use std::ops::Bound::Unbounded;
+                    index.range((Excluded(self.value.clone()), Unbounded))
+                },
+                BinaryOp::Ge => {
+                    use std::ops::Bound::Included;
+                    use std::ops::Bound::Unbounded;
+                    index.range((Included(self.value.clone()), Unbounded))
+                },
+                BinaryOp::Lt => {
+                    use std::ops::Bound::Excluded;
+                    use std::ops::Bound::Unbounded;
+                    index.range((Unbounded, Excluded(self.value.clone())))
+                },
+                BinaryOp::Le => {
+                    use std::ops::Bound::Included;
+                    use std::ops::Bound::Unbounded;
+                    index.range((Unbounded, Included(self.value.clone())))
+                },
+                _ => Vec::new(),
+            };
+        }
+    }
+}
+
+impl PhysicalOperator for IndexScanOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.initialize(store);
+
+        while self.current < self.node_ids.len() {
+            let node_id = self.node_ids[self.current];
+            self.current += 1;
+
+            if let Some(node) = store.get_node(node_id) {
+                let mut record = Record::new();
+                record.bind(self.variable.clone(), Value::Node(node_id, node.clone()));
+                return Ok(Some(record));
+            }
+        }
+        
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.current = 0;
+    }
+}
+
 /// Vector search operator: CALL db.index.vector.queryNodes(...)
 pub struct VectorSearchOperator {
     /// Label to search in
@@ -843,6 +925,67 @@ impl PhysicalOperator for CreateNodeOperator {
     fn reset(&mut self) {
         self.current = 0;
         // Note: We don't reset executed flag - nodes are already created
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+}
+
+/// Create property index operator: CREATE INDEX ON :Person(id)
+pub struct CreateIndexOperator {
+    label: Label,
+    property: String,
+    executed: bool,
+}
+
+impl CreateIndexOperator {
+    pub fn new(label: Label, property: String) -> Self {
+        Self { label, property, executed: false }
+    }
+}
+
+impl PhysicalOperator for CreateIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CreateIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        store.property_index.create_index(self.label.clone(), self.property.clone());
+
+        // Backfill index
+        // Since we have mutable access to store, we can get nodes
+        // But we need to avoid borrowing store while mutating property_index if we accessed it differently
+        // Here we use get_nodes_by_label which borrows store.
+        // property_index is inside store. 
+        // IndexManager uses RwLock internally so it handles its own mutability.
+        
+        // We collect entries to release the borrow on nodes
+        let mut entries = Vec::new();
+        let nodes = store.get_nodes_by_label(&self.label);
+        
+        for node in nodes {
+            if let Some(val) = node.get_property(&self.property) {
+                entries.push((node.id, val.clone()));
+            }
+        }
+        
+        for (node_id, val) in entries {
+            store.property_index.index_insert(&self.label, &self.property, val, node_id);
+        }
+
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
     }
 
     fn is_mutating(&self) -> bool {

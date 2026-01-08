@@ -103,6 +103,7 @@ pub mod rdf;
 pub mod sparql;
 pub mod vector;
 pub mod algo;
+pub mod index;
 
 // Re-export main types for convenience
 pub use graph::{

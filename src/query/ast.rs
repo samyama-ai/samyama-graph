@@ -26,6 +26,10 @@ pub struct Query {
     pub call_clause: Option<CallClause>,
     /// CREATE VECTOR INDEX clause (optional)
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
+    /// CREATE INDEX clause (optional)
+    pub create_index_clause: Option<CreateIndexClause>,
+    /// EXPLAIN clause (optional)
+    pub explain: bool,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -36,6 +40,13 @@ pub struct CreateVectorIndexClause {
     pub property_key: String,
     pub dimensions: usize,
     pub similarity: String, // 'cosine', 'l2', etc.
+}
+
+/// CREATE INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexClause {
+    pub label: Label,
+    pub property: String,
 }
 
 /// CALL clause: CALL db.index.vector.queryNodes('Person', 'embedding', [...], 10) YIELD node, score
@@ -288,6 +299,8 @@ impl Query {
             skip: None,
             call_clause: None,
             create_vector_index_clause: None,
+            create_index_clause: None,
+            explain: false,
         }
     }
 

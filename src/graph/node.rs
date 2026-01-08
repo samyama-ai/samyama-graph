@@ -109,9 +109,10 @@ impl Node {
     }
 
     /// Set a property value
-    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) {
-        self.properties.insert(key.into(), value.into());
+    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) -> Option<PropertyValue> {
+        let old = self.properties.insert(key.into(), value.into());
         self.update_timestamp();
+        old
     }
 
     /// Get a property value

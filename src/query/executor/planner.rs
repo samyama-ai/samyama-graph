@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, AlgorithmOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -54,6 +54,18 @@ impl QueryPlanner {
             });
         }
 
+        // Handle CREATE INDEX
+        if let Some(clause) = &query.create_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(CreateIndexOperator::new(
+                    clause.label.clone(),
+                    clause.property.clone(),
+                )),
+                output_columns: vec![],
+                is_write: true,
+            });
+        }
+
         // Handle CREATE-only queries (no MATCH/CALL required)
         if query.match_clauses.is_empty() && query.call_clause.is_none() {
             if let Some(create_clause) = &query.create_clause {
@@ -68,7 +80,7 @@ impl QueryPlanner {
 
         // 1. Handle MATCH if present
         if !query.match_clauses.is_empty() {
-            operator = Some(self.plan_match(&query.match_clauses[0])?);
+            operator = Some(self.plan_match(&query.match_clauses[0], query.where_clause.as_ref(), _store)?);
         }
 
         // 2. Handle CALL if present
@@ -265,7 +277,7 @@ impl QueryPlanner {
         }
     }
 
-    fn plan_match(&self, match_clause: &MatchClause) -> ExecutionResult<OperatorBox> {
+    fn plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let pattern = &match_clause.pattern;
 
         if pattern.paths.is_empty() {
@@ -282,10 +294,45 @@ impl QueryPlanner {
                 .ok_or_else(|| ExecutionError::PlanningError("Start node must have a variable".to_string()))?
                 .clone();
 
-            let mut path_operator: OperatorBox = Box::new(NodeScanOperator::new(
-                start_var.clone(),
-                path.start.labels.clone(),
-            ));
+            // Optimization: Check for index usage
+            let mut index_op: Option<OperatorBox> = None;
+            if let Some(wc) = where_clause {
+                // Simple case: WHERE n.prop OP literal
+                // TODO: Handle AND chains
+                if let Expression::Binary { left, op, right } = &wc.predicate {
+                    if let (Expression::Property { variable, property }, Expression::Literal(val)) = (left.as_ref(), right.as_ref()) {
+                        if variable == &start_var {
+                            // Check if any label has an index on this property
+                            for label in &path.start.labels {
+                                if store.property_index.has_index(label, property) {
+                                    // Found index!
+                                    // Only support =, >, >=, <, <=
+                                    match op {
+                                        BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
+                                            index_op = Some(Box::new(IndexScanOperator::new(
+                                                start_var.clone(),
+                                                label.clone(),
+                                                property.clone(),
+                                                op.clone(),
+                                                val.clone()
+                                            )));
+                                        },
+                                        _ => {}
+                                    }
+                                    if index_op.is_some() { break; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut path_operator = index_op.unwrap_or_else(|| {
+                Box::new(NodeScanOperator::new(
+                    start_var.clone(),
+                    path.start.labels.clone(),
+                ))
+            });
 
             // Add property filter for start node if properties are specified
             if let Some(ref props) = path.start.properties {

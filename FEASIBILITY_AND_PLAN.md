@@ -824,6 +824,36 @@ Build an adapter that translates SPARQL to Cypher, avoiding need to implement fu
 - [ ] Find shortest paths with properties
 - [ ] Benchmarks showing >1M traversals/sec
 
+### Phase 8: Query Optimization & Indexing (Months 37-38)
+**Team**: 1 engineer
+**Duration**: 1 month
+**Risk**: MEDIUM
+
+**Goals**: Solve performance bottlenecks via Indexing and Cost-Based Optimization.
+
+**Requirements Coverage**:
+- ✅ Property Indices (REQ-OPT-001)
+- ✅ Cost-Based Optimizer (REQ-OPT-004)
+- ✅ Explain Plans (REQ-OPT-005)
+
+**Technical Tasks**:
+
+#### 8.1 Indexing Engine
+**Tasks**:
+- [ ] Implement B-Tree indices for properties
+- [ ] Index Manager & Sync with GraphStore
+- [ ] DDL: `CREATE INDEX ON :Label(prop)`
+
+#### 8.2 Optimizer
+**Tasks**:
+- [ ] Statistics collection (Cardinality estimation)
+- [ ] Planner rules (Swap Scan -> IndexScan)
+- [ ] `EXPLAIN` command support
+
+**Phase 8 Success Criteria**:
+- [ ] Simple lookup queries (`WHERE n.id = 1`) run in <1ms (vs 160ms)
+- [ ] `full_benchmark.rs` shows >10k QPS for lookups
+
 ---
 
 ## Resource Requirements

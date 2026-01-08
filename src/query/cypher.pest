@@ -5,11 +5,13 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
-query = { SOI ~ statement ~ ";"? ~ EOI }
-statement = { create_vector_index_stmt | call_stmt | match_stmt | create_stmt }
+query = { SOI ~ explain? ~ statement ~ ";"? ~ EOI }
+explain = { ^"EXPLAIN" }
+statement = { create_vector_index_stmt | create_index_stmt | call_stmt | match_stmt | create_stmt }
 
 // CREATE VECTOR INDEX statement
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
+create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 
 // CALL statement (Standalone or followed by MATCH)

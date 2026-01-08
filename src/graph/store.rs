@@ -10,6 +10,7 @@ use super::node::Node;
 use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
 use crate::vector::{VectorIndexManager, DistanceMetric, VectorResult};
+use crate::index::IndexManager;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -68,6 +69,9 @@ pub struct GraphStore {
     /// Vector indices manager
     pub vector_index: VectorIndexManager,
 
+    /// Property indices manager
+    pub property_index: IndexManager,
+
     /// Next node ID
     next_node_id: u64,
 
@@ -86,6 +90,7 @@ impl GraphStore {
             label_index: HashMap::new(),
             edge_type_index: HashMap::new(),
             vector_index: VectorIndexManager::new(),
+            property_index: IndexManager::new(),
             next_node_id: 1,
             next_edge_id: 1,
         }
@@ -143,6 +148,10 @@ impl GraphStore {
                     let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
                 }
             }
+            // Update property indices
+            for label in &node.labels {
+                self.property_index.index_insert(label, key, value.clone(), node_id);
+            }
         }
 
         self.nodes.insert(node_id, node);
@@ -175,7 +184,18 @@ impl GraphStore {
         let val = value.into();
 
         let node = self.nodes.get_mut(&node_id).ok_or(GraphError::NodeNotFound(node_id))?;
-        node.set_property(key_str.clone(), val.clone());
+        
+        // Remove old value from index if it existed
+        if let Some(old_val) = node.set_property(key_str.clone(), val.clone()) {
+            for label in &node.labels {
+                self.property_index.index_remove(label, &key_str, &old_val, node_id);
+            }
+        }
+
+        // Update indices for new value
+        for label in &node.labels {
+            self.property_index.index_insert(label, &key_str, val.clone(), node_id);
+        }
 
         // Update vector indices if this property is a vector
         if let PropertyValue::Vector(vec) = val {
@@ -195,6 +215,10 @@ impl GraphStore {
         for label in &node.labels {
             if let Some(node_set) = self.label_index.get_mut(label) {
                 node_set.remove(&id);
+            }
+            // Remove from property indices
+            for (key, value) in &node.properties {
+                self.property_index.index_remove(label, key, value, id);
             }
         }
 
@@ -245,6 +269,8 @@ impl GraphStore {
             if let PropertyValue::Vector(vec) = value {
                 let _ = self.vector_index.add_vector(label.as_str(), key, node_id, vec);
             }
+            // Add to property index
+            self.property_index.index_insert(&label, key, value.clone(), node_id);
         }
 
         Ok(())
@@ -432,6 +458,7 @@ impl GraphStore {
         self.label_index.clear();
         self.edge_type_index.clear();
         self.vector_index = VectorIndexManager::new();
+        self.property_index = IndexManager::new();
         self.next_node_id = 1;
         self.next_edge_id = 1;
     }

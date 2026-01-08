@@ -126,6 +126,11 @@ fn main() {
     // --- 4. Cypher Query Benchmark ---
     println!("\n[4] Benchmarking Cypher Queries...");
     
+    // Create Index on Entity(id)
+    println!("  Creating index on :Entity(id)...");
+    let create_index_query = "CREATE INDEX ON :Entity(id)";
+    engine.execute_mut(create_index_query, &mut store).unwrap();
+    
     // Simple 1-hop traversal
     // MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id
     let traversal_query = format!("MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id", 1);
