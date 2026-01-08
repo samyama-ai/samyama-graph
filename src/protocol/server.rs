@@ -6,6 +6,8 @@ use crate::graph::GraphStore;
 use crate::persistence::PersistenceManager;
 use crate::protocol::resp::{RespValue, RespError};
 use crate::protocol::command::CommandHandler;
+use crate::sharding::{Router, Proxy, RouteResult};
+use crate::raft::ClusterManager;
 use bytes::BytesMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +50,12 @@ pub struct RespServer {
     /// Optional persistence manager for durability
     /// When Some, writes are persisted to disk via WAL + RocksDB
     persistence: Option<Arc<PersistenceManager>>,
+    /// Optional sharding router
+    router: Option<Arc<Router>>,
+    /// Optional proxy client
+    proxy: Option<Arc<Proxy>>,
+    /// Optional cluster manager for resolving node addresses
+    cluster_manager: Option<Arc<ClusterManager>>,
 }
 
 impl RespServer {
@@ -59,6 +67,9 @@ impl RespServer {
             store,
             handler,
             persistence: None,
+            router: None,
+            proxy: None,
+            cluster_manager: None,
         }
     }
 
@@ -75,7 +86,23 @@ impl RespServer {
             store,
             handler,
             persistence: Some(persistence),
+            router: None,
+            proxy: None,
+            cluster_manager: None,
         }
+    }
+
+    /// Enable sharding for this server
+    pub fn with_sharding(
+        mut self,
+        router: Arc<Router>,
+        proxy: Arc<Proxy>,
+        cluster_manager: Arc<ClusterManager>,
+    ) -> Self {
+        self.router = Some(router);
+        self.proxy = Some(proxy);
+        self.cluster_manager = Some(cluster_manager);
+        self
     }
 
     /// Start the server
@@ -91,10 +118,13 @@ impl RespServer {
 
             let store = Arc::clone(&self.store);
             let handler = Arc::clone(&self.handler);
+            let router = self.router.clone();
+            let proxy = self.proxy.clone();
+            let cluster = self.cluster_manager.clone();
 
             // Spawn a new task for each connection
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(socket, store, handler).await {
+                if let Err(e) = handle_connection(socket, store, handler, router, proxy, cluster).await {
                     error!("Error handling connection from {}: {}", peer_addr, e);
                 }
             });
@@ -107,6 +137,9 @@ async fn handle_connection(
     mut socket: TcpStream,
     store: Arc<RwLock<GraphStore>>,
     handler: Arc<CommandHandler>,
+    router: Option<Arc<Router>>,
+    proxy: Option<Arc<Proxy>>,
+    cluster: Option<Arc<ClusterManager>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = BytesMut::with_capacity(4096);
 
@@ -124,13 +157,58 @@ async fn handle_connection(
         loop {
             match RespValue::decode(&mut buffer) {
                 Ok(Some(value)) => {
-                    // Process command
-                    let response = handler.handle_command(&value, &store).await;
+                    let mut forwarded = false;
 
-                    // Encode and send response
-                    let mut response_buf = Vec::new();
-                    response.encode(&mut response_buf)?;
-                    socket.write_all(&response_buf).await?;
+                    // Attempt routing if configured
+                    if let (Some(router), Some(proxy), Some(cluster)) = (&router, &proxy, &cluster) {
+                        if let Ok(args) = value.as_array() {
+                            if args.len() >= 2 {
+                                if let Ok(Some(cmd)) = args[0].as_string() {
+                                    if cmd.to_uppercase().starts_with("GRAPH.") {
+                                        if let Ok(Some(key)) = args[1].as_string() {
+                                            if let Some(RouteResult::Remote(node_id)) = router.route(&key) {
+                                                // Resolve address from ClusterConfig
+                                                let config = cluster.get_config().await;
+                                                if let Some(node_config) = config.nodes.iter().find(|n| n.id == node_id) {
+                                                    debug!("Routing command for tenant '{}' to node {} ({})", key, node_id, node_config.address);
+                                                    
+                                                    // Re-encode command
+                                                    let mut cmd_bytes = Vec::new();
+                                                    value.encode(&mut cmd_bytes)?;
+
+                                                    // Forward
+                                                    match proxy.forward(&node_config.address, &cmd_bytes).await {
+                                                        Ok(response_bytes) => {
+                                                            socket.write_all(&response_bytes).await?;
+                                                            forwarded = true;
+                                                        }
+                                                        Err(e) => {
+                                                            error!("Failed to forward request: {}", e);
+                                                            let err = RespValue::Error(format!("ERR routing failed: {}", e));
+                                                            let mut buf = Vec::new();
+                                                            err.encode(&mut buf)?;
+                                                            socket.write_all(&buf).await?;
+                                                            forwarded = true; // Handled as error
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !forwarded {
+                        // Process command locally
+                        let response = handler.handle_command(&value, &store).await;
+
+                        // Encode and send response
+                        let mut response_buf = Vec::new();
+                        response.encode(&mut response_buf)?;
+                        socket.write_all(&response_buf).await?;
+                    }
                 }
                 Ok(None) => {
                     // Need more data

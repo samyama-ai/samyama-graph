@@ -104,6 +104,7 @@ pub mod sparql;
 pub mod vector;
 pub mod algo;
 pub mod index;
+pub mod sharding;
 
 // Re-export main types for convenience
 pub use graph::{
