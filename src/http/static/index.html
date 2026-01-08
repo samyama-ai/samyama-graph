@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Samyama Graph Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/force-graph"></script>
+    <style>
+        body { margin: 0; background-color: #0f172a; color: white; }
+        .graph-container { height: calc(100vh - 64px); width: 100%; }
+        #graph { width: 100%; height: 100%; }
+        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); }
+    </style>
+</head>
+<body class="overflow-hidden">
+    <nav class="h-16 border-b border-slate-700 flex items-center px-6 justify-between glass sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center font-bold">S</div>
+            <h1 class="text-xl font-bold tracking-tight">Samyama <span class="text-indigo-400">Viz</span></h1>
+        </div>
+        <div class="flex-1 max-w-2xl px-8">
+            <div class="relative">
+                <input id="query-input" type="text" 
+                    placeholder="MATCH (n) RETURN n LIMIT 25" 
+                    class="w-full bg-slate-900 border border-slate-700 rounded-full py-2 px-6 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
+                <button id="run-btn" class="absolute right-2 top-1 bottom-1 px-4 bg-indigo-600 hover:bg-indigo-500 rounded-full text-xs font-semibold transition">Run</button>
+            </div>
+        </div>
+        <div id="status" class="text-xs text-slate-400 flex items-center gap-2">
+            <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+            Healthy
+        </div>
+    </nav>
+
+    <main class="flex">
+        <div class="graph-container relative flex-1">
+            <div id="graph"></div>
+            <!-- Overlay for empty state -->
+            <div id="empty-state" class="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
+                <div class="text-center">
+                    <p class="text-slate-500 text-lg">Enter a Cypher query to start exploring</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <aside class="w-80 border-l border-slate-700 glass p-6 overflow-y-auto h-[calc(100vh-64px)]">
+            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Properties</h2>
+            <div id="properties" class="space-y-4">
+                <p class="text-slate-500 italic text-sm">Select a node or edge to view details</p>
+            </div>
+        </aside>
+    </main>
+
+    <script>
+        const graph = ForceGraph()(document.getElementById('graph'))
+            .backgroundColor('#0f172a')
+            .nodeId('id')
+            .nodeLabel(node => `[${node.labels.join(', ')}] ${node.id}`)
+            .nodeColor(node => node.labels.includes('Person') ? '#6366f1' : '#f43f5e')
+            .nodeRelSize(6)
+            .linkDirectionalArrowLength(4)
+            .linkDirectionalArrowRelPos(1)
+            .linkCurvature(0.1)
+            .linkLabel(link => link.type)
+            .onNodeClick(node => {
+                showProperties(node);
+            })
+            .onLinkClick(link => {
+                showProperties(link);
+            });
+
+        function showProperties(element) {
+            const propsDiv = document.getElementById('properties');
+            propsDiv.innerHTML = `
+                <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
+                    <div class="text-xs text-indigo-400 font-mono mb-2 uppercase">${element.__typename === 'node' ? 'Node' : 'Edge'} ${element.id}</div>
+                    ${Object.entries(element.properties).map(([k, v]) => `
+                        <div class="mb-3">
+                            <div class="text-slate-500 text-[10px] uppercase font-bold">${k}</div>
+                            <div class="text-sm font-medium">${typeof v === 'object' ? JSON.stringify(v) : v}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        async function runQuery() {
+            const query = document.getElementById('query-input').value || "MATCH (n) RETURN n LIMIT 25";
+            const btn = document.getElementById('run-btn');
+            btn.innerText = "Running...";
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    alert("Error: " + data.error);
+                } else {
+                    document.getElementById('empty-state').style.opacity = '0';
+                    graph.graphData({
+                        nodes: data.nodes.map(n => ({ ...n, __typename: 'node' })),
+                        links: data.edges.map(e => ({ ...e, __typename: 'edge' }))
+                    });
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Failed to connect to server");
+            } finally {
+                btn.innerText = "Run";
+                btn.disabled = false;
+            }
+        }
+
+        document.getElementById('run-btn').onclick = runQuery;
+        document.getElementById('query-input').onkeypress = (e) => {
+            if (e.key === 'Enter') runQuery();
+        };
+
+        // Initial status check
+        fetch('/api/status').then(res => res.json()).then(data => {
+            document.getElementById('status').innerHTML = `
+                <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+                v${data.version} | ${data.storage.nodes} nodes
+            `;
+        });
+    </script>
+</body>
+</html>

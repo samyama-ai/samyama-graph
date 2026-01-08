@@ -105,6 +105,7 @@ pub mod vector;
 pub mod algo;
 pub mod index;
 pub mod sharding;
+pub mod http;
 
 // Re-export main types for convenience
 pub use graph::{

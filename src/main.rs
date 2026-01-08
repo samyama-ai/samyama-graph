@@ -1,4 +1,4 @@
-use samyama::{GraphStore, QueryEngine, RespServer, ServerConfig, PersistenceManager};
+use samyama::{GraphStore, QueryEngine, RespServer, ServerConfig, PersistenceManager, http::HttpServer};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -206,22 +206,32 @@ async fn start_server(bind_addr: &str) {
         store.create_edge(alice, bob, "KNOWS").unwrap();
     }
 
-    let store = Arc::new(RwLock::new(store));
+    let store_arc = Arc::new(RwLock::new(store));
 
     // Create server with or without persistence
     let server = if let Some(pm) = persistence {
         println!("✅ Server ready WITH persistence. Data will be saved to disk.");
-        RespServer::new_with_persistence(config, store, pm)
+        RespServer::new_with_persistence(config, Arc::clone(&store_arc), pm)
     } else {
         println!("✅ Server ready (in-memory only). Data will NOT survive restart.");
-        RespServer::new(config, store)
+        RespServer::new(config, Arc::clone(&store_arc))
     };
 
     println!("Connect with: redis-cli -p 6379");
     println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
     println!();
 
-    if let Err(e) = server.start().await {
-        eprintln!("Server error: {}", e);
+    println!("Visualizer available at: http://localhost:8080");
+    println!();
+
+    let http_server = HttpServer::new(Arc::clone(&store_arc), 8080);
+
+    let resp_handle = server.start();
+    let http_handle = http_server.start();
+
+    // Run both servers concurrently
+    match tokio::try_join!(resp_handle, http_handle) {
+        Ok(_) => {},
+        Err(e) => eprintln!("Server error: {}", e),
     }
 }
