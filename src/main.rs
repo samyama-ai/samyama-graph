@@ -20,15 +20,41 @@ async fn main() {
 
     // Demo 3: RESP Server
     let bind_addr = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let resp_port: u16 = std::env::var("RESP_PORT").unwrap_or_else(|_| "6379".to_string()).parse().expect("Invalid RESP_PORT");
+    let http_port: u16 = std::env::var("HTTP_PORT").unwrap_or_else(|_| "8080".to_string()).parse().expect("Invalid HTTP_PORT");
+
     println!("\n=== Demo 3: RESP Protocol Server ===");
-    println!("Starting RESP server on {}:6379...", bind_addr);
+    println!("Starting RESP server on {}:{}...", bind_addr, resp_port);
+    println!("Visualizer on http://{}:{}", bind_addr, http_port);
     println!("Connect with any Redis client:");
-    println!("  redis-cli");
+    println!("  redis-cli -p {}", resp_port);
     println!("  GRAPH.QUERY mygraph \"MATCH (n:Person) RETURN n\"");
     println!();
 
-    start_server(&bind_addr).await;
+    start_server(&bind_addr, resp_port, http_port).await;
 }
+
+// ... existing code ...
+
+async fn start_server(bind_addr: &str, resp_port: u16, http_port: u16) {
+    let mut config = ServerConfig::default();
+    config.address = bind_addr.to_string();
+    config.port = resp_port;
+    // Ensure unique data path if running multiple instances locally
+    if let Some(path) = config.data_path {
+        config.data_path = Some(format!("{}_{}", path, resp_port));
+    }
+    let mut store = GraphStore::new();
+// ...
+    println!("Connect with: redis-cli -p {}", resp_port);
+    println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
+    println!();
+
+    println!("Visualizer available at: http://localhost:{}", http_port);
+    println!();
+
+    let http_server = HttpServer::new(Arc::clone(&store_arc), http_port);
+// ...
 
 fn demo_property_graph() {
     println!("=== Demo 1: Property Graph ===");
