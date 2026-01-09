@@ -34,28 +34,6 @@ async fn main() {
     start_server(&bind_addr, resp_port, http_port).await;
 }
 
-// ... existing code ...
-
-async fn start_server(bind_addr: &str, resp_port: u16, http_port: u16) {
-    let mut config = ServerConfig::default();
-    config.address = bind_addr.to_string();
-    config.port = resp_port;
-    // Ensure unique data path if running multiple instances locally
-    if let Some(path) = config.data_path {
-        config.data_path = Some(format!("{}_{}", path, resp_port));
-    }
-    let mut store = GraphStore::new();
-// ...
-    println!("Connect with: redis-cli -p {}", resp_port);
-    println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
-    println!();
-
-    println!("Visualizer available at: http://localhost:{}", http_port);
-    println!();
-
-    let http_server = HttpServer::new(Arc::clone(&store_arc), http_port);
-// ...
-
 fn demo_property_graph() {
     println!("=== Demo 1: Property Graph ===");
     let mut store = GraphStore::new();
@@ -164,9 +142,16 @@ fn demo_cypher_queries() {
     println!("\n✅ All queries executed successfully!");
 }
 
-async fn start_server(bind_addr: &str) {
+async fn start_server(bind_addr: &str, resp_port: u16, http_port: u16) {
     let mut config = ServerConfig::default();
     config.address = bind_addr.to_string();
+    config.port = resp_port;
+    
+    // Ensure unique data path if running multiple instances locally
+    if let Some(path) = config.data_path {
+        config.data_path = Some(format!("{}_{}", path, resp_port));
+    }
+    
     let mut store = GraphStore::new();
 
     // Initialize persistence if data_path is configured
@@ -243,14 +228,14 @@ async fn start_server(bind_addr: &str) {
         RespServer::new(config, Arc::clone(&store_arc))
     };
 
-    println!("Connect with: redis-cli -p 6379");
+    println!("Connect with: redis-cli -p {}", resp_port);
     println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
     println!();
 
-    println!("Visualizer available at: http://localhost:8080");
+    println!("Visualizer available at: http://localhost:{}", http_port);
     println!();
 
-    let http_server = HttpServer::new(Arc::clone(&store_arc), 8080);
+    let http_server = HttpServer::new(Arc::clone(&store_arc), http_port);
 
     let resp_handle = server.start();
     let http_handle = http_server.start();
