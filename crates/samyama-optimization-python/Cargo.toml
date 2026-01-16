@@ -1,0 +1,17 @@
+[package]
+name = "samyama-optimization-python"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sandeep Kunkunuru <sandeep@samyama.ai>"]
+description = "Python bindings for Samyama Optimization Engine"
+license = "Apache-2.0"
+
+[lib]
+name = "samyama_optimization"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+samyama-optimization = { path = "../samyama-optimization" }
+ndarray = "0.15"
+numpy = "0.20"

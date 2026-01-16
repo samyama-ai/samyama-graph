@@ -1,0 +1,25 @@
+[package]
+name = "samyama-optimization"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sandeep Kunkunuru <sandeep@samyama.ai>"]
+description = "High-performance metaheuristic optimization algorithms (Rao, Jaya, TLBO) in Rust"
+license = "Apache-2.0"
+
+[dependencies]
+# Parallel execution
+rayon = "1.8"
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+# Fast math/vectors
+ndarray = { version = "0.15", features = ["serde"] }
+# Random numbers
+rand = "0.8"
+# Logging
+tracing = "0.1"
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+[dev-dependencies]
+criterion = "0.5"

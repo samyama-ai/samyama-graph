@@ -1,3 +1,10 @@
+[workspace]
+members = [
+    ".",
+    "crates/samyama-optimization",
+    "crates/samyama-optimization-python",
+]
+
 [package]
 name = "samyama"
 version = "0.1.0"
@@ -56,6 +63,10 @@ mime = "0.3"               # MIME types
 # Vector Search (Phase 6)
 hnsw_rs = "0.2.1"
 rand = "0.8"
+
+# Optimization Engine (Phase 7)
+samyama-optimization = { path = "crates/samyama-optimization" }
+ndarray = "0.15"
 
 [dev-dependencies]
 tempfile = "3.8"
