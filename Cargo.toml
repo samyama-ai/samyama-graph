@@ -2,7 +2,6 @@
 members = [
     ".",
     "crates/samyama-optimization",
-    "crates/samyama-optimization-python",
 ]
 
 [package]
