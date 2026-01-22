@@ -23,19 +23,37 @@ fn test_jaya_sphere() {
     let solver = JayaSolver::new(config);
     let result = solver.solve(&problem);
     
-    assert!(result.best_fitness < 0.01, "Jaya failed to minimize Sphere function: fitness {}", result.best_fitness);
+    assert!(result.best_fitness < 0.01, "Jaya failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_qojaya_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = QOJayaSolver::new(config);
+    let result = solver.solve(&problem);
+    
+    assert!(result.best_fitness < 0.01, "QOJaya failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_itlbo_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = ITLBOSolver::new(config);
+    let result = solver.solve(&problem);
+    
+    assert!(result.best_fitness < 0.01, "ITLBO failed: fitness {}", result.best_fitness);
 }
 
 #[test]
 fn test_rao3_sphere() {
     let problem = SphereProblem;
-    // Rao3 needs more population/iterations for the Sphere function due to the abs() term
     let config = SolverConfig { population_size: 100, max_iterations: 1000 };
     let solver = RaoSolver::new(config, RaoVariant::Rao3);
     let result = solver.solve(&problem);
     
-    // We check if it improved significantly from the start (initial avg fitness ~66)
-    assert!(result.best_fitness < 1.0, "Rao3 failed to minimize Sphere function: fitness {}", result.best_fitness);
+    assert!(result.best_fitness < 1.0, "Rao3 failed: fitness {}", result.best_fitness);
 }
 
 #[test]
@@ -45,7 +63,7 @@ fn test_tlbo_sphere() {
     let solver = TLBOSolver::new(config);
     let result = solver.solve(&problem);
     
-    assert!(result.best_fitness < 0.01, "TLBO failed to minimize Sphere function: fitness {}", result.best_fitness);
+    assert!(result.best_fitness < 0.01, "TLBO failed: fitness {}", result.best_fitness);
 }
 
 #[test]
@@ -55,7 +73,7 @@ fn test_bmr_sphere() {
     let solver = BMRSolver::new(config);
     let result = solver.solve(&problem);
     
-    assert!(result.best_fitness < 0.1, "BMR failed to minimize Sphere function: fitness {}", result.best_fitness);
+    assert!(result.best_fitness < 0.1, "BMR failed: fitness {}", result.best_fitness);
 }
 
 #[test]
@@ -65,5 +83,5 @@ fn test_bwr_sphere() {
     let solver = BWRSolver::new(config);
     let result = solver.solve(&problem);
     
-    assert!(result.best_fitness < 0.1, "BWR failed to minimize Sphere function: fitness {}", result.best_fitness);
+    assert!(result.best_fitness < 0.1, "BWR failed: fitness {}", result.best_fitness);
 }

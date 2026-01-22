@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-optimization"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-optimization-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ndarray",
  "numpy",

@@ -1,0 +1,56 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: auto
+          args: --release --out dist
+          sccache: 'true'
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: dist
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive --skip-existing dist/*
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
