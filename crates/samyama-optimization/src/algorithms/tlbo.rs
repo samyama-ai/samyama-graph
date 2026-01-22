@@ -31,7 +31,10 @@ impl TLBOSolver {
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
-        for _ in 0..self.config.max_iterations {
+        for iter in 0..self.config.max_iterations {
+            if iter % 10 == 0 {
+                println!("TLBO Solver: Iteration {}/{}", iter, self.config.max_iterations);
+            }
             let best_idx = self.find_best(&population);
             let teacher_vars = population[best_idx].variables.clone();
             let best_fitness = population[best_idx].fitness;

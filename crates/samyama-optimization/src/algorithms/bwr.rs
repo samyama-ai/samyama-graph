@@ -30,7 +30,10 @@ impl BWRSolver {
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
-        for _ in 0..self.config.max_iterations {
+        for iter in 0..self.config.max_iterations {
+            if iter % 10 == 0 {
+                println!("BWR Solver: Iteration {}/{}", iter, self.config.max_iterations);
+            }
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
             let worst_vars = population[worst_idx].variables.clone();
