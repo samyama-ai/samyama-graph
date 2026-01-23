@@ -1,97 +1,56 @@
-use samyama::{GraphStore, QueryEngine, RespServer, ServerConfig, PersistenceManager, http::HttpServer};
+use samyama::{GraphStore, NodeId, QueryEngine, RespServer, ServerConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
     tracing_subscriber::fmt::init();
 
     println!("Samyama Graph Database v{}", samyama::version());
     println!("==========================================");
     println!();
 
-    // Demo 1: Property Graph
     demo_property_graph();
-
-    // Demo 2: OpenCypher Queries
     demo_cypher_queries();
 
-    // Demo 3: RESP Server
-    let bind_addr = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let resp_port: u16 = std::env::var("RESP_PORT").unwrap_or_else(|_| "6379".to_string()).parse().expect("Invalid RESP_PORT");
-    let http_port: u16 = std::env::var("HTTP_PORT").unwrap_or_else(|_| "8080".to_string()).parse().expect("Invalid HTTP_PORT");
-
-    println!("\n=== Demo 3: RESP Protocol Server ===");
-    println!("Starting RESP server on {}:{}...", bind_addr, resp_port);
-    println!("Visualizer on http://{}:{}", bind_addr, http_port);
-    println!("Connect with any Redis client:");
-    println!("  redis-cli -p {}", resp_port);
-    println!("  GRAPH.QUERY mygraph \"MATCH (n:Person) RETURN n\"");
+    println!("\n=== Starting RESP Server ===");
+    println!("Connect with: redis-cli");
+    println!("Example: GRAPH.QUERY sandbox \"MATCH (n:Disease) RETURN n.name LIMIT 10\"");
     println!();
 
-    start_server(&bind_addr, resp_port, http_port).await;
+    start_server().await;
 }
 
 fn demo_property_graph() {
     println!("=== Demo 1: Property Graph ===");
     let mut store = GraphStore::new();
 
-    // Create people
     let alice = store.create_node("Person");
     if let Some(node) = store.get_node_mut(alice) {
         node.set_property("name", "Alice");
         node.set_property("age", 30i64);
-        node.set_property("city", "New York");
-        println!("✓ Created Person: Alice (age 30, New York)");
+        println!("Created Person: Alice");
     }
 
     let bob = store.create_node("Person");
     if let Some(node) = store.get_node_mut(bob) {
         node.set_property("name", "Bob");
         node.set_property("age", 25i64);
-        node.set_property("city", "San Francisco");
-        println!("✓ Created Person: Bob (age 25, San Francisco)");
+        println!("Created Person: Bob");
     }
 
-    let charlie = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(charlie) {
-        node.set_property("name", "Charlie");
-        node.set_property("age", 35i64);
-        node.set_property("city", "New York");
-        println!("✓ Created Person: Charlie (age 35, New York)");
-    }
-
-    // Create relationships
-    let alice_knows_bob = store.create_edge(alice, bob, "KNOWS").unwrap();
-    if let Some(edge) = store.get_edge_mut(alice_knows_bob) {
-        edge.set_property("since", 2020i64);
-        edge.set_property("strength", 0.9);
-        println!("✓ Alice -[KNOWS]-> Bob (since 2020, strength 0.9)");
-    }
-
-    let bob_knows_charlie = store.create_edge(bob, charlie, "KNOWS").unwrap();
-    if let Some(edge) = store.get_edge_mut(bob_knows_charlie) {
-        edge.set_property("since", 2019i64);
-        edge.set_property("strength", 0.8);
-        println!("✓ Bob -[KNOWS]-> Charlie (since 2019, strength 0.8)");
-    }
-
-    let _alice_follows_charlie = store.create_edge(alice, charlie, "FOLLOWS").unwrap();
-    println!("✓ Alice -[FOLLOWS]-> Charlie");
-
-    println!("\nGraph Statistics:");
-    println!("  Total nodes: {}", store.node_count());
-    println!("  Total edges: {}", store.edge_count());
+    store.create_edge(alice, bob, "KNOWS").unwrap();
+    println!("Created: Alice -[KNOWS]-> Bob");
+    println!("Total nodes: {}, edges: {}", store.node_count(), store.edge_count());
 }
 
 fn demo_cypher_queries() {
     println!("\n=== Demo 2: OpenCypher Queries ===");
-
     let mut store = GraphStore::new();
 
-    // Create test data
     let alice = store.create_node("Person");
     if let Some(node) = store.get_node_mut(alice) {
         node.set_property("name", "Alice");
@@ -104,145 +63,367 @@ fn demo_cypher_queries() {
         node.set_property("age", 25i64);
     }
 
-    let charlie = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(charlie) {
-        node.set_property("name", "Charlie");
-        node.set_property("age", 35i64);
-    }
-
     store.create_edge(alice, bob, "KNOWS").unwrap();
-    store.create_edge(bob, charlie, "KNOWS").unwrap();
 
     let engine = QueryEngine::new();
-
-    // Query 1: Simple match
-    println!("\nQuery 1: MATCH (n:Person) RETURN n");
     if let Ok(result) = engine.execute("MATCH (n:Person) RETURN n", &store) {
-        println!("  → Found {} persons", result.len());
+        println!("Query executed: Found {} persons", result.len());
     }
-
-    // Query 2: Filter with WHERE
-    println!("\nQuery 2: MATCH (n:Person) WHERE n.age > 28 RETURN n");
-    if let Ok(result) = engine.execute("MATCH (n:Person) WHERE n.age > 28 RETURN n", &store) {
-        println!("  → Found {} persons over 28", result.len());
-    }
-
-    // Query 3: Edge traversal
-    println!("\nQuery 3: MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b");
-    if let Ok(result) = engine.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b", &store) {
-        println!("  → Found {} KNOWS relationships", result.len());
-    }
-
-    // Query 4: Property projection
-    println!("\nQuery 4: MATCH (n:Person) RETURN n.name, n.age LIMIT 2");
-    if let Ok(result) = engine.execute("MATCH (n:Person) RETURN n.name, n.age LIMIT 2", &store) {
-        println!("  → Returned {} rows with columns: {:?}", result.len(), result.columns);
-    }
-
-    println!("\n✅ All queries executed successfully!");
 }
 
-async fn start_server(bind_addr: &str, resp_port: u16, http_port: u16) {
-    let mut config = ServerConfig::default();
-    config.address = bind_addr.to_string();
-    config.port = resp_port;
+fn load_clinical_trials_data(store: &mut GraphStore) -> (HashMap<String, NodeId>, HashMap<String, NodeId>) {
+    println!("Loading clinical trials data...");
     
-    // Ensure unique data path if running multiple instances locally
-    if let Some(path) = config.data_path {
-        config.data_path = Some(format!("{}_{}", path, resp_port));
+    // Diseases
+    let diseases = [
+        "Diabetes Mellitus", "Hypertension", "Asthma", "Alzheimer Disease",
+        "Parkinson Disease", "Breast Neoplasms", "Rheumatoid Arthritis",
+        "Anxiety Disorders", "Epilepsy", "Migraine Disorders", "Osteoporosis",
+        "Obesity", "Heart Failure", "Coronary Artery Disease", "Stroke",
+        "Hepatitis C", "HIV Infections"
+    ];
+    
+    let mut disease_ids: HashMap<String, NodeId> = HashMap::new();
+    for name in &diseases {
+        let id = store.create_node("Disease");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("name", *name);
+        }
+        disease_ids.insert(name.to_string(), id);
     }
+    println!("  Created {} disease nodes", diseases.len());
     
-    let mut store = GraphStore::new();
-
-    // Initialize persistence if data_path is configured
-    let persistence = if let Some(ref data_path) = config.data_path {
-        println!("Initializing persistence at: {}", data_path);
-
-        match PersistenceManager::new(data_path) {
-            Ok(pm) => {
-                // Recover existing data from disk
-                println!("Recovering data from disk...");
-                match pm.recover("default") {
-                    Ok((nodes, edges)) => {
-                        println!("Recovered {} nodes and {} edges from disk", nodes.len(), edges.len());
-
-                        // Rebuild in-memory GraphStore from recovered data
-                        // Insert nodes first (edges depend on nodes existing)
-                        for node in nodes {
-                            store.insert_recovered_node(node);
-                        }
-
-                        // Then insert edges
-                        for edge in edges {
-                            if let Err(e) = store.insert_recovered_edge(edge) {
-                                eprintln!("Warning: Failed to recover edge: {}", e);
-                            }
-                        }
-
-                        info!("Recovery complete. GraphStore has {} nodes, {} edges",
-                              store.node_count(), store.edge_count());
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Recovery failed: {}. Starting with empty graph.", e);
-                    }
+    // Drugs
+    let drugs = [
+        "Insulin", "Aspirin", "Ibuprofen", "Acetaminophen", "Lisinopril",
+        "Atorvastatin", "Metoprolol", "Amlodipine", "Omeprazole", "Gabapentin",
+        "Sertraline", "Fluoxetine", "Prednisone", "Warfarin", "Clopidogrel",
+        "Levothyroxine", "Albuterol", "Amoxicillin"
+    ];
+    
+    let mut drug_ids: HashMap<String, NodeId> = HashMap::new();
+    for name in &drugs {
+        let id = store.create_node("Drug");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("name", *name);
+        }
+        drug_ids.insert(name.to_string(), id);
+    }
+    println!("  Created {} drug nodes", drugs.len());
+    
+    // Co-occurrence relationships
+    let relationships: &[(&str, &str, i64)] = &[
+        ("Diabetes Mellitus", "Insulin", 312),
+        ("Diabetes Mellitus", "Aspirin", 6),
+        ("Diabetes Mellitus", "Atorvastatin", 1),
+        ("Diabetes Mellitus", "Gabapentin", 3),
+        ("Diabetes Mellitus", "Clopidogrel", 4),
+        ("Diabetes Mellitus", "Levothyroxine", 1),
+        ("Hypertension", "Insulin", 6),
+        ("Hypertension", "Aspirin", 8),
+        ("Hypertension", "Ibuprofen", 2),
+        ("Hypertension", "Acetaminophen", 2),
+        ("Hypertension", "Lisinopril", 3),
+        ("Hypertension", "Atorvastatin", 4),
+        ("Hypertension", "Metoprolol", 6),
+        ("Hypertension", "Amlodipine", 35),
+        ("Hypertension", "Levothyroxine", 5),
+        ("Asthma", "Aspirin", 19),
+        ("Asthma", "Prednisone", 4),
+        ("Asthma", "Albuterol", 67),
+        ("Asthma", "Levothyroxine", 2),
+        ("Alzheimer Disease", "Insulin", 20),
+        ("Alzheimer Disease", "Aspirin", 1),
+        ("Alzheimer Disease", "Atorvastatin", 1),
+        ("Parkinson Disease", "Insulin", 7),
+        ("Parkinson Disease", "Aspirin", 2),
+        ("Parkinson Disease", "Sertraline", 1),
+        ("Parkinson Disease", "Fluoxetine", 1),
+        ("Breast Neoplasms", "Insulin", 4),
+        ("Breast Neoplasms", "Aspirin", 6),
+        ("Breast Neoplasms", "Atorvastatin", 3),
+        ("Rheumatoid Arthritis", "Insulin", 5),
+        ("Rheumatoid Arthritis", "Prednisone", 11),
+        ("Rheumatoid Arthritis", "Levothyroxine", 3),
+        ("Anxiety Disorders", "Gabapentin", 1),
+        ("Anxiety Disorders", "Sertraline", 21),
+        ("Anxiety Disorders", "Fluoxetine", 11),
+        ("Epilepsy", "Gabapentin", 8),
+        ("Epilepsy", "Atorvastatin", 2),
+        ("Epilepsy", "Fluoxetine", 2),
+        ("Migraine Disorders", "Aspirin", 4),
+        ("Migraine Disorders", "Ibuprofen", 11),
+        ("Migraine Disorders", "Acetaminophen", 13),
+        ("Migraine Disorders", "Metoprolol", 2),
+        ("Migraine Disorders", "Gabapentin", 2),
+        ("Osteoporosis", "Insulin", 4),
+        ("Osteoporosis", "Atorvastatin", 2),
+        ("Osteoporosis", "Prednisone", 3),
+        ("Osteoporosis", "Levothyroxine", 8),
+        ("Obesity", "Insulin", 82),
+        ("Obesity", "Aspirin", 3),
+        ("Obesity", "Fluoxetine", 2),
+        ("Obesity", "Levothyroxine", 6),
+        ("Heart Failure", "Insulin", 7),
+        ("Heart Failure", "Aspirin", 7),
+        ("Heart Failure", "Metoprolol", 4),
+        ("Heart Failure", "Warfarin", 5),
+        ("Heart Failure", "Levothyroxine", 4),
+        ("Coronary Artery Disease", "Aspirin", 67),
+        ("Coronary Artery Disease", "Atorvastatin", 9),
+        ("Coronary Artery Disease", "Clopidogrel", 51),
+        ("Coronary Artery Disease", "Warfarin", 4),
+        ("Stroke", "Aspirin", 44),
+        ("Stroke", "Atorvastatin", 13),
+        ("Stroke", "Warfarin", 22),
+        ("Stroke", "Clopidogrel", 30),
+        ("Hepatitis C", "Aspirin", 3),
+        ("Hepatitis C", "Atorvastatin", 3),
+        ("Hepatitis C", "Prednisone", 2),
+        ("HIV Infections", "Insulin", 3),
+        ("HIV Infections", "Aspirin", 1),
+        ("HIV Infections", "Prednisone", 1),
+    ];
+    
+    let mut edge_count = 0;
+    for (disease_name, drug_name, count) in relationships {
+        if let (Some(&d_id), Some(&dr_id)) = (disease_ids.get(*disease_name), drug_ids.get(*drug_name)) {
+            if let Ok(edge_id) = store.create_edge(d_id, dr_id, "CO_OCCURS_WITH") {
+                if let Some(edge) = store.get_edge_mut(edge_id) {
+                    edge.set_property("count", *count);
                 }
-
-                Some(Arc::new(pm))
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to initialize persistence: {}. Running in-memory only.", e);
-                None
+                edge_count += 1;
             }
         }
-    } else {
-        println!("No data_path configured. Running in-memory only (data will not survive restart).");
-        None
-    };
+    }
+    println!("  Created {} relationships", edge_count);
+    println!("Clinical trials data loaded successfully!");
+    
+    (disease_ids, drug_ids)
+}
 
-    // If no data was recovered, add some demo data
-    if store.node_count() == 0 {
-        println!("No existing data found. Adding demo data...");
-        let alice = store.create_node("Person");
-        if let Some(node) = store.get_node_mut(alice) {
+fn load_hetionet_data(store: &mut GraphStore, disease_ids: &mut HashMap<String, NodeId>) {
+    println!("\nLoading Hetionet data...");
+    
+    let nodes_path = "/tmp/clinical_nodes.tsv";
+    let edges_path = "/tmp/clinical_edges.tsv";
+    
+    if !std::path::Path::new(nodes_path).exists() || !std::path::Path::new(edges_path).exists() {
+        println!("  Hetionet data files not found at /tmp/, skipping...");
+        return;
+    }
+    
+    let mut compound_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut symptom_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut hetionet_disease_ids: HashMap<String, NodeId> = HashMap::new();
+    
+    let mut compound_count = 0;
+    let mut symptom_count = 0;
+    let mut disease_count = 0;
+    
+    if let Ok(file) = File::open(nodes_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 { continue; }
+            
+            let node_id = parts[0];
+            let name = parts[1];
+            let node_type = parts[2];
+            
+            match node_type {
+                "Compound" => {
+                    let id = store.create_node("Compound");
+                    if let Some(node) = store.get_node_mut(id) {
+                        node.set_property("name", name);
+                        node.set_property("hetionet_id", node_id);
+                    }
+                    compound_ids.insert(node_id.to_string(), id);
+                    compound_count += 1;
+                },
+                "Disease" => {
+                    if let Some(&existing_id) = disease_ids.get(name) {
+                        hetionet_disease_ids.insert(node_id.to_string(), existing_id);
+                        if let Some(node) = store.get_node_mut(existing_id) {
+                            node.set_property("hetionet_id", node_id);
+                        }
+                    } else {
+                        let id = store.create_node("Disease");
+                        if let Some(node) = store.get_node_mut(id) {
+                            node.set_property("name", name);
+                            node.set_property("hetionet_id", node_id);
+                        }
+                        hetionet_disease_ids.insert(node_id.to_string(), id);
+                        disease_ids.insert(name.to_string(), id);
+                    }
+                    disease_count += 1;
+                },
+                "Symptom" => {
+                    let id = store.create_node("Symptom");
+                    if let Some(node) = store.get_node_mut(id) {
+                        node.set_property("name", name);
+                        node.set_property("hetionet_id", node_id);
+                    }
+                    symptom_ids.insert(node_id.to_string(), id);
+                    symptom_count += 1;
+                },
+                _ => {}
+            }
+        }
+    }
+    println!("  Loaded {} compounds, {} diseases, {} symptoms", compound_count, disease_count, symptom_count);
+    
+    let mut treats_count = 0;
+    let mut palliates_count = 0;
+    let mut presents_count = 0;
+    let mut resembles_count = 0;
+    
+    if let Ok(file) = File::open(edges_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 { continue; }
+            
+            let source_id = parts[0];
+            let rel_type = parts[1];
+            let target_id = parts[2];
+            
+            match rel_type {
+                "CtD" => {
+                    if let (Some(&c_id), Some(&d_id)) = (compound_ids.get(source_id), hetionet_disease_ids.get(target_id)) {
+                        if store.create_edge(c_id, d_id, "TREATS").is_ok() {
+                            treats_count += 1;
+                        }
+                    }
+                },
+                "CpD" => {
+                    if let (Some(&c_id), Some(&d_id)) = (compound_ids.get(source_id), hetionet_disease_ids.get(target_id)) {
+                        if store.create_edge(c_id, d_id, "PALLIATES").is_ok() {
+                            palliates_count += 1;
+                        }
+                    }
+                },
+                "DpS" => {
+                    if let (Some(&d_id), Some(&s_id)) = (hetionet_disease_ids.get(source_id), symptom_ids.get(target_id)) {
+                        if store.create_edge(d_id, s_id, "PRESENTS").is_ok() {
+                            presents_count += 1;
+                        }
+                    }
+                },
+                "DrD" => {
+                    if let (Some(&d1_id), Some(&d2_id)) = (hetionet_disease_ids.get(source_id), hetionet_disease_ids.get(target_id)) {
+                        if store.create_edge(d1_id, d2_id, "RESEMBLES").is_ok() {
+                            resembles_count += 1;
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    println!("  Loaded {} TREATS, {} PALLIATES, {} PRESENTS, {} RESEMBLES edges", 
+             treats_count, palliates_count, presents_count, resembles_count);
+    println!("Hetionet data loaded successfully!");
+}
+
+fn load_phegeni_data(store: &mut GraphStore) {
+    println!("\nLoading PheGenI data...");
+    
+    let phegeni_path = "/tmp/phegeni.tsv";
+    
+    if !std::path::Path::new(phegeni_path).exists() {
+        println!("  PheGenI data file not found at /tmp/, skipping...");
+        return;
+    }
+    
+    let mut phenotype_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut gene_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut association_count = 0;
+    
+    if let Ok(file) = File::open(phegeni_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 4 { continue; }
+            
+            let phenotype = parts[0];
+            let gene_symbol = parts[2];
+            let gene_ncbi_id = parts[3];
+            
+            let p_id = *phenotype_ids.entry(phenotype.to_string()).or_insert_with(|| {
+                let id = store.create_node("Phenotype");
+                if let Some(node) = store.get_node_mut(id) {
+                    node.set_property("name", phenotype);
+                }
+                id
+            });
+            
+            let gene_key = format!("{}:{}", gene_symbol, gene_ncbi_id);
+            let g_id = *gene_ids.entry(gene_key).or_insert_with(|| {
+                let id = store.create_node("Gene");
+                if let Some(node) = store.get_node_mut(id) {
+                    node.set_property("symbol", gene_symbol);
+                    node.set_property("ncbi_id", gene_ncbi_id);
+                }
+                id
+            });
+            
+            if store.create_edge(p_id, g_id, "ASSOCIATED_WITH").is_ok() {
+                association_count += 1;
+            }
+        }
+    }
+    
+    println!("  Loaded {} phenotypes, {} genes, {} associations", 
+             phenotype_ids.len(), gene_ids.len(), association_count);
+    println!("PheGenI data loaded successfully!");
+}
+
+async fn start_server() {
+    let store = Arc::new(RwLock::new(GraphStore::new()));
+
+    {
+        let mut graph = store.write().await;
+        
+        let alice = graph.create_node("Person");
+        if let Some(node) = graph.get_node_mut(alice) {
             node.set_property("name", "Alice");
             node.set_property("age", 30i64);
         }
 
-        let bob = store.create_node("Person");
-        if let Some(node) = store.get_node_mut(bob) {
+        let bob = graph.create_node("Person");
+        if let Some(node) = graph.get_node_mut(bob) {
             node.set_property("name", "Bob");
             node.set_property("age", 25i64);
         }
 
-        store.create_edge(alice, bob, "KNOWS").unwrap();
+        graph.create_edge(alice, bob, "KNOWS").unwrap();
+        
+        let (mut disease_ids, _drug_ids) = load_clinical_trials_data(&mut graph);
+        load_hetionet_data(&mut graph, &mut disease_ids);
+        load_phegeni_data(&mut graph);
+        
+        println!("\nGraph Statistics:");
+        println!("  Total nodes: {}", graph.node_count());
+        println!("  Total edges: {}", graph.edge_count());
     }
 
-    let store_arc = Arc::new(RwLock::new(store));
+    let mut config = ServerConfig::default();
+    config.address = std::env::args().find(|a| a.starts_with("--host"))
+        .and_then(|_| std::env::args().skip_while(|a| a != "--host").nth(1))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    config.port = std::env::args().find(|a| a.starts_with("--port"))
+        .and_then(|_| std::env::args().skip_while(|a| a != "--port").nth(1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(6379);
+    
+    println!("\nServer starting on {}:{}", config.address, config.port);
+    
+    let server = RespServer::new(config, store);
 
-    // Create server with or without persistence
-    let server = if let Some(pm) = persistence {
-        println!("✅ Server ready WITH persistence. Data will be saved to disk.");
-        RespServer::new_with_persistence(config, Arc::clone(&store_arc), pm)
-    } else {
-        println!("✅ Server ready (in-memory only). Data will NOT survive restart.");
-        RespServer::new(config, Arc::clone(&store_arc))
-    };
+    println!("Server ready. Press Ctrl+C to stop.\n");
 
-    println!("Connect with: redis-cli -p {}", resp_port);
-    println!("Example: GRAPH.QUERY mygraph \"CREATE (n:Person {{name: 'Test'}})\"");
-    println!();
-
-    println!("Visualizer available at: http://localhost:{}", http_port);
-    println!();
-
-    let http_server = HttpServer::new(Arc::clone(&store_arc), http_port);
-
-    let resp_handle = server.start();
-    let http_handle = http_server.start();
-
-    // Run both servers concurrently
-    match tokio::try_join!(resp_handle, http_handle) {
-        Ok(_) => {},
-        Err(e) => eprintln!("Server error: {}", e),
+    if let Err(e) = server.start().await {
+        eprintln!("Server error: {}", e);
     }
 }
