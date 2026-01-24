@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    ".",
+    ".", "crates/samyama-graph-algorithms",
     "crates/samyama-optimization",
 ]
 
@@ -65,6 +65,7 @@ rand = "0.8"
 
 # Optimization Engine (Phase 7)
 samyama-optimization = { path = "crates/samyama-optimization" }
+samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms" }
 ndarray = "0.15"
 
 [dev-dependencies]

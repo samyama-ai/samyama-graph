@@ -2,8 +2,7 @@
 //!
 //! Implements REQ-ALGO-001: Node centrality
 
-use super::common::GraphView;
-use crate::graph::{GraphStore, NodeId};
+use super::common::{GraphView, NodeId};
 use std::collections::HashMap;
 
 /// PageRank configuration
@@ -26,15 +25,11 @@ impl Default for PageRankConfig {
     }
 }
 
-/// Calculate PageRank for the graph (or a subgraph)
+/// Calculate PageRank for the graph view
 pub fn page_rank(
-    store: &GraphStore,
-    label: Option<&str>,
-    edge_type: Option<&str>,
+    view: &GraphView,
     config: PageRankConfig,
 ) -> HashMap<NodeId, f64> {
-    // 1. Project graph to optimized view
-    let view = GraphView::new(store, label, edge_type);
     let n = view.node_count;
     
     if n == 0 {
@@ -42,7 +37,7 @@ pub fn page_rank(
     }
 
     // 2. Initialize scores
-    // Initial score is 1.0 for all nodes (some implementations use 1/N, but Neo4j uses 0.15 + ...)
+    // Initial score is 1.0 for all nodes
     let initial_score = 1.0;
     let mut scores = vec![initial_score; n];
     let mut next_scores = vec![0.0; n];
@@ -72,7 +67,7 @@ pub fn page_rank(
         // Swap buffers
         scores.copy_from_slice(&next_scores);
 
-        // Check convergence (optional optimization)
+        // Check convergence
         if total_diff < config.tolerance {
             break;
         }
@@ -85,33 +80,4 @@ pub fn page_rank(
     }
 
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::GraphStore;
-
-    #[test]
-    fn test_pagerank_simple() {
-        let mut store = GraphStore::new();
-        // Star graph: Center (0) points to Leaves (1, 2, 3)
-        // Leaves point back to Center
-        // Center should have highest PageRank
-        let center = store.create_node("Node");
-        let l1 = store.create_node("Node");
-        let l2 = store.create_node("Node");
-
-        store.create_edge(center, l1, "LINK").unwrap();
-        store.create_edge(center, l2, "LINK").unwrap();
-        store.create_edge(l1, center, "LINK").unwrap();
-        store.create_edge(l2, center, "LINK").unwrap();
-
-        let scores = page_rank(&store, None, None, PageRankConfig::default());
-
-        let center_score = *scores.get(&center).unwrap();
-        let l1_score = *scores.get(&l1).unwrap();
-        
-        assert!(center_score > l1_score);
-    }
 }

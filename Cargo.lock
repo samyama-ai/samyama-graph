@@ -2005,6 +2005,7 @@ dependencies = [
  "rio_xml",
  "rocksdb",
  "rust-embed",
+ "samyama-graph-algorithms",
  "samyama-optimization",
  "serde",
  "serde_json",
@@ -2019,6 +2020,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "samyama-graph-algorithms"
+version = "0.1.0"
 
 [[package]]
 name = "samyama-optimization"

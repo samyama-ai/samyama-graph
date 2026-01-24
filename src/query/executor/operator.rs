@@ -1407,7 +1407,7 @@ impl AlgorithmOperator {
         // Arguments: (label?, edge_type?, iterations?)
         let mut label = None;
         let mut edge_type = None;
-        let mut config = crate::algo::PageRankConfig::default();
+        let config = crate::algo::PageRankConfig::default();
 
         if self.args.len() > 0 {
             if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
@@ -1421,10 +1421,13 @@ impl AlgorithmOperator {
         }
         // TODO: Parse config map for iterations
 
-        let scores = crate::algo::page_rank(store, label.as_deref(), edge_type.as_deref(), config);
+        // Build view and run
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+        let scores = crate::algo::page_rank(&view, config);
 
         // Convert to records
-        for (node_id, score) in scores {
+        for (algo_id, score) in scores {
+            let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
                 record.bind("node".to_string(), Value::Node(node_id, node.clone()));
@@ -1454,26 +1457,29 @@ impl AlgorithmOperator {
         }
 
         let source_id = match &self.args[0] {
-            Expression::Literal(PropertyValue::Integer(id)) => NodeId::new(*id as u64),
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
             _ => return Err(ExecutionError::TypeError("Source must be integer ID for now".to_string())),
         };
 
         let target_id = match &self.args[1] {
-            Expression::Literal(PropertyValue::Integer(id)) => NodeId::new(*id as u64),
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
             _ => return Err(ExecutionError::TypeError("Target must be integer ID for now".to_string())),
         };
 
         // TODO: weight property from config
         
-        if let Some(result) = crate::algo::pathfinding::bfs(store, source_id, target_id, None) {
+        // Build view and run BFS
+        let view = crate::algo::build_view(store, None, None, None);
+        if let Some(result) = crate::algo::bfs(&view, source_id, target_id) {
              let mut record = Record::new();
              // Return path as list of nodes? Or just cost?
              record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
              
              // Construct path list
              let mut path_nodes = Vec::new();
-             for nid in result.path {
-                 if let Some(n) = store.get_node(nid) {
+             for nid_u64 in result.path {
+                 let nid = NodeId::new(nid_u64);
+                 if let Some(_n) = store.get_node(nid) {
                      path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
                  }
              }

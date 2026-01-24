@@ -1,14 +1,8 @@
-//! Graph Visualization Demo
-//!
-//! Generates a synthetic graph, runs analytics, and renders a visualization to SVG.
-
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::algo::{page_rank, PageRankConfig};
-use samyama::algo::community::weakly_connected_components;
+use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
 use std::fs::File;
 use std::io::Write;
 use rand::Rng;
-use std::f64::consts::PI;
 
 const NUM_NODES: usize = 200;
 const CLUSTERS: usize = 5;
@@ -56,11 +50,14 @@ fn main() {
     }
 
     // 3. Run Analytics
+    // Build view for analytics
+    let view = build_view(&store, None, None, None);
+
     println!("3. Running PageRank for node sizing...");
-    let scores = page_rank(&store, None, None, PageRankConfig::default());
+    let scores = page_rank(&view, PageRankConfig::default());
     
     println!("4. Running Community Detection (WCC) for coloring...");
-    let wcc = weakly_connected_components(&store, None, None);
+    let wcc = weakly_connected_components(&view);
 
     // 4. Layout & Render (Simple Force Directed)
     println!("5. Simulating Physics & Rendering...");
@@ -144,8 +141,8 @@ fn main() {
     let colors = ["#6366f1", "#ec4899", "#10b981", "#f59e0b", "#0ea5e9"];
     for i in 0..NUM_NODES {
         let id = nodes[i].0;
-        let cluster = wcc.node_component.get(&id).unwrap_or(&0) % colors.len();
-        let rank = scores.get(&id).unwrap_or(&1.0);
+        let cluster = wcc.node_component.get(&id.as_u64()).unwrap_or(&0) % colors.len();
+        let rank = scores.get(&id.as_u64()).unwrap_or(&1.0);
         let radius = 3.0 + (rank * 5.0); // Size by PageRank
         
         svg.push_str(&format!(
