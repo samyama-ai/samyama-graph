@@ -85,3 +85,23 @@ fn test_bwr_sphere() {
     
     assert!(result.best_fitness < 0.1, "BWR failed: fitness {}", result.best_fitness);
 }
+
+#[test]
+fn test_pso_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = PSOSolver::new(config);
+    let result = solver.solve(&problem);
+    
+    assert!(result.best_fitness < 0.01, "PSO failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_de_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = DESolver::new(config);
+    let result = solver.solve(&problem);
+    
+    assert!(result.best_fitness < 0.01, "DE failed: fitness {}", result.best_fitness);
+}

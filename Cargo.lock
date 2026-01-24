@@ -2024,6 +2024,9 @@ dependencies = [
 [[package]]
 name = "samyama-graph-algorithms"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "samyama-optimization"

@@ -46,12 +46,9 @@ impl RaoSolver {
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
             let worst_vars = population[worst_idx].variables.clone();
-            let mean_vars = self.calculate_mean(&population, dim);
             let best_fitness = population[best_idx].fitness;
 
             history.push(best_fitness);
-
-            let phase = 1.0 - (iter as f64 / self.config.max_iterations as f64);
 
             // Update population
             population = population
@@ -60,26 +57,50 @@ impl RaoSolver {
                     let mut local_rng = thread_rng();
                     let mut new_vars = Array1::zeros(dim);
 
-                    let r: f64 = local_rng.gen(); // Scalar r per individual
+                    let r1: f64 = local_rng.gen();
+                    let r2: f64 = local_rng.gen();
+
+                    // For Rao-2 and Rao-3, we need a random individual.
+                    // In parallel map, we approximate by generating a random point in bounds.
+                    // This is "Best-Worst-Random" style.
+                    let mut rand_vars = Array1::zeros(dim);
+                    if matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3) {
+                        for j in 0..dim {
+                            rand_vars[j] = local_rng.gen_range(lower[j]..upper[j]);
+                        }
+                    }
+                    // We assume fitness of random point is worse? Or compare?
+                    // Standard Rao compares fitness. We'll compute it if needed.
+                    let rand_fitness = if matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3) {
+                        problem.fitness(&rand_vars)
+                    } else {
+                        0.0
+                    };
 
                     for j in 0..dim {
+                        let term1 = best_vars[j] - worst_vars[j];
+                        
                         let delta = match self.variant {
                             RaoVariant::Rao1 => {
-                                if r < 0.5 {
-                                    r * (best_vars[j] - ind.variables[j].abs())
-                                } else {
-                                    r * (best_vars[j] - mean_vars[j])
-                                }
+                                r1 * term1
                             },
                             RaoVariant::Rao2 => {
-                                if r < 0.5 {
-                                    r * (best_vars[j] - ind.variables[j].abs()) - r * (worst_vars[j] - ind.variables[j].abs())
+                                let term2 = if ind.fitness < rand_fitness {
+                                    ind.variables[j] - rand_vars[j]
                                 } else {
-                                    r * (best_vars[j] - mean_vars[j]) - r * (worst_vars[j] - ind.variables[j].abs())
-                                }
+                                    rand_vars[j] - ind.variables[j]
+                                };
+                                r1 * term1 + r2 * term2
                             },
                             RaoVariant::Rao3 => {
-                                r * phase * (best_vars[j] - ind.variables[j].abs())
+                                // Rao-3 often uses |worst| and |best|
+                                let term1_abs = best_vars[j] - worst_vars[j].abs();
+                                let term2_abs = if ind.fitness < rand_fitness {
+                                    ind.variables[j] - rand_vars[j]
+                                } else {
+                                    rand_vars[j] - ind.variables[j]
+                                };
+                                r1 * term1_abs + r2 * term2_abs
                             }
                         };
 
@@ -118,13 +139,5 @@ impl RaoSolver {
             }
         }
         (best_idx, worst_idx)
-    }
-
-    fn calculate_mean(&self, population: &[Individual], dim: usize) -> Array1<f64> {
-        let mut mean = Array1::zeros(dim);
-        for ind in population {
-            mean += &ind.variables;
-        }
-        mean / (population.len() as f64)
     }
 }
