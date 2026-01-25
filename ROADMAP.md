@@ -81,17 +81,19 @@ This document outlines the development journey of Samyama, from its inception as
     *   **Force-Directed Graph**: Interactive visualization.
     *   **Query Workbench**: Run Cypher directly in the browser.
 
+### Phase 12: "Auto-RAG" Pipelines 🤖
+**Goal**: Native AI support for automatic data processing.
+*   **Features**:
+    *   **Tenant-Level Config**: Each tenant can have its own LLM provider and embedding policy.
+    *   **Externalized LLMs**: Support for OpenAI, Ollama, and Gemini.
+    *   **Automatic Embedding**: Background tasks automatically generate embeddings when text properties matching policies are updated.
+    *   **Native Integration**: Built directly into the async indexing pipeline.
+
 ---
 
 ## 🔮 Future Roadmap
 
 ### 1. Time-Travel / Temporal Queries ⏳
-**Goal**: Audit and historical analysis.
-*   **Plan**: Implement MVCC in RocksDB to allow `MATCH ... AT TIME '2025-01-01'`.
-
-### 2. "Auto-RAG" Pipelines 🤖
-**Goal**: Simplification.
-*   **Plan**: Allow users to define embedding policies. Samyama will automatically call OpenAI/Ollama APIs when text properties are updated.
 
 ### 3. Graph-Level Sharding
 **Goal**: Massive scale for single graphs.

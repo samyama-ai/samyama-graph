@@ -380,11 +380,9 @@ fn load_phegeni_data(store: &mut GraphStore) {
 }
 
 async fn start_server() {
-    let store = Arc::new(RwLock::new(GraphStore::new()));
+    let (mut graph, rx) = GraphStore::with_async_indexing();
 
     {
-        let mut graph = store.write().await;
-        
         let alice = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(alice) {
             node.set_property("name", "Alice");
@@ -408,6 +406,8 @@ async fn start_server() {
         println!("  Total edges: {}", graph.edge_count());
     }
 
+    let store = Arc::new(RwLock::new(graph));
+
     let mut config = ServerConfig::default();
     config.address = std::env::args().find(|a| a.starts_with("--host"))
         .and_then(|_| std::env::args().skip_while(|a| a != "--host").nth(1))
@@ -419,7 +419,20 @@ async fn start_server() {
     
     println!("\nServer starting on {}:{}", config.address, config.port);
     
-    let server = RespServer::new(config, store);
+    // Initialize persistence if path is configured
+    let persistence = if let Some(path) = &config.data_path {
+        let pm = Arc::new(samyama::PersistenceManager::new(path).expect("Failed to initialize persistence"));
+        pm.start_indexer(&*store.read().await, rx);
+        Some(pm)
+    } else {
+        None
+    };
+
+    let server = if let Some(pm) = persistence {
+        RespServer::new_with_persistence(config, store, pm)
+    } else {
+        RespServer::new(config, store)
+    };
 
     println!("Server ready. Press Ctrl+C to stop.\n");
 

@@ -23,7 +23,9 @@ fn main() {
     for i in 0..NUM_NODES {
         let cluster = i % CLUSTERS;
         let id = store.create_node(Label::new(format!("Group{}", cluster)));
-        store.set_node_property(id, "cluster", PropertyValue::Integer(cluster as i64)).unwrap();
+        for (id, cluster) in nodes.iter() {
+            store.set_node_property("default", *id, "cluster", PropertyValue::Integer(*cluster as i64)).unwrap();
+        }
         nodes.push((id, cluster));
     }
 

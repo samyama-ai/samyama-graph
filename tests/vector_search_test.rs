@@ -9,20 +9,21 @@ fn test_vector_search_integration() {
     store.create_vector_index("Person", "embedding", 3, DistanceMetric::Cosine).unwrap();
     
     // 2. Create nodes with vector properties
-    let mut props1 = std::collections::HashMap::new();
-    props1.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+    let mut props1 = PropertyMap::new();
+    props1.insert("name".to_string(), "Alice".into());
     props1.insert("embedding".to_string(), PropertyValue::Vector(vec![1.0, 0.0, 0.0]));
-    store.create_node_with_properties(vec![Label::new("Person")], props1);
-    
-    let mut props2 = std::collections::HashMap::new();
-    props2.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
+    store.create_node_with_properties("default", vec![Label::new("Person")], props1);
+
+    let mut props2 = PropertyMap::new();
+    props2.insert("name".to_string(), "Bob".into());
     props2.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 1.0, 0.0]));
-    store.create_node_with_properties(vec![Label::new("Person")], props2);
-    
-    let mut props3 = std::collections::HashMap::new();
-    props3.insert("name".to_string(), PropertyValue::String("Charlie".to_string()));
+    store.create_node_with_properties("default", vec![Label::new("Person")], props2);
+
+    let mut props3 = PropertyMap::new();
+    props3.insert("name".to_string(), "Charlie".into());
     props3.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 0.0, 1.0]));
-    store.create_node_with_properties(vec![Label::new("Person")], props3);
+    store.create_node_with_properties("default", vec![Label::new("Person")], props3);
+
     
     // 3. Search
     // Query vector is closest to Alice [1, 0, 0]
@@ -49,7 +50,9 @@ fn test_vector_search_update() {
     assert_eq!(results.len(), 0);
     
     // Update property
-    store.set_node_property(node_id, "embedding", PropertyValue::Vector(vec![1.0, 0.0])).unwrap();
+        for (node_id, embedding) in nodes {
+            store.set_node_property("default", node_id, "embedding", PropertyValue::Vector(embedding)).unwrap();
+        }
     
     // Now should be found
     let results = store.vector_search("Person", "embedding", &vec![1.0, 0.0], 1).unwrap();

@@ -67,6 +67,7 @@ rand = "0.8"
 samyama-optimization = { path = "crates/samyama-optimization" }
 samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms" }
 ndarray = "0.15"
+reqwest = { version = "0.13.1", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3.8"

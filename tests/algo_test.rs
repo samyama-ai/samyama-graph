@@ -13,15 +13,13 @@ fn test_pagerank_procedure() {
     
     // Alice (Center)
     let alice = store.create_node("Person");
-    store.set_node_property(alice, "name", "Alice").unwrap();
-    
-    // Bob
+    store.set_node_property("default", alice, "name", "Alice").unwrap();
+
     let bob = store.create_node("Person");
-    store.set_node_property(bob, "name", "Bob").unwrap();
-    
-    // Charlie
+    store.set_node_property("default", bob, "name", "Bob").unwrap();
+
     let charlie = store.create_node("Person");
-    store.set_node_property(charlie, "name", "Charlie").unwrap();
+    store.set_node_property("default", charlie, "name", "Charlie").unwrap();
     
     store.create_edge(alice, bob, "KNOWS").unwrap();
     store.create_edge(alice, charlie, "KNOWS").unwrap();

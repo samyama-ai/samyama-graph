@@ -56,12 +56,13 @@ impl QueryEngine {
         &self,
         query_str: &str,
         store: &mut crate::graph::GraphStore,
+        tenant_id: &str,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         // Parse query
         let query = parse_query(query_str)?;
 
         // Execute query (with write access)
-        let mut executor = MutQueryExecutor::new(store);
+        let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
         let result = executor.execute(&query)?;
 
         Ok(result)
@@ -214,7 +215,7 @@ mod tests {
         let engine = QueryEngine::new();
 
         // Execute CREATE query
-        let result = engine.execute_mut(r#"CREATE (n:Person)"#, &mut store);
+        let result = engine.execute_mut(r#"CREATE (n:Person)"#, &mut store, "default");
 
         assert!(result.is_ok(), "CREATE query should succeed");
 
@@ -253,11 +254,11 @@ mod tests {
         let engine = QueryEngine::new();
 
         // Create first node
-        let result1 = engine.execute_mut(r#"CREATE (a:Person {name: "Alice"})"#, &mut store);
+        let result1 = engine.execute_mut(r#"CREATE (a:Person {name: "Alice"})"#, &mut store, "default");
         assert!(result1.is_ok());
 
         // Create second node
-        let result2 = engine.execute_mut(r#"CREATE (b:Person {name: "Bob"})"#, &mut store);
+        let result2 = engine.execute_mut(r#"CREATE (b:Person {name: "Bob"})"#, &mut store, "default");
         assert!(result2.is_ok());
 
         // Verify both nodes exist

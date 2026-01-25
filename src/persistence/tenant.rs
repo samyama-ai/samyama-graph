@@ -155,6 +155,8 @@ pub struct Tenant {
     pub quotas: ResourceQuotas,
     /// Enabled status
     pub enabled: bool,
+    /// Auto-RAG configuration
+    pub rag_config: Option<AutoRagConfig>,
 }
 
 impl Tenant {
@@ -166,6 +168,7 @@ impl Tenant {
             created_at: chrono::Utc::now().timestamp(),
             quotas: ResourceQuotas::default(),
             enabled: true,
+            rag_config: None,
         }
     }
 
@@ -177,8 +180,40 @@ impl Tenant {
             created_at: chrono::Utc::now().timestamp(),
             quotas,
             enabled: true,
+            rag_config: None,
         }
     }
+}
+
+/// LLM Provider options
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LLMProvider {
+    OpenAI,
+    Ollama,
+    Gemini,
+    AzureOpenAI,
+    Anthropic,
+}
+
+/// Configuration for Auto-RAG features
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoRagConfig {
+    /// The LLM provider to use
+    pub provider: LLMProvider,
+    /// Model name (e.g., "text-embedding-3-small", "llama3")
+    pub embedding_model: String,
+    /// API Key (optional, can be loaded from env if None)
+    pub api_key: Option<String>,
+    /// API Base URL (required for Ollama/Azure, optional for others)
+    pub api_base_url: Option<String>,
+    /// Chunk size for text splitting
+    pub chunk_size: usize,
+    /// Overlap between chunks
+    pub chunk_overlap: usize,
+    /// Vector dimension size
+    pub vector_dimension: usize,
+    /// Embedding policies: Label -> Vec<PropertyKey>
+    pub embedding_policies: HashMap<String, Vec<String>>,
 }
 
 /// Tenant manager - manages all tenants and their resources
@@ -365,6 +400,20 @@ impl TenantManager {
         Ok(())
     }
 
+    /// Update Auto-RAG configuration for a tenant
+    pub fn update_rag_config(&self, tenant_id: &str, config: Option<AutoRagConfig>) -> TenantResult<()> {
+        let mut tenants = self.tenants.write().unwrap();
+
+        let tenant = tenants.get_mut(tenant_id)
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        tenant.rag_config = config;
+
+        info!("Updated RAG config for tenant: {}", tenant_id);
+
+        Ok(())
+    }
+
     /// Enable/disable a tenant
     pub fn set_enabled(&self, tenant_id: &str, enabled: bool) -> TenantResult<()> {
         if tenant_id == "default" {
@@ -496,5 +545,30 @@ mod tests {
         let result = manager.check_quota("tenant1", "nodes");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TenantError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_update_rag_config() {
+        let manager = TenantManager::new();
+        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+
+        let rag_config = AutoRagConfig {
+            provider: LLMProvider::OpenAI,
+            embedding_model: "text-embedding-3-small".to_string(),
+            api_key: Some("sk-test".to_string()),
+            api_base_url: None,
+            chunk_size: 512,
+            chunk_overlap: 64,
+            vector_dimension: 1536,
+            embedding_policies: HashMap::from([("Document".to_string(), vec!["content".to_string()])]),
+        };
+
+        manager.update_rag_config("tenant1", Some(rag_config)).unwrap();
+
+        let tenant = manager.get_tenant("tenant1").unwrap();
+        assert!(tenant.rag_config.is_some());
+        let config = tenant.rag_config.unwrap();
+        assert_eq!(config.provider, LLMProvider::OpenAI);
+        assert_eq!(config.embedding_model, "text-embedding-3-small");
     }
 }

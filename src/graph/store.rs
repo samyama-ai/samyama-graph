@@ -115,12 +115,13 @@ impl GraphStore {
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
         vector_index: Arc<VectorIndexManager>,
         property_index: Arc<IndexManager>,
+        tenant_manager: Arc<crate::persistence::TenantManager>,
     ) {
         use crate::graph::event::IndexEvent::*;
         
         while let Some(event) = receiver.recv().await {
             match event {
-                NodeCreated { id, labels, properties } => {
+                NodeCreated { tenant_id, id, labels, properties } => {
                     for (key, value) in properties {
                         if let PropertyValue::Vector(vec) = &value {
                             for label in &labels {
@@ -130,16 +131,49 @@ impl GraphStore {
                         for label in &labels {
                             property_index.index_insert(label, &key, value.clone(), id);
                         }
+                        
+                        // Auto-RAG check
+                        if let PropertyValue::String(text) = &value {
+                            if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
+                                if let Some(config) = tenant.rag_config {
+                                    for label in &labels {
+                                        if let Some(keys) = config.embedding_policies.get(label.as_str()) {
+                                            if keys.contains(&key) {
+                                                // Trigger Auto-RAG
+                                                let vector_index_clone = Arc::clone(&vector_index);
+                                                let label_str = label.as_str().to_string();
+                                                let key_clone = key.clone();
+                                                let text_clone = text.clone();
+                                                let config_clone = config.clone();
+                                                
+                                                tokio::spawn(async move {
+                                                    if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                        if let Ok(chunks) = pipeline.process_text(&text_clone).await {
+                                                            for chunk in chunks {
+                                                                // For simplicity, if multiple chunks, we might need a different strategy
+                                                                // but for now we just take the first one or treat it as one.
+                                                                // Real Auto-RAG might create child nodes for chunks.
+                                                                let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &chunk.embedding);
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                NodeDeleted { id, labels, properties } => {
+                NodeDeleted { tenant_id: _, id, labels, properties } => {
                     for (key, value) in properties {
                         for label in &labels {
                             property_index.index_remove(label, &key, &value, id);
                         }
                     }
                 }
-                PropertySet { id, labels, key, old_value, new_value } => {
+                PropertySet { tenant_id, id, labels, key, old_value, new_value } => {
                     if let Some(old) = old_value {
                         for label in &labels {
                             property_index.index_remove(label, &key, &old, id);
@@ -153,13 +187,69 @@ impl GraphStore {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
                         }
                     }
+                    
+                    // Auto-RAG check
+                    if let PropertyValue::String(text) = &new_value {
+                        if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
+                            if let Some(config) = tenant.rag_config {
+                                for label in &labels {
+                                    if let Some(keys) = config.embedding_policies.get(label.as_str()) {
+                                        if keys.contains(&key) {
+                                            let vector_index_clone = Arc::clone(&vector_index);
+                                            let label_str = label.as_str().to_string();
+                                            let key_clone = key.clone();
+                                            let text_clone = text.clone();
+                                            let config_clone = config.clone();
+                                            
+                                            tokio::spawn(async move {
+                                                if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                    if let Ok(chunks) = pipeline.process_text(&text_clone).await {
+                                                        if let Some(first) = chunks.first() {
+                                                            let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                LabelAdded { id, label, properties } => {
+                LabelAdded { tenant_id, id, label, properties } => {
                     for (key, value) in properties {
                         if let PropertyValue::Vector(vec) = &value {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
                         }
                         property_index.index_insert(&label, &key, value.clone(), id);
+                        
+                        // Auto-RAG check
+                        if let PropertyValue::String(text) = &value {
+                            if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
+                                if let Some(config) = tenant.rag_config {
+                                    if let Some(keys) = config.embedding_policies.get(label.as_str()) {
+                                        if keys.contains(&key) {
+                                            let vector_index_clone = Arc::clone(&vector_index);
+                                            let label_str = label.as_str().to_string();
+                                            let key_clone = key.clone();
+                                            let text_clone = text.clone();
+                                            let config_clone = config.clone();
+                                            
+                                            tokio::spawn(async move {
+                                                if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                    if let Ok(chunks) = pipeline.process_text(&text_clone).await {
+                                                        if let Some(first) = chunks.first() {
+                                                            let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -184,6 +274,19 @@ impl GraphStore {
         self.outgoing.insert(node_id, Vec::new());
         self.incoming.insert(node_id, Vec::new());
 
+        let event = crate::graph::event::IndexEvent::NodeCreated {
+            tenant_id: "default".to_string(),
+            id: node_id,
+            labels: node.labels.iter().cloned().collect(),
+            properties: node.properties.clone(),
+        };
+
+        if let Some(sender) = &self.index_sender {
+            let _ = sender.send(event);
+        } else {
+            self.handle_index_event(event, None);
+        }
+
         self.nodes.insert(node_id, node);
         node_id
     }
@@ -191,6 +294,7 @@ impl GraphStore {
     /// Create a node with multiple labels and properties
     pub fn create_node_with_properties(
         &mut self,
+        tenant_id: &str,
         labels: Vec<Label>,
         properties: PropertyMap,
     ) -> NodeId {
@@ -212,6 +316,7 @@ impl GraphStore {
         self.incoming.insert(node_id, Vec::new());
 
         let event = crate::graph::event::IndexEvent::NodeCreated {
+            tenant_id: tenant_id.to_string(),
             id: node_id,
             labels: node.labels.iter().cloned().collect(),
             properties: node.properties.clone(),
@@ -220,7 +325,7 @@ impl GraphStore {
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
         } else {
-            self.handle_index_event(event);
+            self.handle_index_event(event, None);
         }
 
         self.nodes.insert(node_id, node);
@@ -245,6 +350,7 @@ impl GraphStore {
     /// Set a property on a node and update vector indices if necessary
     pub fn set_node_property(
         &mut self,
+        tenant_id: &str,
         node_id: NodeId,
         key: impl Into<String>,
         value: impl Into<PropertyValue>,
@@ -257,6 +363,7 @@ impl GraphStore {
         let old_val = node.set_property(key_str.clone(), val.clone());
 
         let event = crate::graph::event::IndexEvent::PropertySet {
+            tenant_id: tenant_id.to_string(),
             id: node_id,
             labels: node.labels.iter().cloned().collect(),
             key: key_str,
@@ -267,14 +374,18 @@ impl GraphStore {
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
         } else {
-            self.handle_index_event(event);
+            self.handle_index_event(event, None);
         }
 
         Ok(())
     }
 
     /// Delete a node and all its connected edges
-    pub fn delete_node(&mut self, id: NodeId) -> GraphResult<Node> {
+    pub fn delete_node(
+        &mut self,
+        tenant_id: &str,
+        id: NodeId
+    ) -> GraphResult<Node> {
         let node = self.nodes.remove(&id).ok_or(GraphError::NodeNotFound(id))?;
 
         // Remove from label indices
@@ -285,6 +396,7 @@ impl GraphStore {
         }
 
         let event = crate::graph::event::IndexEvent::NodeDeleted {
+            tenant_id: tenant_id.to_string(),
             id,
             labels: node.labels.iter().cloned().collect(),
             properties: node.properties.clone(),
@@ -293,7 +405,7 @@ impl GraphStore {
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
         } else {
-            self.handle_index_event(event);
+            self.handle_index_event(event, None);
         }
 
         // Remove all connected edges
@@ -325,7 +437,12 @@ impl GraphStore {
     /// This is the correct way to add labels to nodes after creation.
     /// Using `node.add_label()` directly will NOT update the label_index,
     /// making the node invisible to `get_nodes_by_label()` queries.
-    pub fn add_label_to_node(&mut self, node_id: NodeId, label: impl Into<Label>) -> GraphResult<()> {
+    pub fn add_label_to_node(
+        &mut self,
+        tenant_id: &str,
+        node_id: NodeId,
+        label: impl Into<Label>
+    ) -> GraphResult<()> {
         let label = label.into();
 
         // Get the node and add the label
@@ -339,6 +456,7 @@ impl GraphStore {
             .insert(node_id);
 
         let event = crate::graph::event::IndexEvent::LabelAdded {
+            tenant_id: tenant_id.to_string(),
             id: node_id,
             label: label.clone(),
             properties: node.properties.clone(),
@@ -347,7 +465,7 @@ impl GraphStore {
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
         } else {
-            self.handle_index_event(event);
+            self.handle_index_event(event, None);
         }
 
         Ok(())
@@ -545,10 +663,10 @@ impl GraphStore {
     // Event Handling
     // ============================================================
 
-    pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent) {
+    pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent, _tenant_manager: Option<Arc<crate::persistence::TenantManager>>) {
         use crate::graph::event::IndexEvent::*;
         match event {
-            NodeCreated { id, labels, properties } => {
+            NodeCreated { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
                     if let PropertyValue::Vector(vec) = &value {
                         for label in &labels {
@@ -560,14 +678,14 @@ impl GraphStore {
                     }
                 }
             }
-            NodeDeleted { id, labels, properties } => {
+            NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
                     for label in &labels {
                         self.property_index.index_remove(label, &key, &value, id);
                     }
                 }
             }
-            PropertySet { id, labels, key, old_value, new_value } => {
+            PropertySet { tenant_id: _, id, labels, key, old_value, new_value } => {
                 if let Some(old) = old_value {
                     for label in &labels {
                         self.property_index.index_remove(label, &key, &old, id);
@@ -582,7 +700,7 @@ impl GraphStore {
                     }
                 }
             }
-            LabelAdded { id, label, properties } => {
+            LabelAdded { tenant_id: _, id, label, properties } => {
                 for (key, value) in properties {
                     if let PropertyValue::Vector(vec) = &value {
                         let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
@@ -716,6 +834,7 @@ mod tests {
         props.insert("age".to_string(), 30i64.into());
 
         let node_id = store.create_node_with_properties(
+            "default",
             vec![Label::new("Person"), Label::new("Employee")],
             props,
         );
@@ -827,7 +946,7 @@ mod tests {
         assert_eq!(store.edge_count(), 1);
 
         // Delete node1 (should also delete connected edge)
-        let deleted = store.delete_node(node1);
+        let deleted = store.delete_node("default", node1);
         assert!(deleted.is_ok());
         assert_eq!(store.node_count(), 1);
         assert_eq!(store.edge_count(), 0);
@@ -893,7 +1012,7 @@ mod tests {
         assert_eq!(store.get_nodes_by_label(&Label::new("Employee")).len(), 0);
 
         // Add "Employee" label using the proper method
-        store.add_label_to_node(node_id, "Employee").unwrap();
+        store.add_label_to_node("default", node_id, "Employee").unwrap();
 
         // Now both labels should be indexed and queryable
         assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 1);
@@ -910,7 +1029,7 @@ mod tests {
         let mut store = GraphStore::new();
         let invalid_id = NodeId::new(999);
 
-        let result = store.add_label_to_node(invalid_id, "Employee");
+        let result = store.add_label_to_node("default", invalid_id, "Employee");
         assert_eq!(result, Err(GraphError::NodeNotFound(invalid_id)));
     }
 }

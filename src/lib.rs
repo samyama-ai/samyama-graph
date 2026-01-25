@@ -106,6 +106,7 @@ pub mod algo;
 pub mod index;
 pub mod sharding;
 pub mod http;
+pub mod rag;
 
 // Re-export main types for convenience
 pub use graph::{
@@ -126,6 +127,11 @@ pub use persistence::{
     PersistentStorage, StorageError, StorageResult,
     Tenant, TenantManager, ResourceQuotas, ResourceUsage, TenantError, TenantResult,
     Wal, WalEntry, WalError, WalResult,
+    AutoRagConfig, LLMProvider,
+};
+
+pub use rag::{
+    RagPipeline, RagError, RagResult, TextChunk,
 };
 
 pub use raft::{

@@ -12,10 +12,11 @@ pub mod wal;
 pub use storage::{PersistentStorage, StorageError, StorageResult};
 pub use tenant::{
     ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
+    AutoRagConfig, LLMProvider,
 };
 pub use wal::{Wal, WalEntry, WalError, WalResult};
 
-use crate::graph::{Edge, Node, PropertyMap};
+use crate::graph::{Edge, Node, PropertyMap, GraphStore};
 use std::path::Path;
 use std::sync::Arc;
 // warn removed - was unused import causing compiler warning
@@ -72,6 +73,22 @@ impl PersistenceManager {
     /// Get tenant manager
     pub fn tenants(&self) -> &TenantManager {
         &self.tenants
+    }
+
+    /// Start the background indexer for a store
+    pub fn start_indexer(&self, store: &GraphStore, receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>) {
+        let vector_index = Arc::clone(&store.vector_index);
+        let property_index = Arc::clone(&store.property_index);
+        let tenant_manager = Arc::clone(&self.tenants);
+
+        tokio::spawn(async move {
+            GraphStore::start_background_indexer(
+                receiver,
+                vector_index,
+                property_index,
+                tenant_manager,
+            ).await;
+        });
     }
 
     /// Persist a node creation

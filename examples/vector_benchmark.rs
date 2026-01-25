@@ -25,7 +25,7 @@ fn main() {
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
         props.insert("embedding".to_string(), PropertyValue::Vector(vec));
         
-        store.create_node_with_properties(vec![Label::new("Item")], props);
+        store.create_node_with_properties("default", vec![Label::new("Item")], props);
         
         if (i + 1) % 2000 == 0 {
             println!("  Inserted {} vectors...", i + 1);

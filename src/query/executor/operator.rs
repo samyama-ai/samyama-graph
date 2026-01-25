@@ -14,7 +14,7 @@ pub trait PhysicalOperator: Send {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
 
     /// Get the next record from this operator (write operations that mutate the store)
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // Default implementation calls the read-only version
         self.next(store)
     }
@@ -877,7 +877,7 @@ impl PhysicalOperator for CreateNodeOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
             for (labels, properties, variable) in &self.nodes_to_create {
@@ -890,12 +890,12 @@ impl PhysicalOperator for CreateNodeOperator {
 
                 // Add additional labels
                 for label in labels.iter().skip(1) {
-                    let _ = store.add_label_to_node(node_id, label.clone());
+                    let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
                 }
 
                 // Set properties using store.set_node_property to trigger indexing
                 for (key, value) in properties {
-                    let _ = store.set_node_property(node_id, key.clone(), value.clone());
+                    let _ = store.set_node_property(tenant_id, node_id, key.clone(), value.clone());
                 }
 
                 self.created_nodes.push((node_id, variable.clone()));
@@ -952,7 +952,7 @@ impl PhysicalOperator for CreateIndexOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -1021,7 +1021,7 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -1091,14 +1091,14 @@ impl PhysicalOperator for CreateEdgeOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         let (source_var, target_var, edge_type, properties, edge_var) = &self.edge_pattern;
 
         // Process input records and create edges
         if !self.processed {
             if let Some(ref mut input) = self.input {
                 // Create edge for each input record
-                while let Some(record) = input.next_mut(store)? {
+                while let Some(record) = input.next_mut(store, tenant_id)? {
                     let source_val = record.get(source_var)
                         .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
                     let target_val = record.get(target_var)
@@ -1203,10 +1203,10 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // Phase 0: Create all nodes and collect their IDs
         if self.phase == 0 {
-            while let Some(record) = self.node_operator.next_mut(store)? {
+            while let Some(record) = self.node_operator.next_mut(store, tenant_id)? {
                 // Extract variable and node from record
                 for (var, value) in record.bindings().iter() {
                     if let Value::Node(node_id, node) = value {
@@ -1316,10 +1316,10 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First pass: process all matched records and create edges
         if !self.done {
-            while let Some(record) = self.input.next_mut(store)? {
+            while let Some(record) = self.input.next_mut(store, tenant_id)? {
                 // For each matched record, create the specified edges
                 for (source_var, target_var, edge_type, properties, _edge_var) in &self.edges_to_create {
                     // Get source node ID from record bindings

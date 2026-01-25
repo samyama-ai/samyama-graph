@@ -123,7 +123,9 @@ fn main() {
             props.insert("name".to_string(), PropertyValue::String(format!("Resource_{}", r)));
             props.insert("cost".to_string(), PropertyValue::Float(rng.gen_range(50.0..500.0)));
             props.insert("efficiency".to_string(), PropertyValue::Float(rng.gen_range(0.5..2.0)));
-            let id = store_write.create_node_with_properties(vec![Label::new("Resource")], props);
+        let id = store_write.create_node_with_properties("default", vec![Label::new("Resource")], props);
+...
+        let d_id = store_write.create_node_with_properties("default", vec![Label::new("Department")], props);
             res_ids.push(id);
         }
 

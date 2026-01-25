@@ -64,7 +64,7 @@ async fn main() {
         props.insert("embedding".to_string(), PropertyValue::Vector(vec));
         props.insert("score".to_string(), PropertyValue::Float(rng.gen::<f64>()));
 
-        let id = store.create_node_with_properties(vec![Label::new("Entity")], props);
+        let id = store.create_node_with_properties("default", vec![Label::new("Entity")], props);
         node_ids.push(id);
     }
     let ingest_nodes_time = start_ingest.elapsed();

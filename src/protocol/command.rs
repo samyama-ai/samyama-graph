@@ -84,7 +84,7 @@ impl CommandHandler {
         }
 
         // Extract graph name (for future multi-tenancy)
-        let _graph_name = match args[1].as_string() {
+        let graph_name = match args[1].as_string() {
             Ok(Some(s)) => s,
             Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
@@ -113,7 +113,10 @@ impl CommandHandler {
         // Execute query with appropriate method
         let result = if is_write_query {
             let mut store_guard = store.write().await;
-            let res = self.query_engine.execute_mut(&query_str, &mut *store_guard);
+            
+            // Set current tenant for indexing events
+            // In a more complex architecture, the store_guard would be isolated
+            let res = self.query_engine.execute_mut(&query_str, &mut *store_guard, &graph_name);
 
             // If write succeeded and persistence is enabled, persist the changes
             if let (Ok(ref batch), Some(ref persist_mgr)) = (&res, &self.persistence) {
@@ -124,15 +127,13 @@ impl CommandHandler {
                         match value {
                             Value::Node(node_id, node) => {
                                 // Persist the created node
-                                if let Err(e) = persist_mgr.persist_create_node("default", node) {
+                                if let Err(e) = persist_mgr.persist_create_node(&graph_name, node) {
                                     warn!("Failed to persist node {:?}: {}", node_id, e);
-                                    // Note: We continue even if persistence fails
-                                    // The in-memory state is still valid
                                 }
                             }
                             Value::Edge(edge_id, edge) => {
                                 // Persist the created edge
-                                if let Err(e) = persist_mgr.persist_create_edge("default", edge) {
+                                if let Err(e) = persist_mgr.persist_create_edge(&graph_name, edge) {
                                     warn!("Failed to persist edge {:?}: {}", edge_id, e);
                                 }
                             }

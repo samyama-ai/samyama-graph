@@ -13,7 +13,7 @@ fn test_property_index_usage() {
     for i in 0..100 {
         let mut props = std::collections::HashMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
-        store.create_node_with_properties(vec![Label::new("Person")], props);
+        store.create_node_with_properties("default", vec![Label::new("Person")], props);
     }
 
     // Query with index
@@ -37,7 +37,7 @@ fn test_property_index_range() {
     for i in 0..10 {
         let mut props = std::collections::HashMap::new();
         props.insert("price".to_string(), PropertyValue::Integer(i * 10));
-        store.create_node_with_properties(vec![Label::new("Product")], props);
+        store.create_node_with_properties("default", vec![Label::new("Product")], props);
     }
 
     // MATCH (n:Product) WHERE n.price > 50 RETURN n
@@ -57,7 +57,7 @@ fn test_create_index_ddl() {
     for i in 0..10 {
         let mut props = std::collections::HashMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
-        store.create_node_with_properties(vec![Label::new("User")], props);
+        store.create_node_with_properties("default", vec![Label::new("User")], props);
     }
 
     // 2. Create index using DDL (should backfill)

@@ -42,7 +42,7 @@ pub async fn query_handler(
 
     let result = if is_write {
         let mut store_guard = store.write().await;
-        engine.execute_mut(&payload.query, &mut *store_guard)
+        engine.execute_mut(&payload.query, &mut *store_guard, "default")
     } else {
         let store_guard = store.read().await;
         engine.execute(&payload.query, &*store_guard)

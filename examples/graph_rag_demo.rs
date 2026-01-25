@@ -21,23 +21,23 @@ fn main() {
     // Doc 3: "Graph databases store connected data." [0.0, 0.0, 1.0]
     
     let doc1 = store.create_node("Document");
-    store.set_node_property(doc1, "title", "Rust Intro").unwrap();
-    store.set_node_property(doc1, "embedding", PropertyValue::Vector(vec![1.0, 0.0, 0.0])).unwrap();
+    store.set_node_property("default", doc1, "title", "Rust Intro").unwrap();
+    store.set_node_property("default", doc1, "embedding", PropertyValue::Vector(vec![1.0, 0.0, 0.0])).unwrap();
     
     let doc2 = store.create_node("Document");
-    store.set_node_property(doc2, "title", "Python Data").unwrap();
-    store.set_node_property(doc2, "embedding", PropertyValue::Vector(vec![0.0, 1.0, 0.0])).unwrap();
+    store.set_node_property("default", doc2, "title", "Python Data").unwrap();
+    store.set_node_property("default", doc2, "embedding", PropertyValue::Vector(vec![0.0, 1.0, 0.0])).unwrap();
     
     let doc3 = store.create_node("Document");
-    store.set_node_property(doc3, "title", "Graph DB").unwrap();
-    store.set_node_property(doc3, "embedding", PropertyValue::Vector(vec![0.0, 0.0, 1.0])).unwrap();
+    store.set_node_property("default", doc3, "title", "Graph DB").unwrap();
+    store.set_node_property("default", doc3, "embedding", PropertyValue::Vector(vec![0.0, 0.0, 1.0])).unwrap();
 
     // Nodes: Authors
     let alice = store.create_node("Author");
-    store.set_node_property(alice, "name", "Alice").unwrap();
+    store.set_node_property("default", alice, "name", "Alice").unwrap();
     
     let bob = store.create_node("Author");
-    store.set_node_property(bob, "name", "Bob").unwrap();
+    store.set_node_property("default", bob, "name", "Bob").unwrap();
 
     // Relationships: Author -[WROTE]-> Document
     store.create_edge(alice, doc1, "WROTE").unwrap();

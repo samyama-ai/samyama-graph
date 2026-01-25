@@ -10,14 +10,14 @@ fn test_vector_call_query() {
     store.create_vector_index("Person", "embedding", 3, DistanceMetric::Cosine).unwrap();
     
     let mut props1 = std::collections::HashMap::new();
-    props1.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-    props1.insert("embedding".to_string(), PropertyValue::Vector(vec![1.0, 0.0, 0.0]));
-    store.create_node_with_properties(vec![Label::new("Person")], props1);
+    props1.insert("name".to_string(), "Alice".into());
+    props1.insert("embedding".to_string(), PropertyValue::Vector(vec![1.0, 0.0]));
+    store.create_node_with_properties("default", vec![Label::new("Person")], props1);
     
     let mut props2 = std::collections::HashMap::new();
-    props2.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
-    props2.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 1.0, 0.0]));
-    store.create_node_with_properties(vec![Label::new("Person")], props2);
+    props2.insert("name".to_string(), "Bob".into());
+    props2.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 1.0]));
+    store.create_node_with_properties("default", vec![Label::new("Person")], props2);
     
     // 2. Execute query
     let engine = QueryEngine::new();
@@ -44,20 +44,17 @@ fn test_vector_hybrid_query() {
     // 1. Setup data
     store.create_vector_index("Person", "embedding", 2, DistanceMetric::Cosine).unwrap();
     
-    // Alice [1, 0]
     let alice = store.create_node("Person");
-    store.set_node_property(alice, "name", "Alice").unwrap();
-    store.set_node_property(alice, "embedding", PropertyValue::Vector(vec![1.0, 0.0])).unwrap();
-    
-    // Bob [0, 1]
+    store.set_node_property("default", alice, "name", "Alice").unwrap();
+    store.set_node_property("default", alice, "embedding", PropertyValue::Vector(vec![1.0, 0.0])).unwrap();
+
     let bob = store.create_node("Person");
-    store.set_node_property(bob, "name", "Bob").unwrap();
-    store.set_node_property(bob, "embedding", PropertyValue::Vector(vec![0.0, 1.0])).unwrap();
-    
-    // Charlie [1, 0.1]
+    store.set_node_property("default", bob, "name", "Bob").unwrap();
+    store.set_node_property("default", bob, "embedding", PropertyValue::Vector(vec![0.0, 1.0])).unwrap();
+
     let charlie = store.create_node("Person");
-    store.set_node_property(charlie, "name", "Charlie").unwrap();
-    store.set_node_property(charlie, "embedding", PropertyValue::Vector(vec![1.0, 0.1])).unwrap();
+    store.set_node_property("default", charlie, "name", "Charlie").unwrap();
+    store.set_node_property("default", charlie, "embedding", PropertyValue::Vector(vec![1.0, 0.1])).unwrap();
     
     // Edges: Alice -> Charlie
     store.create_edge(alice, charlie, "KNOWS").unwrap();

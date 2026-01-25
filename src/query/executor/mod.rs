@@ -92,14 +92,16 @@ impl<'a> QueryExecutor<'a> {
 pub struct MutQueryExecutor<'a> {
     store: &'a mut GraphStore,
     planner: QueryPlanner,
+    tenant_id: String,
 }
 
 impl<'a> MutQueryExecutor<'a> {
     /// Create a new mutable query executor for write operations
-    pub fn new(store: &'a mut GraphStore) -> Self {
+    pub fn new(store: &'a mut GraphStore, tenant_id: String) -> Self {
         Self {
             store,
             planner: QueryPlanner::new(),
+            tenant_id,
         }
     }
 
@@ -121,7 +123,7 @@ impl<'a> MutQueryExecutor<'a> {
 
         // Pull records from the root operator
         // Use next_mut() which allows operators to modify the graph store
-        while let Some(record) = plan.root.next_mut(self.store)? {
+        while let Some(record) = plan.root.next_mut(self.store, &self.tenant_id)? {
             records.push(record);
         }
 

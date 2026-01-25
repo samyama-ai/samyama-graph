@@ -127,10 +127,10 @@ fn load_branches(
         }
 
         // Add branch_type as label AFTER releasing mutable borrow
-        // Using graph.add_label_to_node() ensures the label_index is updated,
+        // Using graph.add_label_to_node("default", ) ensures the label_index is updated,
         // making the node queryable via get_nodes_by_label() and Cypher MATCH
         if let Some(bt) = row.get("branch_type") {
-            let _ = graph.add_label_to_node(node_id, bt.replace(" ", ""));
+            let _ = graph.add_label_to_node("default", node_id, bt.replace(" ", ""));
         }
 
         if let Some(id) = row.get("branch_id") {
@@ -214,13 +214,13 @@ fn load_customers(
         }
 
         // Add labels AFTER releasing mutable borrow
-        // Using graph.add_label_to_node() ensures the label_index is updated,
+        // Using graph.add_label_to_node("default", ) ensures the label_index is updated,
         // making nodes queryable via get_nodes_by_label() and Cypher MATCH (c:Individual)
         if let Some(ct) = customer_type {
-            let _ = graph.add_label_to_node(node_id, ct);
+            let _ = graph.add_label_to_node("default", node_id, ct);
         }
         if let Some(risk) = risk_label {
-            let _ = graph.add_label_to_node(node_id, risk);
+            let _ = graph.add_label_to_node("default", node_id, risk);
         }
 
         if let Some(id) = row.get("customer_id") {
@@ -293,13 +293,13 @@ fn load_accounts(
         }
 
         // Add labels AFTER releasing mutable borrow
-        // Using graph.add_label_to_node() ensures the label_index is updated,
+        // Using graph.add_label_to_node("default", ) ensures the label_index is updated,
         // making nodes queryable via get_nodes_by_label() and Cypher MATCH (a:Checking)
         if let Some(at) = account_type {
-            let _ = graph.add_label_to_node(node_id, at);
+            let _ = graph.add_label_to_node("default", node_id, at);
         }
         if let Some(status) = status_label {
-            let _ = graph.add_label_to_node(node_id, status);
+            let _ = graph.add_label_to_node("default", node_id, status);
         }
 
         if let Some(id) = row.get("account_id") {
@@ -380,14 +380,14 @@ fn load_transactions(
         }
 
         // Add labels AFTER releasing mutable borrow
-        // Using graph.add_label_to_node() ensures the label_index is updated,
+        // Using graph.add_label_to_node("default", ) ensures the label_index is updated,
         // making nodes queryable via get_nodes_by_label() and Cypher MATCH (t:Transfer)
         if let Some(tt) = transaction_type {
-            let _ = graph.add_label_to_node(node_id, tt);
+            let _ = graph.add_label_to_node("default", node_id, tt);
         }
         if is_fraud {
-            let _ = graph.add_label_to_node(node_id, "Flagged");
-            let _ = graph.add_label_to_node(node_id, "Fraud");
+            let _ = graph.add_label_to_node("default", node_id, "Flagged");
+            let _ = graph.add_label_to_node("default", node_id, "Fraud");
         }
 
         if let Some(id) = row.get("transaction_id") {
@@ -1037,13 +1037,13 @@ fn create_sample_data(graph: &mut GraphStore) -> Result<LoadStats, Box<dyn std::
         }
 
         // Add labels AFTER releasing mutable borrow
-        // Using graph.add_label_to_node() ensures the label_index is updated,
+        // Using graph.add_label_to_node("default", ) ensures the label_index is updated,
         // so MATCH (c:Individual) queries work correctly
-        let _ = graph.add_label_to_node(node_id, *ctype);
+        let _ = graph.add_label_to_node("default", node_id, *ctype);
         let risk_label = if *risk >= 80 { "HighRisk" }
             else if *risk >= 50 { "MediumRisk" }
             else { "LowRisk" };
-        let _ = graph.add_label_to_node(node_id, risk_label);
+        let _ = graph.add_label_to_node("default", node_id, risk_label);
 
         stats.customers += 1;
     }
@@ -1068,7 +1068,7 @@ fn create_sample_data(graph: &mut GraphStore) -> Result<LoadStats, Box<dyn std::
         }
 
         // Add label AFTER releasing mutable borrow
-        let _ = graph.add_label_to_node(node_id, acc_type);
+        let _ = graph.add_label_to_node("default", node_id, acc_type);
 
         stats.accounts += 1;
     }
@@ -1095,9 +1095,9 @@ fn create_sample_data(graph: &mut GraphStore) -> Result<LoadStats, Box<dyn std::
         }
 
         // Add labels AFTER releasing mutable borrow
-        let _ = graph.add_label_to_node(node_id, tx_type);
+        let _ = graph.add_label_to_node("default", node_id, tx_type);
         if is_flagged {
-            let _ = graph.add_label_to_node(node_id, "Flagged");
+            let _ = graph.add_label_to_node("default", node_id, "Flagged");
         }
 
         stats.transactions += 1;
