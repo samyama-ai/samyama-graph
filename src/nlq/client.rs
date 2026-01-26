@@ -26,6 +26,7 @@ impl NLQClient {
                 LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 LLMProvider::AzureOpenAI => String::new(),
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+                LLMProvider::Mock => String::new(),
             }
         });
 
@@ -41,6 +42,7 @@ impl NLQClient {
             LLMProvider::OpenAI => self.openai_chat(prompt).await,
             LLMProvider::Ollama => self.ollama_chat(prompt).await,
             LLMProvider::Gemini => self.gemini_chat(prompt).await,
+            LLMProvider::Mock => Ok("MATCH (n) RETURN n LIMIT 10".to_string()),
             _ => Err(NLQError::ConfigError(format!("Provider {:?} not yet implemented", self.config.provider))),
         }
     }

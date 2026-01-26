@@ -30,6 +30,7 @@ impl EmbeddingClient {
                 LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 LLMProvider::AzureOpenAI => String::new(), // Must be provided
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+                LLMProvider::Mock => String::new(),
             }
         });
 
@@ -52,6 +53,10 @@ impl EmbeddingClient {
             LLMProvider::OpenAI => self.openai_embeddings(texts).await,
             LLMProvider::Ollama => self.ollama_embeddings(texts).await,
             LLMProvider::Gemini => self.gemini_embeddings(texts).await,
+            LLMProvider::Mock => {
+                // Return dummy embeddings
+                Ok(texts.iter().map(|_| vec![0.1; 64]).collect())
+            }
             _ => Err(EmbedError::ConfigError(format!("Provider {:?} not yet implemented", self.provider))),
         }
     }
