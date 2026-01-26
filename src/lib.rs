@@ -107,6 +107,7 @@ pub mod index;
 pub mod sharding;
 pub mod http;
 pub mod embed;
+pub mod nlq;
 
 // Re-export main types for convenience
 pub use graph::{
@@ -127,11 +128,15 @@ pub use persistence::{
     PersistentStorage, StorageError, StorageResult,
     Tenant, TenantManager, ResourceQuotas, ResourceUsage, TenantError, TenantResult,
     Wal, WalEntry, WalError, WalResult,
-    AutoEmbedConfig, LLMProvider,
+    AutoEmbedConfig, NLQConfig, LLMProvider,
 };
 
 pub use embed::{
     EmbedPipeline, EmbedError, EmbedResult, TextChunk,
+};
+
+pub use nlq::{
+    NLQPipeline, NLQError, NLQResult,
 };
 
 pub use raft::{

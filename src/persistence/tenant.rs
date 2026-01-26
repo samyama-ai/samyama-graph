@@ -157,6 +157,8 @@ pub struct Tenant {
     pub enabled: bool,
     /// Auto-Embed configuration
     pub embed_config: Option<AutoEmbedConfig>,
+    /// NLQ configuration
+    pub nlq_config: Option<NLQConfig>,
 }
 
 impl Tenant {
@@ -169,6 +171,7 @@ impl Tenant {
             quotas: ResourceQuotas::default(),
             enabled: true,
             embed_config: None,
+            nlq_config: None,
         }
     }
 
@@ -181,6 +184,7 @@ impl Tenant {
             quotas,
             enabled: true,
             embed_config: None,
+            nlq_config: None,
         }
     }
 }
@@ -193,6 +197,23 @@ pub enum LLMProvider {
     Gemini,
     AzureOpenAI,
     Anthropic,
+}
+
+/// Configuration for NLQ features
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NLQConfig {
+    /// Enabled status
+    pub enabled: bool,
+    /// The LLM provider to use
+    pub provider: LLMProvider,
+    /// Model name (e.g., "gpt-4o", "llama3")
+    pub model: String,
+    /// API Key (optional, can be loaded from env if None)
+    pub api_key: Option<String>,
+    /// API Base URL (required for Ollama/Azure, optional for others)
+    pub api_base_url: Option<String>,
+    /// System prompt for the LLM
+    pub system_prompt: Option<String>,
 }
 
 /// Configuration for Auto-Embed features
@@ -410,6 +431,20 @@ impl TenantManager {
         tenant.embed_config = config;
 
         info!("Updated Auto-Embed config for tenant: {}", tenant_id);
+
+        Ok(())
+    }
+
+    /// Update NLQ configuration for a tenant
+    pub fn update_nlq_config(&self, tenant_id: &str, config: Option<NLQConfig>) -> TenantResult<()> {
+        let mut tenants = self.tenants.write().unwrap();
+
+        let tenant = tenants.get_mut(tenant_id)
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        tenant.nlq_config = config;
+
+        info!("Updated NLQ config for tenant: {}", tenant_id);
 
         Ok(())
     }
