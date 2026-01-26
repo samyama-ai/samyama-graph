@@ -108,6 +108,7 @@ pub mod sharding;
 pub mod http;
 pub mod embed;
 pub mod nlq;
+pub mod agent;
 
 // Re-export main types for convenience
 pub use graph::{

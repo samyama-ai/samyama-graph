@@ -159,6 +159,8 @@ pub struct Tenant {
     pub embed_config: Option<AutoEmbedConfig>,
     /// NLQ configuration
     pub nlq_config: Option<NLQConfig>,
+    /// Agent configuration
+    pub agent_config: Option<AgentConfig>,
 }
 
 impl Tenant {
@@ -172,6 +174,7 @@ impl Tenant {
             enabled: true,
             embed_config: None,
             nlq_config: None,
+            agent_config: None,
         }
     }
 
@@ -185,6 +188,7 @@ impl Tenant {
             enabled: true,
             embed_config: None,
             nlq_config: None,
+            agent_config: None,
         }
     }
 }
@@ -197,6 +201,36 @@ pub enum LLMProvider {
     Gemini,
     AzureOpenAI,
     Anthropic,
+}
+
+/// Tool definition for agents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub enabled: bool,
+}
+
+/// Configuration for Agentic features
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// Enabled status
+    pub enabled: bool,
+    /// LLM provider for the agent
+    pub provider: LLMProvider,
+    /// Model name
+    pub model: String,
+    /// API Key
+    pub api_key: Option<String>,
+    /// Base URL
+    pub api_base_url: Option<String>,
+    /// System prompt
+    pub system_prompt: Option<String>,
+    /// Available tools
+    pub tools: Vec<ToolConfig>,
+    /// Auto-trigger policies (e.g., on node creation)
+    pub policies: HashMap<String, String>, // Label -> Trigger Prompt
 }
 
 /// Configuration for NLQ features
@@ -445,6 +479,20 @@ impl TenantManager {
         tenant.nlq_config = config;
 
         info!("Updated NLQ config for tenant: {}", tenant_id);
+
+        Ok(())
+    }
+
+    /// Update Agent configuration for a tenant
+    pub fn update_agent_config(&self, tenant_id: &str, config: Option<AgentConfig>) -> TenantResult<()> {
+        let mut tenants = self.tenants.write().unwrap();
+
+        let tenant = tenants.get_mut(tenant_id)
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        tenant.agent_config = config;
+
+        info!("Updated Agent config for tenant: {}", tenant_id);
 
         Ok(())
     }
