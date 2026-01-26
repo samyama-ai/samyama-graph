@@ -7,153 +7,281 @@
 //! 4. Cypher Query Execution
 
 use samyama::{GraphStore, Label, PropertyValue, QueryEngine, PersistenceManager, DistanceMetric};
+
 use std::time::Instant;
+
 use std::sync::Arc;
+
 use samyama::persistence::TenantManager;
+
 use rand::Rng;
 
+use tokio::sync::RwLock;
+
+
+
+const VECTOR_DIM: usize = 64;
+
+const NUM_NODES: usize = 10_000;
+
+const EDGES_PER_NODE: usize = 5;
+
+const SEARCH_K: usize = 10;
+
+
+
 #[tokio::main]
+
 async fn main() {
+
     tracing_subscriber::fmt::init();
 
-    const VECTOR_DIM: usize = 64;
-    const EDGES_PER_NODE: usize = 5;
-    const SEARCH_K: usize = 10;
-    let num_nodes: usize = 10_000;
+    println!("--- Samyama Comprehensive Benchmark Suite ---");
 
-    println!("--- Samyama Full Benchmark ---");
+    println!("Nodes: {}", NUM_NODES);
 
-    // 1. Ingestion Throughput
-    println!("\n1. Ingestion Throughput Test");
+    println!("Edges: ~{}", NUM_NODES * EDGES_PER_NODE);
+
+    println!("Vector Dim: {}", VECTOR_DIM);
+
+
+
+    // Setup
+
     let (mut store, rx) = GraphStore::with_async_indexing();
+
     let engine = QueryEngine::new();
-    
-    // Create tenant manager
+
     let tenant_manager = Arc::new(TenantManager::new());
+
     
+
     // Start background indexer
+
     let v_idx = Arc::clone(&store.vector_index);
+
     let p_idx = Arc::clone(&store.property_index);
+
     tokio::spawn(async move {
+
         GraphStore::start_background_indexer(rx, v_idx, p_idx, tenant_manager).await;
+
     });
 
-    // --- 1. Ingestion Benchmark ---
+
+
+    // 1. Ingestion
+
+    let node_ids = benchmark_ingestion(&mut store).await;
+
+
+
+    // 2. Vector Search
+
+    benchmark_vector_search(&store);
+
+
+
+    // 3. K-Hop Traversal (The "Graphy" Test)
+
+    benchmark_k_hop(&store, &engine, &node_ids);
+
+
+
+    // 4. Concurrent Mixed Workload
+
+    // Wrap store in RwLock/Arc for shared access
+
+    // Note: GraphStore currently requires &mut for some ops, checking concurrency support
+
+    // For this benchmark, we might need to skip if GraphStore isn't fully thread-safe for mixed Read/Write yet
+
+    // Or we use the engine which handles locks? Engine usually takes &GraphStore.
+
+    // benchmark_concurrent_load(store).await;
+
+}
+
+
+
+async fn benchmark_ingestion(store: &mut GraphStore) -> Vec<samyama::graph::NodeId> {
+
     println!("\n[1] Benchmarking Ingestion...");
-    
-    // Create Vector Index first (will be used by background worker)
+
     store.create_vector_index("Entity", "embedding", VECTOR_DIM, DistanceMetric::Cosine).unwrap();
 
-    let mut rng = rand::thread_rng();
-    let start_ingest = Instant::now();
-    let mut node_ids = Vec::with_capacity(num_nodes);
 
-    // Bulk create nodes
-    for i in 0..num_nodes {
+
+    let mut rng = rand::thread_rng();
+
+    let start = Instant::now();
+
+    let mut node_ids = Vec::with_capacity(NUM_NODES);
+
+
+
+    // Nodes
+
+    for i in 0..NUM_NODES {
+
         let vec: Vec<f32> = (0..VECTOR_DIM).map(|_| rng.gen::<f32>()).collect();
-        
-        let mut props = std::collections::HashMap::new();
+
+        let mut props = samyama::PropertyMap::new();
+
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
+
         props.insert("embedding".to_string(), PropertyValue::Vector(vec));
+
         props.insert("score".to_string(), PropertyValue::Float(rng.gen::<f64>()));
 
+
+
         let id = store.create_node_with_properties("default", vec![Label::new("Entity")], props);
+
         node_ids.push(id);
-    }
-    let ingest_nodes_time = start_ingest.elapsed();
-    println!("  Nodes created: {} in {:.2?}", num_nodes, ingest_nodes_time);
-    println!("  Node Rate: {:.0} nodes/sec", num_nodes as f64 / ingest_nodes_time.as_secs_f64());
 
-    // Bulk create edges (Random Graph)
-    let start_edges = Instant::now();
+    }
+
+    let node_time = start.elapsed();
+
+    println!("  Nodes: {:.2?} ({:.0} nodes/sec)", node_time, NUM_NODES as f64 / node_time.as_secs_f64());
+
+
+
+    // Edges
+
+    let start_edge = Instant::now();
+
     let mut edge_count = 0;
-    for i in 0..num_nodes {
+
+    for i in 0..NUM_NODES {
+
         for _ in 0..EDGES_PER_NODE {
-            let target_idx = rng.gen_range(0..num_nodes);
+
+            let target_idx = rng.gen_range(0..NUM_NODES);
+
             if i != target_idx {
+
                 let source = node_ids[i];
+
                 let target = node_ids[target_idx];
+
                 store.create_edge(source, target, "LINKS_TO").unwrap();
+
                 edge_count += 1;
+
             }
+
         }
+
     }
-    let ingest_edges_time = start_edges.elapsed();
-    println!("  Edges created: {} in {:.2?}", edge_count, ingest_edges_time);
-    println!("  Edge Rate: {:.0} edges/sec", edge_count as f64 / ingest_edges_time.as_secs_f64());
 
-    // Wait for indexing to catch up before searching
-    println!("  Waiting 2s for background indexing to complete...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let edge_time = start_edge.elapsed();
 
-    // --- 2. Vector Search Benchmark ---
+    println!("  Edges: {:.2?} ({:.0} edges/sec)", edge_time, edge_count as f64 / edge_time.as_secs_f64());
+
+
+
+    // Wait for indexing
+
+    println!("  Waiting for indexing...");
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    
+
+    node_ids
+
+}
+
+
+
+fn benchmark_vector_search(store: &GraphStore) {
+
     println!("\n[2] Benchmarking Vector Search (HNSW)...");
+
+    let mut rng = rand::thread_rng();
+
     let num_searches = 1000;
-    let mut total_search_time = std::time::Duration::default();
+
+    let mut total_time = std::time::Duration::default();
+
+
 
     for _ in 0..num_searches {
+
         let query: Vec<f32> = (0..VECTOR_DIM).map(|_| rng.gen::<f32>()).collect();
+
         let t = Instant::now();
-        let _results = store.vector_search("Entity", "embedding", &query, SEARCH_K).unwrap();
-        total_search_time += t.elapsed();
-    }
-    
-    println!("  Queries: {}", num_searches);
-    println!("  Total Time: {:.2?}", total_search_time);
-    println!("  Avg Latency: {:.2?}", total_search_time / num_searches as u32);
-    println!("  QPS: {:.0}", num_searches as f64 / total_search_time.as_secs_f64());
 
+        let _ = store.vector_search("Entity", "embedding", &query, SEARCH_K).unwrap();
 
-    // --- 3. Graph Algorithms Benchmark ---
-    println!("\n[3] Benchmarking Graph Algorithms...");
+        total_time += t.elapsed();
 
-    // PageRank
-    let start_pr = Instant::now();
-    let pr_query = "CALL algo.pageRank('Entity', 'LINKS_TO') YIELD node, score RETURN node";
-    let pr_res = engine.execute(pr_query, &store).unwrap();
-    let pr_time = start_pr.elapsed();
-    println!("  PageRank (20 iters): {:.2?} ({} nodes processed)", pr_time, pr_res.records.len());
-
-    // Shortest Path (BFS)
-    let start_node = node_ids[0];
-    let end_node = node_ids[num_nodes / 2]; // Pick someone in the middle
-    
-    let start_bfs = Instant::now();
-    let sp_query = format!("CALL algo.shortestPath({}, {}) YIELD path, cost RETURN cost", start_node.as_u64(), end_node.as_u64());
-    let sp_res = engine.execute(&sp_query, &store).unwrap();
-    let sp_time = start_bfs.elapsed();
-    
-    println!("  Shortest Path (BFS): {:.2?}", sp_time);
-    if !sp_res.records.is_empty() {
-        println!("    Path found! Cost: {:?}", sp_res.records[0].get("cost").unwrap());
-    } else {
-        println!("    No path found (random graph disconnected).");
     }
 
+    
 
-    // --- 4. Cypher Query Benchmark ---
-    println!("\n[4] Benchmarking Cypher Queries...");
+    println!("  Avg Latency: {:.2?}", total_time / num_searches as u32);
+
+    println!("  QPS: {:.0}", num_searches as f64 / total_time.as_secs_f64());
+
+}
+
+
+
+fn benchmark_k_hop(store: &GraphStore, engine: &QueryEngine, node_ids: &[samyama::graph::NodeId]) {
+
+    println!("\n[3] Benchmarking K-Hop Traversal...");
+
+    // 1-Hop
+
+    let query_1 = "MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id";
+
+    // 2-Hop
+
+    let query_2 = "MATCH (a:Entity)-[:LINKS_TO]->(b)-[:LINKS_TO]->(c:Entity) WHERE a.id = {} RETURN c.id";
+
     
-    // Create Index on Entity(id)
-    println!("  Creating index on :Entity(id)...");
-    let create_index_query = "CREATE INDEX ON :Entity(id)";
-    engine.execute_mut(create_index_query, &mut store, "default").unwrap();
-    
-    // Simple 1-hop traversal
-    // MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id
-    let traversal_query = format!("MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id", 1);
-    
-    let start_cypher = Instant::now();
-    let mut traversal_count = 0;
-    for _ in 0..1000 {
-        let res = engine.execute(&traversal_query, &store).unwrap();
-        traversal_count += res.records.len();
+
+    let mut rng = rand::thread_rng();
+
+    let num_queries = 100;
+
+
+
+    // 1-Hop Test
+
+    let start = Instant::now();
+
+    for _ in 0..num_queries {
+
+        let id = rng.gen_range(0..NUM_NODES);
+
+        let q = query_1.replace("{}", &id.to_string());
+
+        let _ = engine.execute(&q, store).unwrap();
+
     }
-    let cypher_time = start_cypher.elapsed();
-    
-    println!("  Executed 1000 traversal queries in {:.2?} (Total records: {})", cypher_time, traversal_count);
-    println!("  Avg Latency: {:.2?}", cypher_time / 1000);
-    println!("  QPS: {:.0}", 1000.0 / cypher_time.as_secs_f64());
 
-    println!("\n=== Benchmark Complete ===");
+    println!("  1-Hop Latency: {:.2?}", start.elapsed() / num_queries as u32);
+
+
+
+    // 2-Hop Test
+
+    let start = Instant::now();
+
+    for _ in 0..num_queries {
+
+        let id = rng.gen_range(0..NUM_NODES);
+
+        let q = query_2.replace("{}", &id.to_string());
+
+        let _ = engine.execute(&q, store).unwrap();
+
+    }
+
+    println!("  2-Hop Latency: {:.2?}", start.elapsed() / num_queries as u32);
+
 }

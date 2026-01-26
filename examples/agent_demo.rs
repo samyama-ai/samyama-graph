@@ -25,7 +25,7 @@ async fn main() {
     runtime.register_tool(Arc::new(WebSearchTool::new("mock-key".to_string())));
 
     // 3. Simulate Trigger (e.g., Node Created: Company {name: "Samyama AI"})
-    println!("\nTriggering agent for node context: Company {name: 'Samyama AI'}");
+    println!("\nTriggering agent for node context: Company {{name: 'Samyama AI'}}");
     let context = "Node: Company { name: 'Samyama AI', industry: 'Technology' }";
     let task = "Find the latest news about this company and update the 'news' property.";
 
