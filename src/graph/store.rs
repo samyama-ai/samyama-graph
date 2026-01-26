@@ -15,6 +15,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
+use crate::agent::{AgentRuntime, tools::WebSearchTool};
 
 /// Errors that can occur during graph operations
 #[derive(Error, Debug, PartialEq)]
@@ -122,23 +123,23 @@ impl GraphStore {
         while let Some(event) = receiver.recv().await {
             match event {
                 NodeCreated { tenant_id, id, labels, properties } => {
-                    for (key, value) in properties {
-                        if let PropertyValue::Vector(vec) = &value {
+                    for (key, value) in &properties {
+                        if let PropertyValue::Vector(vec) = value {
                             for label in &labels {
-                                let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                                let _ = vector_index.add_vector(label.as_str(), key, id, vec);
                             }
                         }
                         for label in &labels {
-                            property_index.index_insert(label, &key, value.clone(), id);
+                            property_index.index_insert(label, key, value.clone(), id);
                         }
                         
                         // Auto-Embed check
-                        if let PropertyValue::String(text) = &value {
+                        if let PropertyValue::String(text) = value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                                 if let Some(config) = tenant.embed_config {
                                     for label in &labels {
                                         if let Some(keys) = config.embedding_policies.get(label.as_str()) {
-                                            if keys.contains(&key) {
+                                            if keys.contains(key) {
                                                 // Trigger Auto-Embed
                                                 let vector_index_clone = Arc::clone(&vector_index);
                                                 let label_str = label.as_str().to_string();
@@ -150,9 +151,6 @@ impl GraphStore {
                                                     if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
                                                         if let Ok(chunks) = pipeline.process_text(&text_clone).await {
                                                             for chunk in chunks {
-                                                                // For simplicity, if multiple chunks, we might need a different strategy
-                                                                // but for now we just take the first one or treat it as one.
-                                                                // Real Auto-Embed might create child nodes for chunks.
                                                                 let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &chunk.embedding);
                                                             }
                                                         }
@@ -160,6 +158,38 @@ impl GraphStore {
                                                 });
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Agentic Enrichment Trigger
+                    if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
+                        if let Some(agent_config) = tenant.agent_config {
+                            if agent_config.enabled {
+                                for label in &labels {
+                                    if let Some(trigger_prompt) = agent_config.policies.get(label.as_str()) {
+                                        // Construct context from node properties
+                                        let context = format!("Node: {} {:?}", label.as_str(), properties);
+                                        let task = trigger_prompt.clone();
+                                        let mut runtime = AgentRuntime::new(agent_config.clone());
+                                        let label_str = label.as_str().to_string();
+                                        
+                                        // Register tools based on config/availability
+                                        if let Some(api_key) = &agent_config.api_key {
+                                            runtime.register_tool(Arc::new(WebSearchTool::new(api_key.clone())));
+                                        } else {
+                                            // Mock/Prototype mode
+                                            runtime.register_tool(Arc::new(WebSearchTool::new("mock".to_string())));
+                                        }
+
+                                        tokio::spawn(async move {
+                                            if let Ok(result) = runtime.process_trigger(&task, &context).await {
+                                                println!("Agent Action [{}] -> {}", label_str, result);
+                                                // Future: Write result back to graph properties using a GraphStore client
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -211,6 +241,34 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                                                 }
                                             });
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Agentic Enrichment Trigger (PropertySet)
+                    if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
+                        if let Some(agent_config) = tenant.agent_config {
+                            if agent_config.enabled {
+                                for label in &labels {
+                                    if let Some(trigger_prompt) = agent_config.policies.get(label.as_str()) {
+                                        let context = format!("Node: {} (Property Updated: {})", label.as_str(), key);
+                                        let task = trigger_prompt.clone();
+                                        let mut runtime = AgentRuntime::new(agent_config.clone());
+                                        let label_str = label.as_str().to_string();
+                                        
+                                        if let Some(api_key) = &agent_config.api_key {
+                                            runtime.register_tool(Arc::new(WebSearchTool::new(api_key.clone())));
+                                        } else {
+                                            runtime.register_tool(Arc::new(WebSearchTool::new("mock".to_string())));
+                                        }
+
+                                        tokio::spawn(async move {
+                                            if let Ok(result) = runtime.process_trigger(&task, &context).await {
+                                                println!("Agent Action [{}] -> {}", label_str, result);
+                                            }
+                                        });
                                     }
                                 }
                             }
