@@ -155,8 +155,8 @@ pub struct Tenant {
     pub quotas: ResourceQuotas,
     /// Enabled status
     pub enabled: bool,
-    /// Auto-RAG configuration
-    pub rag_config: Option<AutoRagConfig>,
+    /// Auto-Embed configuration
+    pub embed_config: Option<AutoEmbedConfig>,
 }
 
 impl Tenant {
@@ -168,7 +168,7 @@ impl Tenant {
             created_at: chrono::Utc::now().timestamp(),
             quotas: ResourceQuotas::default(),
             enabled: true,
-            rag_config: None,
+            embed_config: None,
         }
     }
 
@@ -180,7 +180,7 @@ impl Tenant {
             created_at: chrono::Utc::now().timestamp(),
             quotas,
             enabled: true,
-            rag_config: None,
+            embed_config: None,
         }
     }
 }
@@ -195,9 +195,9 @@ pub enum LLMProvider {
     Anthropic,
 }
 
-/// Configuration for Auto-RAG features
+/// Configuration for Auto-Embed features
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutoRagConfig {
+pub struct AutoEmbedConfig {
     /// The LLM provider to use
     pub provider: LLMProvider,
     /// Model name (e.g., "text-embedding-3-small", "llama3")
@@ -400,16 +400,16 @@ impl TenantManager {
         Ok(())
     }
 
-    /// Update Auto-RAG configuration for a tenant
-    pub fn update_rag_config(&self, tenant_id: &str, config: Option<AutoRagConfig>) -> TenantResult<()> {
+    /// Update Auto-Embed configuration for a tenant
+    pub fn update_embed_config(&self, tenant_id: &str, config: Option<AutoEmbedConfig>) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
 
         let tenant = tenants.get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
-        tenant.rag_config = config;
+        tenant.embed_config = config;
 
-        info!("Updated RAG config for tenant: {}", tenant_id);
+        info!("Updated Auto-Embed config for tenant: {}", tenant_id);
 
         Ok(())
     }
@@ -548,11 +548,11 @@ mod tests {
     }
 
     #[test]
-    fn test_update_rag_config() {
+    fn test_update_embed_config() {
         let manager = TenantManager::new();
         manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
 
-        let rag_config = AutoRagConfig {
+        let embed_config = AutoEmbedConfig {
             provider: LLMProvider::OpenAI,
             embedding_model: "text-embedding-3-small".to_string(),
             api_key: Some("sk-test".to_string()),
@@ -563,11 +563,11 @@ mod tests {
             embedding_policies: HashMap::from([("Document".to_string(), vec!["content".to_string()])]),
         };
 
-        manager.update_rag_config("tenant1", Some(rag_config)).unwrap();
+        manager.update_embed_config("tenant1", Some(embed_config)).unwrap();
 
         let tenant = manager.get_tenant("tenant1").unwrap();
-        assert!(tenant.rag_config.is_some());
-        let config = tenant.rag_config.unwrap();
+        assert!(tenant.embed_config.is_some());
+        let config = tenant.embed_config.unwrap();
         assert_eq!(config.provider, LLMProvider::OpenAI);
         assert_eq!(config.embedding_model, "text-embedding-3-small");
     }

@@ -123,9 +123,7 @@ fn main() {
             props.insert("name".to_string(), PropertyValue::String(format!("Resource_{}", r)));
             props.insert("cost".to_string(), PropertyValue::Float(rng.gen_range(50.0..500.0)));
             props.insert("efficiency".to_string(), PropertyValue::Float(rng.gen_range(0.5..2.0)));
-        let id = store_write.create_node_with_properties("default", vec![Label::new("Resource")], props);
-...
-        let d_id = store_write.create_node_with_properties("default", vec![Label::new("Department")], props);
+            let id = store_write.create_node_with_properties("default", vec![Label::new("Resource")], props);
             res_ids.push(id);
         }
 
@@ -133,7 +131,7 @@ fn main() {
             let mut props = PropertyMap::new();
             props.insert("name".to_string(), PropertyValue::String(format!("Dept_{}", d)));
             props.insert("demand".to_string(), PropertyValue::Float(rng.gen_range(100.0..1000.0)));
-            let d_id = store_write.create_node_with_properties(vec![Label::new("Department")], props);
+            let d_id = store_write.create_node_with_properties("default", vec![Label::new("Department")], props);
             dept_ids.push(d_id);
 
             for r_id in &res_ids {

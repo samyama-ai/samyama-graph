@@ -1,4 +1,4 @@
-use samyama::graph::{GraphStore, Label, PropertyValue};
+use samyama::graph::{GraphStore, Label, PropertyValue, PropertyMap};
 use samyama::vector::DistanceMetric;
 
 #[test]
@@ -44,15 +44,14 @@ fn test_vector_search_update() {
     store.create_vector_index("Person", "embedding", 2, DistanceMetric::Cosine).unwrap();
     
     let node_id = store.create_node("Person");
+    store.add_label_to_node("default", node_id, "Person").unwrap();
     
     // Initially not in index (no vector property)
     let results = store.vector_search("Person", "embedding", &vec![1.0, 0.0], 1).unwrap();
     assert_eq!(results.len(), 0);
     
     // Update property
-        for (node_id, embedding) in nodes {
-            store.set_node_property("default", node_id, "embedding", PropertyValue::Vector(embedding)).unwrap();
-        }
+    store.set_node_property("default", node_id, "embedding", PropertyValue::Vector(vec![1.0, 0.0])).unwrap();
     
     // Now should be found
     let results = store.vector_search("Person", "embedding", &vec![1.0, 0.0], 1).unwrap();

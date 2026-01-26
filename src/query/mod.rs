@@ -235,7 +235,8 @@ mod tests {
         // Execute CREATE query with properties
         let result = engine.execute_mut(
             r#"CREATE (n:Person {name: "Alice", age: 30})"#,
-            &mut store
+            &mut store,
+            "default"
         );
 
         assert!(result.is_ok(), "CREATE query with properties should succeed");
@@ -291,7 +292,8 @@ mod tests {
         // Execute CREATE query with edge
         let result = engine.execute_mut(
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
-            &mut store
+            &mut store,
+            "default"
         );
 
         assert!(result.is_ok(), "CREATE with edge should succeed: {:?}", result.err());
@@ -321,7 +323,8 @@ mod tests {
         // Execute CREATE query with edge properties
         let result = engine.execute_mut(
             r#"CREATE (a:Person {name: "Alice"})-[:FRIENDS {since: 2020}]->(b:Person {name: "Bob"})"#,
-            &mut store
+            &mut store,
+            "default"
         );
 
         assert!(result.is_ok(), "CREATE with edge properties should succeed: {:?}", result.err());
@@ -345,7 +348,8 @@ mod tests {
         // Execute CREATE query with chain of edges
         let result = engine.execute_mut(
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})-[:LIKES]->(c:Movie {title: "Matrix"})"#,
-            &mut store
+            &mut store,
+            "default"
         );
 
         assert!(result.is_ok(), "CREATE chain should succeed: {:?}", result.err());

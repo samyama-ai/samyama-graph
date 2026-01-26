@@ -132,14 +132,14 @@ impl GraphStore {
                             property_index.index_insert(label, &key, value.clone(), id);
                         }
                         
-                        // Auto-RAG check
+                        // Auto-Embed check
                         if let PropertyValue::String(text) = &value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
-                                if let Some(config) = tenant.rag_config {
+                                if let Some(config) = tenant.embed_config {
                                     for label in &labels {
                                         if let Some(keys) = config.embedding_policies.get(label.as_str()) {
                                             if keys.contains(&key) {
-                                                // Trigger Auto-RAG
+                                                // Trigger Auto-Embed
                                                 let vector_index_clone = Arc::clone(&vector_index);
                                                 let label_str = label.as_str().to_string();
                                                 let key_clone = key.clone();
@@ -147,12 +147,12 @@ impl GraphStore {
                                                 let config_clone = config.clone();
                                                 
                                                 tokio::spawn(async move {
-                                                    if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                    if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
                                                         if let Ok(chunks) = pipeline.process_text(&text_clone).await {
                                                             for chunk in chunks {
                                                                 // For simplicity, if multiple chunks, we might need a different strategy
                                                                 // but for now we just take the first one or treat it as one.
-                                                                // Real Auto-RAG might create child nodes for chunks.
+                                                                // Real Auto-Embed might create child nodes for chunks.
                                                                 let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &chunk.embedding);
                                                             }
                                                         }
@@ -166,7 +166,7 @@ impl GraphStore {
                         }
                     }
                 }
-                NodeDeleted { tenant_id: _, id, labels, properties } => {
+NodeDeleted { tenant_id: _, id, labels, properties } => {
                     for (key, value) in properties {
                         for label in &labels {
                             property_index.index_remove(label, &key, &value, id);
@@ -188,10 +188,10 @@ impl GraphStore {
                         }
                     }
                     
-                    // Auto-RAG check
+                    // Auto-Embed check
                     if let PropertyValue::String(text) = &new_value {
                         if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
-                            if let Some(config) = tenant.rag_config {
+                            if let Some(config) = tenant.embed_config {
                                 for label in &labels {
                                     if let Some(keys) = config.embedding_policies.get(label.as_str()) {
                                         if keys.contains(&key) {
@@ -202,7 +202,7 @@ impl GraphStore {
                                             let config_clone = config.clone();
                                             
                                             tokio::spawn(async move {
-                                                if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
                                                     if let Ok(chunks) = pipeline.process_text(&text_clone).await {
                                                         if let Some(first) = chunks.first() {
                                                             let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);
@@ -224,10 +224,10 @@ impl GraphStore {
                         }
                         property_index.index_insert(&label, &key, value.clone(), id);
                         
-                        // Auto-RAG check
+                        // Auto-Embed check
                         if let PropertyValue::String(text) = &value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
-                                if let Some(config) = tenant.rag_config {
+                                if let Some(config) = tenant.embed_config {
                                     if let Some(keys) = config.embedding_policies.get(label.as_str()) {
                                         if keys.contains(&key) {
                                             let vector_index_clone = Arc::clone(&vector_index);
@@ -237,7 +237,7 @@ impl GraphStore {
                                             let config_clone = config.clone();
                                             
                                             tokio::spawn(async move {
-                                                if let Ok(pipeline) = crate::rag::RagPipeline::new(config_clone) {
+                                                if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
                                                     if let Ok(chunks) = pipeline.process_text(&text_clone).await {
                                                         if let Some(first) = chunks.first() {
                                                             let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);

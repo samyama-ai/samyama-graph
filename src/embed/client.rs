@@ -1,7 +1,7 @@
 //! Embedding client for various LLM providers
 
-use crate::persistence::tenant::{AutoRagConfig, LLMProvider};
-use crate::rag::{RagError, RagResult};
+use crate::persistence::tenant::{AutoEmbedConfig, LLMProvider};
+use crate::embed::{EmbedError, EmbedResult};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use std::time::Duration;
@@ -17,11 +17,11 @@ pub struct EmbeddingClient {
 
 impl EmbeddingClient {
     /// Create a new embedding client based on configuration
-    pub fn new(config: &AutoRagConfig) -> RagResult<Self> {
+    pub fn new(config: &AutoEmbedConfig) -> EmbedResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| RagError::ConfigError(e.to_string()))?;
+            .map_err(|e| EmbedError::ConfigError(e.to_string()))?;
 
         let api_base_url = config.api_base_url.clone().unwrap_or_else(|| {
             match config.provider {
@@ -34,7 +34,7 @@ impl EmbeddingClient {
         });
 
         if (config.provider == LLMProvider::AzureOpenAI || config.provider == LLMProvider::Ollama) && config.api_base_url.is_none() && config.provider == LLMProvider::AzureOpenAI {
-             return Err(RagError::ConfigError("AzureOpenAI requires api_base_url".to_string()));
+             return Err(EmbedError::ConfigError("AzureOpenAI requires api_base_url".to_string()));
         }
 
         Ok(Self {
@@ -47,16 +47,16 @@ impl EmbeddingClient {
     }
 
     /// Generate embeddings for a batch of texts
-    pub async fn generate_embeddings(&self, texts: &[String]) -> RagResult<Vec<Vec<f32>>> {
+    pub async fn generate_embeddings(&self, texts: &[String]) -> EmbedResult<Vec<Vec<f32>>> {
         match self.provider {
             LLMProvider::OpenAI => self.openai_embeddings(texts).await,
             LLMProvider::Ollama => self.ollama_embeddings(texts).await,
             LLMProvider::Gemini => self.gemini_embeddings(texts).await,
-            _ => Err(RagError::ConfigError(format!("Provider {:?} not yet implemented", self.provider))),
+            _ => Err(EmbedError::ConfigError(format!("Provider {:?} not yet implemented", self.provider))),
         }
     }
 
-    async fn openai_embeddings(&self, texts: &[String]) -> RagResult<Vec<Vec<f32>>> {
+    async fn openai_embeddings(&self, texts: &[String]) -> EmbedResult<Vec<Vec<f32>>> {
         #[derive(Serialize)]
         struct OpenAIRequest<'a> {
             input: &'a [String],
@@ -73,7 +73,7 @@ impl EmbeddingClient {
             embedding: Vec<f32>,
         }
 
-        let api_key = self.api_key.as_ref().ok_or_else(|| RagError::ConfigError("OpenAI requires API key".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| EmbedError::ConfigError("OpenAI requires API key".to_string()))?;
         
         let url = format!("{}/embeddings", self.api_base_url);
         let resp = self.client.post(&url)
@@ -84,18 +84,18 @@ impl EmbeddingClient {
             })
             .send()
             .await
-            .map_err(|e| RagError::NetworkError(e.to_string()))?;
+            .map_err(|e| EmbedError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(RagError::ApiError(format!("OpenAI returned error: {}", error_text)));
+            return Err(EmbedError::ApiError(format!("OpenAI returned error: {}", error_text)));
         }
 
-        let result: OpenAIResponse = resp.json().await.map_err(|e| RagError::SerializationError(e.to_string()))?;
+        let result: OpenAIResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
         Ok(result.data.into_iter().map(|d| d.embedding).collect())
     }
 
-    async fn ollama_embeddings(&self, texts: &[String]) -> RagResult<Vec<Vec<f32>>> {
+    async fn ollama_embeddings(&self, texts: &[String]) -> EmbedResult<Vec<Vec<f32>>> {
         #[derive(Serialize)]
         struct OllamaRequest<'a> {
             model: &'a str,
@@ -117,21 +117,21 @@ impl EmbeddingClient {
                 })
                 .send()
                 .await
-                .map_err(|e| RagError::NetworkError(e.to_string()))?;
+                .map_err(|e| EmbedError::NetworkError(e.to_string()))?;
 
             if !resp.status().is_success() {
                 let error_text = resp.text().await.unwrap_or_default();
-                return Err(RagError::ApiError(format!("Ollama returned error: {}", error_text)));
+                return Err(EmbedError::ApiError(format!("Ollama returned error: {}", error_text)));
             }
 
-            let result: OllamaResponse = resp.json().await.map_err(|e| RagError::SerializationError(e.to_string()))?;
+            let result: OllamaResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
             results.push(result.embedding);
         }
         
         Ok(results)
     }
 
-    async fn gemini_embeddings(&self, texts: &[String]) -> RagResult<Vec<Vec<f32>>> {
+    async fn gemini_embeddings(&self, texts: &[String]) -> EmbedResult<Vec<Vec<f32>>> {
         #[derive(Serialize)]
         struct GeminiBatchRequest<'a> {
             requests: Vec<GeminiRequest<'a>>,
@@ -163,7 +163,7 @@ impl EmbeddingClient {
             values: Vec<f32>,
         }
 
-        let api_key = self.api_key.as_ref().ok_or_else(|| RagError::ConfigError("Gemini requires API key".to_string()))?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| EmbedError::ConfigError("Gemini requires API key".to_string()))?;
         
         let url = format!("{}/models/{}:batchEmbedContents?key={}", self.api_base_url, self.model, api_key);
         
@@ -178,14 +178,14 @@ impl EmbeddingClient {
             .json(&GeminiBatchRequest { requests })
             .send()
             .await
-            .map_err(|e| RagError::NetworkError(e.to_string()))?;
+            .map_err(|e| EmbedError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(RagError::ApiError(format!("Gemini returned error: {}", error_text)));
+            return Err(EmbedError::ApiError(format!("Gemini returned error: {}", error_text)));
         }
 
-        let result: GeminiBatchResponse = resp.json().await.map_err(|e| RagError::SerializationError(e.to_string()))?;
+        let result: GeminiBatchResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
         Ok(result.embeddings.into_iter().map(|e| e.values).collect())
     }
 }

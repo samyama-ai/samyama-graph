@@ -84,10 +84,10 @@ fn test_create_vector_index_query() {
     
     // 1. Create index via Cypher
     let ddl = "CREATE VECTOR INDEX person_idx FOR (n:Person) ON (n.embedding) OPTIONS {dimensions: 3, similarity: 'cosine'}";
-    engine.execute_mut(ddl, &mut store).unwrap();
+    engine.execute_mut(ddl, &mut store, "default").unwrap();
     
     // 2. Add data
-    engine.execute_mut("CREATE (n:Person {name: 'Alice', embedding: [1.0, 0.0, 0.0]})", &mut store).unwrap();
+    engine.execute_mut("CREATE (n:Person {name: 'Alice', embedding: [1.0, 0.0, 0.0]})", &mut store, "default").unwrap();
     
     // 3. Query
     let query = "CALL db.index.vector.queryNodes('Person', 'embedding', [1.0, 0.1, 0.0], 1) YIELD node RETURN node.name";

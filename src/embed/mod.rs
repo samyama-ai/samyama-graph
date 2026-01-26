@@ -1,17 +1,17 @@
-//! Auto-RAG Pipelines
+//! Auto-Embed Pipelines
 //!
 //! Implements automatic embedding generation and text splitting for RAG applications.
 
 pub mod client;
 
 use serde::{Deserialize, Serialize};
-use crate::persistence::tenant::AutoRagConfig;
+use crate::persistence::tenant::AutoEmbedConfig;
 use crate::graph::PropertyValue;
 use thiserror::Error;
 
-/// RAG errors
+/// Embed errors
 #[derive(Error, Debug)]
-pub enum RagError {
+pub enum EmbedError {
     /// API error from LLM provider
     #[error("LLM API error: {0}")]
     ApiError(String),
@@ -29,7 +29,7 @@ pub enum RagError {
     SerializationError(String),
 }
 
-pub type RagResult<T> = Result<T, RagError>;
+pub type EmbedResult<T> = Result<T, EmbedError>;
 
 /// A chunk of text with its embedding
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,20 +43,20 @@ pub struct TextChunk {
 }
 
 /// Pipeline for processing text into embeddings
-pub struct RagPipeline {
-    config: AutoRagConfig,
+pub struct EmbedPipeline {
+    config: AutoEmbedConfig,
     client: client::EmbeddingClient,
 }
 
-impl RagPipeline {
-    /// Create a new RAG pipeline from tenant config
-    pub fn new(config: AutoRagConfig) -> RagResult<Self> {
+impl EmbedPipeline {
+    /// Create a new Embed pipeline from tenant config
+    pub fn new(config: AutoEmbedConfig) -> EmbedResult<Self> {
         let client = client::EmbeddingClient::new(&config)?;
         Ok(Self { config, client })
     }
 
     /// Process text into one or more chunks with embeddings
-    pub async fn process_text(&self, text: &str) -> RagResult<Vec<TextChunk>> {
+    pub async fn process_text(&self, text: &str) -> EmbedResult<Vec<TextChunk>> {
         // 1. Split text into chunks
         let texts = self.split_text(text);
         

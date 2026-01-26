@@ -120,6 +120,22 @@ Samyama is a high-performance, distributed graph database designed to provide in
 - **REQ-SPARQL-007**: The system SHOULD support SPARQL federation (SERVICE keyword)
 - **REQ-SPARQL-008**: The system SHOULD optimize SPARQL queries for in-memory execution
 
+### 3.3 Auto-Embed Pipelines (Completed)
+- **REQ-RAG-001**: The system MUST support automatic vector embedding generation for text properties
+- **REQ-RAG-002**: The system MUST support tenant-level configuration for LLM providers (OpenAI, Ollama, etc.)
+- **REQ-RAG-003**: The system MUST implement an event-driven background pipeline for embedding generation
+- **REQ-RAG-004**: The system MUST automatically update vector indices when source text changes
+- **REQ-RAG-005**: The system MUST support configurable chunking and overlap strategies
+- **REQ-RAG-006**: The system MUST ensure embedding generation does not block write operations (async)
+
+### 3.4 Natural Language Querying (Proposed)
+- **REQ-NLQ-001**: The system SHOULD support querying graph data using natural language text
+- **REQ-NLQ-002**: The system SHOULD translate natural language to valid OpenCypher queries
+- **REQ-NLQ-003**: The system MUST support tenant-specific configuration for NLQ providers and models
+- **REQ-NLQ-004**: The system MUST inject tenant schema (labels/edges) into the translation context
+- **REQ-NLQ-005**: The system SHOULD restrict generated queries to read-only operations by default
+- **REQ-NLQ-006**: The system MUST return the generated Cypher query alongside results for verification
+
 ## 4. Performance Requirements
 
 ### 4.1 Query Performance

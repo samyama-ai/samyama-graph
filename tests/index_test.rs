@@ -62,7 +62,7 @@ fn test_create_index_ddl() {
 
     // 2. Create index using DDL (should backfill)
     let ddl = "CREATE INDEX ON :User(id)";
-    engine.execute_mut(ddl, &mut store).unwrap();
+    engine.execute_mut(ddl, &mut store, "default").unwrap();
 
     // 3. Verify index exists
     assert!(store.property_index.has_index(&Label::new("User"), "id"));

@@ -44,4 +44,4 @@ Most graph databases act as passive stores. By enabling in-database inference, S
 ---
 
 ## 3. Verdict
-**Yes, but scoped.** Do not attempt to replace PyTorch. Instead, build the **inference engine** that allows users to apply GNNs to live data without leaving the database environment. This integrates perfectly with the existing roadmap for "Auto-RAG Pipelines."
+**Yes, but scoped.** Do not attempt to replace PyTorch. Instead, build the **inference engine** that allows users to apply GNNs to live data without leaving the database environment. This integrates perfectly with the existing roadmap for "Auto-Embed Pipelines."

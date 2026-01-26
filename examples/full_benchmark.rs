@@ -6,43 +6,36 @@
 //! 3. Graph Algorithms (PageRank, BFS, WCC)
 //! 4. Cypher Query Execution
 
-use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::QueryEngine;
-use samyama::vector::DistanceMetric;
+use samyama::{GraphStore, Label, PropertyValue, QueryEngine, PersistenceManager, DistanceMetric};
 use std::time::Instant;
+use std::sync::Arc;
+use samyama::persistence::TenantManager;
 use rand::Rng;
-use std::env;
-
-const EDGES_PER_NODE: usize = 5;
-const VECTOR_DIM: usize = 128;
-const SEARCH_K: usize = 10;
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
-    let num_nodes = if args.len() > 1 {
-        args[1].parse::<usize>().expect("Usage: cargo run --release --example full_benchmark <NUM_NODES>")
-    } else {
-        10_000
-    };
+    tracing_subscriber::fmt::init();
 
-    println!("=== Samyama Graph Database Benchmark ===");
-    println!("Configuration:");
-    println!("  Nodes: {}", num_nodes);
-    println!("  Edges: ~{}", num_nodes * EDGES_PER_NODE);
-    println!("  Vector Dim: {}", VECTOR_DIM);
-    println!("  Indexing: Async Background Task");
-    println!("----------------------------------------");
+    const VECTOR_DIM: usize = 64;
+    const EDGES_PER_NODE: usize = 5;
+    const SEARCH_K: usize = 10;
+    let num_nodes: usize = 10_000;
 
-    // Initialize with async indexing
+    println!("--- Samyama Full Benchmark ---");
+
+    // 1. Ingestion Throughput
+    println!("\n1. Ingestion Throughput Test");
     let (mut store, rx) = GraphStore::with_async_indexing();
     let engine = QueryEngine::new();
-
-    // Spawn background indexer
-    let v_idx = store.vector_index.clone();
-    let p_idx = store.property_index.clone();
+    
+    // Create tenant manager
+    let tenant_manager = Arc::new(TenantManager::new());
+    
+    // Start background indexer
+    let v_idx = Arc::clone(&store.vector_index);
+    let p_idx = Arc::clone(&store.property_index);
     tokio::spawn(async move {
-        GraphStore::start_background_indexer(rx, v_idx, p_idx).await;
+        GraphStore::start_background_indexer(rx, v_idx, p_idx, tenant_manager).await;
     });
 
     // --- 1. Ingestion Benchmark ---
@@ -144,7 +137,7 @@ async fn main() {
     // Create Index on Entity(id)
     println!("  Creating index on :Entity(id)...");
     let create_index_query = "CREATE INDEX ON :Entity(id)";
-    engine.execute_mut(create_index_query, &mut store).unwrap();
+    engine.execute_mut(create_index_query, &mut store, "default").unwrap();
     
     // Simple 1-hop traversal
     // MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = 1 RETURN b.id

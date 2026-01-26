@@ -81,13 +81,21 @@ This document outlines the development journey of Samyama, from its inception as
     *   **Force-Directed Graph**: Interactive visualization.
     *   **Query Workbench**: Run Cypher directly in the browser.
 
-### Phase 12: "Auto-RAG" Pipelines 🤖
+### Phase 12: "Auto-Embed" Pipelines (formerly Auto-RAG)
 **Goal**: Native AI support for automatic data processing.
 *   **Features**:
     *   **Tenant-Level Config**: Each tenant can have its own LLM provider and embedding policy.
     *   **Externalized LLMs**: Support for OpenAI, Ollama, and Gemini.
     *   **Automatic Embedding**: Background tasks automatically generate embeddings when text properties matching policies are updated.
     *   **Native Integration**: Built directly into the async indexing pipeline.
+
+### Phase 13: Natural Language Querying (NLQ)
+**Goal**: Query the graph using plain English.
+*   **Features**:
+    *   **Text-to-Cypher**: LLM-powered translation of user questions into valid Cypher queries.
+    *   **Schema-Aware**: Injects tenant-specific schema into prompts for accuracy.
+    *   **Safe Execution**: Defaults to read-only queries to prevent data loss.
+    *   **Opt-In**: Configurable per tenant.
 
 ---
 
