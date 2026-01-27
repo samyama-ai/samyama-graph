@@ -181,8 +181,48 @@ impl QueryPlanner {
 
         // Add RETURN clause if present
         if let Some(return_clause) = &query.return_clause {
-            let projections = self.plan_return(return_clause, &mut output_columns)?;
-            operator = Box::new(ProjectOperator::new(operator, projections));
+            // Check for simple aggregation (count)
+            // TODO: Proper aggregation handling
+            let mut is_aggregation = false;
+            let mut func_name = String::new();
+            let mut arg_var = String::new();
+            let mut alias = String::new();
+
+            if return_clause.items.len() == 1 {
+                if let Expression::Function { name, args } = &return_clause.items[0].expression {
+                    if name.to_lowercase() == "count" {
+                        is_aggregation = true;
+                        func_name = "count".to_string();
+                        if let Some(Expression::Variable(v)) = args.first() {
+                            arg_var = v.clone();
+                        }
+                        alias = return_clause.items[0].alias.clone().unwrap_or_else(|| format!("count({})", arg_var));
+                    }
+                }
+            }
+
+            // Add ORDER BY if present (before projection to access variables)
+            if let Some(order_by) = &query.order_by {
+                let mut sort_items = Vec::new();
+                for item in &order_by.items {
+                    sort_items.push((item.expression.clone(), item.ascending));
+                }
+                use crate::query::executor::operator::SortOperator;
+                operator = Box::new(SortOperator::new(operator, sort_items));
+            }
+
+            if is_aggregation {
+                use crate::query::executor::operator::AggregateOperator;
+                operator = Box::new(AggregateOperator::new(
+                    operator,
+                    vec![(func_name, arg_var)],
+                    alias.clone()
+                ));
+                output_columns.push(alias);
+            } else {
+                let projections = self.plan_return(return_clause, &mut output_columns)?;
+                operator = Box::new(ProjectOperator::new(operator, projections));
+            }
         } else {
             // No explicit RETURN - return all matched/yielded variables
             if !query.match_clauses.is_empty() {

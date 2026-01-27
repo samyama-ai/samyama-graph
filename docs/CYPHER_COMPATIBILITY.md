@@ -19,17 +19,17 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Read Operations** | `MATCH` | ✅ | ✅ | ✅ | Basic pattern matching works. |
 | | `OPTIONAL MATCH` | ❌ | ✅ | ✅ | Returns `null` for missing patterns. |
-| | `WHERE` | ⚠️ | ✅ | ✅ | **Bug**: Precedence issues (e.g., `AND` binds tighter than `>=`). Requires parentheses. |
+| | `WHERE` | ✅ | ✅ | ✅ | **Supported**: Precedence issues fixed via Pratt Parser. |
 | | `RETURN` | ✅ | ✅ | ✅ | Projections work. |
 | | `RETURN DISTINCT` | ❌ | ✅ | ✅ | Deduplication not implemented. |
-| | `ORDER BY` | ❌ | ✅ | ✅ | Parsed but execution fails. |
+| | `ORDER BY` | ✅ | ✅ | ✅ | **Supported**: In-memory sorting implemented. |
 | | `SKIP` / `LIMIT` | ⚠️ | ✅ | ✅ | `LIMIT` works; `SKIP` not implemented. |
 | **Write Operations** | `CREATE` | ✅ | ✅ | ✅ | Fast node/edge creation. |
 | | `DELETE` | ✅ | ✅ | ✅ | Basic deletion works. |
 | | `SET` | ✅ | ✅ | ✅ | Property updates work. |
 | | `REMOVE` | ❌ | ✅ | ✅ | Label/Property removal not implemented. |
 | | `MERGE` | ❌ | ✅ | ✅ | **Critical Gap**: No upsert capability. |
-| **Aggregations** | `count()` | ❌ | ✅ | ✅ | Runtime error in projection. |
+| **Aggregations** | `count()` | ⚠️ | ✅ | ✅ | **Supported**: Basic global aggregation supported. Grouping not yet supported. |
 | | `sum()`, `avg()`, `max()` | ❌ | ✅ | ✅ | Not implemented. |
 | | `GROUP BY` | ❌ | ✅ | ✅ | Implicit grouping in `RETURN` not supported. |
 | **Query Structure** | `WITH` | ❌ | ✅ | ✅ | Pipelining results to next query stage. |
@@ -43,17 +43,12 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 
 ## 🛠 Known Issues
 
-1.  **Parser Precedence**: The current parser treats all binary operators with flat left-to-right precedence.
-    *   *Fails:* `WHERE n.age > 10 AND n.city = 'NY'`
-    *   *Workaround:* `WHERE (n.age > 10) AND (n.city = 'NY')`
-2.  **Aggregation Runtime**: Using `count(n)` in `RETURN` clause causes a runtime panic ("Unsupported projection expression").
-3.  **Sorting**: `ORDER BY` clause is parsed but ignored or causes execution errors.
+1.  **Aggregation Runtime**: Only `count()` is supported. `GROUP BY` is not yet implemented.
+2.  **Missing Features**: `MERGE`, `WITH`, `OPTIONAL MATCH` are high-priority gaps.
 
 ## 📅 Roadmap for Compatibility
 
 To reach "Bronze" compatibility tier (usable for general apps):
 
-1.  **Phase 8.1 (Parser Refactor)**: Migrate to Pratt Parser to fix operator precedence.
-2.  **Phase 8.2 (Aggregations)**: Implement `AggregateOperator` (Hash/Stream) for `count`, `sum`, etc.
-3.  **Phase 8.3 (Sorting)**: Implement `SortOperator` (In-memory sort).
-4.  **Phase 8.4 (Pipelining)**: Implement `WITH` to allow multi-stage query plans.
+1.  **Phase 8.2 (Full Aggregations)**: Implement `AggregateOperator` (Hash/Stream) for `sum`, `avg`, and `GROUP BY`.
+2.  **Phase 8.4 (Pipelining)**: Implement `WITH` to allow multi-stage query plans.

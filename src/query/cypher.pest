@@ -90,12 +90,13 @@ function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")
 function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Operators
-binary_op = {
-    "==" | "=" | "!=" | "<>" | "<=" | ">=" | "<" | ">" |
-    ^"AND" | ^"OR" |
-    "+" | "-" | "*" | "/" | "%" |
-    ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS"
-}
+mul_div_mod_op = { "*" | "/" | "%" }
+add_sub_op = { "+" | "-" }
+comparison_op = { "<=" | ">=" | "<" | ">" | "==" | "=" | "!=" | "<>" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
+and_op = { ^"AND" }
+or_op = { ^"OR" }
+
+binary_op = _{ mul_div_mod_op | add_sub_op | comparison_op | and_op | or_op }
 
 unary_op = {
     ^"NOT" | "-" |

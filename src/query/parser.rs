@@ -5,13 +5,24 @@
 use crate::graph::{EdgeType, Label, PropertyValue};
 use crate::query::ast::*;
 use pest::Parser;
+use pest::pratt_parser::{PrattParser, Op, Assoc};
 use pest_derive::Parser;
 use std::collections::HashMap;
 use thiserror::Error;
+use std::sync::LazyLock;
 
 #[derive(Parser)]
 #[grammar = "query/cypher.pest"]
 struct CypherParser;
+
+static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
+    PrattParser::new()
+        .op(Op::infix(Rule::or_op, Assoc::Left))
+        .op(Op::infix(Rule::and_op, Assoc::Left))
+        .op(Op::infix(Rule::comparison_op, Assoc::Left))
+        .op(Op::infix(Rule::add_sub_op, Assoc::Left))
+        .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
+});
 
 /// Parser errors
 #[derive(Error, Debug)]
@@ -630,39 +641,48 @@ fn parse_order_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<OrderByIte
 }
 
 fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
-    let mut expr_parts: Vec<pest::iterators::Pair<Rule>> = pair.into_inner().collect();
+    PRATT_PARSER
+        .map_primary(|primary| parse_term(primary))
+        .map_infix(|left, op, right| {
+            let left = left?;
+            let right = right?;
+            
+            let op = match op.as_rule() {
+                Rule::or_op => BinaryOp::Or,
+                Rule::and_op => BinaryOp::And,
+                Rule::comparison_op => parse_op_str(op.as_str())?,
+                Rule::add_sub_op => parse_op_str(op.as_str())?,
+                Rule::mul_div_mod_op => parse_op_str(op.as_str())?,
+                _ => return Err(ParseError::SemanticError(format!("Unexpected operator: {:?}", op.as_rule()))),
+            };
 
-    if expr_parts.is_empty() {
-        return Err(ParseError::SemanticError("Empty expression".to_string()));
-    }
+            Ok(Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+        })
+        .parse(pair.into_inner())
+}
 
-    // Simple case: just one term
-    if expr_parts.len() == 1 {
-        return parse_term(expr_parts.remove(0));
-    }
-
-    // Parse binary operations left-to-right (simplified)
-    let mut result = parse_term(expr_parts.remove(0))?;
-
-    while !expr_parts.is_empty() {
-        if expr_parts.len() < 2 {
-            break;
-        }
-
-        let op_pair = expr_parts.remove(0);
-        let right_pair = expr_parts.remove(0);
-
-        let op = parse_binary_op(op_pair)?;
-        let right = parse_term(right_pair)?;
-
-        result = Expression::Binary {
-            left: Box::new(result),
-            op,
-            right: Box::new(right),
-        };
-    }
-
-    Ok(result)
+fn parse_op_str(op_str: &str) -> ParseResult<BinaryOp> {
+    Ok(match op_str {
+        "==" | "=" => BinaryOp::Eq,
+        "!=" | "<>" => BinaryOp::Ne,
+        "<" => BinaryOp::Lt,
+        "<=" => BinaryOp::Le,
+        ">" => BinaryOp::Gt,
+        ">=" => BinaryOp::Ge,
+        "+" => BinaryOp::Add,
+        "-" => BinaryOp::Sub,
+        "*" => BinaryOp::Mul,
+        "/" => BinaryOp::Div,
+        "%" => BinaryOp::Mod,
+        _ if op_str.eq_ignore_ascii_case("STARTS WITH") => BinaryOp::StartsWith,
+        _ if op_str.eq_ignore_ascii_case("ENDS WITH") => BinaryOp::EndsWith,
+        _ if op_str.eq_ignore_ascii_case("CONTAINS") => BinaryOp::Contains,
+        _ => return Err(ParseError::SemanticError(format!("Unknown operator: {}", op_str))),
+    })
 }
 
 fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
@@ -738,26 +758,6 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
     Ok(Expression::Function { name, args })
 }
 
-fn parse_binary_op(pair: pest::iterators::Pair<Rule>) -> ParseResult<BinaryOp> {
-    let op_str = pair.as_str();
-
-    Ok(match op_str {
-        "==" | "=" => BinaryOp::Eq,
-        "!=" | "<>" => BinaryOp::Ne,
-        "<" => BinaryOp::Lt,
-        "<=" => BinaryOp::Le,
-        ">" => BinaryOp::Gt,
-        ">=" => BinaryOp::Ge,
-        "+" => BinaryOp::Add,
-        "-" => BinaryOp::Sub,
-        "*" => BinaryOp::Mul,
-        "/" => BinaryOp::Div,
-        "%" => BinaryOp::Mod,
-        _ if op_str.eq_ignore_ascii_case("AND") => BinaryOp::And,
-        _ if op_str.eq_ignore_ascii_case("OR") => BinaryOp::Or,
-        _ => return Err(ParseError::SemanticError(format!("Unknown operator: {}", op_str))),
-    })
-}
 
 #[cfg(test)]
 mod tests {

@@ -477,6 +477,52 @@ impl PhysicalOperator for ProjectOperator {
     }
 }
 
+/// Aggregate operator: RETURN count(n)
+pub struct AggregateOperator {
+    input: OperatorBox,
+    aggregations: Vec<(String, String)>, // (func_name, variable) - simplistic for now
+    alias: String, // Output alias
+    result: Option<Record>,
+    executed: bool,
+}
+
+impl AggregateOperator {
+    pub fn new(input: OperatorBox, aggregations: Vec<(String, String)>, alias: String) -> Self {
+        Self {
+            input,
+            aggregations,
+            alias,
+            result: None,
+            executed: false,
+        }
+    }
+}
+
+impl PhysicalOperator for AggregateOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        let mut count = 0;
+        while let Some(_record) = self.input.next(store)? {
+            count += 1;
+        }
+
+        let mut record = Record::new();
+        // Assuming simple count(*) or count(n) behavior which counts rows
+        record.bind(self.alias.clone(), Value::Property(PropertyValue::Integer(count as i64)));
+        
+        self.executed = true;
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.executed = false;
+    }
+}
+
 /// Limit operator: LIMIT 10
 pub struct LimitOperator {
     /// Input operator
@@ -511,6 +557,113 @@ impl PhysicalOperator for LimitOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.count = 0;
+    }
+}
+
+/// Sort operator: ORDER BY n.age ASC
+pub struct SortOperator {
+    input: OperatorBox,
+    sort_items: Vec<(Expression, bool)>, // (expr, ascending)
+    records: Vec<Record>,
+    current: usize,
+    executed: bool,
+}
+
+impl SortOperator {
+    pub fn new(input: OperatorBox, sort_items: Vec<(Expression, bool)>) -> Self {
+        Self {
+            input,
+            sort_items,
+            records: Vec::new(),
+            current: 0,
+            executed: false,
+        }
+    }
+
+    fn evaluate_expression(expr: &Expression, record: &Record) -> ExecutionResult<Value> {
+        match expr {
+            Expression::Variable(var) => {
+                record.get(var)
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
+            Expression::Property { variable, property } => {
+                let val = record.get(variable)
+                    .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
+
+                match val {
+                    Value::Node(_, node) => {
+                        let prop = node.get_property(property)
+                            .cloned()
+                            .unwrap_or(PropertyValue::Null);
+                        Ok(Value::Property(prop))
+                    }
+                    Value::Edge(_, edge) => {
+                        let prop = edge.get_property(property)
+                            .cloned()
+                            .unwrap_or(PropertyValue::Null);
+                        Ok(Value::Property(prop))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
+            _ => Err(ExecutionError::RuntimeError("Unsupported sort expression".to_string())),
+        }
+    }
+}
+
+impl PhysicalOperator for SortOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            // Materialize all records
+            while let Some(record) = self.input.next(store)? {
+                self.records.push(record);
+            }
+
+            // Sort
+            // We need to handle errors during sort comparison which is tricky with sort_by
+            // So we'll unwrap/panic or use a custom sort that pre-calculates keys?
+            // For simplicity, we assume evaluation succeeds or panic (not ideal but ok for prototype)
+            // Better: use sort_by with a closure that captures errors? sort_by expects Ordering.
+            
+            let sort_items = &self.sort_items;
+            self.records.sort_by(|a, b| {
+                for (expr, ascending) in sort_items {
+                    // Evaluate expr for a and b
+                    // TODO: Handle evaluation errors gracefully?
+                    let val_a = Self::evaluate_expression(expr, a).unwrap_or(Value::Null);
+                    let val_b = Self::evaluate_expression(expr, b).unwrap_or(Value::Null);
+
+                    // Extract PropertyValue
+                    let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
+                    let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
+
+                    let ord = prop_a.cmp(prop_b);
+                    if ord != std::cmp::Ordering::Equal {
+                        return if *ascending { ord } else { ord.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+
+            self.executed = true;
+        }
+
+        if self.current >= self.records.len() {
+            return Ok(None);
+        }
+
+        let record = self.records[self.current].clone();
+        self.current += 1;
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.records.clear();
+        self.current = 0;
+        self.executed = false;
     }
 }
 

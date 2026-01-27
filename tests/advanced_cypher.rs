@@ -47,8 +47,8 @@ fn test_filter_and_projection() {
     let engine = QueryEngine::new();
 
     // Query: Find names of people in NY over 30
-    // Note: Using parentheses because current parser has flat precedence
-    let query = "MATCH (n:Person) WHERE (n.city = 'NY') AND (n.age >= 30) RETURN n.name, n.age";
+    // Note: Parentheses removed to test Pratt parser precedence
+    let query = "MATCH (n:Person) WHERE n.city = 'NY' AND n.age >= 30 RETURN n.name, n.age";
     let result = engine.execute(query, &store).unwrap();
 
     // Should be Alice (30) and Charlie (35)
@@ -64,7 +64,6 @@ fn test_filter_and_projection() {
 }
 
 #[test]
-#[ignore]
 fn test_order_by_limit() {
     let store = setup_social_graph();
     let engine = QueryEngine::new();
@@ -85,7 +84,6 @@ fn test_order_by_limit() {
 }
 
 #[test]
-#[ignore]
 fn test_aggregations() {
     let store = setup_social_graph();
     let engine = QueryEngine::new();
