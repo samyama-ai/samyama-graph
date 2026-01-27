@@ -10,6 +10,9 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 
 *   **⚡ Speed**: 115,000+ Queries Per Second (QPS) for lookups; 800,000+ Nodes/sec ingestion.
 *   **🧠 Vector Search**: Built-in HNSW indexing for millisecond-speed Semantic Search.
+*   **🤖 Auto-Embed**: Automatically generate vector embeddings from text properties using LLMs.
+*   **🗣️ NLQ**: Query your graph using plain English ("Who knows Alice?") instead of Cypher code.
+*   **🕵️ Agents**: Autonomous agents that can enrich your graph data by calling external tools (e.g., Web Search).
 *   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
 *   **📊 Analytics**: Native PageRank, BFS, Dijkstra, and WCC algorithms.
 *   **🛡️ Reliability**: Raft Consensus for High Availability and RocksDB for persistence.
@@ -111,6 +114,32 @@ cargo run --release --example full_benchmark
 # Run with 1 Million nodes (Requires ~8GB RAM)
 cargo run --release --example full_benchmark 1000000
 ```
+
+### 5. Auto-Embed Demo
+Demonstrates automatic embedding generation.
+
+```bash
+export GEMINI_API_KEY="your_key"
+cargo run --release --example auto_embed_demo
+```
+*   **What it does**: Creates a document node with text. The system automatically calls Gemini to generate an embedding and indexes it for vector search.
+
+### 6. NLQ (Natural Language Query) Demo
+Query the database using English.
+
+```bash
+export GEMINI_API_KEY="your_key"
+cargo run --release --example nlq_demo
+```
+*   **What it does**: Translates "Who knows Alice?" into a valid Cypher query using an LLM and executes it.
+
+### 7. Agentic Enrichment Demo
+Demonstrates an autonomous agent enriching data.
+
+```bash
+cargo run --release --example agent_demo
+```
+*   **What it does**: Simulates a new company node being created. An agent automatically wakes up, searches the web for info (mocked), and updates the node.
 
 ---
 

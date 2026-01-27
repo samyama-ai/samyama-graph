@@ -97,6 +97,14 @@ This document outlines the development journey of Samyama, from its inception as
     *   **Safe Execution**: Defaults to read-only queries to prevent data loss.
     *   **Opt-In**: Configurable per tenant.
 
+### Phase 14: Agentic Enrichment
+**Goal**: Autonomous agents that maintain and enrich the graph.
+*   **Features**:
+    *   **Event-Driven**: Agents trigger on `NodeCreated` or `PropertySet` events based on policy.
+    *   **Tool Use**: Agents can use tools (e.g., Web Search) to gather information.
+    *   **Autonomous Updates**: Agents can write back to the graph to enrich properties.
+    *   **Mock Tooling**: Initial support for mocked tools for testing and development.
+
 ---
 
 ## 🔮 Future Roadmap
