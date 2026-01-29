@@ -258,6 +258,30 @@ impl PropertyValue {
             PropertyValue::Null => "Null",
         }
     }
+
+    /// Convert to a flattened JSON value for API responses
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            PropertyValue::String(s) => json!(s),
+            PropertyValue::Integer(i) => json!(i),
+            PropertyValue::Float(f) => json!(f),
+            PropertyValue::Boolean(b) => json!(b),
+            PropertyValue::DateTime(dt) => json!(dt),
+            PropertyValue::Array(arr) => {
+                json!(arr.iter().map(|v| v.to_json()).collect::<Vec<_>>())
+            }
+            PropertyValue::Map(map) => {
+                let mut json_map = serde_json::Map::new();
+                for (k, v) in map {
+                    json_map.insert(k.clone(), v.to_json());
+                }
+                serde_json::Value::Object(json_map)
+            }
+            PropertyValue::Vector(v) => json!(v),
+            PropertyValue::Null => serde_json::Value::Null,
+        }
+    }
 }
 
 impl fmt::Display for PropertyValue {

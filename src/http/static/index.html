@@ -133,11 +133,12 @@
             .nodeColor(node => getColorForLabel(node.labels[0]))
             .nodeVal(node => node.val || 5)
             .nodeRelSize(4)
-            .linkDirectionalArrowLength(3.5)
+            .linkDirectionalArrowLength(5)
             .linkDirectionalArrowRelPos(1)
-            .linkCurvature(0.2)
-            .linkWidth(link => link.width || 1.5)
-            .linkColor(() => '#475569') // Slate-600
+            .linkCurvature(0.25)
+            .linkWidth(2)
+            .linkColor(() => '#94a3b8') // Slate-400 for higher contrast
+            .linkLabel(link => `<div class="px-2 py-1 bg-slate-900 text-[10px] rounded border border-slate-700 shadow-xl text-indigo-300 font-bold">${link.type}</div>`)
             .onNodeClick(node => showProperties(node))
             .onLinkClick(link => showProperties(link))
             .cooldownTicks(100);
