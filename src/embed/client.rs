@@ -54,8 +54,19 @@ impl EmbeddingClient {
             LLMProvider::Ollama => self.ollama_embeddings(texts).await,
             LLMProvider::Gemini => self.gemini_embeddings(texts).await,
             LLMProvider::Mock => {
-                // Return dummy embeddings
-                Ok(texts.iter().map(|_| vec![0.1; 64]).collect())
+                // Return deterministic dummy embeddings based on text length and first chars
+                Ok(texts.iter().map(|t| {
+                    let mut vec = vec![0.1; 64];
+                    if !t.is_empty() {
+                        // Vary the first few elements based on string properties
+                        vec[0] = (t.len() as f32 % 100.0) / 100.0;
+                        vec[1] = (t.as_bytes()[0] as f32 % 100.0) / 100.0;
+                        if t.len() > 1 {
+                            vec[2] = (t.as_bytes()[1] as f32 % 100.0) / 100.0;
+                        }
+                    }
+                    vec
+                }).collect())
             }
             _ => Err(EmbedError::ConfigError(format!("Provider {:?} not yet implemented", self.provider))),
         }
