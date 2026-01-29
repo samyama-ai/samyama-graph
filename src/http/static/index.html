@@ -7,90 +7,219 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/force-graph"></script>
     <style>
-        body { margin: 0; background-color: #0f172a; color: white; }
-        .graph-container { height: calc(100vh - 64px); width: 100%; }
+        body { margin: 0; background-color: #0f172a; color: white; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .graph-container { height: calc(100vh - 64px); width: 100%; position: relative; }
         #graph { width: 100%; height: 100%; }
-        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); }
+        .glass { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .sidebar { background: #1e293b; border-left: 1px solid rgba(255,255,255,0.1); }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
     </style>
 </head>
-<body class="overflow-hidden">
-    <nav class="h-16 border-b border-slate-700 flex items-center px-6 justify-between glass sticky top-0 z-50">
+<body class="overflow-hidden h-screen flex flex-col">
+    <!-- Navigation -->
+    <nav class="h-16 flex items-center px-6 justify-between glass z-50 shadow-lg">
         <div class="flex items-center gap-3">
-            <div class="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center font-bold">S</div>
-            <h1 class="text-xl font-bold tracking-tight">Samyama <span class="text-indigo-400">Viz</span></h1>
+            <div class="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center font-bold shadow-indigo-500/20 shadow-lg text-white">S</div>
+            <h1 class="text-xl font-bold tracking-tight text-slate-100">Samyama <span class="text-indigo-400 font-light">Visualizer</span></h1>
         </div>
-        <div class="flex-1 max-w-2xl px-8">
-            <div class="relative">
+        
+        <div class="flex-1 max-w-3xl px-8">
+            <div class="relative group">
+                <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <svg class="h-4 w-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
+                    </svg>
+                </div>
                 <input id="query-input" type="text" 
-                    placeholder="MATCH (n) RETURN n LIMIT 25" 
-                    class="w-full bg-slate-900 border border-slate-700 rounded-full py-2 px-6 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
-                <button id="run-btn" class="absolute right-2 top-1 bottom-1 px-4 bg-indigo-600 hover:bg-indigo-500 rounded-full text-xs font-semibold transition">Run</button>
+                    placeholder="Enter Cypher query (e.g., MATCH (n) RETURN n)" 
+                    class="w-full bg-slate-800/50 border border-slate-700/50 rounded-full py-2.5 pl-10 pr-24 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:bg-slate-800 focus:border-indigo-500/50 text-sm transition-all placeholder:text-slate-600 text-slate-200 font-mono">
+                <button id="run-btn" class="absolute right-1.5 top-1.5 bottom-1.5 px-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 active:scale-95">Run</button>
             </div>
         </div>
-        <div id="status" class="text-xs text-slate-400 flex items-center gap-2">
-            <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-            Healthy
+
+        <div id="status" class="text-xs text-slate-400 font-mono bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-700/50 flex items-center gap-2">
+            <span class="relative flex h-2 w-2">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            Connecting...
         </div>
     </nav>
 
-    <main class="flex">
-        <div class="graph-container relative flex-1">
+    <main class="flex flex-1 overflow-hidden">
+        <!-- Graph Area -->
+        <div class="graph-container flex-1 bg-gradient-to-b from-slate-900 to-slate-950">
             <div id="graph"></div>
+            
+            <!-- Floating Controls -->
+            <div class="absolute bottom-6 left-6 flex flex-col gap-2">
+                <div class="glass px-4 py-2 rounded-lg text-xs text-slate-400 border border-slate-700/50">
+                    <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-[#f43f5e]"></div> Port / Factory</div>
+                    <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-[#3b82f6]"></div> Supplier</div>
+                    <div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full bg-[#10b981]"></div> Shipment / Material</div>
+                </div>
+            </div>
+
             <!-- Overlay for empty state -->
-            <div id="empty-state" class="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
-                <div class="text-center">
-                    <p class="text-slate-500 text-lg">Enter a Cypher query to start exploring</p>
+            <div id="empty-state" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none transition-opacity duration-500 bg-slate-900/50 backdrop-blur-sm">
+                <div class="text-center space-y-4 p-8 rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl">
+                    <div class="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-200">Ready to Explore</h3>
+                    <p class="text-slate-500 text-sm max-w-xs mx-auto">Run a query to visualize nodes and relationships. Try <code class="bg-slate-800 px-1.5 py-0.5 rounded text-indigo-400 font-mono text-xs">MATCH (n) RETURN n</code></p>
                 </div>
             </div>
         </div>
 
         <!-- Sidebar -->
-        <aside class="w-80 border-l border-slate-700 glass p-6 overflow-y-auto h-[calc(100vh-64px)]">
-            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Properties</h2>
-            <div id="properties" class="space-y-4">
-                <p class="text-slate-500 italic text-sm">Select a node or edge to view details</p>
+        <aside class="w-96 sidebar overflow-y-auto z-40 shadow-xl transform transition-transform duration-300">
+            <div class="p-6">
+                <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-6 flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    Selection Details
+                </h2>
+                <div id="properties" class="space-y-4">
+                    <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
+                        <p class="text-sm">Select a node or link<br>to view properties</p>
+                    </div>
+                </div>
             </div>
         </aside>
     </main>
 
     <script>
+        // Auto-color generation based on string hash
+        const stringToColor = (str) => {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+            return '#' + '00000'.substring(0, 6 - c.length) + c;
+        };
+
+        const getColorForLabel = (label) => {
+            const colors = {
+                'Person': '#6366f1',    // Indigo
+                'Supplier': '#3b82f6',  // Blue
+                'Port': '#f43f5e',      // Rose
+                'Factory': '#f43f5e',   // Rose
+                'Shipment': '#10b981',  // Emerald
+                'Material': '#10b981',  // Emerald
+                'Disease': '#ef4444',   // Red
+                'Drug': '#06b6d4',      // Cyan
+                'Compound': '#8b5cf6',  // Violet
+            };
+            return colors[label] || stringToColor(label || 'Unknown');
+        };
+
         const graph = ForceGraph()(document.getElementById('graph'))
             .backgroundColor('#0f172a')
             .nodeId('id')
-            .nodeLabel(node => `[${node.labels.join(', ')}] ${node.id}`)
-            .nodeColor(node => node.labels.includes('Person') ? '#6366f1' : '#f43f5e')
-            .nodeRelSize(6)
-            .linkDirectionalArrowLength(4)
-            .linkDirectionalArrowRelPos(1)
-            .linkCurvature(0.1)
-            .linkLabel(link => link.type)
-            .onNodeClick(node => {
-                showProperties(node);
+            .nodeLabel(node => {
+                const label = node.labels[0] || 'Node';
+                const name = node.properties.name || node.properties.id || node.id;
+                return `<div class="px-2 py-1 bg-slate-900 text-xs rounded border border-slate-700 shadow-xl">
+                    <span class="text-indigo-400 font-bold">${label}</span>
+                    <span class="text-white ml-1">${name}</span>
+                </div>`;
             })
-            .onLinkClick(link => {
-                showProperties(link);
-            });
+            .nodeColor(node => getColorForLabel(node.labels[0]))
+            .nodeVal(node => node.val || 5)
+            .nodeRelSize(4)
+            .linkDirectionalArrowLength(3.5)
+            .linkDirectionalArrowRelPos(1)
+            .linkCurvature(0.2)
+            .linkWidth(link => link.width || 1.5)
+            .linkColor(() => '#475569') // Slate-600
+            .onNodeClick(node => showProperties(node))
+            .onLinkClick(link => showProperties(link))
+            .cooldownTicks(100);
 
         function showProperties(element) {
             const propsDiv = document.getElementById('properties');
-            propsDiv.innerHTML = `
-                <div class="bg-slate-900 rounded-lg p-4 border border-slate-800">
-                    <div class="text-xs text-indigo-400 font-mono mb-2 uppercase">${element.__typename === 'node' ? 'Node' : 'Edge'} ${element.id}</div>
-                    ${Object.entries(element.properties).map(([k, v]) => `
-                        <div class="mb-3">
-                            <div class="text-slate-500 text-[10px] uppercase font-bold">${k}</div>
-                            <div class="text-sm font-medium">${typeof v === 'object' ? JSON.stringify(v) : v}</div>
+            const type = element.__typename === 'node' ? 'Node' : 'Edge';
+            const title = type === 'Node' 
+                ? (element.labels[0] || 'Unknown') 
+                : (element.type || 'Relationship');
+            
+            const id = element.id;
+
+            let content = `
+                <div class="bg-slate-800/50 rounded-xl p-5 border border-slate-700 shadow-inner">
+                    <div class="flex items-center justify-between mb-4 pb-4 border-b border-slate-700/50">
+                        <div>
+                            <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">${type}</div>
+                            <div class="text-lg font-bold text-white">${title}</div>
                         </div>
-                    `).join('')}
-                </div>
+                        <div class="text-xs font-mono text-slate-500 bg-slate-900 px-2 py-1 rounded">#${id}</div>
+                    </div>
+                    <div class="space-y-3">
             `;
+
+            const props = element.properties || {};
+            if (Object.keys(props).length === 0) {
+                content += `<div class="text-sm text-slate-500 italic">No properties</div>`;
+            } else {
+                for (const [k, v] of Object.entries(props)) {
+                    let displayValue = v;
+                    if (typeof v === 'object' && v !== null) {
+                        if (Array.isArray(v) && typeof v[0] === 'number') {
+                            // Vector - truncate
+                            displayValue = `<span class="font-mono text-xs text-emerald-400">[Vector dim=${v.length}]</span>`;
+                        } else {
+                            displayValue = `<pre class="text-[10px] bg-slate-900 p-2 rounded overflow-x-auto text-slate-300">${JSON.stringify(v, null, 2)}</pre>`;
+                        }
+                    } else {
+                        displayValue = `<span class="text-slate-200 font-medium">${v}</span>`;
+                    }
+
+                    content += `
+                        <div class="group">
+                            <div class="text-[10px] text-indigo-400 uppercase font-bold mb-0.5">${k}</div>
+                            <div class="text-sm breaking-words">${displayValue}</div>
+                        </div>
+                    `;
+                }
+            }
+            
+            // Add Agent Actions if relevant (Mock)
+            if (type === 'Node' && (element.labels.includes('Port') || element.labels.includes('Supplier'))) {
+                 content += `
+                    <div class="mt-6 pt-4 border-t border-slate-700/50">
+                        <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-2">Agent Insights</div>
+                        <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
+                                <span class="text-xs text-emerald-400 font-bold">News Agent Active</span>
+                            </div>
+                            <p class="text-xs text-slate-400 leading-relaxed">
+                                Last enrichment: Just now.<br>
+                                No anomalies detected for this entity in global news feeds.
+                            </p>
+                        </div>
+                    </div>
+                 `;
+            }
+
+            content += `</div></div>`;
+            propsDiv.innerHTML = content;
         }
 
         async function runQuery() {
-            const query = document.getElementById('query-input').value || "MATCH (n) RETURN n LIMIT 25";
+            const input = document.getElementById('query-input');
+            const query = input.value || "MATCH (n) RETURN n LIMIT 50";
             const btn = document.getElementById('run-btn');
-            btn.innerText = "Running...";
+            
+            btn.innerHTML = `<svg class="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
             btn.disabled = true;
+            input.disabled = true;
 
             try {
                 const response = await fetch('/api/query', {
@@ -102,21 +231,53 @@
                 const data = await response.json();
                 
                 if (data.error) {
-                    alert("Error: " + data.error);
+                    showToast(data.error, 'error');
                 } else {
                     document.getElementById('empty-state').style.opacity = '0';
-                    graph.graphData({
-                        nodes: data.nodes.map(n => ({ ...n, __typename: 'node' })),
-                        links: data.edges.map(e => ({ ...e, __typename: 'edge' }))
-                    });
+                    
+                    // Transform for force-graph
+                    const nodes = data.nodes.map(n => ({ 
+                        ...n, 
+                        __typename: 'node',
+                        val: n.labels.includes('Port') ? 10 : 5 // Size
+                    }));
+                    const links = data.edges.map(e => ({ 
+                        ...e, 
+                        __typename: 'edge',
+                        source: e.source, 
+                        target: e.target 
+                    }));
+
+                    graph.graphData({ nodes, links });
+                    
+                    showToast(`Found ${nodes.length} nodes, ${links.length} edges`, 'success');
                 }
             } catch (err) {
                 console.error(err);
-                alert("Failed to connect to server");
+                showToast("Failed to connect to server", 'error');
             } finally {
                 btn.innerText = "Run";
                 btn.disabled = false;
+                input.disabled = false;
+                input.focus();
             }
+        }
+
+        function showToast(message, type = 'info') {
+            const toast = document.createElement('div');
+            const color = type === 'error' ? 'bg-red-500' : 'bg-indigo-600';
+            toast.className = `fixed bottom-6 right-6 ${color} text-white px-6 py-3 rounded-lg shadow-xl text-sm font-bold transform transition-all duration-300 translate-y-10 opacity-0 z-50`;
+            toast.innerText = message;
+            document.body.appendChild(toast);
+            
+            requestAnimationFrame(() => {
+                toast.classList.remove('translate-y-10', 'opacity-0');
+            });
+
+            setTimeout(() => {
+                toast.classList.add('translate-y-10', 'opacity-0');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
         }
 
         document.getElementById('run-btn').onclick = runQuery;
@@ -125,12 +286,30 @@
         };
 
         // Initial status check
-        fetch('/api/status').then(res => res.json()).then(data => {
-            document.getElementById('status').innerHTML = `
-                <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-                v${data.version} | ${data.storage.nodes} nodes
-            `;
-        });
+        const checkStatus = () => {
+            fetch('/api/status')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('status').innerHTML = `
+                        <span class="relative flex h-2 w-2">
+                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                        <span class="text-emerald-400">Online</span> 
+                        <span class="text-slate-600 mx-1">|</span> 
+                        ${data.storage.nodes} nodes
+                    `;
+                })
+                .catch(() => {
+                    document.getElementById('status').innerHTML = `
+                        <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                        <span class="text-red-400">Offline</span>
+                    `;
+                });
+        };
+        
+        checkStatus();
+        setInterval(checkStatus, 5000);
     </script>
 </body>
 </html>
