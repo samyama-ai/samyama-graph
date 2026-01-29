@@ -1,0 +1,9 @@
+# Code Owners for Samyama Graph
+# This file defines who owns the code and who should review changes.
+
+# Global owner (matches everything)
+*       @madhulatha
+
+# Specific component owners (examples for future)
+# /crates/samyama-optimization/  @expert-optimizer
+# /docs/                         @tech-writer
