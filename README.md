@@ -14,7 +14,8 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 *   **🗣️ NLQ**: Query your graph using plain English ("Who knows Alice?") instead of Cypher code.
 *   **🕵️ Agents**: Autonomous agents that can enrich your graph data by calling external tools (e.g., Web Search).
 *   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
-*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, and WCC algorithms.
+*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, WCC, MaxFlow, and MST algorithms.
+*   **🎯 Optimization**: Built-in metaheuristic solvers (Jaya, Rao, GWO, Firefly) for resource allocation and scheduling directly on the graph.
 *   **🛡️ Reliability**: Raft Consensus for High Availability and RocksDB for persistence.
 *   **⚖️ Scalability**: Native Tenant-Level Sharding for horizontal scaling.
 *   **🎨 Visualization**: Built-in interactive Web UI.
@@ -180,6 +181,24 @@ ORDER BY score DESC LIMIT 10
 
 // Find Shortest Path (BFS)
 CALL algo.shortestPath($start_id, $end_id) YIELD path, cost
+```
+
+### In-Database Optimization
+
+Use the graph as your optimization model. Automatically adjust node properties to minimize/maximize an objective.
+
+```cypher
+// Optimize Factory production to minimize cost
+CALL algo.or.solve({
+  algorithm: 'Jaya',
+  label: 'Factory',
+  property: 'production_rate',
+  min: 10.0,
+  max: 100.0,
+  cost_property: 'unit_cost',
+  budget: 50000.0
+}) 
+YIELD fitness, algorithm
 ```
 
 ---
