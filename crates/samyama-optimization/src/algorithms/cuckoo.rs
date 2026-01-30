@@ -34,7 +34,7 @@ impl CuckooSolver {
         let mut rng = thread_rng();
 
         for i in 0..dim {
-            let u: f64 = rng.gen_range(0.0..1.0) * sigma_u; // Standard normal * sigma_u? No, usually Gaussian(0, sigma_u^2)
+            let _u: f64 = rng.gen_range(0.0..1.0) * sigma_u; // Standard normal * sigma_u? No, usually Gaussian(0, sigma_u^2)
             // Simulating Normal distribution
             let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(&mut rng);
             let v_n: f64 = rand_distr::Normal::new(0.0, sigma_v).unwrap().sample(&mut rng);
@@ -89,7 +89,7 @@ impl CuckooSolver {
                     // Sometimes uses difference from best. 
                     // Let's use simple: X_new = X + alpha * Levy * (X - X_best)
                     let diff = current_vars[j] - best_ind.variables[j];
-                    let delta = step_size * levy[j] * (if diff.abs() > 1e-6 { diff } else { 1.0 }); // avoid zero mult?
+                    let _delta = step_size * levy[j] * (if diff.abs() > 1e-6 { diff } else { 1.0 }); // avoid zero mult?
                     // Actually standard CS: step = alpha * L(s, lambda)
                     // Let's stick to X_new = X + alpha * Levy (+)
                     

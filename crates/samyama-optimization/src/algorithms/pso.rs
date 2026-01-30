@@ -46,7 +46,7 @@ impl PSOSolver {
         let mut pbests = swarm.clone();
 
         // Initialize global best (gbest)
-        let mut gbest_idx = self.find_best(&swarm);
+        let gbest_idx = self.find_best(&swarm);
         let mut gbest = swarm[gbest_idx].clone();
 
         let mut history = Vec::with_capacity(self.config.max_iterations);

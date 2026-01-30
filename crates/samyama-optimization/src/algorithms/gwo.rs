@@ -68,26 +68,26 @@ impl GWOSolver {
                     // Hunting equations
                     let r1: f64 = rng.gen();
                     let r2: f64 = rng.gen();
-                    let A1 = 2.0 * a * r1 - a;
-                    let C1 = 2.0 * r2;
-                    let D_alpha = (C1 * alpha.variables[j] - population[i].variables[j]).abs();
-                    let X1 = alpha.variables[j] - A1 * D_alpha;
+                    let a1 = 2.0 * a * r1 - a;
+                    let c1 = 2.0 * r2;
+                    let d_alpha = (c1 * alpha.variables[j] - population[i].variables[j]).abs();
+                    let x1 = alpha.variables[j] - a1 * d_alpha;
 
                     let r1: f64 = rng.gen();
                     let r2: f64 = rng.gen();
-                    let A2 = 2.0 * a * r1 - a;
-                    let C2 = 2.0 * r2;
-                    let D_beta = (C2 * beta.variables[j] - population[i].variables[j]).abs();
-                    let X2 = beta.variables[j] - A2 * D_beta;
+                    let a2 = 2.0 * a * r1 - a;
+                    let c2 = 2.0 * r2;
+                    let d_beta = (c2 * beta.variables[j] - population[i].variables[j]).abs();
+                    let x2 = beta.variables[j] - a2 * d_beta;
 
                     let r1: f64 = rng.gen();
                     let r2: f64 = rng.gen();
-                    let A3 = 2.0 * a * r1 - a;
-                    let C3 = 2.0 * r2;
-                    let D_delta = (C3 * delta.variables[j] - population[i].variables[j]).abs();
-                    let X3 = delta.variables[j] - A3 * D_delta;
+                    let a3 = 2.0 * a * r1 - a;
+                    let c3 = 2.0 * r2;
+                    let d_delta = (c3 * delta.variables[j] - population[i].variables[j]).abs();
+                    let x3 = delta.variables[j] - a3 * d_delta;
 
-                    new_vars[j] = ((X1 + X2 + X3) / 3.0).clamp(lower[j], upper[j]);
+                    new_vars[j] = ((x1 + x2 + x3) / 3.0).clamp(lower[j], upper[j]);
                 }
 
                 population[i].variables = new_vars;

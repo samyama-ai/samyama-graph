@@ -3,7 +3,7 @@
 //! Implements Prim's algorithm for MST.
 
 use super::common::{GraphView, NodeId};
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Ordering;
 
 pub struct MSTResult {
@@ -86,7 +86,7 @@ fn add_edges(view: &GraphView, u: usize, heap: &mut BinaryHeap<EdgeState>, visit
     }
 
     // Check incoming edges (treat as undirected)
-    for (i, &v) in view.incoming[u].iter().enumerate() {
+    for (_i, &v) in view.incoming[u].iter().enumerate() {
          if !visited.contains(&v) {
             // Need to find weight in incoming list? 
             // GraphView structure: incoming[u] contains v implies edge v->u exists.
