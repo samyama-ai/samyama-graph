@@ -17,6 +17,8 @@ struct GraphOptimizationProblem {
     costs: Vec<f64>,
     /// Budget constraint (optional)
     budget: Option<f64>,
+    /// Minimum total sum constraint (optional)
+    min_total: Option<f64>,
     /// Dimensions
     dim: usize,
     /// Bounds
@@ -46,17 +48,31 @@ impl Problem for GraphOptimizationProblem {
     }
 
     fn penalty(&self, variables: &Array1<f64>) -> f64 {
+        let mut penalty = 0.0;
+        
+        // 1. Budget Constraint: sum(x * cost) <= budget
         if let Some(budget) = self.budget {
             let mut total_cost = 0.0;
             for i in 0..self.dim {
                 total_cost += variables[i] * self.costs[i];
             }
             if total_cost > budget {
-                // Penalty is square of violation
-                return (total_cost - budget).powi(2);
+                penalty += (total_cost - budget).powi(2);
             }
         }
-        0.0
+
+        // 2. Minimum Total Constraint: sum(x) >= min_total
+        if let Some(min_total) = self.min_total {
+            let mut total_val = 0.0;
+            for i in 0..self.dim {
+                total_val += variables[i];
+            }
+            if total_val < min_total {
+                penalty += (min_total - total_val).powi(2) * 100.0; // High weight for feasibility
+            }
+        }
+
+        penalty
     }
 }
 
@@ -1803,6 +1819,7 @@ impl AlgorithmOperator {
         // Objective: minimize sum(variable * cost_property)
         let cost_prop = config_map.get("cost_property").and_then(|v| v.as_string());
         let budget = config_map.get("budget").and_then(|v| v.as_float());
+        let min_total = config_map.get("min_total").and_then(|v| v.as_float());
         
         let pop_size = config_map.get("population_size").and_then(|v| v.as_integer()).unwrap_or(50) as usize;
         let max_iter = config_map.get("max_iterations").and_then(|v| v.as_integer()).unwrap_or(100) as usize;
@@ -1837,6 +1854,7 @@ impl AlgorithmOperator {
         let problem = GraphOptimizationProblem {
             costs,
             budget,
+            min_total,
             dim: node_ids.len(),
             lower: min_val,
             upper: max_val,
