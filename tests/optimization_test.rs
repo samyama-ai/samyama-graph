@@ -21,7 +21,7 @@ fn test_optimization_solver_integration() {
     // Let's set min=5.0 to force it to 5.0.
     let query_str = r#"
         CALL algo.or.solve({
-            algorithm: 'Jaya',
+            algorithm: 'GWO',
             label: 'Resource',
             property: 'allocation',
             min: 5.0,
