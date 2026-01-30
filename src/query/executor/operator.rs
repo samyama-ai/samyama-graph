@@ -1874,6 +1874,87 @@ impl AlgorithmOperator {
 
         Ok(())
     }
+
+    fn execute_max_flow(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (source, sink, capacity_property?)
+        if self.args.len() < 2 {
+            return Err(ExecutionError::RuntimeError("maxFlow requires source and sink".to_string()));
+        }
+
+        let source_id = match &self.args[0] {
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
+            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
+        };
+
+        let target_id = match &self.args[1] {
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
+            _ => return Err(ExecutionError::TypeError("Sink must be integer ID".to_string())),
+        };
+
+        let cap_prop = if self.args.len() > 2 {
+            match &self.args[2] {
+                Expression::Literal(PropertyValue::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Build view
+        let view = crate::algo::build_view(store, None, None, cap_prop.as_deref());
+        
+        // edmonds_karp expects u64 (AlgoNodeId), not crate::graph::NodeId
+        if let Some(result) = crate::algo::edmonds_karp(&view, source_id, target_id) {
+            let mut record = Record::new();
+            record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
+            self.results.push(record);
+        } else {
+             // No flow found or invalid nodes
+             let mut record = Record::new();
+             record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(0.0)));
+             self.results.push(record);
+        }
+
+        Ok(())
+    }
+
+    fn execute_mst(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (weight_property?)
+        let weight_prop = if self.args.len() > 0 {
+            match &self.args[0] {
+                Expression::Literal(PropertyValue::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let view = crate::algo::build_view(store, None, None, weight_prop.as_deref());
+        let result = crate::algo::prim_mst(&view);
+
+        // Return total weight
+        let mut summary = Record::new();
+        summary.bind("total_weight".to_string(), Value::Property(PropertyValue::Float(result.total_weight)));
+        self.results.push(summary);
+
+        // Return edges
+        for (u_u64, v_u64, w) in result.edges {
+            let u = NodeId::new(u_u64);
+            let v = NodeId::new(v_u64);
+            
+            let mut record = Record::new();
+            if let Some(node_u) = store.get_node(u) {
+                record.bind("source".to_string(), Value::Node(u, node_u.clone()));
+            }
+            if let Some(node_v) = store.get_node(v) {
+                record.bind("target".to_string(), Value::Node(v, node_v.clone()));
+            }
+            record.bind("weight".to_string(), Value::Property(PropertyValue::Float(w)));
+            self.results.push(record);
+        }
+
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for AlgorithmOperator {
@@ -1884,6 +1965,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.shortestPath" => self.execute_shortest_path(store)?,
                 "algo.wcc" => self.execute_wcc(store)?,
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
+                "algo.maxFlow" => self.execute_max_flow(store)?,
+                "algo.mst" => self.execute_mst(store)?,
                 "algo.or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
@@ -1910,6 +1993,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.shortestPath" => self.execute_shortest_path(store)?,
                 "algo.wcc" => self.execute_wcc(store)?,
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
+                "algo.maxFlow" => self.execute_max_flow(store)?,
+                "algo.mst" => self.execute_mst(store)?,
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;
