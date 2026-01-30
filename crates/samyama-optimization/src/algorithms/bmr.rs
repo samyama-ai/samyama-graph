@@ -53,7 +53,7 @@ impl BMRSolver {
                     let r4: f64 = local_rng.gen();
                     let t: f64 = local_rng.gen_range(1..3) as f64;
                     
-                    let rand_idx = local_rng.gen_range(0..self.config.population_size);
+                    let _rand_idx = local_rng.gen_range(0..self.config.population_size);
                     // Note: In parallel map, we can't easily access the current population.
                     // But we can approximate by having each thread pick its own random.
                     // Or we just pass the population down. 
