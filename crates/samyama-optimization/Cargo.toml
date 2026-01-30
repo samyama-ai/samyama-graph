@@ -11,19 +11,12 @@ categories = ["algorithms", "science", "mathematics"]
 readme = "README.md"
 
 [dependencies]
-# Parallel execution
-rayon = "1.8"
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-# Fast math/vectors
-ndarray = { version = "0.15", features = ["serde"] }
-# Random numbers
 rand = "0.8"
-# Logging
+rayon = "1.8"
+ndarray = { version = "0.15", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
-# Error handling
-thiserror = "1.0"
-anyhow = "1.0"
+rand_distr = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"

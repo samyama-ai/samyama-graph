@@ -8,6 +8,9 @@ pub mod itlbo;
 pub mod pso;
 pub mod de;
 pub mod gotlbo;
+pub mod firefly;
+pub mod cuckoo;
+pub mod gwo;
 
 pub use jaya::JayaSolver;
 pub use rao::{RaoSolver, RaoVariant};
@@ -19,3 +22,6 @@ pub use itlbo::ITLBOSolver;
 pub use pso::PSOSolver;
 pub use de::DESolver;
 pub use gotlbo::GOTLBOSolver;
+pub use firefly::FireflySolver;
+pub use cuckoo::CuckooSolver;
+pub use gwo::GWOSolver;

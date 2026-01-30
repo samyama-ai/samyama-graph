@@ -8,7 +8,7 @@ use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, OptimizationResult};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
@@ -1853,6 +1853,9 @@ impl AlgorithmOperator {
             "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
             "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
             "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
+            "Firefly" => FireflySolver::new(solver_config).solve(&problem),
+            "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
+            "GWO" => GWOSolver::new(solver_config).solve(&problem),
             _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
         };
 
