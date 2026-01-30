@@ -40,6 +40,13 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 | | List Functions | ❌ | ✅ | ✅ | e.g., `nodes()`, `relationships()`. |
 | **Vector / AI** | `CREATE VECTOR INDEX` | ✅ | ⚠️ | ⚠️ | **Native Syntax**. Falkor/Neo4j use procedures or separate indices. |
 | | `CALL db.index.vector...` | ✅ | ⚠️ | ⚠️ | Optimized for RAG. |
+| **Native Procedures** | `algo.pageRank` | ✅ | ✅ | ✅ | Iterative ranking. |
+| | `algo.wcc` | ✅ | ✅ | ✅ | Weakly Connected Components. |
+| | `algo.bfs` / `shortestPath` | ✅ | ✅ | ✅ | Unweighted shortest path. |
+| | `algo.dijkstra` / `weightedPath` | ✅ | ❌ | ✅ | Weighted shortest path. |
+| | `algo.maxFlow` | ✅ | ❌ | ❌ | Edmonds-Karp Max Flow. |
+| | `algo.mst` | ✅ | ❌ | ❌ | Prim's Minimum Spanning Tree. |
+| | `algo.or.solve` | ✅ | ❌ | ❌ | **Unique**: In-Database Optimization (Jaya, Rao, TLBO, GWO, etc.). |
 
 ## 🛠 Known Issues
 
