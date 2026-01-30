@@ -400,6 +400,7 @@ async fn start_server() {
         let (mut disease_ids, _drug_ids) = load_clinical_trials_data(&mut graph);
         load_hetionet_data(&mut graph, &mut disease_ids);
         load_phegeni_data(&mut graph);
+        load_aact_data(&mut graph);
         
         println!("\nGraph Statistics:");
         println!("  Total nodes: {}", graph.node_count());
@@ -439,4 +440,131 @@ async fn start_server() {
     if let Err(e) = server.start().await {
         eprintln!("Server error: {}", e);
     }
+}
+
+fn load_aact_data(store: &mut GraphStore) {
+    println!("\nLoading AACT Clinical Trials data...");
+    
+    let trials_path = "/tmp/aact_trials.tsv";
+    let conditions_path = "/tmp/aact_conditions.tsv";
+    let sponsors_path = "/tmp/aact_sponsors.tsv";
+    let edges_studies_path = "/tmp/aact_edges_studies.tsv";
+    let edges_sponsored_path = "/tmp/aact_edges_sponsored.tsv";
+    
+    if !std::path::Path::new(trials_path).exists() {
+        println!("  AACT data files not found, skipping...");
+        return;
+    }
+    
+    let mut trial_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut condition_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut sponsor_ids: HashMap<String, NodeId> = HashMap::new();
+    
+    // Load trials
+    let mut trial_count = 0;
+    if let Ok(file) = File::open(trials_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 { continue; }
+            
+            let trial_key = parts[0];
+            let title = parts[1];
+            let phase = if parts.len() > 3 { parts[3] } else { "Unknown" };
+            
+            let id = store.create_node("ClinicalTrial");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("trial_id", trial_key);
+                node.set_property("title", title);
+                node.set_property("phase", phase);
+            }
+            trial_ids.insert(trial_key.to_string(), id);
+            trial_count += 1;
+        }
+    }
+    println!("  Loaded {} clinical trials", trial_count);
+    
+    // Load conditions
+    let mut condition_count = 0;
+    if let Ok(file) = File::open(conditions_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 { continue; }
+            
+            let cond_key = parts[0];
+            let name = parts[1];
+            
+            let id = store.create_node("MedicalCondition");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", name);
+            }
+            condition_ids.insert(cond_key.to_string(), id);
+            condition_count += 1;
+        }
+    }
+    println!("  Loaded {} medical conditions", condition_count);
+    
+    // Load sponsors
+    let mut sponsor_count = 0;
+    if let Ok(file) = File::open(sponsors_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 { continue; }
+            
+            let sponsor_key = parts[0];
+            let name = parts[1];
+            
+            let id = store.create_node("Sponsor");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", name);
+            }
+            sponsor_ids.insert(sponsor_key.to_string(), id);
+            sponsor_count += 1;
+        }
+    }
+    println!("  Loaded {} sponsors", sponsor_count);
+    
+    // Load STUDIES edges (Trial -> Condition)
+    let mut studies_count = 0;
+    if let Ok(file) = File::open(edges_studies_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 { continue; }
+            
+            let trial_key = parts[0];
+            let cond_key = parts[2];
+            
+            if let (Some(&t_id), Some(&c_id)) = (trial_ids.get(trial_key), condition_ids.get(cond_key)) {
+                if store.create_edge(t_id, c_id, "STUDIES").is_ok() {
+                    studies_count += 1;
+                }
+            }
+        }
+    }
+    println!("  Loaded {} STUDIES relationships", studies_count);
+    
+    // Load SPONSORS edges (Sponsor -> Trial)
+    let mut sponsored_count = 0;
+    if let Ok(file) = File::open(edges_sponsored_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 { continue; }
+            
+            let sponsor_key = parts[0];
+            let trial_key = parts[2];
+            
+            if let (Some(&s_id), Some(&t_id)) = (sponsor_ids.get(sponsor_key), trial_ids.get(trial_key)) {
+                if store.create_edge(s_id, t_id, "SPONSORS").is_ok() {
+                    sponsored_count += 1;
+                }
+            }
+        }
+    }
+    println!("  Loaded {} SPONSORS relationships", sponsored_count);
+    
+    println!("AACT data loaded successfully!");
 }
