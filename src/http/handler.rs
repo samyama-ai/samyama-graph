@@ -62,27 +62,35 @@ pub async fn query_handler(
                     // Extract graph elements for visualization
                     match val {
                         Value::Node(id, node) => {
+                            let mut properties = serde_json::Map::new();
+                            for (k, v) in &node.properties {
+                                properties.insert(k.clone(), v.to_json());
+                            }
                             let node_json = json!({
                                 "id": id.as_u64().to_string(),
                                 "labels": node.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
-                                "properties": node.properties,
+                                "properties": properties,
                             });
                             nodes.insert(id.as_u64().to_string(), node_json.clone());
                             row.push(node_json);
                         }
                         Value::Edge(id, edge) => {
+                            let mut properties = serde_json::Map::new();
+                            for (k, v) in &edge.properties {
+                                properties.insert(k.clone(), v.to_json());
+                            }
                             let edge_json = json!({
                                 "id": id.as_u64().to_string(),
                                 "source": edge.source.as_u64().to_string(),
                                 "target": edge.target.as_u64().to_string(),
                                 "type": edge.edge_type.as_str(),
-                                "properties": edge.properties,
+                                "properties": properties,
                             });
                             edges.insert(id.as_u64().to_string(), edge_json.clone());
                             row.push(edge_json);
                         }
                         Value::Property(p) => {
-                            row.push(json!(p));
+                            row.push(p.to_json());
                         }
                         Value::Null => {
                             row.push(serde_json::Value::Null);

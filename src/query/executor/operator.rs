@@ -7,6 +7,58 @@ use crate::query::ast::{Expression, BinaryOp, Direction};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
+use samyama_optimization::common::{Problem, SolverConfig, OptimizationResult};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver};
+use ndarray::Array1;
+
+/// Optimization problem wrapper for GraphStore
+struct GraphOptimizationProblem {
+    /// Static cost coefficients (e.g. price per unit)
+    costs: Vec<f64>,
+    /// Budget constraint (optional)
+    budget: Option<f64>,
+    /// Dimensions
+    dim: usize,
+    /// Bounds
+    lower: f64,
+    upper: f64,
+}
+
+impl Problem for GraphOptimizationProblem {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
+        (
+            Array1::from_elem(self.dim, self.lower),
+            Array1::from_elem(self.dim, self.upper)
+        )
+    }
+
+    fn objective(&self, variables: &Array1<f64>) -> f64 {
+        // Minimize sum(variable * cost)
+        let mut sum = 0.0;
+        for i in 0..self.dim {
+            sum += variables[i] * self.costs[i];
+        }
+        sum
+    }
+
+    fn penalty(&self, variables: &Array1<f64>) -> f64 {
+        if let Some(budget) = self.budget {
+            let mut total_cost = 0.0;
+            for i in 0..self.dim {
+                total_cost += variables[i] * self.costs[i];
+            }
+            if total_cost > budget {
+                // Penalty is square of violation
+                return (total_cost - budget).powi(2);
+            }
+        }
+        0.0
+    }
+}
 
 /// Physical operator trait - all operators implement this
 pub trait PhysicalOperator: Send {
@@ -1643,6 +1695,182 @@ impl AlgorithmOperator {
 
         Ok(())
     }
+
+    fn execute_wcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (label?, edge_type?)
+        let mut label = None;
+        let mut edge_type = None;
+
+        if self.args.len() > 0 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
+                label = Some(s.clone());
+            }
+        }
+        if self.args.len() > 1 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
+                edge_type = Some(s.clone());
+            }
+        }
+
+        // Build view and run WCC
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+        let result = crate::algo::weakly_connected_components(&view);
+
+        // Convert to records
+        // For WCC, we return (node, componentId)
+        for (node_id, component_id) in result.node_component {
+            let nid = NodeId::new(node_id);
+            let mut record = Record::new();
+            if let Some(node) = store.get_node(nid) {
+                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
+                self.results.push(record);
+            }
+        }
+        
+        // Sort by componentId
+        self.results.sort_by(|a, b| {
+            let cid_a = a.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
+            let cid_b = b.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
+            cid_a.cmp(&cid_b)
+        });
+
+        Ok(())
+    }
+
+    fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (source_node_id, target_node_id, weight_property)
+        if self.args.len() < 3 {
+            return Err(ExecutionError::RuntimeError("weightedPath requires source, target, and weight property".to_string()));
+        }
+
+        let source_id = match &self.args[0] {
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
+            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
+        };
+
+        let target_id = match &self.args[1] {
+            Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
+            _ => return Err(ExecutionError::TypeError("Target must be integer ID".to_string())),
+        };
+        
+        let weight_prop = match &self.args[2] {
+            Expression::Literal(PropertyValue::String(s)) => s.clone(),
+            _ => return Err(ExecutionError::TypeError("Weight property must be a string".to_string())),
+        };
+
+        // Build view with weights
+        let view = crate::algo::build_view(store, None, None, Some(&weight_prop));
+        
+        if let Some(result) = crate::algo::dijkstra(&view, source_id, target_id) {
+             let mut record = Record::new();
+             record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
+             
+             // Construct path list
+             let mut path_nodes = Vec::new();
+             for nid_u64 in result.path {
+                 let nid = NodeId::new(nid_u64);
+                 // We add just IDs for now, or could fetch full nodes if needed
+                 path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
+             }
+             record.bind("path".to_string(), Value::Property(PropertyValue::Array(path_nodes)));
+             
+             self.results.push(record);
+        }
+
+        Ok(())
+    }
+    fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        if self.args.is_empty() {
+             return Err(ExecutionError::RuntimeError("algo.or.solve requires a config map".to_string()));
+        }
+
+        let config_map = match &self.args[0] {
+            Expression::Literal(PropertyValue::Map(m)) => m,
+            _ => return Err(ExecutionError::TypeError("First argument must be a map".to_string())),
+        };
+
+        // Extract parameters
+        let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
+        let label_str = config_map.get("label").and_then(|v| v.as_string())
+            .ok_or_else(|| ExecutionError::RuntimeError("Missing 'label' in config".to_string()))?;
+        let property = config_map.get("property").and_then(|v| v.as_string())
+            .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
+        
+        let min_val = config_map.get("min").and_then(|v| v.as_float()).unwrap_or(0.0);
+        let max_val = config_map.get("max").and_then(|v| v.as_float()).unwrap_or(100.0);
+        
+        // Objective: minimize sum(variable * cost_property)
+        let cost_prop = config_map.get("cost_property").and_then(|v| v.as_string());
+        let budget = config_map.get("budget").and_then(|v| v.as_float());
+        
+        let pop_size = config_map.get("population_size").and_then(|v| v.as_integer()).unwrap_or(50) as usize;
+        let max_iter = config_map.get("max_iterations").and_then(|v| v.as_integer()).unwrap_or(100) as usize;
+
+        // 1. Gather nodes and costs
+        let label = Label::new(label_str);
+        // We need to use store (mutable) to get nodes, but get_nodes_by_label returns references.
+        // We can't hold references while writing back later.
+        // So we collect IDs and costs.
+        
+        let mut node_ids = Vec::new();
+        let mut costs = Vec::new();
+        
+        {
+            let nodes = store.get_nodes_by_label(&label);
+            for node in nodes {
+                node_ids.push(node.id);
+                let cost = if let Some(cp) = cost_prop {
+                    node.get_property(cp).and_then(|v| v.as_float()).unwrap_or(1.0)
+                } else {
+                    1.0
+                };
+                costs.push(cost);
+            }
+        }
+
+        if node_ids.is_empty() {
+             return Ok(());
+        }
+
+        // 2. Setup Problem
+        let problem = GraphOptimizationProblem {
+            costs,
+            budget,
+            dim: node_ids.len(),
+            lower: min_val,
+            upper: max_val,
+        };
+
+        let solver_config = SolverConfig {
+            population_size: pop_size,
+            max_iterations: max_iter,
+        };
+
+        // 3. Run Solver
+        let result = match algorithm {
+            "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
+            "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
+            "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
+            "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
+            _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
+        };
+
+        // 4. Write back results
+        for (i, &val) in result.best_variables.iter().enumerate() {
+            let node_id = node_ids[i];
+            let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+        }
+
+        // 5. Return result record
+        let mut record = Record::new();
+        record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
+        record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
+        record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+        self.results.push(record);
+
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for AlgorithmOperator {
@@ -1651,6 +1879,9 @@ impl PhysicalOperator for AlgorithmOperator {
             match self.name.as_str() {
                 "algo.pageRank" => self.execute_pagerank(store)?,
                 "algo.shortestPath" => self.execute_shortest_path(store)?,
+                "algo.wcc" => self.execute_wcc(store)?,
+                "algo.weightedPath" => self.execute_weighted_path(store)?,
+                "algo.or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;
@@ -1663,6 +1894,35 @@ impl PhysicalOperator for AlgorithmOperator {
         let record = self.results[self.current].clone();
         self.current += 1;
         Ok(Some(record))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+         if !self.executed {
+            match self.name.as_str() {
+                "algo.or.solve" => self.execute_or_solve(store, tenant_id)?,
+                // For read-only algos, we can just call the immutable implementations
+                // But we need to borrow store immutably.
+                // Since we have &mut store, we can reborrow as &store
+                "algo.pageRank" => self.execute_pagerank(store)?,
+                "algo.shortestPath" => self.execute_shortest_path(store)?,
+                "algo.wcc" => self.execute_wcc(store)?,
+                "algo.weightedPath" => self.execute_weighted_path(store)?,
+                _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
+            }
+            self.executed = true;
+        }
+
+        if self.current >= self.results.len() {
+            return Ok(None);
+        }
+
+        let record = self.results[self.current].clone();
+        self.current += 1;
+        Ok(Some(record))
+    }
+
+    fn is_mutating(&self) -> bool {
+        self.name == "algo.or.solve"
     }
 
     fn reset(&mut self) {

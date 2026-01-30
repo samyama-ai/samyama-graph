@@ -538,6 +538,29 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 }
                 return Ok(PropertyValue::Array(items));
             }
+            Rule::map => {
+                let mut map = HashMap::new();
+                for entry in inner.into_inner() {
+                    if entry.as_rule() == Rule::map_entry {
+                        let mut key = String::new();
+                        let mut val = PropertyValue::Null;
+                        
+                        for part in entry.into_inner() {
+                            match part.as_rule() {
+                                Rule::property_key => key = part.as_str().to_string(),
+                                Rule::string => {
+                                    let s = part.as_str();
+                                    key = s[1..s.len()-1].to_string();
+                                }
+                                Rule::value => val = parse_value(part)?,
+                                _ => {}
+                            }
+                        }
+                        map.insert(key, val);
+                    }
+                }
+                return Ok(PropertyValue::Map(map));
+            }
             _ => {}
         }
     }
