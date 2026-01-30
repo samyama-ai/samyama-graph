@@ -1,5 +1,5 @@
 use samyama::graph::{GraphStore, Label, EdgeType, PropertyValue, NodeId, EdgeId, PropertyMap};
-use samyama_optimization::algorithms::JayaSolver;
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver};
 use samyama_optimization::common::{Problem, SolverConfig};
 use ndarray::Array1;
 use rand::Rng;
@@ -144,49 +144,51 @@ fn main() {
     }
     println!("Graph built in {:.2?} ({} Nodes, {} Edges)", start_build.elapsed(), num_departments + num_resources, total_vars);
 
-    // 2. Setup Optimization Problem
-    println!("\n[2/4] Initializing Solver...");
-    let problem = HospitalGraphProblem {
-        graph: store.clone(),
-        dept_ids,
-        resource_ids: res_ids,
-        edge_ids: edge_ids.clone(),
-        budget,
-    };
+    // 2. Define Algorithms
+    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO"];
+    let mut results = Vec::new();
 
     let config = SolverConfig {
-        population_size: 100,
-        max_iterations: 200, 
+        population_size: 50,
+        max_iterations: 100, // Reduced iterations for quicker benchmark of multiple algos
     };
-    let solver = JayaSolver::new(config);
 
-    // 3. Run Optimization
-    println!("\n[3/4] Optimizing {} variables...", total_vars);
-    let start_solve = Instant::now();
-    let result = solver.solve(&problem);
-    let solve_time = start_solve.elapsed();
-    
-    println!("Optimization converged in {:.2?}", solve_time);
-    println!("Best Objective Score: {:.4}", result.best_fitness);
-    println!("Throughput: {:.0} evals/sec", (100 * 200) as f64 / solve_time.as_secs_f64());
+    println!("\n[2/4] Benchmarking Algorithms...");
+    println!("----------------------------------------------------------------");
+    println!("| Algorithm | Time (s) | Best Fitness | Evals/Sec |");
+    println!("|-----------|----------|--------------|-----------|");
 
-    // 4. Write-Back to Graph
-    println!("\n[4/4] Writing results back to Graph...");
-    let start_write = Instant::now();
-    let mut updated_count = 0;
-    
-    {
-        let mut store_write = store.write().unwrap();
-        for (i, &val) in result.best_variables.iter().enumerate() {
-            let edge_id = edge_ids[i];
+    for &algo_name in &algorithms {
+        let problem = HospitalGraphProblem {
+            graph: store.clone(),
+            dept_ids: dept_ids.clone(),
+            resource_ids: res_ids.clone(),
+            edge_ids: edge_ids.clone(),
+            budget,
+        };
+
+        let start_solve = Instant::now();
+        
+        let result = match algo_name {
+            "Jaya" => JayaSolver::new(config.clone()).solve(&problem),
+            "Rao3" => RaoSolver::new(config.clone(), RaoVariant::Rao3).solve(&problem),
+            "Firefly" => FireflySolver::new(config.clone()).solve(&problem),
+            "Cuckoo" => CuckooSolver::new(config.clone()).solve(&problem),
+            "GWO" => GWOSolver::new(config.clone()).solve(&problem),
+            _ => panic!("Unknown algorithm"),
+        };
+        
+        let solve_time = start_solve.elapsed();
+        let evals_sec = (config.population_size * config.max_iterations) as f64 / solve_time.as_secs_f64();
+        
+        println!("| {:<9} | {:<8.2} | {:<12.4} | {:<9.0} |", 
+            algo_name, solve_time.as_secs_f64(), result.best_fitness, evals_sec);
             
-            if let Some(edge) = store_write.get_edge_mut(edge_id) {
-                edge.properties.insert("quantity".to_string(), PropertyValue::Float(val));
-                updated_count += 1;
-            }
-        }
+        results.push((algo_name, solve_time, result.best_fitness));
     }
-    println!("Updated {} edges in {:.2?}", updated_count, start_write.elapsed());
+    println!("----------------------------------------------------------------");
 
-    println!("\n✨ SUCCESS: In-Database Optimization Complete!");
+    // 3. Write-Back to Graph (using the result from the last algorithm, or best?)
+    // For benchmark demo, we just skip write-back or do it once.
+    println!("\n[3/4] Benchmark Complete.");
 }
