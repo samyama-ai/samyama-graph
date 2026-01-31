@@ -11,6 +11,24 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 *   **⚡ Speed**: 115,000+ Queries Per Second (QPS) for lookups; 800,000+ Nodes/sec ingestion.
 *   **🧠 Vector Search**: Built-in HNSW indexing for millisecond-speed Semantic Search.
 *   **🤖 Auto-Embed**: Automatically generate vector embeddings from text properties using LLMs.
+## 📚 Documentation
+
+*   **[ACID Guarantees](docs/ACID_GUARANTEES.md)**: Detailed breakdown of consistency and durability.
+*   **[Architecture](docs/ARCHITECTURE.md)**: System design and components.
+*   **[Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)**: Supported query features.
+*   **[Benchmarks](docs/performance/BENCHMARKS.md)**: Performance metrics.
+
+## 📦 Crates
+
+*   **[samyama-graph-algorithms](crates/samyama-graph-algorithms/README.md)**: Native graph analytics (PageRank, WCC, MaxFlow, etc.).
+*   **[samyama-optimization](crates/samyama-optimization/README.md)**: 15+ Metaheuristic Solvers (Jaya, Rao, GWO, PSO, etc.).
+
+## 🚀 Key Features
+
+*   **⚡ High Performance**: In-memory graph storage with RocksDB persistence.
+*   **🔄 Distributed**: Raft-based consensus for High Availability.
+*   **🔍 Vector Search**: Native HNSW indexing for RAG applications.
+*   **🧠 AI-Native**: "Auto-Embed" pipelines and Agentic Enrichment.
 *   **🗣️ NLQ**: Query your graph using plain English ("Who knows Alice?") instead of Cypher code.
 *   **🕵️ Agents**: Autonomous agents that can enrich your graph data by calling external tools (e.g., Web Search).
 *   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
