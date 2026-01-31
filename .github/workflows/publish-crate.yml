@@ -22,4 +22,6 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish -p samyama-optimization
+        run: |
+          cargo publish -p samyama-optimization
+          cargo publish -p samyama-graph-algorithms
