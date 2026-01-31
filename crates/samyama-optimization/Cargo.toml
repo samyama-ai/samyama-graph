@@ -1,6 +1,6 @@
 [package]
 name = "samyama-optimization"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 authors = ["Sandeep Kunkunuru <sandeep@samyama.ai>"]
 description = "High-performance metaheuristic optimization algorithms (Jaya, Rao, TLBO, BMR, BWR, QOJaya, ITLBO) in Rust."
