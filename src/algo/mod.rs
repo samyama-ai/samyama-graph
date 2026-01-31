@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub use samyama_graph_algorithms::{
     page_rank, PageRankConfig,
     weakly_connected_components, WccResult,
+    strongly_connected_components, SccResult,
     bfs, dijkstra, PathResult,
     edmonds_karp, FlowResult,
     prim_mst, MSTResult,

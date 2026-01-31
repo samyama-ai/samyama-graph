@@ -8,7 +8,7 @@ use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
@@ -2101,6 +2101,7 @@ impl AlgorithmOperator {
                 "SA" => SASolver::new(solver_config).solve(&problem),
                 "Bat" => BatSolver::new(solver_config).solve(&problem),
                 "ABC" => ABCSolver::new(solver_config).solve(&problem),
+                "GSA" => GSASolver::new(solver_config).solve(&problem),
                 "HS" => HSSolver::new(solver_config).solve(&problem),
                 "FPA" => FPASolver::new(solver_config).solve(&problem),
                 _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
@@ -2220,6 +2221,32 @@ impl AlgorithmOperator {
 
         Ok(())
     }
+
+    fn execute_scc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Build view and run SCC
+        let view = crate::algo::build_view(store, None, None, None);
+        let result = crate::algo::strongly_connected_components(&view);
+
+        // For SCC, we return (node, componentId)
+        for (node_id, component_id) in result.node_component {
+            let nid = NodeId::new(node_id);
+            let mut record = Record::new();
+            if let Some(node) = store.get_node(nid) {
+                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
+                self.results.push(record);
+            }
+        }
+        
+        // Sort by componentId
+        self.results.sort_by(|a, b| {
+            let cid_a = a.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
+            let cid_b = b.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
+            cid_a.cmp(&cid_b)
+        });
+
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for AlgorithmOperator {
@@ -2229,6 +2256,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.pageRank" => self.execute_pagerank(store)?,
                 "algo.shortestPath" => self.execute_shortest_path(store)?,
                 "algo.wcc" => self.execute_wcc(store)?,
+                "algo.scc" => self.execute_scc(store)?,
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
@@ -2258,6 +2286,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.pageRank" => self.execute_pagerank(store)?,
                 "algo.shortestPath" => self.execute_shortest_path(store)?,
                 "algo.wcc" => self.execute_wcc(store)?,
+                "algo.scc" => self.execute_scc(store)?,
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
