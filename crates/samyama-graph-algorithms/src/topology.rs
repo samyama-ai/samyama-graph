@@ -2,7 +2,7 @@
 //!
 //! Implements REQ-ALGO-005 (Triangle Counting)
 
-use super::common::{GraphView, NodeId};
+use super::common::GraphView;
 use std::collections::HashSet;
 
 /// Triangle Counting
