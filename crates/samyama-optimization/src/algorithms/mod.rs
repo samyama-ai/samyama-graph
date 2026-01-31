@@ -14,6 +14,7 @@ pub mod gwo;
 pub mod ga;
 pub mod sa;
 pub mod bat;
+pub mod abc;
 
 pub use jaya::JayaSolver;
 pub use rao::{RaoSolver, RaoVariant};
@@ -31,3 +32,4 @@ pub use gwo::GWOSolver;
 pub use ga::GASolver;
 pub use sa::SASolver;
 pub use bat::BatSolver;
+pub use abc::ABCSolver;

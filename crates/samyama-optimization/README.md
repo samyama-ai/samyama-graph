@@ -5,9 +5,18 @@ A high-performance library implementing metaphor-less metaheuristic optimization
 ## Algorithms
 - **Jaya**: Parameter-less optimization (Toward best, away from worst).
 - **Rao (1, 2, 3)**: Metaphor-less algorithms using best, worst, and mean solutions.
-- **TLBO**: Teaching-Learning-Based Optimization.
-- **BMR**: Best-Mean-Random.
-- **BWR**: Best-Worst-Random.
+- **TLBO / ITLBO**: Teaching-Learning-Based Optimization (with Elitism in ITLBO).
+- **QOJaya**: Quasi-Oppositional Jaya (using Opposition-Based Learning).
+- **BMR / BWR**: Best-Mean-Random and Best-Worst-Random strategies.
+- **PSO**: Particle Swarm Optimization.
+- **DE**: Differential Evolution.
+- **GA**: Genetic Algorithm (Tournament selection, Uniform crossover).
+- **GWO**: Grey Wolf Optimizer (Alpha, Beta, Delta hierarchy).
+- **Firefly**: Firefly Algorithm (Light intensity based attraction).
+- **Cuckoo**: Cuckoo Search (Levy flights and nest abandonment).
+- **SA**: Simulated Annealing.
+- **Bat**: Bat Algorithm (Echolocation-based search).
+- **ABC**: Artificial Bee Colony.
 
 ## Features
 - **Parallel Evaluation**: Automatic multi-threaded fitness calculation via `rayon`.
