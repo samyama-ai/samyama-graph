@@ -7,8 +7,8 @@ use crate::query::ast::{Expression, BinaryOp, Direction};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
-use samyama_optimization::common::{Problem, SolverConfig, OptimizationResult};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver};
+use samyama_optimization::common::{Problem, SolverConfig};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
@@ -1768,10 +1768,10 @@ impl AlgorithmOperator {
     }
 
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        // Arguments: (label?, edge_type?, iterations?)
+        // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
-        let config = crate::algo::PageRankConfig::default();
+        let mut config = crate::algo::PageRankConfig::default();
 
         if self.args.len() > 0 {
             if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
@@ -1783,7 +1783,18 @@ impl AlgorithmOperator {
                 edge_type = Some(s.clone());
             }
         }
-        // TODO: Parse config map for iterations
+        
+        // Parse optional config map
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Integer(i)) = m.get("iterations") {
+                    config.iterations = *i as usize;
+                }
+                if let Some(PropertyValue::Float(f)) = m.get("damping") {
+                    config.damping_factor = *f;
+                }
+            }
+        }
 
         // Build view and run
         let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
@@ -2018,6 +2029,8 @@ impl AlgorithmOperator {
             "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
             "GWO" => GWOSolver::new(solver_config).solve(&problem),
             "GA" => GASolver::new(solver_config).solve(&problem),
+            "SA" => SASolver::new(solver_config).solve(&problem),
+            "Bat" => BatSolver::new(solver_config).solve(&problem),
             _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
         };
 
@@ -2032,6 +2045,11 @@ impl AlgorithmOperator {
         record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
         record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
         record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+        
+        // Yield history as an array for plotting
+        let history_props: Vec<PropertyValue> = result.history.into_iter().map(PropertyValue::Float).collect();
+        record.bind("history".to_string(), Value::Property(PropertyValue::Array(history_props)));
+        
         self.results.push(record);
 
         Ok(())
