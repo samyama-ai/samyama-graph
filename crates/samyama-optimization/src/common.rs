@@ -36,6 +36,53 @@ pub trait Problem: Send + Sync {
     fn bounds(&self) -> (Array1<f64>, Array1<f64>);
 }
 
+/// Represents a candidate solution in a multi-objective space.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultiObjectiveIndividual {
+    pub variables: Array1<f64>,
+    pub fitness: Vec<f64>,
+    pub rank: usize,
+    pub crowding_distance: f64,
+}
+
+impl MultiObjectiveIndividual {
+    pub fn new(variables: Array1<f64>, fitness: Vec<f64>) -> Self {
+        Self { 
+            variables, 
+            fitness, 
+            rank: 0, 
+            crowding_distance: 0.0 
+        }
+    }
+}
+
+/// Defines a multi-objective optimization problem.
+pub trait MultiObjectiveProblem: Send + Sync {
+    /// Multiple objective functions to minimize.
+    fn objectives(&self, variables: &Array1<f64>) -> Vec<f64>;
+    
+    /// Optional constraints. Returns a vector of penalties.
+    fn penalties(&self, _variables: &Array1<f64>) -> Vec<f64> {
+        vec![]
+    }
+
+    /// Number of variables.
+    fn dim(&self) -> usize;
+
+    /// Lower and upper bounds for each variable.
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>);
+    
+    /// Number of objectives.
+    fn num_objectives(&self) -> usize;
+}
+
+/// The result of a multi-objective optimization run (Pareto Front).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MultiObjectiveResult {
+    pub pareto_front: Vec<MultiObjectiveIndividual>,
+    pub history: Vec<f64>, // e.g., hypervolume or min of first objective
+}
+
 /// Configuration for the solver.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SolverConfig {

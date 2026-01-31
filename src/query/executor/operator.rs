@@ -7,14 +7,16 @@ use crate::query::ast::{Expression, BinaryOp, Direction};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
-use samyama_optimization::common::{Problem, SolverConfig};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver};
+use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, NSGA2Solver, MOTLBOSolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
 struct GraphOptimizationProblem {
-    /// Static cost coefficients (e.g. price per unit)
+    /// Static cost coefficients (e.g. price per unit) for single objective
     costs: Vec<f64>,
+    /// Multiple cost coefficient vectors for multi-objective
+    multi_costs: Vec<Vec<f64>>,
     /// Budget constraint (optional)
     budget: Option<f64>,
     /// Minimum total sum constraint (optional)
@@ -73,6 +75,32 @@ impl Problem for GraphOptimizationProblem {
         }
 
         penalty
+    }
+}
+
+impl MultiObjectiveProblem for GraphOptimizationProblem {
+    fn num_objectives(&self) -> usize {
+        self.multi_costs.len()
+    }
+
+    fn objectives(&self, variables: &Array1<f64>) -> Vec<f64> {
+        let mut results = Vec::with_capacity(self.multi_costs.len());
+        for costs in &self.multi_costs {
+            let mut sum = 0.0;
+            for i in 0..self.dim {
+                sum += variables[i] * costs[i];
+            }
+            results.push(sum);
+        }
+        results
+    }
+
+    fn dim(&self) -> usize { self.dim }
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
+        (
+            Array1::from_elem(self.dim, self.lower),
+            Array1::from_elem(self.dim, self.upper)
+        )
     }
 }
 
@@ -1972,6 +2000,17 @@ impl AlgorithmOperator {
         
         // Objective: minimize sum(variable * cost_property)
         let cost_prop = config_map.get("cost_property").and_then(|v| v.as_string());
+        
+        // Support multiple objectives
+        let mut cost_props: Vec<String> = Vec::new();
+        if let Some(cp) = cost_prop {
+            cost_props.push(cp.to_string());
+        } else if let Some(PropertyValue::Array(arr)) = config_map.get("cost_properties") {
+            for v in arr {
+                if let Some(s) = v.as_string() { cost_props.push(s.to_string()); }
+            }
+        }
+
         let budget = config_map.get("budget").and_then(|v| v.as_float());
         let min_total = config_map.get("min_total").and_then(|v| v.as_float());
         
@@ -1980,23 +2019,28 @@ impl AlgorithmOperator {
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
-        // We need to use store (mutable) to get nodes, but get_nodes_by_label returns references.
-        // We can't hold references while writing back later.
-        // So we collect IDs and costs.
         
         let mut node_ids = Vec::new();
-        let mut costs = Vec::new();
+        let mut single_costs = Vec::new();
+        let mut multi_costs = vec![Vec::new(); cost_props.len()];
         
         {
             let nodes = store.get_nodes_by_label(&label);
             for node in nodes {
                 node_ids.push(node.id);
-                let cost = if let Some(cp) = cost_prop {
-                    node.get_property(cp).and_then(|v| v.as_float()).unwrap_or(1.0)
+                
+                // Single cost (for single objective solvers)
+                if cost_props.len() == 1 {
+                    let cost = node.get_property(&cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
+                    single_costs.push(cost);
+                } else if !cost_props.is_empty() {
+                    for (i, cp) in cost_props.iter().enumerate() {
+                        let cost = node.get_property(cp).and_then(|v| v.as_float()).unwrap_or(1.0);
+                        multi_costs[i].push(cost);
+                    }
                 } else {
-                    1.0
-                };
-                costs.push(cost);
+                    single_costs.push(1.0);
+                }
             }
         }
 
@@ -2006,7 +2050,8 @@ impl AlgorithmOperator {
 
         // 2. Setup Problem
         let problem = GraphOptimizationProblem {
-            costs,
+            costs: single_costs,
+            multi_costs,
             budget,
             min_total,
             dim: node_ids.len(),
@@ -2020,38 +2065,63 @@ impl AlgorithmOperator {
         };
 
         // 3. Run Solver
-        let result = match algorithm {
-            "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-            "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
-            "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
-            "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
-            "Firefly" => FireflySolver::new(solver_config).solve(&problem),
-            "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
-            "GWO" => GWOSolver::new(solver_config).solve(&problem),
-            "GA" => GASolver::new(solver_config).solve(&problem),
-            "SA" => SASolver::new(solver_config).solve(&problem),
-            "Bat" => BatSolver::new(solver_config).solve(&problem),
-            "ABC" => ABCSolver::new(solver_config).solve(&problem),
-            _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
-        };
+        if algorithm == "NSGA2" || algorithm == "MOTLBO" || cost_props.len() > 1 {
+            let res = match algorithm {
+                "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
+                _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
+            };
 
-        // 4. Write back results
-        for (i, &val) in result.best_variables.iter().enumerate() {
-            let node_id = node_ids[i];
-            let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+            // Write back first individual from Pareto Front
+            if let Some(best) = res.pareto_front.first() {
+                for (i, &val) in best.variables.iter().enumerate() {
+                    let node_id = node_ids[i];
+                    let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+                }
+            }
+
+            let mut record = Record::new();
+            if let Some(best) = res.pareto_front.first() {
+                let fitness_props: Vec<PropertyValue> = best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect();
+                record.bind("fitness".to_string(), Value::Property(PropertyValue::Array(fitness_props)));
+            }
+            record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
+            record.bind("front_size".to_string(), Value::Property(PropertyValue::Integer(res.pareto_front.len() as i64)));
+            self.results.push(record);
+
+        } else {
+            let result = match algorithm {
+                "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
+                "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
+                "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
+                "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
+                "Firefly" => FireflySolver::new(solver_config).solve(&problem),
+                "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
+                "GWO" => GWOSolver::new(solver_config).solve(&problem),
+                "GA" => GASolver::new(solver_config).solve(&problem),
+                "SA" => SASolver::new(solver_config).solve(&problem),
+                "Bat" => BatSolver::new(solver_config).solve(&problem),
+                "ABC" => ABCSolver::new(solver_config).solve(&problem),
+                _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
+            };
+
+            // 4. Write back results
+            for (i, &val) in result.best_variables.iter().enumerate() {
+                let node_id = node_ids[i];
+                let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+            }
+
+            // 5. Return result record
+            let mut record = Record::new();
+            record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
+            record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
+            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            
+            // Yield history as an array for plotting
+            let history_props: Vec<PropertyValue> = result.history.into_iter().map(PropertyValue::Float).collect();
+            record.bind("history".to_string(), Value::Property(PropertyValue::Array(history_props)));
+            
+            self.results.push(record);
         }
-
-        // 5. Return result record
-        let mut record = Record::new();
-        record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
-        record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
-        record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
-        
-        // Yield history as an array for plotting
-        let history_props: Vec<PropertyValue> = result.history.into_iter().map(PropertyValue::Float).collect();
-        record.bind("history".to_string(), Value::Property(PropertyValue::Array(history_props)));
-        
-        self.results.push(record);
 
         Ok(())
     }
