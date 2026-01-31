@@ -46,6 +46,7 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 | | `algo.dijkstra` / `weightedPath` | ✅ | ❌ | ✅ | Weighted shortest path. |
 | | `algo.maxFlow` | ✅ | ❌ | ❌ | Edmonds-Karp Max Flow. |
 | | `algo.mst` | ✅ | ❌ | ❌ | Prim's Minimum Spanning Tree. |
+| | `algo.triangleCount` | ✅ | ❌ | ❌ | Topology analysis. |
 | | `algo.or.solve` | ✅ | ❌ | ❌ | **Unique**: In-Database Optimization (Jaya, Rao, TLBO, GWO, etc.). |
 
 ## 🛠 Known Issues

@@ -8,7 +8,7 @@ use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, NSGA2Solver, MOTLBOSolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
@@ -2101,6 +2101,8 @@ impl AlgorithmOperator {
                 "SA" => SASolver::new(solver_config).solve(&problem),
                 "Bat" => BatSolver::new(solver_config).solve(&problem),
                 "ABC" => ABCSolver::new(solver_config).solve(&problem),
+                "HS" => HSSolver::new(solver_config).solve(&problem),
+                "FPA" => FPASolver::new(solver_config).solve(&problem),
                 _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
             };
 
@@ -2206,6 +2208,18 @@ impl AlgorithmOperator {
 
         Ok(())
     }
+
+    fn execute_triangle_count(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Build view (undirected treatment is handled in the algorithm)
+        let view = crate::algo::build_view(store, None, None, None);
+        let count = crate::algo::count_triangles(&view);
+
+        let mut record = Record::new();
+        record.bind("triangles".to_string(), Value::Property(PropertyValue::Integer(count as i64)));
+        self.results.push(record);
+
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for AlgorithmOperator {
@@ -2218,6 +2232,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
+                "algo.triangleCount" => self.execute_triangle_count(store)?,
                 "algo.or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
@@ -2246,6 +2261,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.weightedPath" => self.execute_weighted_path(store)?,
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
+                "algo.triangleCount" => self.execute_triangle_count(store)?,
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;
