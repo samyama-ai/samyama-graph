@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "samyama"
-version = "0.2.1"
+version = "0.5.0-alpha.1"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "High-performance distributed graph database with OpenCypher support"
@@ -64,8 +64,8 @@ hnsw_rs = "0.2.1"
 rand = "0.8"
 
 # Optimization Engine (Phase 7)
-samyama-optimization = { path = "crates/samyama-optimization" }
-samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms" }
+samyama-optimization = { path = "crates/samyama-optimization", version = "0.5.0-alpha.1" }
+samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "0.5.0-alpha.1" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
 
