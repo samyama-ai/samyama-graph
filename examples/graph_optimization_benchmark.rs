@@ -1,5 +1,5 @@
 use samyama::graph::{GraphStore, Label, EdgeType, PropertyValue, NodeId, EdgeId, PropertyMap};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver, GASolver};
 use samyama_optimization::common::{Problem, SolverConfig};
 use ndarray::Array1;
 use rand::Rng;
@@ -145,7 +145,7 @@ fn main() {
     println!("Graph built in {:.2?} ({} Nodes, {} Edges)", start_build.elapsed(), num_departments + num_resources, total_vars);
 
     // 2. Define Algorithms
-    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO"];
+    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO", "GA"];
     let mut results = Vec::new();
 
     let config = SolverConfig {
@@ -175,6 +175,7 @@ fn main() {
             "Firefly" => FireflySolver::new(config.clone()).solve(&problem),
             "Cuckoo" => CuckooSolver::new(config.clone()).solve(&problem),
             "GWO" => GWOSolver::new(config.clone()).solve(&problem),
+            "GA" => GASolver::new(config.clone()).solve(&problem),
             _ => panic!("Unknown algorithm"),
         };
         

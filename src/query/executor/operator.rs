@@ -8,7 +8,7 @@ use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, OptimizationResult};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver};
 use ndarray::Array1;
 
 /// Optimization problem wrapper for GraphStore
@@ -545,49 +545,192 @@ impl PhysicalOperator for ProjectOperator {
     }
 }
 
-/// Aggregate operator: RETURN count(n)
+/// Aggregation type
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateType {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// Aggregation function definition
+#[derive(Debug, Clone)]
+pub struct AggregateFunction {
+    pub func: AggregateType,
+    pub expr: Expression,
+    pub alias: String,
+}
+
+/// Internal state for an aggregator
+#[derive(Debug, Clone)]
+enum AggregatorState {
+    Count(i64),
+    Sum(f64),
+    Avg { sum: f64, count: i64 },
+    Min(Option<PropertyValue>),
+    Max(Option<PropertyValue>),
+}
+
+impl AggregatorState {
+    fn new(func: &AggregateType) -> Self {
+        match func {
+            AggregateType::Count => AggregatorState::Count(0),
+            AggregateType::Sum => AggregatorState::Sum(0.0),
+            AggregateType::Avg => AggregatorState::Avg { sum: 0.0, count: 0 },
+            AggregateType::Min => AggregatorState::Min(None),
+            AggregateType::Max => AggregatorState::Max(None),
+        }
+    }
+
+    fn update(&mut self, value: &Value) {
+        match self {
+            AggregatorState::Count(c) => {
+                if !value.is_null() {
+                    *c += 1;
+                }
+            }
+            AggregatorState::Sum(s) => {
+                if let Some(prop) = value.as_property() {
+                    if let Some(f) = prop.as_float() { *s += f; }
+                    else if let Some(i) = prop.as_integer() { *s += i as f64; }
+                }
+            }
+            AggregatorState::Avg { sum, count } => {
+                if let Some(prop) = value.as_property() {
+                    if let Some(f) = prop.as_float() { *sum += f; *count += 1; }
+                    else if let Some(i) = prop.as_integer() { *sum += i as f64; *count += 1; }
+                }
+            }
+            AggregatorState::Min(curr) => {
+                if let Some(prop) = value.as_property() {
+                    if curr.is_none() || prop < curr.as_ref().unwrap() {
+                        *curr = Some(prop.clone());
+                    }
+                }
+            }
+            AggregatorState::Max(curr) => {
+                if let Some(prop) = value.as_property() {
+                    if curr.is_none() || prop > curr.as_ref().unwrap() {
+                        *curr = Some(prop.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn result(&self) -> Value {
+        match self {
+            AggregatorState::Count(c) => Value::Property(PropertyValue::Integer(*c)),
+            AggregatorState::Sum(s) => Value::Property(PropertyValue::Float(*s)),
+            AggregatorState::Avg { sum, count } => {
+                if *count == 0 { Value::Null }
+                else { Value::Property(PropertyValue::Float(*sum / *count as f64)) }
+            }
+            AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
+            AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
+        }
+    }
+}
+
+/// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
-    aggregations: Vec<(String, String)>, // (func_name, variable) - simplistic for now
-    alias: String, // Output alias
-    result: Option<Record>,
+    group_by: Vec<(Expression, String)>, // (expr, alias)
+    aggregates: Vec<AggregateFunction>,
+    results: std::vec::IntoIter<Record>,
     executed: bool,
 }
 
 impl AggregateOperator {
-    pub fn new(input: OperatorBox, aggregations: Vec<(String, String)>, alias: String) -> Self {
+    pub fn new(
+        input: OperatorBox, 
+        group_by: Vec<(Expression, String)>, 
+        aggregates: Vec<AggregateFunction>
+    ) -> Self {
         Self {
             input,
-            aggregations,
-            alias,
-            result: None,
+            group_by,
+            aggregates,
+            results: Vec::new().into_iter(),
             executed: false,
+        }
+    }
+
+    fn evaluate_expression(expr: &Expression, record: &Record) -> ExecutionResult<Value> {
+        match expr {
+            Expression::Variable(var) => {
+                Ok(record.get(var).cloned().unwrap_or(Value::Null))
+            }
+            Expression::Property { variable, property } => {
+                let val = record.get(variable).cloned().unwrap_or(Value::Null);
+                match val {
+                    Value::Node(_, node) => Ok(Value::Property(node.get_property(property).cloned().unwrap_or(PropertyValue::Null))),
+                    Value::Edge(_, edge) => Ok(Value::Property(edge.get_property(property).cloned().unwrap_or(PropertyValue::Null))),
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
+            _ => Err(ExecutionError::RuntimeError("Unsupported expression in aggregation".to_string())),
         }
     }
 }
 
 impl PhysicalOperator for AggregateOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
-        if self.executed {
-            return Ok(None);
+        if !self.executed {
+            let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
+            
+            // 1. Consume all input
+            while let Some(record) = self.input.next(store)? {
+                // Evaluate grouping keys
+                let mut key = Vec::new();
+                for (expr, _) in &self.group_by {
+                    key.push(Self::evaluate_expression(expr, &record)?);
+                }
+
+                // Initialize state if new group
+                let states = groups.entry(key).or_insert_with(|| {
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func)).collect()
+                });
+
+                // Update state
+                for (i, agg) in self.aggregates.iter().enumerate() {
+                    let val = Self::evaluate_expression(&agg.expr, &record)?;
+                    states[i].update(&val);
+                }
+            }
+
+            // 2. Generate results
+            let mut output_records = Vec::new();
+            for (key, states) in groups {
+                let mut record = Record::new();
+                
+                // Add grouping keys
+                for (i, (_, alias)) in self.group_by.iter().enumerate() {
+                    record.bind(alias.clone(), key[i].clone());
+                }
+
+                // Add aggregation results
+                for (i, agg) in self.aggregates.iter().enumerate() {
+                    record.bind(agg.alias.clone(), states[i].result());
+                }
+                
+                output_records.push(record);
+            }
+
+            self.results = output_records.into_iter();
+            self.executed = true;
         }
 
-        let mut count = 0;
-        while let Some(_record) = self.input.next(store)? {
-            count += 1;
-        }
-
-        let mut record = Record::new();
-        // Assuming simple count(*) or count(n) behavior which counts rows
-        record.bind(self.alias.clone(), Value::Property(PropertyValue::Integer(count as i64)));
-        
-        self.executed = true;
-        Ok(Some(record))
+        Ok(self.results.next())
     }
 
     fn reset(&mut self) {
         self.input.reset();
         self.executed = false;
+        self.results = Vec::new().into_iter();
     }
 }
 
@@ -1874,6 +2017,7 @@ impl AlgorithmOperator {
             "Firefly" => FireflySolver::new(solver_config).solve(&problem),
             "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
             "GWO" => GWOSolver::new(solver_config).solve(&problem),
+            "GA" => GASolver::new(solver_config).solve(&problem),
             _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
         };
 

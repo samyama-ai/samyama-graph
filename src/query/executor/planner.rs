@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -181,46 +181,74 @@ impl QueryPlanner {
 
         // Add RETURN clause if present
         if let Some(return_clause) = &query.return_clause {
-            // Check for simple aggregation (count)
-            // TODO: Proper aggregation handling
-            let mut is_aggregation = false;
-            let mut func_name = String::new();
-            let mut arg_var = String::new();
-            let mut alias = String::new();
+            let mut aggregates = Vec::new();
+            let mut group_by = Vec::new();
+            let mut projections = Vec::new();
+            let mut has_aggregation = false;
 
-            if return_clause.items.len() == 1 {
-                if let Expression::Function { name, args } = &return_clause.items[0].expression {
-                    if name.to_lowercase() == "count" {
-                        is_aggregation = true;
-                        func_name = "count".to_string();
-                        if let Some(Expression::Variable(v)) = args.first() {
-                            arg_var = v.clone();
-                        }
-                        alias = return_clause.items[0].alias.clone().unwrap_or_else(|| format!("count({})", arg_var));
+            for (idx, item) in return_clause.items.iter().enumerate() {
+                let alias = item.alias.clone().unwrap_or_else(|| {
+                    match &item.expression {
+                        Expression::Variable(var) => var.clone(),
+                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                        Expression::Function { name, .. } => format!("{}_{}", name, idx),
+                        _ => format!("col_{}", idx),
+                    }
+                });
+
+                output_columns.push(alias.clone());
+
+                // Detect Aggregation
+                let mut is_agg_func = false;
+                if let Expression::Function { name, args } = &item.expression {
+                    let func_type = match name.to_lowercase().as_str() {
+                        "count" => Some(AggregateType::Count),
+                        "sum" => Some(AggregateType::Sum),
+                        "avg" => Some(AggregateType::Avg),
+                        "min" => Some(AggregateType::Min),
+                        "max" => Some(AggregateType::Max),
+                        _ => None,
+                    };
+
+                    if let Some(func) = func_type {
+                        is_agg_func = true;
+                        has_aggregation = true;
+                        let arg_expr = args.first().cloned().unwrap_or(Expression::Literal(PropertyValue::Null));
+                        aggregates.push(AggregateFunction {
+                            func,
+                            expr: arg_expr,
+                            alias: alias.clone(),
+                        });
                     }
                 }
-            }
 
-            // Add ORDER BY if present (before projection to access variables)
-            if let Some(order_by) = &query.order_by {
-                let mut sort_items = Vec::new();
-                for item in &order_by.items {
-                    sort_items.push((item.expression.clone(), item.ascending));
+                if !is_agg_func {
+                    group_by.push((item.expression.clone(), alias.clone()));
+                    projections.push((item.expression.clone(), alias.clone()));
                 }
-                use crate::query::executor::operator::SortOperator;
-                operator = Box::new(SortOperator::new(operator, sort_items));
             }
 
-            if is_aggregation {
-                use crate::query::executor::operator::AggregateOperator;
-                operator = Box::new(AggregateOperator::new(
-                    operator,
-                    vec![(func_name, arg_var)],
-                    alias.clone()
-                ));
-                output_columns.push(alias);
+            if has_aggregation {
+                operator = Box::new(AggregateOperator::new(operator, group_by, aggregates));
+                
+                // Sort after aggregation
+                if let Some(order_by) = &query.order_by {
+                    let mut sort_items = Vec::new();
+                    for item in &order_by.items {
+                        sort_items.push((item.expression.clone(), item.ascending));
+                    }
+                    operator = Box::new(SortOperator::new(operator, sort_items));
+                }
             } else {
-                let projections = self.plan_return(return_clause, &mut output_columns)?;
+                // Non-aggregation: Sort -> Project
+                if let Some(order_by) = &query.order_by {
+                    let mut sort_items = Vec::new();
+                    for item in &order_by.items {
+                        sort_items.push((item.expression.clone(), item.ascending));
+                    }
+                    operator = Box::new(SortOperator::new(operator, sort_items));
+                }
+                
                 operator = Box::new(ProjectOperator::new(operator, projections));
             }
         } else {
@@ -449,33 +477,6 @@ impl QueryPlanner {
             }
             result
         }
-    }
-
-    fn plan_return(&self, return_clause: &ReturnClause, output_columns: &mut Vec<String>) -> ExecutionResult<Vec<(Expression, String)>> {
-        let mut projections = Vec::new();
-
-        for (idx, item) in return_clause.items.iter().enumerate() {
-            let alias = if let Some(alias) = &item.alias {
-                alias.clone()
-            } else {
-                // Generate alias from expression
-                match &item.expression {
-                    Expression::Variable(var) => var.clone(),
-                    Expression::Property { variable, property } => {
-                        format!("{}.{}", variable, property)
-                    }
-                    Expression::Function { name, .. } => {
-                        format!("{}_{}", name, idx)
-                    }
-                    _ => format!("col_{}", idx),
-                }
-            };
-
-            output_columns.push(alias.clone());
-            projections.push((item.expression.clone(), alias));
-        }
-
-        Ok(projections)
     }
 
     /// Plan a CREATE-only query (no MATCH clause)
