@@ -14,7 +14,8 @@ pub use samyama_graph_algorithms::{
     weakly_connected_components, WccResult,
     bfs, dijkstra, PathResult,
     edmonds_karp, FlowResult,
-    prim_mst, MSTResult
+    prim_mst, MSTResult,
+    count_triangles
 };
 
 /// Build a GraphView from the store for algorithm execution

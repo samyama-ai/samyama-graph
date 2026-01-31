@@ -17,6 +17,8 @@ pub mod bat;
 pub mod abc;
 pub mod nsga2;
 pub mod motlbo;
+pub mod hs;
+pub mod fpa;
 
 pub use jaya::JayaSolver;
 pub use rao::{RaoSolver, RaoVariant};
@@ -37,3 +39,5 @@ pub use bat::BatSolver;
 pub use abc::ABCSolver;
 pub use nsga2::NSGA2Solver;
 pub use motlbo::MOTLBOSolver;
+pub use hs::HSSolver;
+pub use fpa::FPASolver;

@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "samyama"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "High-performance distributed graph database with OpenCypher support"
