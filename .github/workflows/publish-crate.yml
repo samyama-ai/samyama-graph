@@ -22,6 +22,33 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        shell: bash
         run: |
-          cargo publish -p samyama-optimization
-          cargo publish -p samyama-graph-algorithms
+          publish_crate() {
+              CRATE=$1
+              echo "--------------------------------------------------"
+              echo "🚀 Processing $CRATE..."
+              
+              # Dry run first to check compilation/packaging
+              # cargo publish --dry-run -p $CRATE
+              
+              # Attempt real publish
+              OUTPUT=$(cargo publish -p $CRATE 2>&1)
+              EXIT_CODE=$?
+              
+              if [ $EXIT_CODE -eq 0 ]; then
+                  echo "✅ Success: $CRATE published."
+              elif echo "$OUTPUT" | grep -q "already exists"; then
+                  echo "⚠️  Skipping: Version already exists on crates.io."
+              elif echo "$OUTPUT" | grep -q "already uploaded"; then
+                  echo "⚠️  Skipping: Version already exists on crates.io."
+              else
+                  echo "❌ Error: Failed to publish $CRATE"
+                  echo "$OUTPUT"
+                  return $EXIT_CODE
+              fi
+          }
+
+          # Publish order matters if there are dependencies
+          publish_crate samyama-graph-algorithms
+          publish_crate samyama-optimization
