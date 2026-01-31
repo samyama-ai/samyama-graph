@@ -1851,40 +1851,47 @@ impl AlgorithmOperator {
 
     fn execute_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node, target_node, config?)
-        // Currently we can't easily pass Node objects in CALL arguments from AST literals
-        // So we might need to rely on variable resolution in the planner or simple ID passing for MVP
-        // For MVP, let's assume we pass node IDs (integers)
-        
         if self.args.len() < 2 {
             return Err(ExecutionError::RuntimeError("shortestPath requires source and target".to_string()));
         }
 
         let source_id = match &self.args[0] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Source must be integer ID for now".to_string())),
+            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
         };
 
         let target_id = match &self.args[1] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Target must be integer ID for now".to_string())),
+            _ => return Err(ExecutionError::TypeError("Target must be integer ID".to_string())),
         };
 
-        // TODO: weight property from config
+        let mut weight_prop = None;
+        if self.args.len() > 2 {
+            if let Expression::Literal(PropertyValue::Map(m)) = &self.args[2] {
+                if let Some(PropertyValue::String(s)) = m.get("weight_property") {
+                    weight_prop = Some(s.clone());
+                }
+            }
+        }
         
-        // Build view and run BFS
-        let view = crate::algo::build_view(store, None, None, None);
-        if let Some(result) = crate::algo::bfs(&view, source_id, target_id) {
+        // Build view
+        let view = crate::algo::build_view(store, None, None, weight_prop.as_deref());
+        
+        // Run Algorithm
+        let result = if weight_prop.is_some() {
+            crate::algo::dijkstra(&view, source_id, target_id)
+        } else {
+            crate::algo::bfs(&view, source_id, target_id)
+        };
+
+        if let Some(result) = result {
              let mut record = Record::new();
-             // Return path as list of nodes? Or just cost?
              record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
              
              // Construct path list
              let mut path_nodes = Vec::new();
              for nid_u64 in result.path {
-                 let nid = NodeId::new(nid_u64);
-                 if let Some(_n) = store.get_node(nid) {
-                     path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
-                 }
+                 path_nodes.push(PropertyValue::Integer(nid_u64 as i64));
              }
              record.bind("path".to_string(), Value::Property(PropertyValue::Array(path_nodes)));
              
