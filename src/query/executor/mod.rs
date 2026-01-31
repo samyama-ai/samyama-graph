@@ -74,10 +74,11 @@ impl<'a> QueryExecutor<'a> {
 
     fn execute_plan(&self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
         let mut records = Vec::new();
+        let batch_size = 1024;
 
-        // Pull records from the root operator (read-only)
-        while let Some(record) = plan.root.next(self.store)? {
-            records.push(record);
+        // Pull records from the root operator in batches (Vectorized Execution)
+        while let Some(batch) = plan.root.next_batch(self.store, batch_size)? {
+            records.extend(batch.records);
         }
 
         Ok(RecordBatch {
@@ -120,11 +121,12 @@ impl<'a> MutQueryExecutor<'a> {
 
     fn execute_plan_mut(&mut self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
         let mut records = Vec::new();
+        let batch_size = 1024;
 
-        // Pull records from the root operator
-        // Use next_mut() which allows operators to modify the graph store
-        while let Some(record) = plan.root.next_mut(self.store, &self.tenant_id)? {
-            records.push(record);
+        // Pull records from the root operator in batches
+        // Use next_batch_mut to allow operators to modify the graph store
+        while let Some(batch) = plan.root.next_batch_mut(self.store, &self.tenant_id, batch_size)? {
+            records.extend(batch.records);
         }
 
         Ok(RecordBatch {

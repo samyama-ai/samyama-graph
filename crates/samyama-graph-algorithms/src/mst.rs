@@ -78,33 +78,25 @@ pub fn prim_mst(view: &GraphView) -> MSTResult {
 
 fn add_edges(view: &GraphView, u: usize, heap: &mut BinaryHeap<EdgeState>, visited: &HashSet<usize>) {
     // Check outgoing edges
-    for (i, &v) in view.outgoing[u].iter().enumerate() {
+    let u_out = view.successors(u);
+    for (i, &v) in u_out.iter().enumerate() {
         if !visited.contains(&v) {
-            let weight = view.weights.as_ref().map(|w| w[u][i]).unwrap_or(1.0);
+            let weight = view.weights(u).map(|w| w[i]).unwrap_or(1.0);
             heap.push(EdgeState { weight, source: u, target: v });
         }
     }
 
     // Check incoming edges (treat as undirected)
-    for (_i, &v) in view.incoming[u].iter().enumerate() {
+    let u_in = view.predecessors(u);
+    for &_v in u_in.iter() {
+         let v = _v; // explicit copy
          if !visited.contains(&v) {
             // Need to find weight in incoming list? 
             // GraphView structure: incoming[u] contains v implies edge v->u exists.
-            // But we don't store weights for incoming edges directly in GraphView definition usually?
-            // Let's check `common.rs`.
             
-            // Actually, GraphView build_view in `algo/mod.rs` populates `outgoing` and `incoming`.
-            // But `weights` is `vec![vec![]; node_count]` corresponding to `outgoing`.
-            // There is no `incoming_weights`.
-            // So we need to look up weight of edge v->u.
-            // This is slow: find index of u in outgoing[v].
-            
-            // Optimization: For MST, we usually assume weights are populated in outgoing.
-            // If the graph is stored as directed but we want undirected MST, we need to consider v->u.
-            // We can find the weight by scanning `view.outgoing[v]` for `u`.
-            
-            if let Some(idx) = view.outgoing[v].iter().position(|&x| x == u) {
-                let weight = view.weights.as_ref().map(|w| w[v][idx]).unwrap_or(1.0);
+            let v_out = view.successors(v);
+            if let Some(idx) = v_out.iter().position(|&x| x == u) {
+                let weight = view.weights(v).map(|w| w[idx]).unwrap_or(1.0);
                 heap.push(EdgeState { weight, source: u, target: v }); // "source" here is just the connection point in MST
             }
         }
@@ -145,14 +137,14 @@ mod tests {
         // 3->1 (10)
         outgoing[2].push(0); incoming[0].push(2); weights[2].push(10.0);
 
-        let view = GraphView {
+        let view = GraphView::from_adjacency_list(
             node_count,
             index_to_node,
             node_to_index,
             outgoing,
             incoming,
-            weights: Some(weights),
-        };
+            Some(weights),
+        );
 
         let result = prim_mst(&view);
         assert_eq!(result.total_weight, 3.0);

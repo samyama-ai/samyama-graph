@@ -11,6 +11,7 @@ use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
 use crate::vector::{VectorIndexManager, DistanceMetric, VectorResult};
 use crate::index::IndexManager;
+use crate::graph::storage::ColumnStore;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -75,6 +76,12 @@ pub struct GraphStore {
     /// Property indices manager
     pub property_index: Arc<IndexManager>,
 
+    /// Columnar storage for node properties
+    pub node_columns: ColumnStore,
+
+    /// Columnar storage for edge properties
+    pub edge_columns: ColumnStore,
+
     /// Async index event sender
     pub index_sender: Option<UnboundedSender<crate::graph::event::IndexEvent>>,
 
@@ -97,6 +104,8 @@ impl GraphStore {
             edge_type_index: HashMap::new(),
             vector_index: Arc::new(VectorIndexManager::new()),
             property_index: Arc::new(IndexManager::new()),
+            node_columns: ColumnStore::new(),
+            edge_columns: ColumnStore::new(),
             index_sender: None,
             next_node_id: 1,
             next_edge_id: 1,
@@ -359,6 +368,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let node_id = NodeId::new(self.next_node_id);
         self.next_node_id += 1;
 
+        // Populate columnar storage
+        for (key, value) in &properties {
+            self.node_columns.set_property(node_id.as_u64() as usize, key, value.clone());
+        }
+
         let node = Node::new_with_properties(node_id, labels.clone(), properties);
 
         // Add to label indices
@@ -415,6 +429,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     ) -> GraphResult<()> {
         let key_str = key.into();
         let val = value.into();
+
+        // Update columnar storage
+        self.node_columns.set_property(node_id.as_u64() as usize, &key_str, val.clone());
 
         let node = self.nodes.get_mut(&node_id).ok_or(GraphError::NodeNotFound(node_id))?;
         
@@ -582,6 +599,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let edge_id = EdgeId::new(self.next_edge_id);
         self.next_edge_id += 1;
+
+        // Populate columnar storage
+        for (key, value) in &properties {
+            self.edge_columns.set_property(edge_id.as_u64() as usize, key, value.clone());
+        }
 
         let edge_type = edge_type.into();
         let edge = Edge::new_with_properties(edge_id, source, target, edge_type.clone(), properties);

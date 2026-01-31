@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "samyama"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2568,14 +2568,14 @@ dependencies = [
 
 [[package]]
 name = "samyama-graph-algorithms"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "samyama-optimization"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "criterion",
  "ndarray",

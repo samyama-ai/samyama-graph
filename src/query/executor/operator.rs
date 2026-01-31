@@ -4,12 +4,14 @@
 
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
 use crate::query::ast::{Expression, BinaryOp, Direction};
-use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
+use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
+
+// ... (optimization structs remain unchanged)
 
 /// Optimization problem wrapper for GraphStore
 struct GraphOptimizationProblem {
@@ -109,6 +111,39 @@ pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
 
+    /// Get the next batch of records (Vectorized Execution)
+    /// Defaults to accumulating records from next()
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            match self.next(store)? {
+                Some(record) => records.push(record),
+                None => break,
+            }
+        }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+        }
+    }
+
+    /// Get the next batch of records for mutating operations
+    fn next_batch_mut(&mut self, store: &mut GraphStore, tenant_id: &str, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            match self.next_mut(store, tenant_id)? {
+                Some(record) => records.push(record),
+                None => break,
+            }
+        }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+        }
+    }
+
     /// Get the next record from this operator (write operations that mutate the store)
     fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // Default implementation calls the read-only version
@@ -197,6 +232,32 @@ impl PhysicalOperator for NodeScanOperator {
         Ok(Some(record))
     }
 
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.initialize(store);
+
+        if self.current >= self.node_ids.len() {
+            return Ok(None);
+        }
+
+        let end = (self.current + batch_size).min(self.node_ids.len());
+        let range = self.current..end;
+        self.current = end;
+
+        let mut records = Vec::with_capacity(range.len());
+        for node_id in &self.node_ids[range] {
+             if let Some(node) = store.get_node(*node_id) {
+                 let mut record = Record::new();
+                 record.bind(self.variable.clone(), Value::Node(*node_id, node.clone()));
+                 records.push(record);
+             }
+        }
+
+        Ok(Some(RecordBatch {
+            records,
+            columns: vec![self.variable.clone()]
+        }))
+    }
+
     fn reset(&mut self) {
         self.current = 0;
     }
@@ -226,7 +287,7 @@ impl FilterOperator {
         }
     }
 
-    fn evaluate_expression(&self, expr: &Expression, record: &Record, _store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             Expression::Variable(var) => {
                 record.get(var)
@@ -238,29 +299,39 @@ impl FilterOperator {
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
                 match val {
-                    Value::Node(_, node) => {
-                        let prop = node.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Node(id, node) => {
+                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = node.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
-                    Value::Edge(_, edge) => {
-                        let prop = edge.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Edge(id, edge) => {
+                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = edge.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
                     _ => Ok(Value::Null),
                 }
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
-                let left_val = self.evaluate_expression(left, record, _store)?;
-                let right_val = self.evaluate_expression(right, record, _store)?;
+                let left_val = self.evaluate_expression(left, record, store)?;
+                let right_val = self.evaluate_expression(right, record, store)?;
                 self.evaluate_binary_op(op, left_val, right_val)
             }
             Expression::Function { name, args } => {
-                self.evaluate_function(name, args, record, _store)
+                self.evaluate_function(name, args, record, store)
             }
             _ => Err(ExecutionError::RuntimeError("Unsupported expression type".to_string())),
         }
@@ -364,6 +435,31 @@ impl PhysicalOperator for FilterOperator {
             }
         }
         Ok(None)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut filtered_records = Vec::new();
+        
+        while filtered_records.len() < batch_size {
+            if let Some(batch) = self.input.next_batch(store, batch_size)? {
+                for record in batch.records {
+                    if self.evaluate_predicate(&record, store)? {
+                        filtered_records.push(record);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        if filtered_records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records: filtered_records,
+                columns: Vec::new(), // Filter doesn't change columns
+            }))
+        }
     }
 
     fn reset(&mut self) {
@@ -497,6 +593,58 @@ impl PhysicalOperator for ExpandOperator {
         }
     }
 
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut expanded_records = Vec::with_capacity(batch_size);
+
+        while expanded_records.len() < batch_size {
+            // If we have edges from current record, process them
+            if self.edge_index < self.current_edges.len() {
+                let take = (batch_size - expanded_records.len()).min(self.current_edges.len() - self.edge_index);
+                
+                for i in 0..take {
+                    let (edge_id, edge) = &self.current_edges[self.edge_index + i];
+                    let mut new_record = self.current_record.as_ref().unwrap().clone();
+
+                    let target_id = match self.direction {
+                        Direction::Outgoing => edge.target,
+                        Direction::Incoming => edge.source,
+                        Direction::Both => {
+                            let source_val = new_record.get(&self.source_var).unwrap();
+                            let (source_id, _) = source_val.as_node().unwrap();
+                            if edge.source == source_id { edge.target } else { edge.source }
+                        }
+                    };
+
+                    if let Some(target_node) = store.get_node(target_id) {
+                        new_record.bind(self.target_var.clone(), Value::Node(target_id, target_node.clone()));
+                        if let Some(edge_var) = &self.edge_var {
+                            new_record.bind(edge_var.clone(), Value::Edge(*edge_id, edge.clone()));
+                        }
+                        expanded_records.push(new_record);
+                    }
+                }
+                self.edge_index += take;
+            } else {
+                // Need new input record
+                if let Some(record) = self.input.next(store)? {
+                    self.current_record = Some(record.clone());
+                    self.load_edges(&record, store)?;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if expanded_records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records: expanded_records,
+                columns: Vec::new(), // Columns determined by output variables
+            }))
+        }
+    }
+
     fn reset(&mut self) {
         self.input.reset();
         self.current_record = None;
@@ -519,7 +667,7 @@ impl ProjectOperator {
         Self { input, projections }
     }
 
-    fn evaluate_expression(&self, expr: &Expression, record: &Record, _store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             Expression::Variable(var) => {
                 record.get(var)
@@ -531,17 +679,27 @@ impl ProjectOperator {
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
                 match val {
-                    Value::Node(_, node) => {
-                        let prop = node.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Node(id, node) => {
+                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = node.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
-                    Value::Edge(_, edge) => {
-                        let prop = edge.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Edge(id, edge) => {
+                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = edge.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
                     _ => Ok(Value::Null),
                 }
@@ -563,6 +721,29 @@ impl PhysicalOperator for ProjectOperator {
             }
 
             Ok(Some(new_record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if let Some(batch) = self.input.next_batch(store, batch_size)? {
+            let mut projected_records = Vec::with_capacity(batch.records.len());
+            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.clone()).collect();
+
+            for record in batch.records {
+                let mut new_record = Record::new();
+                for (expr, alias) in &self.projections {
+                    let value = self.evaluate_expression(expr, &record, store)?;
+                    new_record.bind(alias.clone(), value);
+                }
+                projected_records.push(new_record);
+            }
+
+            Ok(Some(RecordBatch {
+                records: projected_records,
+                columns,
+            }))
         } else {
             Ok(None)
         }
@@ -686,7 +867,7 @@ impl AggregateOperator {
         }
     }
 
-    fn evaluate_expression(expr: &Expression, record: &Record) -> ExecutionResult<Value> {
+    fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             Expression::Variable(var) => {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
@@ -694,8 +875,22 @@ impl AggregateOperator {
             Expression::Property { variable, property } => {
                 let val = record.get(variable).cloned().unwrap_or(Value::Null);
                 match val {
-                    Value::Node(_, node) => Ok(Value::Property(node.get_property(property).cloned().unwrap_or(PropertyValue::Null))),
-                    Value::Edge(_, edge) => Ok(Value::Property(edge.get_property(property).cloned().unwrap_or(PropertyValue::Null))),
+                    Value::Node(id, node) => {
+                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            Ok(Value::Property(node.get_property(property).cloned().unwrap_or(PropertyValue::Null)))
+                        }
+                    }
+                    Value::Edge(id, edge) => {
+                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            Ok(Value::Property(edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)))
+                        }
+                    }
                     _ => Ok(Value::Null),
                 }
             }
@@ -708,14 +903,51 @@ impl AggregateOperator {
 impl PhysicalOperator for AggregateOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
-            let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
-            
-            // 1. Consume all input
-            while let Some(record) = self.input.next(store)? {
+            self.execute_all(store)?;
+        }
+        Ok(self.results.next())
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if !self.executed {
+            self.execute_all(store)?;
+        }
+
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            if let Some(record) = self.results.next() {
+                batch.push(record);
+            } else {
+                break;
+            }
+        }
+
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.executed = false;
+        self.results = Vec::new().into_iter();
+    }
+}
+
+impl AggregateOperator {
+    fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
+        
+        // Use next_batch from input for performance
+        let batch_size = 1024;
+        while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            for record in batch.records {
                 // Evaluate grouping keys
                 let mut key = Vec::new();
                 for (expr, _) in &self.group_by {
-                    key.push(Self::evaluate_expression(expr, &record)?);
+                    key.push(Self::evaluate_expression(expr, &record, store)?);
                 }
 
                 // Initialize state if new group
@@ -725,40 +957,31 @@ impl PhysicalOperator for AggregateOperator {
 
                 // Update state
                 for (i, agg) in self.aggregates.iter().enumerate() {
-                    let val = Self::evaluate_expression(&agg.expr, &record)?;
+                    let val = Self::evaluate_expression(&agg.expr, &record, store)?;
                     states[i].update(&val);
                 }
             }
-
-            // 2. Generate results
-            let mut output_records = Vec::new();
-            for (key, states) in groups {
-                let mut record = Record::new();
-                
-                // Add grouping keys
-                for (i, (_, alias)) in self.group_by.iter().enumerate() {
-                    record.bind(alias.clone(), key[i].clone());
-                }
-
-                // Add aggregation results
-                for (i, agg) in self.aggregates.iter().enumerate() {
-                    record.bind(agg.alias.clone(), states[i].result());
-                }
-                
-                output_records.push(record);
-            }
-
-            self.results = output_records.into_iter();
-            self.executed = true;
         }
 
-        Ok(self.results.next())
-    }
+        // Generate results
+        let mut output_records = Vec::new();
+        for (key, states) in groups {
+            let mut record = Record::new();
+            
+            for (i, (_, alias)) in self.group_by.iter().enumerate() {
+                record.bind(alias.clone(), key[i].clone());
+            }
 
-    fn reset(&mut self) {
-        self.input.reset();
-        self.executed = false;
-        self.results = Vec::new().into_iter();
+            for (i, agg) in self.aggregates.iter().enumerate() {
+                record.bind(agg.alias.clone(), states[i].result());
+            }
+            
+            output_records.push(record);
+        }
+
+        self.results = output_records.into_iter();
+        self.executed = true;
+        Ok(())
     }
 }
 
@@ -793,6 +1016,25 @@ impl PhysicalOperator for LimitOperator {
         }
     }
 
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if self.count >= self.limit {
+            return Ok(None);
+        }
+
+        let remaining = self.limit - self.count;
+        let request_size = batch_size.min(remaining);
+
+        if let Some(mut batch) = self.input.next_batch(store, request_size)? {
+            if batch.records.len() > remaining {
+                batch.records.truncate(remaining);
+            }
+            self.count += batch.records.len();
+            Ok(Some(batch))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn reset(&mut self) {
         self.input.reset();
         self.count = 0;
@@ -819,7 +1061,7 @@ impl SortOperator {
         }
     }
 
-    fn evaluate_expression(expr: &Expression, record: &Record) -> ExecutionResult<Value> {
+    fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             Expression::Variable(var) => {
                 record.get(var)
@@ -831,17 +1073,27 @@ impl SortOperator {
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
                 match val {
-                    Value::Node(_, node) => {
-                        let prop = node.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Node(id, node) => {
+                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = node.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
-                    Value::Edge(_, edge) => {
-                        let prop = edge.get_property(property)
-                            .cloned()
-                            .unwrap_or(PropertyValue::Null);
-                        Ok(Value::Property(prop))
+                    Value::Edge(id, edge) => {
+                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                        if !prop.is_null() {
+                            Ok(Value::Property(prop))
+                        } else {
+                            let prop = edge.get_property(property)
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null);
+                            Ok(Value::Property(prop))
+                        }
                     }
                     _ => Ok(Value::Null),
                 }
@@ -855,38 +1107,7 @@ impl SortOperator {
 impl PhysicalOperator for SortOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
-            // Materialize all records
-            while let Some(record) = self.input.next(store)? {
-                self.records.push(record);
-            }
-
-            // Sort
-            // We need to handle errors during sort comparison which is tricky with sort_by
-            // So we'll unwrap/panic or use a custom sort that pre-calculates keys?
-            // For simplicity, we assume evaluation succeeds or panic (not ideal but ok for prototype)
-            // Better: use sort_by with a closure that captures errors? sort_by expects Ordering.
-            
-            let sort_items = &self.sort_items;
-            self.records.sort_by(|a, b| {
-                for (expr, ascending) in sort_items {
-                    // Evaluate expr for a and b
-                    // TODO: Handle evaluation errors gracefully?
-                    let val_a = Self::evaluate_expression(expr, a).unwrap_or(Value::Null);
-                    let val_b = Self::evaluate_expression(expr, b).unwrap_or(Value::Null);
-
-                    // Extract PropertyValue
-                    let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
-                    let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
-
-                    let ord = prop_a.cmp(prop_b);
-                    if ord != std::cmp::Ordering::Equal {
-                        return if *ascending { ord } else { ord.reverse() };
-                    }
-                }
-                std::cmp::Ordering::Equal
-            });
-
-            self.executed = true;
+            self.execute_all(store)?;
         }
 
         if self.current >= self.records.len() {
@@ -898,11 +1119,58 @@ impl PhysicalOperator for SortOperator {
         Ok(Some(record))
     }
 
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if !self.executed {
+            self.execute_all(store)?;
+        }
+
+        if self.current >= self.records.len() {
+            return Ok(None);
+        }
+
+        let end = (self.current + batch_size).min(self.records.len());
+        let batch = self.records[self.current..end].to_vec();
+        self.current = end;
+
+        Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+    }
+
     fn reset(&mut self) {
         self.input.reset();
         self.records.clear();
         self.current = 0;
         self.executed = false;
+    }
+}
+
+impl SortOperator {
+    fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Materialize all records in batches
+        let batch_size = 1024;
+        while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            self.records.extend(batch.records);
+        }
+
+        // Sort
+        let sort_items = &self.sort_items;
+        self.records.sort_by(|a, b| {
+            for (expr, ascending) in sort_items {
+                let val_a = Self::evaluate_expression(expr, a, store).unwrap_or(Value::Null);
+                let val_b = Self::evaluate_expression(expr, b, store).unwrap_or(Value::Null);
+
+                let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
+                let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
+
+                let ord = prop_a.cmp(prop_b);
+                if ord != std::cmp::Ordering::Equal {
+                    return if *ascending { ord } else { ord.reverse() };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        self.executed = true;
+        Ok(())
     }
 }
 
@@ -981,6 +1249,32 @@ impl PhysicalOperator for IndexScanOperator {
         }
         
         Ok(None)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.initialize(store);
+
+        if self.current >= self.node_ids.len() {
+            return Ok(None);
+        }
+
+        let mut records = Vec::with_capacity(batch_size);
+        while records.len() < batch_size && self.current < self.node_ids.len() {
+            let node_id = self.node_ids[self.current];
+            self.current += 1;
+
+            if let Some(node) = store.get_node(node_id) {
+                let mut record = Record::new();
+                record.bind(self.variable.clone(), Value::Node(node_id, node.clone()));
+                records.push(record);
+            }
+        }
+
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] }))
+        }
     }
 
     fn reset(&mut self) {
@@ -1138,6 +1432,47 @@ impl PhysicalOperator for CartesianProductOperator {
         }
     }
 
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.materialize_left(store)?;
+        if self.left_records.is_empty() {
+            return Ok(None);
+        }
+
+        let mut results = Vec::with_capacity(batch_size);
+        while results.len() < batch_size {
+            if self.current_right.is_none() {
+                self.current_right = self.right.next(store)?;
+                self.left_index = 0;
+                if self.current_right.is_none() {
+                    break;
+                }
+            }
+
+            let take = (batch_size - results.len()).min(self.left_records.len() - self.left_index);
+            let right_record = self.current_right.as_ref().unwrap();
+
+            for i in 0..take {
+                let left_record = &self.left_records[self.left_index + i];
+                let mut merged = left_record.clone();
+                for (key, value) in right_record.bindings() {
+                    merged.bind(key.clone(), value.clone());
+                }
+                results.push(merged);
+            }
+
+            self.left_index += take;
+            if self.left_index >= self.left_records.len() {
+                self.current_right = None;
+            }
+        }
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+        }
+    }
+
     fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
@@ -1224,6 +1559,47 @@ impl PhysicalOperator for JoinOperator {
         }
 
         Ok(None)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.materialize(store)?;
+        let mut results = Vec::with_capacity(batch_size);
+
+        while results.len() < batch_size && self.current_right_index < self.right_records.len() {
+            let right_record = &self.right_records[self.current_right_index];
+            if let Some(join_val) = right_record.get(&self.join_var) {
+                if let Some(left_list) = self.left_records.get(join_val) {
+                    let take = (batch_size - results.len()).min(left_list.len() - self.current_left_list_index);
+                    
+                    for i in 0..take {
+                        let left_record = &left_list[self.current_left_list_index + i];
+                        let mut merged = left_record.clone();
+                        for (key, value) in right_record.bindings() {
+                            merged.bind(key.clone(), value.clone());
+                        }
+                        results.push(merged);
+                    }
+                    
+                    self.current_left_list_index += take;
+                    if self.current_left_list_index >= left_list.len() {
+                        self.current_right_index += 1;
+                        self.current_left_list_index = 0;
+                    }
+                } else {
+                    self.current_right_index += 1;
+                    self.current_left_list_index = 0;
+                }
+            } else {
+                self.current_right_index += 1;
+                self.current_left_list_index = 0;
+            }
+        }
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+        }
     }
 
     fn reset(&mut self) {

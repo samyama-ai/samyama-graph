@@ -61,7 +61,7 @@ pub fn weakly_connected_components(view: &GraphView) -> WccResult {
 
     // Iterate all edges and Union connected nodes
     for u_idx in 0..n {
-        for &v_idx in &view.outgoing[u_idx] {
+        for &v_idx in view.successors(u_idx) {
             uf.union(u_idx, v_idx);
         }
     }
@@ -123,7 +123,7 @@ pub fn strongly_connected_components(view: &GraphView) -> SccResult {
         low[u] = *id_counter as usize;
         *id_counter += 1;
 
-        for &v in &view.outgoing[u] {
+        for &v in view.successors(u) {
             if ids[v] == -1 {
                 dfs(v, id_counter, scc_count, ids, low, on_stack, stack, view, node_component, components);
                 low[u] = low[u].min(low[v]);
@@ -182,14 +182,14 @@ mod tests {
         outgoing[1].push(2); // 2->3
         outgoing[2].push(0); // 3->1
 
-        let view = GraphView {
+        let view = GraphView::from_adjacency_list(
             node_count,
             index_to_node,
             node_to_index,
             outgoing,
-            incoming: vec![vec![]; 4],
-            weights: None,
-        };
+            vec![vec![]; 4],
+            None,
+        );
 
         let result = strongly_connected_components(&view);
         assert_eq!(result.components.len(), 2);

@@ -53,7 +53,7 @@ pub fn page_rank(
             let mut sum_incoming = 0.0;
             
             // Iterate over incoming edges
-            for &source_idx in &view.incoming[i] {
+            for &source_idx in view.predecessors(i) {
                 let out_degree = view.out_degree(source_idx);
                 if out_degree > 0 {
                     sum_incoming += scores[source_idx] / out_degree as f64;

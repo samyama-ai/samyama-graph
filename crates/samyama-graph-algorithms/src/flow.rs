@@ -28,8 +28,8 @@ pub fn edmonds_karp(view: &GraphView, source: NodeId, sink: NodeId) -> Option<Fl
     let mut residual: Vec<HashMap<usize, f64>> = vec![HashMap::new(); n];
 
     for u in 0..n {
-        let edges = &view.outgoing[u];
-        let weights = view.weights.as_ref().map(|w| &w[u]);
+        let edges = view.successors(u);
+        let weights = view.weights(u);
 
         for (i, &v) in edges.iter().enumerate() {
             let cap = if let Some(w) = weights { w[i] } else { 1.0 };
@@ -159,14 +159,14 @@ mod tests {
         // B->T
         outgoing[2].push(3); weights[2].push(100.0);
 
-        let view = GraphView {
+        let view = GraphView::from_adjacency_list(
             node_count,
             index_to_node,
             node_to_index,
             outgoing,
-            incoming: vec![vec![]; 4],
-            weights: Some(weights),
-        };
+            vec![vec![]; 4],
+            Some(weights),
+        );
 
         let result = edmonds_karp(&view, 1, 4).unwrap();
         assert_eq!(result.max_flow, 150.0);
