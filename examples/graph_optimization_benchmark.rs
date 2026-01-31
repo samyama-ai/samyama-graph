@@ -1,5 +1,5 @@
 use samyama::graph::{GraphStore, Label, EdgeType, PropertyValue, NodeId, EdgeId, PropertyMap};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, HSSolver, FPASolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, HSSolver, FPASolver};
 use samyama_optimization::common::{Problem, SolverConfig};
 use ndarray::Array1;
 use rand::Rng;
@@ -145,7 +145,7 @@ fn main() {
     println!("Graph built in {:.2?} ({} Nodes, {} Edges)", start_build.elapsed(), num_departments + num_resources, total_vars);
 
     // 2. Define Algorithms
-    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "HS", "FPA"];
+    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "GSA", "HS", "FPA"];
     let mut results = Vec::new();
 
     let config = SolverConfig {
@@ -179,6 +179,7 @@ fn main() {
             "SA" => SASolver::new(config.clone()).solve(&problem),
             "Bat" => BatSolver::new(config.clone()).solve(&problem),
             "ABC" => ABCSolver::new(config.clone()).solve(&problem),
+            "GSA" => GSASolver::new(config.clone()).solve(&problem),
             "HS" => HSSolver::new(config.clone()).solve(&problem),
             "FPA" => FPASolver::new(config.clone()).solve(&problem),
             _ => panic!("Unknown algorithm"),
