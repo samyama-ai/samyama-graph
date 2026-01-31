@@ -6,6 +6,7 @@
     <title>Samyama Graph Visualizer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/force-graph"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { margin: 0; background-color: #0f172a; color: white; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         .graph-container { height: calc(100vh - 64px); width: 100%; position: relative; }
@@ -78,15 +79,45 @@
         </div>
 
         <!-- Sidebar -->
-        <aside class="w-96 sidebar overflow-y-auto z-40 shadow-xl transform transition-transform duration-300">
-            <div class="p-6">
-                <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-6 flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    Selection Details
-                </h2>
-                <div id="properties" class="space-y-4">
-                    <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
-                        <p class="text-sm">Select a node or link<br>to view properties</p>
+        <aside class="w-96 sidebar overflow-y-auto z-40 shadow-xl flex flex-col">
+            <!-- Sidebar Tabs -->
+            <div class="flex border-b border-slate-700/50">
+                <button id="tab-selection" class="flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30">Selection</button>
+                <button id="tab-results" class="flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors">Results</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto">
+                <!-- Selection Details -->
+                <div id="selection-panel" class="p-6 space-y-6">
+                    <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Selection Details
+                    </h2>
+                    <div id="properties" class="space-y-4">
+                        <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
+                            <p class="text-sm">Select a node or link<br>to view properties</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Query Results -->
+                <div id="results-panel" class="p-6 space-y-6 hidden">
+                    <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Tabular Results
+                    </h2>
+                    
+                    <!-- Optimization Chart Container -->
+                    <div id="chart-container" class="hidden space-y-4">
+                        <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                            <canvas id="convergence-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <div id="table-results" class="overflow-x-auto">
+                        <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
+                            <p class="text-sm">No results to show</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -213,79 +244,176 @@
             propsDiv.innerHTML = content;
         }
 
-        async function runQuery() {
-            const input = document.getElementById('query-input');
-            const query = input.value || "MATCH (n) RETURN n LIMIT 50";
-            const btn = document.getElementById('run-btn');
-            
-            btn.innerHTML = `<svg class="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
-            btn.disabled = true;
-            input.disabled = true;
-
-            try {
-                const response = await fetch('/api/query', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query })
-                });
-                
-                const data = await response.json();
-                
-                if (data.error) {
-                    showToast(data.error, 'error');
-                } else {
-                    document.getElementById('empty-state').style.opacity = '0';
+                document.getElementById('run-btn').onclick = runQuery;
+                document.getElementById('query-input').onkeypress = (e) => {
+                    if (e.key === 'Enter') runQuery();
+                };
+        
+                // Tab Logic
+                const tabSelection = document.getElementById('tab-selection');
+                const tabResults = document.getElementById('tab-results');
+                const panelSelection = document.getElementById('selection-panel');
+                const panelResults = document.getElementById('results-panel');
+        
+                tabSelection.onclick = () => {
+                    tabSelection.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30";
+                    tabResults.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors";
+                    panelSelection.classList.remove('hidden');
+                    panelResults.classList.add('hidden');
+                };
+        
+                tabResults.onclick = () => {
+                    tabResults.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30";
+                    tabSelection.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors";
+                    panelResults.classList.remove('hidden');
+                    panelSelection.classList.add('hidden');
+                };
+        
+                let convergenceChart = null;
+        
+                function updateResults(data) {
+                    const tableDiv = document.getElementById('table-results');
+                    const chartContainer = document.getElementById('chart-container');
                     
-                    // Transform for force-graph
-                    const nodes = data.nodes.map(n => ({ 
-                        ...n, 
-                        __typename: 'node',
-                        val: n.labels.includes('Port') ? 10 : 5 // Size
-                    }));
-                    const links = data.edges.map(e => ({ 
-                        ...e, 
-                        __typename: 'edge',
-                        source: e.source, 
-                        target: e.target 
-                    }));
-
-                    graph.graphData({ nodes, links });
+                    if (!data.records || data.records.length === 0) {
+                        tableDiv.innerHTML = `<div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl"><p class="text-sm">No tabular results</p></div>`;
+                        chartContainer.classList.add('hidden');
+                        return;
+                    }
+        
+                    // Check for optimization history
+                    const historyIdx = data.columns.indexOf('history');
+                    if (historyIdx !== -1 && data.records[0][historyIdx]) {
+                        const history = data.records[0][historyIdx];
+                        if (Array.isArray(history)) {
+                            renderChart(history, data.records[0][data.columns.indexOf('algorithm')] || 'Solver');
+                            chartContainer.classList.remove('hidden');
+                        }
+                    } else {
+                        chartContainer.classList.add('hidden');
+                    }
+        
+                    // Build Table
+                    let html = `<table class="w-full text-left text-xs border-collapse">
+                        <thead>
+                            <tr class="border-b border-slate-700 text-slate-500 font-bold uppercase tracking-wider">
+                                ${data.columns.map(c => `<th class="py-2 pr-4">${c}</th>`).join('')}
+                            </tr>
+                        </thead>
+                        <tbody class="text-slate-300">
+                            ${data.records.map(row => `
+                                <tr class="border-b border-slate-800/50 hover:bg-slate-800/20">
+                                    ${row.map(val => {
+                                        let display = val;
+                                        if (val && typeof val === 'object') {
+                                            if (val.id) display = `<span class="text-indigo-400 font-mono">#${val.id}</span>`;
+                                            else display = JSON.stringify(val).substring(0, 20) + '...';
+                                        }
+                                        return `<td class="py-3 pr-4 truncate max-w-[150px]">${display}</td>`;
+                                    }).join('')}
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>`;
                     
-                    showToast(`Found ${nodes.length} nodes, ${links.length} edges`, 'success');
+                    tableDiv.innerHTML = html;
+                    
+                    // Auto-switch to results tab
+                    tabResults.click();
                 }
-            } catch (err) {
-                console.error(err);
-                showToast("Failed to connect to server", 'error');
-            } finally {
-                btn.innerText = "Run";
-                btn.disabled = false;
-                input.disabled = false;
-                input.focus();
-            }
-        }
-
-        function showToast(message, type = 'info') {
-            const toast = document.createElement('div');
-            const color = type === 'error' ? 'bg-red-500' : 'bg-indigo-600';
-            toast.className = `fixed bottom-6 right-6 ${color} text-white px-6 py-3 rounded-lg shadow-xl text-sm font-bold transform transition-all duration-300 translate-y-10 opacity-0 z-50`;
-            toast.innerText = message;
-            document.body.appendChild(toast);
-            
-            requestAnimationFrame(() => {
-                toast.classList.remove('translate-y-10', 'opacity-0');
-            });
-
-            setTimeout(() => {
-                toast.classList.add('translate-y-10', 'opacity-0');
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
-        }
-
-        document.getElementById('run-btn').onclick = runQuery;
-        document.getElementById('query-input').onkeypress = (e) => {
-            if (e.key === 'Enter') runQuery();
-        };
-
+        
+                function renderChart(history, algoName) {
+                    const ctx = document.getElementById('convergence-chart').getContext('2d');
+                    
+                    if (convergenceChart) {
+                        convergenceChart.destroy();
+                    }
+        
+                    convergenceChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: history.map((_, i) => i),
+                            datasets: [{
+                                label: `${algoName} Convergence`,
+                                data: history,
+                                borderColor: '#6366f1',
+                                backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                fill: true,
+                                tension: 0.4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: { mode: 'index', intersect: false }
+                            },
+                            scales: {
+                                x: { display: false },
+                                y: { 
+                                    grid: { color: 'rgba(255,255,255,0.05)' },
+                                    ticks: { color: '#64748b', font: { size: 10 } }
+                                }
+                            }
+                        }
+                    });
+                }
+        
+                async function runQuery() {
+                    const input = document.getElementById('query-input');
+                    const query = input.value || "MATCH (n) RETURN n LIMIT 50";
+                    const btn = document.getElementById('run-btn');
+                    
+                    btn.innerHTML = `<svg class="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
+                    btn.disabled = true;
+                    input.disabled = true;
+        
+                    try {
+                        const response = await fetch('/api/query', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ query })
+                        });
+                        
+                        const data = await response.json();
+                        
+                        if (data.error) {
+                            showToast(data.error, 'error');
+                        } else {
+                            document.getElementById('empty-state').style.opacity = '0';
+                            
+                            // Transform for force-graph
+                            const nodes = data.nodes.map(n => ({
+                                ...n,
+                                __typename: 'node',
+                                val: n.labels.includes('Port') ? 10 : 5 // Size
+                            }));
+                            const links = data.edges.map(e => ({
+                                ...e,
+                                __typename: 'edge',
+                                source: e.source,
+                                target: e.target
+                            }));
+        
+                            graph.graphData({ nodes, links });
+                            
+                            // Update Table & Chart
+                            updateResults(data);
+                            
+                            showToast(`Found ${nodes.length} nodes, ${links.length} edges`, 'success');
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        showToast("Failed to connect to server", 'error');
+                    } finally {
+                        btn.innerText = "Run";
+                        btn.disabled = false;
+                        input.disabled = false;
+                        input.focus();
+                    }
+                }
         // Initial status check
         const checkStatus = () => {
             fetch('/api/status')
