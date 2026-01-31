@@ -17,6 +17,7 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 *   **[Architecture](docs/ARCHITECTURE.md)**: System design and components.
 *   **[Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)**: Supported query features.
 *   **[Benchmarks](docs/performance/BENCHMARKS.md)**: Performance metrics.
+*   **[Performance Roadmap](docs/performance/PERFORMANCE_ROADMAP.md)**: Strategy for world-class speed.
 
 ## 📦 Crates
 

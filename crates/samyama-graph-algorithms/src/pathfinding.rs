@@ -52,7 +52,7 @@ pub fn bfs(
             });
         }
 
-        for &next_idx in &view.outgoing[current_idx] {
+        for &next_idx in view.successors(current_idx) {
             if !visited.contains_key(&next_idx) {
                 visited.insert(next_idx, Some(current_idx));
                 queue.push_back(next_idx);
@@ -125,8 +125,8 @@ pub fn dijkstra(
             continue;
         }
 
-        let edges = &view.outgoing[node_idx];
-        let weights = view.weights.as_ref().map(|w| &w[node_idx]);
+        let edges = view.successors(node_idx);
+        let weights = view.weights(node_idx);
 
         for (i, &next_idx) in edges.iter().enumerate() {
             let weight = if let Some(w) = weights {
@@ -169,14 +169,14 @@ mod tests {
         outgoing[0].push(1);
         outgoing[1].push(2);
 
-        let view = GraphView {
-            node_count: 3,
+        let view = GraphView::from_adjacency_list(
+            3,
             index_to_node,
             node_to_index,
             outgoing,
-            incoming: vec![vec![]; 3],
-            weights: None,
-        };
+            vec![vec![]; 3],
+            None,
+        );
 
         let result = bfs(&view, 1, 3).unwrap();
         assert_eq!(result.path, vec![1, 2, 3]);
@@ -199,14 +199,14 @@ mod tests {
         outgoing[0].push(2); weights[0].push(50.0); // Direct 1->3
         outgoing[1].push(2); weights[1].push(5.0);
 
-        let view = GraphView {
-            node_count: 3,
+        let view = GraphView::from_adjacency_list(
+            3,
             index_to_node,
             node_to_index,
             outgoing,
-            incoming: vec![vec![]; 3],
-            weights: Some(weights),
-        };
+            vec![vec![]; 3],
+            Some(weights),
+        );
 
         let result = dijkstra(&view, 1, 3).unwrap();
         assert_eq!(result.path, vec![1, 2, 3]);

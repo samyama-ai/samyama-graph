@@ -17,16 +17,16 @@ pub fn count_triangles(view: &GraphView) -> usize {
     // To avoid overcounting, we only consider nodes with indices i < j < k.
     
     for u in 0..view.node_count {
-        let u_neighbors: HashSet<_> = view.outgoing[u].iter()
-            .chain(view.incoming[u].iter())
+        let u_neighbors: HashSet<_> = view.successors(u).iter()
+            .chain(view.predecessors(u).iter())
             .cloned()
             .collect();
             
         for &v in &u_neighbors {
             if v <= u { continue; } // Order u < v
             
-            let v_neighbors: HashSet<_> = view.outgoing[v].iter()
-                .chain(view.incoming[v].iter())
+            let v_neighbors: HashSet<_> = view.successors(v).iter()
+                .chain(view.predecessors(v).iter())
                 .cloned()
                 .collect();
                 
@@ -65,14 +65,14 @@ mod tests {
             }
         }
         
-        let view = GraphView {
+        let view = GraphView::from_adjacency_list(
             node_count,
-            index_to_node: vec![0, 1, 2, 3],
-            node_to_index: HashMap::new(), // Not used by algorithm
+            vec![0, 1, 2, 3],
+            HashMap::new(),
             outgoing,
             incoming,
-            weights: None,
-        };
+            None,
+        );
         
         let count = count_triangles(&view);
         assert_eq!(count, 4);
