@@ -12,6 +12,8 @@ pub mod firefly;
 pub mod cuckoo;
 pub mod gwo;
 pub mod ga;
+pub mod sa;
+pub mod bat;
 
 pub use jaya::JayaSolver;
 pub use rao::{RaoSolver, RaoVariant};
@@ -27,3 +29,5 @@ pub use firefly::FireflySolver;
 pub use cuckoo::CuckooSolver;
 pub use gwo::GWOSolver;
 pub use ga::GASolver;
+pub use sa::SASolver;
+pub use bat::BatSolver;

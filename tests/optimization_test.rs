@@ -40,8 +40,14 @@ fn test_optimization_solver_integration() {
 
     // 4. Verify Result Records
     assert_eq!(result.records.len(), 1);
-    let fitness = result.records[0].get("fitness").unwrap().as_property().unwrap().as_float().unwrap();
+    let record = &result.records[0];
+    let fitness = record.get("fitness").unwrap().as_property().unwrap().as_float().unwrap();
     println!("Optimization Fitness: {}", fitness);
+    
+    // Check history
+    let history = record.get("history").unwrap().as_property().unwrap().as_array().unwrap();
+    assert_eq!(history.len(), 50); // max_iterations
+    println!("History points: {}", history.len());
     
     // Expected fitness: 10 nodes * 5.0 allocation * 10.0 cost = 500.0
     // Jaya should converge close to this.
