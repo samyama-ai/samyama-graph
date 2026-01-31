@@ -14,8 +14,8 @@ It bridges the gap between **Transactional Graph Databases**, **Vector Databases
 *   **🗣️ NLQ**: Query your graph using plain English ("Who knows Alice?") instead of Cypher code.
 *   **🕵️ Agents**: Autonomous agents that can enrich your graph data by calling external tools (e.g., Web Search).
 *   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
-*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, WCC, MaxFlow, and MST algorithms.
-*   **🎯 Optimization**: Built-in metaheuristic solvers (Jaya, Rao, GWO, Firefly) for resource allocation and scheduling directly on the graph.
+*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, and Triangle Counting algorithms.
+*   **🎯 Optimization**: Built-in metaheuristic solvers (15+ algorithms including Jaya, Rao, GWO, Firefly, Cuckoo, ABC, NSGA-II) for single and multi-objective resource allocation directly on the graph.
 *   **🛡️ Reliability**: Raft Consensus for High Availability and RocksDB for persistence.
 *   **⚖️ Scalability**: Native Tenant-Level Sharding for horizontal scaling.
 *   **🎨 Visualization**: Built-in interactive Web UI.
