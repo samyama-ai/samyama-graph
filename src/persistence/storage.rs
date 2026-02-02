@@ -171,6 +171,7 @@ impl PersistentStorage {
 
                 let node = Node {
                     id: NodeId::new(stored.id),
+                    version: 1,
                     labels: stored.labels.into_iter()
                         .map(|s| crate::graph::Label::new(s))
                         .collect(),
@@ -231,6 +232,7 @@ impl PersistentStorage {
 
                 let edge = Edge {
                     id: EdgeId::new(stored.id),
+                    version: 1,
                     source: NodeId::new(stored.source),
                     target: NodeId::new(stored.target),
                     edge_type: crate::graph::EdgeType::new(stored.edge_type),
@@ -299,6 +301,7 @@ impl PersistentStorage {
 
             let node = Node {
                 id: NodeId::new(stored.id),
+                version: 1,
                 labels: stored.labels.into_iter()
                     .map(|s| crate::graph::Label::new(s))
                     .collect(),
@@ -330,6 +333,7 @@ impl PersistentStorage {
 
             let edge = Edge {
                 id: EdgeId::new(stored.id),
+                version: 1,
                 source: NodeId::new(stored.source),
                 target: NodeId::new(stored.target),
                 edge_type: crate::graph::EdgeType::new(stored.edge_type),

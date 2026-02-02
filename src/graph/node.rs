@@ -22,6 +22,9 @@ pub struct Node {
     /// Unique identifier for this node
     pub id: NodeId,
 
+    /// Version for MVCC
+    pub version: u64,
+
     /// Set of labels for this node (supports multiple labels)
     pub labels: HashSet<Label>,
 
@@ -44,6 +47,7 @@ impl Node {
 
         Node {
             id,
+            version: 1,
             labels,
             properties: PropertyMap::new(),
             created_at: now,
@@ -58,6 +62,7 @@ impl Node {
 
         Node {
             id,
+            version: 1,
             labels: label_set,
             properties: PropertyMap::new(),
             created_at: now,
@@ -76,6 +81,7 @@ impl Node {
 
         Node {
             id,
+            version: 1,
             labels: label_set,
             properties,
             created_at: now,
