@@ -9,7 +9,7 @@ This document outlines the strategic technical initiatives to optimize Samyama G
 - **Benefit**: Achieves superior CPU cache locality and enables pre-fetching. Can be 10x-50x faster for traversals.
 - **Strategy**: Use a hybrid model. Maintain a mutable "Delta" store (HashMap/BTree) for recent writes and a dense "Stable" store (CSR). Periodically merge Delta into CSR.
 
-### Arena Allocation
+### [DONE] Arena Allocation
 - **Goal**: Allocate Node and Edge objects in contiguous memory blocks (Arenas).
 - **Benefit**: Reduces heap fragmentation and allocator overhead. Node IDs become direct indices into these arrays.
 
@@ -29,13 +29,14 @@ This document outlines the strategic technical initiatives to optimize Samyama G
 - **Goal**: Adopt an Apache Arrow-style columnar layout for node/edge properties.
 - **Benefit**: Queries that access specific properties (e.g., `RETURN n.price`) only read relevant data from disk/memory, avoiding "cache pollution" from unused fields.
 
-### IO_URING Integration
+### [DEFERRED] IO_URING Integration
 - **Goal**: Utilize the Linux `io_uring` interface for asynchronous disk I/O.
 - **Benefit**: Allows the storage engine to submit thousands of I/O requests in a single system call, maximizing SSD throughput.
+- **Status**: Deferred (Linux-only, developer environment is macOS).
 
 ## 4. Concurrency & Throughput
 
-### Multi-Version Concurrency Control (MVCC)
+### [IN PROGRESS] Multi-Version Concurrency Control (MVCC)
 - **Goal**: Implement versioning for all graph elements.
 - **Benefit**: **Reads never block writes, and writes never block reads.** Essential for high-concurrency enterprise workloads.
 

@@ -24,6 +24,9 @@ pub struct Edge {
     /// Unique identifier for this edge
     pub id: EdgeId,
 
+    /// Version for MVCC
+    pub version: u64,
+
     /// Source node (edge goes FROM this node)
     pub source: NodeId,
 
@@ -52,6 +55,7 @@ impl Edge {
 
         Edge {
             id,
+            version: 1,
             source,
             target,
             edge_type: edge_type.into(),
@@ -72,6 +76,7 @@ impl Edge {
 
         Edge {
             id,
+            version: 1,
             source,
             target,
             edge_type: edge_type.into(),
