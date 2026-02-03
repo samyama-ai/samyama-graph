@@ -95,4 +95,18 @@ mod tests {
         let router = Router::new(1);
         assert!(router.route("unknown").is_none());
     }
+
+    #[test]
+    fn test_router_ops() {
+        let router = Router::new(1);
+        router.update_route("t1".to_string(), 1);
+        router.update_route("t2".to_string(), 2);
+
+        let routes = router.get_all_routes();
+        assert_eq!(routes.len(), 2);
+        
+        router.remove_route("t1");
+        assert!(router.route("t1").is_none());
+        assert!(router.route("t2").is_some());
+    }
 }

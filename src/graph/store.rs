@@ -1276,25 +1276,12 @@ mod tests {
         assert_eq!(v2_node.get_property("name").unwrap().as_string(), Some("Alice Cooper"));
 
         // Historical read (Version 1 should still be Alice)
-        // Note: In our simple MVCC, set_property modifies the *latest* version in place 
-        // if we didn't explicitly push a new version.
-        // Wait, set_node_property implementation:
-        // let node = self.nodes.get_mut(idx).and_then(|v| v.last_mut())...
-        // node.set_property(...)
-        //
-        // This modifies the latest version in place. It does NOT create a new version automatically.
-        // To support true time-travel, we need `update_node` to push a clone with new version.
-        //
-        // Let's adjust the test to expectations or fix implementation.
-        // The current implementation is "Current Version" oriented for updates, 
-        // but "Append Only" for creation.
-        //
-        // To test append-only history, we should manually simulate it or use what we have.
-        // Since we claimed MVCC, we should probably support COW updates.
-        // But for now, let's verify what we HAVE: Version field exists and is set on creation.
+        let v1_lookup = store.get_node_at_version(node_id, 1).unwrap();
+        assert_eq!(v1_lookup.version, 1);
+        assert_eq!(v1_lookup.get_property("name").unwrap().as_string(), Some("Alice"));
         
         let node = store.get_node(node_id).unwrap();
-        assert_eq!(node.version, 1); // It stays at creation version unless updated
+        assert_eq!(node.version, 2); // Should be latest version
     }
 
     #[test]

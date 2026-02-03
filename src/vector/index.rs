@@ -198,4 +198,21 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, NodeId::new(1));
     }
+
+    #[test]
+    fn test_distance_metrics() {
+        let v1 = vec![1.0, 0.0];
+        let v2 = vec![0.0, 1.0];
+        let v3 = vec![1.0, 1.0]; // Not normalized
+
+        let cosine = CosineDistance;
+        // Orthogonal
+        assert!((cosine.eval(&v1, &v2) - 1.0).abs() < 1e-6); 
+        // Same
+        assert!((cosine.eval(&v1, &v1) - 0.0).abs() < 1e-6);
+        
+        let inner = InnerProductDistance;
+        // Dot product = 0
+        assert!((inner.eval(&v1, &v2) - 1.0).abs() < 1e-6); // 1.0 - 0.0
+    }
 }
