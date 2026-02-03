@@ -2770,4 +2770,137 @@ mod tests {
 
         assert_eq!(count, 3);
     }
+
+    #[test]
+    fn test_node_scan_batch() {
+        let mut store = GraphStore::new();
+        for i in 0..10 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "id", i as i64).unwrap();
+        }
+
+        let mut op = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
+        
+        // Request batch size 4
+        let batch1 = op.next_batch(&store, 4).unwrap().unwrap();
+        assert_eq!(batch1.len(), 4);
+        
+        let batch2 = op.next_batch(&store, 4).unwrap().unwrap();
+        assert_eq!(batch2.len(), 4);
+        
+        let batch3 = op.next_batch(&store, 4).unwrap().unwrap();
+        assert_eq!(batch3.len(), 2); // Remaining
+        
+        let batch4 = op.next_batch(&store, 4).unwrap();
+        assert!(batch4.is_none());
+    }
+
+    #[test]
+    fn test_project_batch() {
+        let mut store = GraphStore::new();
+        let id = store.create_node("Person");
+        store.set_node_property("default", id, "age", 30).unwrap();
+
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
+        let mut project = ProjectOperator::new(Box::new(scan), vec![
+            (Expression::Property { variable: "n".to_string(), property: "age".to_string() }, "age".to_string())
+        ]);
+
+        let batch = project.next_batch(&store, 10).unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        let age = batch.records[0].get("age").unwrap().as_property().unwrap().as_integer().unwrap();
+        assert_eq!(age, 30);
+    }
+
+    #[test]
+    fn test_filter_batch() {
+        let mut store = GraphStore::new();
+        for i in 0..10 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "val", i as i64).unwrap();
+        }
+
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
+        // Filter val >= 5
+        let predicate = Expression::Binary {
+            left: Box::new(Expression::Property { variable: "n".to_string(), property: "val".to_string() }),
+            op: BinaryOp::Ge,
+            right: Box::new(Expression::Literal(PropertyValue::Integer(5))),
+        };
+        
+        let mut filter = FilterOperator::new(Box::new(scan), predicate);
+        
+        // Pull in batches of 10 (should get all 5 matches in one go or multiple depending on implementation)
+        // Implementation loops until batch filled or source exhausted.
+        let batch = filter.next_batch(&store, 10).unwrap().unwrap();
+        assert_eq!(batch.len(), 5);
+        for r in batch.records {
+            let val = r.get("n").unwrap().as_node().unwrap().1.get_property("val").unwrap().as_integer().unwrap();
+            assert!(val >= 5);
+        }
+    }
+
+    #[test]
+    fn test_aggregate_batch() {
+        let mut store = GraphStore::new();
+        // 3 items group A, 2 items group B
+        for _ in 0..3 {
+            let id = store.create_node("Item");
+            store.set_node_property("default", id, "group", "A").unwrap();
+        }
+        for _ in 0..2 {
+            let id = store.create_node("Item");
+            store.set_node_property("default", id, "group", "B").unwrap();
+        }
+
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Item")]);
+        let mut agg = AggregateOperator::new(
+            Box::new(scan),
+            vec![(Expression::Property { variable: "n".to_string(), property: "group".to_string() }, "group".to_string())],
+            vec![AggregateFunction { 
+                func: AggregateType::Count, 
+                expr: Expression::Variable("n".to_string()), 
+                alias: "count".to_string() 
+            }]
+        );
+
+        let batch = agg.next_batch(&store, 10).unwrap().unwrap();
+        assert_eq!(batch.len(), 2); // 2 groups
+        
+        // Check results
+        let mut counts = HashMap::new();
+        for r in batch.records {
+            let g = r.get("group").unwrap().as_property().unwrap().as_string().unwrap().to_string();
+            let c = r.get("count").unwrap().as_property().unwrap().as_integer().unwrap();
+            counts.insert(g, c);
+        }
+        
+        assert_eq!(counts.get("A"), Some(&3));
+        assert_eq!(counts.get("B"), Some(&2));
+    }
+
+    #[test]
+    fn test_sort_batch() {
+        let mut store = GraphStore::new();
+        let values = vec![5, 1, 3, 2, 4];
+        for v in values {
+            let id = store.create_node("Num");
+            store.set_node_property("default", id, "val", v).unwrap();
+        }
+
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Num")]);
+        let mut sort = SortOperator::new(
+            Box::new(scan),
+            vec![(Expression::Property { variable: "n".to_string(), property: "val".to_string() }, true)] // Ascending
+        );
+
+        let batch = sort.next_batch(&store, 10).unwrap().unwrap();
+        assert_eq!(batch.len(), 5);
+        
+        let sorted_vals: Vec<i64> = batch.records.iter()
+            .map(|r| r.get("n").unwrap().as_node().unwrap().1.get_property("val").unwrap().as_integer().unwrap())
+            .collect();
+            
+        assert_eq!(sorted_vals, vec![1, 2, 3, 4, 5]);
+    }
 }
