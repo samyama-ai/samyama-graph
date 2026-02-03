@@ -10,8 +10,8 @@ const PORT = process.env.PORT || 8080;
 
 // Connect to Samyama (Redis-compatible protocol)
 const samyama = new Redis({
-  host: '127.0.0.1',
-  port: 6379,
+  host: process.env.SAMYAMA_HOST || '127.0.0.1',
+  port: process.env.SAMYAMA_PORT || 6379,
   maxRetriesPerRequest: 3,
   retryDelayOnFailover: 100
 });
@@ -60,7 +60,7 @@ app.use('/api/', limiter);
 const BLOCKED_KEYWORDS = [
   'CREATE', 'MERGE', 'DELETE', 'DETACH DELETE',
   'SET', 'REMOVE', 'DROP', 'CALL', 'LOAD CSV',
-  'FOREACH', 'UNWIND'
+  'FOREACH'
 ];
 
 function validateQuery(query) {
@@ -82,7 +82,7 @@ function validateQuery(query) {
   
   // Block write operations
   for (const blocked of BLOCKED_KEYWORDS) {
-    const regex = new RegExp('\b' + blocked.replace(' ', '\s+') + '\b', 'i');
+    const regex = new RegExp('\\b' + blocked.replace(' ', '\\s+') + '\\b', 'i');
     if (regex.test(upperQuery)) {
       return { valid: false, error: `Operation not allowed: ${blocked}. This is a read-only sandbox.` };
     }
