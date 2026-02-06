@@ -13,6 +13,14 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Load .env if exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo -e "${GREEN}Loaded environment variables from .env${NC}"
+else
+    echo -e "${YELLOW}Warning: .env file not found. Some AI demos (Agent, NLQ) may fail without GEMINI_API_KEY.${NC}"
+fi
+
 function build_project() {
     if [ -f "$SERVER_BIN" ]; then
         read -p "Build found. Rebuild project? [y/N]: " REBUILD
