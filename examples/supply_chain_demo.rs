@@ -319,11 +319,18 @@ async fn main() {
     pause();
     println!("\n🌐 Starting Web Visualizer for Exploration...");
     println!("   Open http://localhost:8080 in your browser.");
-    println!("   Press Ctrl+C to exit.");
+    println!("   Press Enter to stop the server and exit demo.");
     
-    // Start HTTP Server
+    // Start HTTP Server in background
     let http_server = samyama::http::HttpServer::new(store.clone(), 8080);
-    if let Err(e) = http_server.start().await {
-        eprintln!("HttpServer error: {}", e);
-    }
+    tokio::spawn(async move {
+        if let Err(e) = http_server.start().await {
+            eprintln!("HttpServer error: {}", e);
+        }
+    });
+
+    // Wait for exit
+    let mut buffer = String::new();
+    std::io::stdin().read_line(&mut buffer).unwrap();
+    println!("Stopping server...");
 }

@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::time::Instant;
 
@@ -36,6 +36,14 @@ use samyama::{
     PersistenceManager, ResourceQuotas, QueryEngine,
     graph::{GraphStore, Label, NodeId},
 };
+
+fn pause() {
+    print!("\n👉 Press Enter to continue...");
+    std::io::stdout().flush().unwrap();
+    let mut buffer = String::new();
+    std::io::stdin().read_line(&mut buffer).unwrap();
+    println!();
+}
 
 // ============================================================================
 // TSV LOADER
@@ -580,6 +588,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════════════════════════════╝");
     println!();
 
+    pause();
+
     let start_time = Instant::now();
 
     // =========================================================================
@@ -640,6 +650,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Created 'wealth_management' tenant (500K nodes, 5M edges)");
     println!();
 
+    pause();
+
     // =========================================================================
     // 2. INITIALIZE GRAPH & LOAD DATA
     // =========================================================================
@@ -665,6 +677,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("  Data loaded in {:.2}s", load_time.as_secs_f64());
     println!();
+
+    pause();
 
     // =========================================================================
     // 3. PERSIST DATA TO STORAGE
@@ -746,6 +760,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Checkpoint created ({:.2}s)", persist_start.elapsed().as_secs_f64());
     println!();
 
+    pause();
+
     // =========================================================================
     // 4. RUN CYPHER QUERIES
     // =========================================================================
@@ -797,6 +813,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Found {} checking accounts ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     println!();
+
+    pause();
 
     // =========================================================================
     // 5. FRAUD DETECTION ANALYSIS
@@ -850,6 +868,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         under_review.len(), frozen_pct, total_accounts);
 
     println!();
+
+    pause();
 
     // =========================================================================
     // 6. STATISTICS SUMMARY
@@ -906,6 +926,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
 
+    pause();
+
     // =========================================================================
     // 7. TENANT USAGE REPORT
     // =========================================================================
@@ -937,6 +959,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!();
     }
+
+    pause();
 
     // =========================================================================
     // 8. FINALIZE
