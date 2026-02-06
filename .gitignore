@@ -18,3 +18,4 @@ docs/banking/data/
 vectors/
 wal/
 data/
+.env
