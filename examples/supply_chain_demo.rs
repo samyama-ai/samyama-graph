@@ -62,7 +62,7 @@ async fn main() {
     let agent_config = AgentConfig {
         enabled: true,
         provider: LLMProvider::Mock,
-        model: "gemini-1.5-flash".to_string(),
+        model: "gemini-2.5-flash".to_string(),
         api_key: Some("mock".to_string()),
         api_base_url: None,
         system_prompt: Some("You are a supply chain risk agent.".to_string()),
@@ -75,7 +75,7 @@ async fn main() {
     let nlq_config = NLQConfig {
         enabled: true,
         provider: LLMProvider::Mock,
-        model: "gemini-1.5-flash".to_string(),
+        model: "gemini-2.5-flash".to_string(),
         api_key: Some("mock".to_string()),
         api_base_url: None,
         system_prompt: None,

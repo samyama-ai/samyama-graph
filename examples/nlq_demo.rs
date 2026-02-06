@@ -21,7 +21,7 @@ async fn main() {
     let nlq_config = NLQConfig {
         enabled: true,
         provider: LLMProvider::Gemini,
-        model: "gemini-2.0-flash-exp".to_string(),
+        model: "gemini-2.5-flash".to_string(),
         api_key: Some(api_key),
         api_base_url: None,
         system_prompt: None,
