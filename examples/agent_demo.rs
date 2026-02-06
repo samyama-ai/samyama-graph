@@ -10,7 +10,7 @@ async fn main() {
     let agent_config = AgentConfig {
         enabled: true,
         provider: LLMProvider::Gemini,
-        model: "gemini-1.5-flash".to_string(),
+        model: "gemini-2.0-flash-exp".to_string(),
         api_key: std::env::var("GEMINI_API_KEY").ok(),
         api_base_url: None,
         system_prompt: None,
