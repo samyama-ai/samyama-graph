@@ -101,7 +101,7 @@ async fn main() {
     {
         let g = store.read().await;
         // Mock query vector for patient profile
-        let patient_vec = vec![0.1; 64]; 
+        let patient_vec = vec![0.1f32; 64]; 
         let results = g.vector_search("Trial", "criteria", &patient_vec, 2).unwrap();
         
         for (id, score) in results {

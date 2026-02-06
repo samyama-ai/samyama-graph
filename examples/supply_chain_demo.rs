@@ -233,7 +233,7 @@ async fn main() {
     {
         let g = store.read().await;
         // Mock query vector
-        let query_vec = vec![0.1; 64]; 
+        let query_vec = vec![0.1f32; 64]; 
         let results = g.vector_search("Supplier", "capabilities", &query_vec, 3).unwrap();
         
         for (id, score) in results {

@@ -58,7 +58,7 @@ async fn main() {
     // Create Vector Index for Threat Signatures
     {
         let g = store.read().await;
-        g.create_vector_index("ThreatIntel", "description", 64, samyama::vector::DistanceMetric::Cosine).unwrap();
+        g.create_vector_index("ThreatIntel", "description_embedding", 64, samyama::vector::DistanceMetric::Cosine).unwrap();
     }
 
     pause();
@@ -77,9 +77,9 @@ async fn main() {
         engine.execute_mut("CREATE (s:Server {name: 'Web-Srv-01', ip: '192.168.1.10', os: 'Linux'})", &mut g, tenant_id).unwrap();
         engine.execute_mut("CREATE (s:Server {name: 'DB-Srv-01', ip: '192.168.1.20', os: 'Linux'})", &mut g, tenant_id).unwrap();
         
-        let servers = g.get_nodes_by_label(&Label::new("Server"));
-        for s in servers {
-            g.create_edge(fw_id, s.id, EdgeType::new("PROTECTS")).unwrap();
+        let server_ids: Vec<_> = g.get_nodes_by_label(&Label::new("Server")).iter().map(|n| n.id).collect();
+        for sid in server_ids {
+            g.create_edge(fw_id, sid, EdgeType::new("PROTECTS")).unwrap();
         }
 
         // Users
@@ -101,21 +101,21 @@ async fn main() {
         let mut g = store.write().await;
         // Mock embeddings for CVEs
         // In real app, Auto-Embed would generate these from text
-        let cve1 = vec![0.1; 64]; // "SQL Injection signature"
-        let cve2 = vec![0.9; 64]; // "Ransomware payload"
+        let cve1 = vec![0.1f32; 64]; // "SQL Injection signature"
+        let cve2 = vec![0.9f32; 64]; // "Ransomware payload"
         
         let cve1_id = g.create_node(Label::new("ThreatIntel"));
         if let Some(n) = g.get_node_mut(cve1_id) {
             n.set_property("cve", "CVE-2023-1234");
             n.set_property("description", "SQL Injection in login form");
-            n.set_vector("description", cve1).unwrap();
+            n.set_property("description_embedding", cve1);
         }
 
         let cve2_id = g.create_node(Label::new("ThreatIntel"));
         if let Some(n) = g.get_node_mut(cve2_id) {
             n.set_property("cve", "CVE-2024-5678");
             n.set_property("description", "WannaCry Ransomware variant");
-            n.set_vector("description", cve2).unwrap();
+            n.set_property("description_embedding", cve2);
         }
         println!("   ✓ Threat Intel Database Updated (Vector Index Active)");
     }
@@ -147,8 +147,8 @@ async fn main() {
     {
         let g = store.read().await;
         // Simulating embedding of the log payload
-        let payload_vec = vec![0.12; 64]; // Close to SQLi
-        let results = g.vector_search("ThreatIntel", "description", &payload_vec, 1).unwrap();
+        let payload_vec = vec![0.12f32; 64]; // Close to SQLi
+        let results = g.vector_search("ThreatIntel", "description_embedding", &payload_vec, 1).unwrap();
         
         if let Some((id, score)) = results.first() {
             let node = g.get_node(*id).unwrap();
