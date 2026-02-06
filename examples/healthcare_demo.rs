@@ -1,135 +1,185 @@
-use samyama_optimization::algorithms::JayaSolver;
-use samyama_optimization::common::{Problem, SolverConfig};
+//! Clinical Trials Optimization: Patient Matching & Site Selection
+//!
+//! Features:
+//! - **Vector Search:** Match patient unstructured records to trial protocols.
+//! - **Graph:** Knowledge Graph of Conditions and Drugs (Phase 5 data).
+//! - **Optimization:** Multi-Objective Site Selection (Cost vs Recruitment).
+
+use samyama::
+{
+    GraphStore,
+    Label,
+    EdgeType,
+    PropertyValue,
+    PersistenceManager,
+    QueryEngine,
+    persistence::tenant::{AutoEmbedConfig, LLMProvider},
+};
+use samyama_optimization::algorithms::NSGA2Solver;
+use samyama_optimization::common::{MultiObjectiveProblem, SolverConfig};
 use ndarray::Array1;
-use rand::Rng;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::io::Write;
 
-/// Healthcare Resource Allocation Problem
-struct HealthcareProblem {
-    num_departments: usize,
-    num_resources: usize,
-    demand: Array1<f64>,
-    costs: Array1<f64>,
-    budget: f64,
+fn pause() {
+    print!("\n👉 Press Enter to continue...");
+    std::io::stdout().flush().unwrap();
+    let mut buffer = String::new();
+    std::io::stdin().read_line(&mut buffer).unwrap();
+    println!();
 }
 
-impl HealthcareProblem {
-    fn new(departments: usize, resources: usize, budget: f64) -> Self {
-        let mut rng = rand::thread_rng();
-        
-        // Random demand per department (patients/hour)
-        let demand = Array1::from_iter((0..departments).map(|_| rng.gen_range(10.0..100.0)));
-        
-        // Random cost per resource type (e.g., Doctor=$100, Nurse=$40, Bed=$10)
-        let costs = Array1::from_iter((0..resources).map(|_| rng.gen_range(10.0..200.0)));
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+    println!("🏥 ClinicalTrialsAI: Patient Matching & Site Optimization");
 
-        Self {
-            num_departments: departments,
-            num_resources: resources,
-            demand,
-            costs,
-            budget,
-        }
-    }
-}
-
-impl Problem for HealthcareProblem {
-    fn dim(&self) -> usize {
-        self.num_departments * self.num_resources
-    }
-
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        // Minimum 1 resource, Maximum 50 resources per slot
-        let dim = self.dim();
-        (Array1::from_elem(dim, 1.0), Array1::from_elem(dim, 50.0))
-    }
-
-    fn objective(&self, variables: &Array1<f64>) -> f64 {
-        // Variables are flattened [Dept1_Res1, Dept1_Res2, ..., Dept2_Res1, ...]
-        let mut total_wait_time = 0.0;
-
-        for d in 0..self.num_departments {
-            let offset = d * self.num_resources;
-            
-            // Calculate capacity for this department based on resources
-            // Simplified model: Capacity = sum(resource_quantity * resource_efficiency)
-            // Assuming resource_efficiency is correlated with cost for simplicity here
-            let mut capacity = 0.0;
-            for r in 0..self.num_resources {
-                let qty = variables[offset + r];
-                let efficiency = self.costs[r] / 10.0; // Higher cost = higher efficiency
-                capacity += qty * efficiency;
-            }
-
-            // Avoid division by zero
-            if capacity < 1.0 { capacity = 1.0; }
-
-            // Wait time ~ Demand / Capacity
-            total_wait_time += self.demand[d] / capacity;
-        }
-
-        total_wait_time
-    }
-
-    fn penalty(&self, variables: &Array1<f64>) -> f64 {
-        // Constraint: Total Cost <= Budget
-        let mut total_cost = 0.0;
-        for d in 0..self.num_departments {
-            for r in 0..self.num_resources {
-                let idx = d * self.num_resources + r;
-                total_cost += variables[idx] * self.costs[r];
-            }
-        }
-
-        if total_cost > self.budget {
-            // Quadratic penalty for exceeding budget
-            (total_cost - self.budget).powi(2)
-        } else {
-            0.0
-        }
-    }
-}
-
-fn main() {
-    println!("🏥 Samyama Healthcare Optimization Demo");
-    println!("=======================================");
-
-    let departments = 5; // ER, ICU, Surgery, General, Pediatrics
-    let resources = 3;   // Doctors, Nurses, Equipment
-    let budget = 50000.0; // Total hourly budget
-
-    let problem = HealthcareProblem::new(departments, resources, budget);
+    // 1. Setup
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let persistence = Arc::new(PersistenceManager::new(temp_dir.path()).unwrap());
+    let tenant_id = "pharma_r_and_d";
     
-    println!("Departments: {}", departments);
-    println!("Resources per Dept: {}", resources);
-    println!("Total Budget: ${:.2}", budget);
-    println!("Problem Dimensions: {}", problem.dim());
-
-    let config = SolverConfig {
-        population_size: 100,
-        max_iterations: 1000,
+    // Auto-Embed for Trial Protocols
+    let embed_config = AutoEmbedConfig {
+        provider: LLMProvider::Mock,
+        embedding_model: "text-embedding-004".to_string(),
+        api_key: Some("mock".to_string()),
+        api_base_url: None,
+        chunk_size: 200,
+        chunk_overlap: 20,
+        vector_dimension: 64,
+        embedding_policies: HashMap::from([
+            ("Trial".to_string(), vec!["criteria".to_string()])
+        ]),
     };
+    persistence.tenants().create_tenant(tenant_id.to_string(), "Clinical R&D".to_string(), None).unwrap();
+    persistence.tenants().update_embed_config(tenant_id, Some(embed_config)).unwrap();
 
-    println!("\n🚀 Running Jaya Algorithm...");
-    let start = std::time::Instant::now();
-    
-    let solver = JayaSolver::new(config);
-    let result = solver.solve(&problem);
+    let (graph, _rx) = GraphStore::with_async_indexing();
+    let store = Arc::new(tokio::sync::RwLock::new(graph));
 
-    let duration = start.elapsed();
-
-    println!("✅ Optimization Complete in {:.2?}", duration);
-    println!("🏆 Best Fitness (Min Wait Score): {:.4}", result.best_fitness);
-    
-    println!("\nOptimal Allocation (First Department):");
-    println!("Doctors: {:.1}", result.best_variables[0]);
-    println!("Nurses:  {:.1}", result.best_variables[1]);
-    println!("Equip:   {:.1}", result.best_variables[2]);
-
-    // Verify constraints
-    let penalty = problem.penalty(&result.best_variables);
-    if penalty > 0.0 {
-        println!("⚠️ Constraints violated! Penalty: {}", penalty);
-    } else {
-        println!("✨ All constraints satisfied (Within Budget).");
+    // Create Vector Index
+    {
+        let g = store.read().await;
+        g.create_vector_index("Trial", "criteria", 64, samyama::vector::DistanceMetric::Cosine).unwrap();
     }
+
+    pause();
+
+    // 2. Knowledge Graph Ingestion
+    println!("\n[Step 1] Building Knowledge Graph...");
+    {
+        let mut g = store.write().await;
+        let engine = QueryEngine::new();
+
+        // Trials
+        engine.execute_mut("CREATE (t:Trial {id: 'NCT01234567', title: 'Immunotherapy for NSCLC', criteria: 'Stage III/IV Non-Small Cell Lung Cancer, PD-L1 positive.'})", &mut g, tenant_id).unwrap();
+        engine.execute_mut("CREATE (t:Trial {id: 'NCT09876543', title: 'Targeted Therapy for EGFR+', criteria: 'Advanced NSCLC with EGFR exon 19 deletion.'})", &mut g, tenant_id).unwrap();
+        
+        // Conditions & Drugs
+        engine.execute_mut("CREATE (c:Condition {name: 'Non-Small Cell Lung Cancer'})", &mut g, tenant_id).unwrap();
+        engine.execute_mut("CREATE (d:Drug {name: 'Pembrolizumab'})", &mut g, tenant_id).unwrap();
+        
+        // Relationships
+        let trial = g.get_nodes_by_label(&Label::new("Trial"))[0].id;
+        let cond = g.get_nodes_by_label(&Label::new("Condition"))[0].id;
+        let drug = g.get_nodes_by_label(&Label::new("Drug"))[0].id;
+        
+        g.create_edge(trial, cond, EdgeType::new("STUDIES")).unwrap();
+        g.create_edge(trial, drug, EdgeType::new("TESTS")).unwrap();
+
+        println!("   ✓ Ingested Trials, Conditions, Drugs.");
+    }
+
+    pause();
+
+    // 3. Patient Matching (Vector Search)
+    println!("\n[Step 2] Matching Patient to Trials (Vector Search)...");
+    println!("   Patient Profile: '55yo male, Stage IV Lung Cancer, PD-L1 high expression.'");
+    
+    {
+        let g = store.read().await;
+        // Mock query vector for patient profile
+        let patient_vec = vec![0.1; 64]; 
+        let results = g.vector_search("Trial", "criteria", &patient_vec, 2).unwrap();
+        
+        for (id, score) in results {
+            let node = g.get_node(id).unwrap();
+            let title = node.get_property("title").unwrap().as_string().unwrap();
+            println!("   ✅ MATCH: {} (Score: {:.4})", title, score);
+        }
+    }
+
+    pause();
+
+    // 4. Site Selection Optimization
+    println!("\n[Step 3] Optimizing Site Selection (Multi-Objective)...");
+    println!("   Goal: Select 5 sites to Maximize Recruitment Rate AND Minimize Cost.");
+    println!("   Constraint: Total Budget < $2M.");
+
+    struct SiteSelectionProblem;
+    impl MultiObjectiveProblem for SiteSelectionProblem {
+        fn dim(&self) -> usize { 10 } // 10 potential sites
+        fn num_objectives(&self) -> usize { 2 } // Cost, Recruitment
+        fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
+            (Array1::from_elem(10, 0.0), Array1::from_elem(10, 1.0)) // Binary selection (relaxed to continuous 0-1)
+        }
+        
+        fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
+            let mut cost = 0.0;
+            let mut recruitment = 0.0;
+            
+            // Mock data for 10 sites
+            let site_costs = [50000., 60000., 45000., 80000., 70000., 55000., 90000., 40000., 65000., 75000.];
+            let site_recruitment = [10., 15., 8., 20., 18., 12., 25., 5., 16., 19.];
+
+            for i in 0..10 {
+                // Soft decision: x[i] > 0.5 means selected
+                if x[i] > 0.5 {
+                    cost += site_costs[i];
+                    recruitment += site_recruitment[i]; // Maximize recruitment = Minimize negative
+                }
+            }
+            
+            vec![cost, -recruitment]
+        }
+
+        fn penalties(&self, x: &Array1<f64>) -> Vec<f64> {
+            // Constraint: Select exactly 5 sites (Soft constraint)
+            let selected_count: f64 = x.iter().map(|&v| if v > 0.5 { 1.0 } else { 0.0 }).sum();
+            if (selected_count - 5.0).abs() > 0.1 {
+                vec![1000.0] // High penalty
+            } else {
+                vec![0.0]
+            }
+        }
+    }
+
+    let solver = NSGA2Solver::new(SolverConfig {
+        population_size: 50,
+        max_iterations: 100,
+    });
+    
+    let result = solver.solve(&SiteSelectionProblem);
+    
+    // Pick best trade-off from Pareto front
+    if let Some(best) = result.pareto_front.first() {
+        let cost = best.fitness[0];
+        let recruitment = -best.fitness[1];
+        println!("   🏆 Optimal Configuration Found:");
+        println!("      Total Cost: ${:.0}", cost);
+        println!("      Est. Recruitment: {:.0} patients/month", recruitment);
+        println!("      Selected Sites Indices: {:?}", 
+            best.variables.iter().enumerate()
+                .filter(|(_, &v)| v > 0.5)
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        );
+    } else {
+        println!("   ⚠️ No feasible solution found.");
+    }
+
+    pause();
+    println!("\n✅ DEMO COMPLETE.");
 }

@@ -16,27 +16,37 @@ NC='\033[0m' # No Color
 function build_project() {
     if [ -f "$SERVER_BIN" ]; then
         read -p "Build found. Rebuild project? [y/N]: " REBUILD
-        if [[ ! "$REBUILD" =~ ^[Yy]$ ]]; then
+        if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}🔨 Building Samyama Graph (Release)...${NC}"
+            cargo build --release --bin samyama
+            cargo build --release --examples
+        else
             echo -e "${GREEN}Skipping build.${NC}"
-            return
         fi
+    else
+        echo -e "${BLUE}🔨 Building Samyama Graph (Release)...${NC}"
+        cargo build --release --bin samyama
+        cargo build --release --examples
     fi
+}
 
-    echo -e "${BLUE}🔨 Building Samyama Graph (Release)...${NC}"
-    # Build the server binary
-    cargo build --release --bin samyama
-    # Build examples
-    cargo build --release --examples
+function cleanup_data() {
+    echo -e "${YELLOW}🧹 Cleaning up data directories...${NC}"
+    rm -rf banking_data demo_data
+    # Clean temp dirs if any explicit ones were created in current dir
 }
 
 function start_server() {
     if [ -n "$SERVER_PID" ]; then
-        echo -e "${YELLOW}⚠️  Server is already running (PID: $SERVER_PID)${NC}"
-        return
+        # Check if process is still alive
+        if ps -p $SERVER_PID > /dev/null; then
+            return
+        else
+            SERVER_PID=""
+        fi
     fi
 
-    echo -e "${BLUE}🚀 Starting Samyama Graph Server...${NC}"
-    # Ensure binary exists
+    echo -e "${BLUE}🚀 Starting Samyama Graph Server (In-Memory)...${NC}"
     if [ ! -f "$SERVER_BIN" ]; then
         echo -e "${RED}❌ Server binary not found at $SERVER_BIN${NC}"
         exit 1
@@ -55,27 +65,44 @@ function stop_server() {
         kill $SERVER_PID
         wait $SERVER_PID 2>/dev/null
         SERVER_PID=""
-        echo "   Server stopped."
     fi
+}
+
+function reset_environment() {
+    echo -e "${YELLOW}🔄 Resetting Environment...${NC}"
+    stop_server
+    cleanup_data
+    start_server
 }
 
 function run_rust_example() {
     EXAMPLE_NAME=$1
     DESCRIPTION=$2
+    
+    # Pre-run cleanup for isolation
+    cleanup_data
+    
     echo -e "${BLUE}▶️  Running $DESCRIPTION ($EXAMPLE_NAME)...${NC}"
     
-    # Check if data prerequisites exist for specific demos
     if [[ "$EXAMPLE_NAME" == "banking_demo" && ! -d "docs/banking/data" ]]; then
         echo -e "${YELLOW}⚠️  Banking data not generated. Running with in-memory sample.${NC}"
     fi
 
     ./target/release/examples/$EXAMPLE_NAME
+    
+    echo -e "${GREEN}✅ Example Complete.${NC}"
+    
+    # Post-run cleanup
+    cleanup_data
+    
     read -p "Press Enter to return to menu..."
 }
 
 function run_python_client() {
     echo -e "${BLUE}🐍 Running Python Client Demo...${NC}"
     if command -v python3 &>/dev/null; then
+        # Ensure server is running
+        start_server
         python3 examples/simple_client_demo.py
     else
         echo -e "${RED}❌ python3 not found.${NC}"
@@ -83,13 +110,14 @@ function run_python_client() {
     read -p "Press Enter to return to menu..."
 }
 
-function cleanup() {
+function cleanup_exit() {
     stop_server
+    cleanup_data
     exit 0
 }
 
 # Trap Ctrl+C
-trap cleanup SIGINT
+trap cleanup_exit SIGINT
 
 # Main Execution
 build_project
@@ -100,52 +128,56 @@ while true; do
     echo -e "${GREEN}==============================================${NC}"
     echo -e "${GREEN}   Samyama Graph - Examples Runner${NC}"
     echo -e "${GREEN}==============================================${NC}"
-    echo -e "${YELLOW}--- Core Demos ---${NC}"
-    echo "1. Banking Demo (Multi-tenant, Fraud Detection)"
-    echo "2. Supply Chain Demo (Agents, Optimization, Visualizer)"
-    echo "3. Healthcare Demo (Clinical Trials, Knowledge Graph)"
-    echo "4. Graph RAG Demo (Vector Search + Graph)"
-    echo -e "${YELLOW}--- AI & Agents ---${NC}"
-    echo "5. Agent Demo (LLM Tools)"
-    echo "6. NLQ Demo (Natural Language Query)"
-    echo "7. Auto-Embed Demo (Vector Embeddings)"
-    echo -e "${YELLOW}--- Infrastructure ---${NC}"
-    echo "8. Cluster Demo (Raft Consensus)"
-    echo "9. Persistence Demo (Storage Engine)"
-    echo "10. Optimization Demo (Solvers)"
-    echo "11. Visualizer Demo (Standalone)"
+    echo -e "${YELLOW}--- Enterprise Scenarios ---${NC}"
+    echo "1. Cyber Security Guardian (Graph + Vector + Agents)"
+    echo "2. Clinical Trials Optimization (Graph + Vector + Optimization)"
+    echo "3. Banking System (Multi-tenant + Fraud Detection)"
+    echo "4. Supply Chain Guardian (Agents + Optimization)"
+    echo -e "${YELLOW}--- AI & Intelligence ---${NC}"
+    echo "5. Graph RAG Demo"
+    echo "6. Agent Demo (LLM Tools)"
+    echo "7. NLQ Demo (Natural Language Query)"
+    echo "8. Auto-Embed Demo"
+    echo -e "${YELLOW}--- Core Infrastructure ---${NC}"
+    echo "9. Cluster Demo (Raft Consensus)"
+    echo "10. Persistence Demo (Storage Engine)"
+    echo "11. Optimization Demo (Solvers)"
+    echo "12. Visualizer Demo"
     echo -e "${YELLOW}--- Benchmarks ---${NC}"
-    echo "12. Full Benchmark Suite"
-    echo "13. Vector Search Benchmark"
-    echo "14. MVCC Benchmark"
-    echo "15. Graph Optimization Benchmark"
-    echo -e "${YELLOW}--- Clients ---${NC}"
-    echo "16. Python Client Demo (Connects to Server)"
-    echo -e "${YELLOW}--- Server ---${NC}"
-    echo "17. View Server Logs"
+    echo "13. Full Benchmark Suite"
+    echo "14. Vector Search Benchmark"
+    echo "15. MVCC Benchmark"
+    echo "16. Graph Optimization Benchmark"
+    echo -e "${YELLOW}--- Connectivity ---${NC}"
+    echo "17. Python Client Demo"
+    echo -e "${YELLOW}--- System ---${NC}"
+    echo "18. Reset Database (Restart Server & Clean Data)"
+    echo "19. View Server Logs"
     echo "q. Quit"
     echo -e "${GREEN}==============================================${NC}"
     read -p "Select an option: " choice
 
     case $choice in
-        1) run_rust_example "banking_demo" "Banking Demo" ;;
-        2) run_rust_example "supply_chain_demo" "Supply Chain Demo" ;;
-        3) run_rust_example "healthcare_demo" "Healthcare Demo" ;;
-        4) run_rust_example "graph_rag_demo" "Graph RAG Demo" ;;
-        5) run_rust_example "agent_demo" "Agent Demo" ;;
-        6) run_rust_example "nlq_demo" "NLQ Demo" ;;
-        7) run_rust_example "auto_embed_demo" "Auto-Embed Demo" ;;
-        8) run_rust_example "cluster_demo" "Cluster Demo" ;;
-        9) run_rust_example "persistence_demo" "Persistence Demo" ;;
-        10) run_rust_example "optimization_demo" "Optimization Demo" ;;
-        11) run_rust_example "visualize_demo" "Visualizer Demo" ;;
-        12) run_rust_example "full_benchmark" "Full Benchmark" ;;
-        13) run_rust_example "vector_benchmark" "Vector Benchmark" ;;
-        14) run_rust_example "mvcc_benchmark" "MVCC Benchmark" ;;
-        15) run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark" ;;
-        16) run_python_client ;;
-        17) echo "--- Last 20 lines of server.log ---"; tail -n 20 server.log; read -p "Press Enter..." ;;
-        q) cleanup ;;
+        1) run_rust_example "cyber_security_demo" "Cyber Security Guardian" ;;
+        2) run_rust_example "healthcare_demo" "Clinical Trials Optimization" ;;
+        3) run_rust_example "banking_demo" "Banking Demo" ;;
+        4) run_rust_example "supply_chain_demo" "Supply Chain Demo" ;;
+        5) run_rust_example "graph_rag_demo" "Graph RAG Demo" ;;
+        6) run_rust_example "agent_demo" "Agent Demo" ;;
+        7) run_rust_example "nlq_demo" "NLQ Demo" ;;
+        8) run_rust_example "auto_embed_demo" "Auto-Embed Demo" ;;
+        9) run_rust_example "cluster_demo" "Cluster Demo" ;;
+        10) run_rust_example "persistence_demo" "Persistence Demo" ;;
+        11) run_rust_example "optimization_demo" "Optimization Demo" ;;
+        12) run_rust_example "visualize_demo" "Visualizer Demo" ;;
+        13) run_rust_example "full_benchmark" "Full Benchmark" ;;
+        14) run_rust_example "vector_benchmark" "Vector Benchmark" ;;
+        15) run_rust_example "mvcc_benchmark" "MVCC Benchmark" ;;
+        16) run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark" ;;
+        17) run_python_client ;;
+        18) reset_environment; read -p "Environment Reset. Press Enter..." ;;
+        19) echo "--- Last 20 lines of server.log ---"; tail -n 20 server.log; read -p "Press Enter..." ;;
+        q) cleanup_exit ;;
         *) echo "Invalid option"; sleep 1 ;;
     esac
 done
