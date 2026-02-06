@@ -400,7 +400,7 @@ async fn start_server() {
         let (mut disease_ids, _drug_ids) = load_clinical_trials_data(&mut graph);
         load_hetionet_data(&mut graph, &mut disease_ids);
         load_phegeni_data(&mut graph);
-        load_aact_data(&mut graph);
+        load_aact_data(&mut graph, &disease_ids);
         
         println!("\nGraph Statistics:");
         println!("  Total nodes: {}", graph.node_count());
@@ -442,14 +442,15 @@ async fn start_server() {
     }
 }
 
-fn load_aact_data(store: &mut GraphStore) {
+fn load_aact_data(store: &mut GraphStore, disease_ids: &HashMap<String, NodeId>) {
     println!("\nLoading AACT Clinical Trials data...");
-    
+
     let trials_path = "/tmp/aact_trials.tsv";
     let conditions_path = "/tmp/aact_conditions.tsv";
     let sponsors_path = "/tmp/aact_sponsors.tsv";
     let edges_studies_path = "/tmp/aact_edges_studies.tsv";
     let edges_sponsored_path = "/tmp/aact_edges_sponsored.tsv";
+    let enriched_edges_path = "/tmp/enriched/enriched_trial_disease_edges.tsv";
     
     if !std::path::Path::new(trials_path).exists() {
         println!("  AACT data files not found, skipping...");
@@ -565,6 +566,39 @@ fn load_aact_data(store: &mut GraphStore) {
         }
     }
     println!("  Loaded {} SPONSORS relationships", sponsored_count);
-    
+
+    // Load enriched trial-disease edges (Trial -> Disease via TREATS)
+    let mut enriched_count = 0;
+    if let Ok(file) = File::open(enriched_edges_path) {
+        let reader = BufReader::new(file);
+        let mut first_line = true;
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            // Skip header line
+            if first_line {
+                first_line = false;
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 4 { continue; }
+
+            let trial_key = parts[0];
+            let disease_name = parts[1];
+            let confidence: f64 = parts[3].parse().unwrap_or(0.0);
+
+            if let (Some(&t_id), Some(&d_id)) = (trial_ids.get(trial_key), disease_ids.get(disease_name)) {
+                if let Ok(edge_id) = store.create_edge(t_id, d_id, "TREATS") {
+                    if let Some(edge) = store.get_edge_mut(edge_id) {
+                        edge.set_property("confidence", confidence.to_string().as_str());
+                    }
+                    enriched_count += 1;
+                }
+            }
+        }
+        println!("  Loaded {} enriched TREATS relationships (Trial->Disease)", enriched_count);
+    } else {
+        println!("  Enriched edges file not found, skipping enriched relationships");
+    }
+
     println!("AACT data loaded successfully!");
 }
