@@ -26,6 +26,7 @@ impl NLQClient {
                 LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 LLMProvider::AzureOpenAI => String::new(),
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+                LLMProvider::ClaudeCode => String::new(),
                 LLMProvider::Mock => String::new(),
             }
         });
@@ -42,6 +43,7 @@ impl NLQClient {
             LLMProvider::OpenAI => self.openai_chat(prompt).await,
             LLMProvider::Ollama => self.ollama_chat(prompt).await,
             LLMProvider::Gemini => self.gemini_chat(prompt).await,
+            LLMProvider::ClaudeCode => self.claude_code_generate(prompt).await,
             LLMProvider::Mock => Ok("MATCH (n) RETURN n LIMIT 10".to_string()),
             _ => Err(NLQError::ConfigError(format!("Provider {:?} not yet implemented", self.config.provider))),
         }
@@ -136,6 +138,22 @@ impl NLQClient {
 
         let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
         Ok(result.response)
+    }
+
+    async fn claude_code_generate(&self, prompt: &str) -> NLQResult<String> {
+        let output = tokio::process::Command::new("claude")
+            .arg("-p")
+            .arg(prompt)
+            .output()
+            .await
+            .map_err(|e| NLQError::ApiError(format!("Claude Code CLI error: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NLQError::ApiError(format!("Claude Code CLI failed: {}", stderr)));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     async fn gemini_chat(&self, prompt: &str) -> NLQResult<String> {

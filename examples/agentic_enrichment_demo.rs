@@ -6,17 +6,23 @@
 //! Instead of RAG (using a database to help LLMs answer questions),
 //! GAK inverts the pattern — using LLMs to help the database build knowledge.
 //!
+//! This demo uses the full NLQ pipeline: TenantManager -> AgentRuntime -> NLQClient
+//! with the ClaudeCode provider (shells out to `claude -p`).
+//!
 //! Requirements: `claude` CLI must be installed and authenticated.
 //!
 //! Run: cargo run --release --example agentic_enrichment_demo
 
-use samyama::{GraphStore, PropertyValue, QueryEngine};
-use std::process::Command;
+use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
+use samyama::agent::AgentRuntime;
+use samyama::{GraphStore, NLQPipeline, PropertyValue, QueryEngine, TenantManager};
+use std::collections::HashMap;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("================================================================");
     println!("  Samyama Agentic Enrichment Demo");
-    println!("  Generation-Augmented Knowledge (GAK) via Claude Code CLI");
+    println!("  Generation-Augmented Knowledge (GAK) via NLQ Pipeline");
     println!("================================================================");
     println!();
     println!("The database becomes an active participant in building its own");
@@ -32,43 +38,160 @@ fn main() {
     println!("[ok] Claude Code CLI detected");
     println!();
 
+    // ━━━ Setup: Tenant with ClaudeCode NLQ + Agent Config ━━━
+    println!("--- Setup: Tenant with ClaudeCode NLQ + Agent Config ---");
+
+    let tenant_mgr = TenantManager::new();
+    tenant_mgr
+        .create_tenant(
+            "pharma_research".to_string(),
+            "Pharma Research".to_string(),
+            None,
+        )
+        .unwrap();
+
+    // NLQ config — translates natural language to read-only Cypher
+    let nlq_config = NLQConfig {
+        enabled: true,
+        provider: LLMProvider::ClaudeCode,
+        model: String::new(),
+        api_key: None,
+        api_base_url: None,
+        system_prompt: Some(
+            "You are a Cypher query expert for a pharmaceutical knowledge graph.".to_string(),
+        ),
+    };
+
+    tenant_mgr
+        .update_nlq_config("pharma_research", Some(nlq_config.clone()))
+        .unwrap();
+
+    // Agent config — generates enrichment CREATE statements
+    let mut policies = HashMap::new();
+    policies.insert(
+        "Drug".to_string(),
+        "When a Drug entity is missing, enrich it with indications, manufacturer, and clinical trials.".to_string(),
+    );
+
+    let agent_config = AgentConfig {
+        enabled: true,
+        provider: LLMProvider::ClaudeCode,
+        model: String::new(),
+        api_key: None,
+        api_base_url: None,
+        system_prompt: Some(
+            "You are a pharmaceutical knowledge graph builder. Generate Cypher CREATE statements.".to_string(),
+        ),
+        tools: vec![],
+        policies,
+    };
+
+    tenant_mgr
+        .update_agent_config("pharma_research", Some(agent_config.clone()))
+        .unwrap();
+
+    println!("  Created tenant 'pharma_research'");
+    println!("  NLQ config: ClaudeCode provider (natural language -> Cypher)");
+    println!("  Agent config: ClaudeCode provider (enrichment CREATE statements)");
+    println!("  Enrichment policy: Drug -> indications, manufacturer, trials");
+    println!();
+
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    // ━━━ Phase 1: The Trigger ━━━
-    println!("--- Phase 1: The Trigger ---");
+    // ━━━ Phase 1: NLQ Translation + The Trigger ━━━
+    println!("--- Phase 1: NLQ Translation + The Trigger ---");
     let user_query = "What are the indications and clinical trials for Semaglutide?";
     println!("User query: \"{}\"", user_query);
     println!();
 
-    // Check if we have information about this drug
-    let result = engine
-        .execute("MATCH (d:Drug) RETURN d.name", &store)
-        .unwrap();
+    // Translate natural language to Cypher via NLQ pipeline
+    let schema_summary = "Node labels: Drug, Indication, Manufacturer, ClinicalTrial\n\
+                          Edge types: TREATS (Drug->Indication), MADE_BY (Drug->Manufacturer), STUDIED_IN (Drug->ClinicalTrial)\n\
+                          Properties: Drug(name, mechanism, drugClass, approvalYear), Indication(name), Manufacturer(name, headquarters), ClinicalTrial(name, phase, year)";
 
-    if result.len() == 0 {
-        println!("  Graph is empty — no Drug nodes found.");
+    let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+    println!("  NLQ pipeline: translating natural language to Cypher...");
+
+    let cypher_query = match nlq_pipeline.text_to_cypher(user_query, schema_summary).await {
+        Ok(cypher) => {
+            println!("  Generated Cypher: {}", cypher);
+            cypher
+        }
+        Err(e) => {
+            println!("  NLQ translation failed: {} — falling back to default query", e);
+            "MATCH (d:Drug) RETURN d.name".to_string()
+        }
+    };
+    println!();
+
+    // Execute the NLQ-generated Cypher
+    let result_count = match engine.execute(&cypher_query, &store) {
+        Ok(result) => result.len(),
+        Err(e) => {
+            println!("  Query execution error: {} — treating as empty result", e);
+            0
+        }
+    };
+
+    if result_count == 0 {
+        println!("  No results — graph has no matching data.");
         println!("  Enrichment policy triggered: missing entity detected.");
     } else {
-        println!("  Found {} Drug node(s). Checking if Semaglutide exists...", result.len());
+        println!("  Found {} result(s).", result_count);
     }
     println!();
 
-    // ━━━ Phase 2: Agentic Enrichment ━━━
-    println!("--- Phase 2: Agentic Enrichment via Claude Code CLI ---");
-    println!("Invoking: claude -p \"<enrichment prompt>\"");
-    println!("Waiting for Claude to generate knowledge subgraph...");
+    // ━━━ Phase 2: Agentic Enrichment via NLQ Pipeline ━━━
+    println!("--- Phase 2: Agentic Enrichment via NLQ Pipeline ---");
+    println!("  Provider: ClaudeCode (claude -p CLI)");
+    println!("  Pipeline: AgentRuntime -> NLQClient -> claude CLI");
+    println!("  Waiting for Claude to generate knowledge subgraph...");
     println!();
 
-    let prompt = build_enrichment_prompt("Semaglutide");
+    // Look up tenant's agent config and create runtime
+    let tenant = tenant_mgr.get_tenant("pharma_research").unwrap();
+    let config = tenant.agent_config.unwrap();
+    let runtime = AgentRuntime::new(config);
 
-    let cypher_statements = match invoke_claude(&prompt) {
-        Ok(statements) => statements,
+    let enrichment_prompt = build_enrichment_prompt("Semaglutide");
+    let response = match runtime
+        .process_trigger(&enrichment_prompt, "pharma_research")
+        .await
+    {
+        Ok(resp) => resp,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error from AgentRuntime: {}", e);
             std::process::exit(1);
         }
     };
+
+    println!("Claude response:");
+    for line in response.lines() {
+        if !line.trim().is_empty() {
+            println!("  | {}", line);
+        }
+    }
+    println!();
+
+    // Parse Cypher statements from response
+    let cypher_statements: Vec<String> = response
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            let upper = l.to_uppercase();
+            upper.starts_with("CREATE") || upper.starts_with("MATCH")
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    if cypher_statements.is_empty() {
+        eprintln!("No Cypher statements found in Claude response");
+        std::process::exit(1);
+    }
+
+    println!("Parsed {} Cypher statements from response.", cypher_statements.len());
+    println!();
 
     // ━━━ Phase 3: Knowledge Ingestion ━━━
     println!("--- Phase 3: Knowledge Ingestion ---");
@@ -186,12 +309,13 @@ fn main() {
     println!("  Edges: {}", store.edge_count());
     println!();
 
-    println!("The database actively built its own knowledge using Claude Code CLI.");
+    println!("The database actively built its own knowledge using the NLQ pipeline.");
+    println!("Provider: ClaudeCode (claude -p CLI) via AgentRuntime -> NLQClient.");
     println!("This is Generation-Augmented Knowledge (GAK) — the inverse of RAG.");
 }
 
 fn is_claude_available() -> bool {
-    Command::new("which")
+    std::process::Command::new("which")
         .arg("claude")
         .output()
         .map(|o| o.status.success())
@@ -229,49 +353,6 @@ MATCH (a:Drug {{name: 'Aspirin'}}), (b:Manufacturer {{name: 'Bayer'}}) CREATE (a
 MATCH (a:Drug {{name: 'Aspirin'}}), (b:ClinicalTrial {{name: 'ARRIVE'}}) CREATE (a)-[:STUDIED_IN]->(b)"#,
         drug_name = drug_name
     )
-}
-
-fn invoke_claude(prompt: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("claude")
-        .arg("-p")
-        .arg(prompt)
-        .output()
-        .map_err(|e| format!("Failed to run claude CLI: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("claude CLI failed: {}", stderr));
-    }
-
-    let response = String::from_utf8_lossy(&output.stdout).to_string();
-
-    println!("Claude response:");
-    for line in response.lines() {
-        if !line.trim().is_empty() {
-            println!("  | {}", line);
-        }
-    }
-    println!();
-
-    // Extract lines that are Cypher statements
-    let statements: Vec<String> = response
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| {
-            let upper = l.to_uppercase();
-            upper.starts_with("CREATE") || upper.starts_with("MATCH")
-        })
-        .map(|l| l.to_string())
-        .collect();
-
-    if statements.is_empty() {
-        return Err("No Cypher statements found in Claude response".to_string());
-    }
-
-    println!("Parsed {} Cypher statements from response.", statements.len());
-    println!();
-
-    Ok(statements)
 }
 
 fn get_string(record: &samyama::query::executor::Record, key: &str) -> Option<String> {
