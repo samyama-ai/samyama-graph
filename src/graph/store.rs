@@ -810,6 +810,38 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             .unwrap_or_default()
     }
 
+    /// Get outgoing edge targets as lightweight tuples (no Edge clone)
+    /// Returns (EdgeId, target NodeId, &EdgeType) for each outgoing edge
+    pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
+        self.outgoing
+            .get(node_id.as_u64() as usize)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&eid| {
+                        self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get incoming edge sources as lightweight tuples (no Edge clone)
+    /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each incoming edge
+    pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
+        self.incoming
+            .get(node_id.as_u64() as usize)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&eid| {
+                        self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get all nodes with a specific label
     pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
         self.label_index

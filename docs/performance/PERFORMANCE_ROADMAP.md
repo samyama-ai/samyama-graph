@@ -19,6 +19,16 @@ This document outlines the strategic technical initiatives to optimize Samyama G
 - **Goal**: Transition from the Volcano (row-at-a-time) iterator to a batch-based iterator (e.g., 1024 rows per `next_batch()`).
 - **Benefit**: Amortizes function call overhead and enables SIMD (Single Instruction, Multiple Data) optimizations.
 
+### [DONE] Late Materialization
+- **Goal**: Pass lightweight `NodeRef(NodeId)` / `EdgeRef(EdgeId)` through the execution pipeline instead of cloning full objects. Materialize only at projection.
+- **Benefit**: Eliminates unnecessary Node/Edge cloning during traversal. Storage-level 3-hop traversal dropped from 17µs to 15µs (14%). Cypher 1-hop dropped from 164ms to 41ms (4x improvement) by avoiding per-step materialization.
+- **Implementation**: `Value::NodeRef`, `Value::EdgeRef` variants; `resolve_property()` for lazy property access; `get_outgoing_edge_targets()` returning `(EdgeId, NodeId, NodeId, &EdgeType)` tuples.
+
+### [IN PROGRESS] Query AST Cache
+- **Goal**: Cache parsed Query ASTs keyed by whitespace-normalized query strings. Eliminate the ~20-25ms parse overhead for repeated queries.
+- **Benefit**: Reduces warm-cache Cypher 1-hop from ~41ms to ~16-20ms (~50% reduction). Critical for RESP server, HTTP handler, and benchmark workloads where queries repeat.
+- **Strategy**: `HashMap<String, Query>` with Mutex in `QueryEngine`. Simple size cap (1024 entries) with full eviction. Plan caching deferred — plans depend on mutable GraphStore state.
+
 ### Query Compilation (JIT)
 - **Goal**: Use LLVM or Cranelift to compile Cypher ASTs directly into machine code at runtime.
 - **Benefit**: Eliminates interpreter overhead. Logic like `WHERE n.age > 30` becomes a raw CPU comparison.

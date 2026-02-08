@@ -191,7 +191,14 @@ impl QueryPlanner {
                     match &item.expression {
                         Expression::Variable(var) => var.clone(),
                         Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                        Expression::Function { name, .. } => format!("{}_{}", name, idx),
+                        Expression::Function { name, args } => {
+                            let arg_strs: Vec<String> = args.iter().map(|a| match a {
+                                Expression::Variable(v) => v.clone(),
+                                Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                                _ => "?".to_string(),
+                            }).collect();
+                            format!("{}({})", name, arg_strs.join(", "))
+                        },
                         _ => format!("col_{}", idx),
                     }
                 });

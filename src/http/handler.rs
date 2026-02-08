@@ -74,6 +74,16 @@ pub async fn query_handler(
                             nodes.insert(id.as_u64().to_string(), node_json.clone());
                             row.push(node_json);
                         }
+                        Value::NodeRef(id) => {
+                            // Lazy ref — minimal JSON (no properties available without store)
+                            let node_json = json!({
+                                "id": id.as_u64().to_string(),
+                                "labels": [],
+                                "properties": {},
+                            });
+                            nodes.insert(id.as_u64().to_string(), node_json.clone());
+                            row.push(node_json);
+                        }
                         Value::Edge(id, edge) => {
                             let mut properties = serde_json::Map::new();
                             for (k, v) in &edge.properties {
@@ -85,6 +95,17 @@ pub async fn query_handler(
                                 "target": edge.target.as_u64().to_string(),
                                 "type": edge.edge_type.as_str(),
                                 "properties": properties,
+                            });
+                            edges.insert(id.as_u64().to_string(), edge_json.clone());
+                            row.push(edge_json);
+                        }
+                        Value::EdgeRef(id, src, tgt, et) => {
+                            let edge_json = json!({
+                                "id": id.as_u64().to_string(),
+                                "source": src.as_u64().to_string(),
+                                "target": tgt.as_u64().to_string(),
+                                "type": et.as_str(),
+                                "properties": {},
                             });
                             edges.insert(id.as_u64().to_string(), edge_json.clone());
                             row.push(edge_json);

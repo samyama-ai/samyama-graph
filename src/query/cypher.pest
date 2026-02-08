@@ -93,8 +93,8 @@ function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 mul_div_mod_op = { "*" | "/" | "%" }
 add_sub_op = { "+" | "-" }
 comparison_op = { "<=" | ">=" | "<" | ">" | "==" | "=" | "!=" | "<>" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
-and_op = { ^"AND" }
-or_op = { ^"OR" }
+and_op = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }
+or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 binary_op = _{ mul_div_mod_op | add_sub_op | comparison_op | and_op | or_op }
 
