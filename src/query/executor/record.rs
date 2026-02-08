@@ -2,8 +2,9 @@
 //!
 //! Records flow through the Volcano iterator pipeline
 
-use crate::graph::{Edge, Node, NodeId, EdgeId, PropertyValue};
+use crate::graph::{Edge, Node, NodeId, EdgeId, EdgeType, PropertyValue, GraphStore};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// A single record flowing through the query pipeline
 #[derive(Debug, Clone)]
@@ -13,16 +14,54 @@ pub struct Record {
 }
 
 /// Value types that can be bound to variables
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum Value {
-    /// A node
+    /// A fully materialized node
     Node(NodeId, Node),
-    /// An edge
+    /// A lazy node reference (no property clone)
+    NodeRef(NodeId),
+    /// A fully materialized edge
     Edge(EdgeId, Edge),
+    /// A lazy edge reference (structural data only, no property clone)
+    EdgeRef(EdgeId, NodeId, NodeId, EdgeType),
     /// A property value
     Property(PropertyValue),
     /// Null
     Null,
+}
+
+// NodeRef(id) == Node(id, _) — compare by ID only for nodes/edges
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            // Node variants compare by ID
+            (Value::Node(id1, _), Value::Node(id2, _)) => id1 == id2,
+            (Value::NodeRef(id1), Value::NodeRef(id2)) => id1 == id2,
+            (Value::Node(id1, _), Value::NodeRef(id2)) | (Value::NodeRef(id2), Value::Node(id1, _)) => id1 == id2,
+            // Edge variants compare by ID
+            (Value::Edge(id1, _), Value::Edge(id2, _)) => id1 == id2,
+            (Value::EdgeRef(id1, ..), Value::EdgeRef(id2, ..)) => id1 == id2,
+            (Value::Edge(id1, _), Value::EdgeRef(id2, ..)) | (Value::EdgeRef(id2, ..), Value::Edge(id1, _)) => id1 == id2,
+            // Property and Null
+            (Value::Property(p1), Value::Property(p2)) => p1 == p2,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Use semantic tags so NodeRef and Node hash the same
+        match self {
+            Value::Node(id, _) | Value::NodeRef(id) => { 0u8.hash(state); id.hash(state); }
+            Value::Edge(id, _) | Value::EdgeRef(id, ..) => { 1u8.hash(state); id.hash(state); }
+            Value::Property(p) => { 2u8.hash(state); p.hash(state); }
+            Value::Null => { 3u8.hash(state); }
+        }
+    }
 }
 
 impl Record {
@@ -77,7 +116,7 @@ impl Default for Record {
 }
 
 impl Value {
-    /// Get as node if this is a node value
+    /// Get as node if this is a fully materialized node value
     pub fn as_node(&self) -> Option<(NodeId, &Node)> {
         match self {
             Value::Node(id, node) => Some((*id, node)),
@@ -85,7 +124,7 @@ impl Value {
         }
     }
 
-    /// Get as edge if this is an edge value
+    /// Get as edge if this is a fully materialized edge value
     pub fn as_edge(&self) -> Option<(EdgeId, &Edge)> {
         match self {
             Value::Edge(id, edge) => Some((*id, edge)),
@@ -104,6 +143,125 @@ impl Value {
     /// Check if this is null
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// Extract NodeId from any node variant (Node or NodeRef)
+    pub fn node_id(&self) -> Option<NodeId> {
+        match self {
+            Value::Node(id, _) | Value::NodeRef(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Extract EdgeId from any edge variant (Edge or EdgeRef)
+    pub fn edge_id(&self) -> Option<EdgeId> {
+        match self {
+            Value::Edge(id, _) => Some(*id),
+            Value::EdgeRef(id, ..) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Extract edge endpoints from any edge variant
+    pub fn edge_endpoints(&self) -> Option<(NodeId, NodeId)> {
+        match self {
+            Value::Edge(_, edge) => Some((edge.source, edge.target)),
+            Value::EdgeRef(_, src, tgt, _) => Some((*src, *tgt)),
+            _ => None,
+        }
+    }
+
+    /// Extract edge type from any edge variant
+    pub fn edge_type(&self) -> Option<&EdgeType> {
+        match self {
+            Value::Edge(_, edge) => Some(&edge.edge_type),
+            Value::EdgeRef(_, _, _, et) => Some(et),
+            _ => None,
+        }
+    }
+
+    /// Check if this represents a node (Node or NodeRef)
+    pub fn is_node(&self) -> bool {
+        matches!(self, Value::Node(..) | Value::NodeRef(..))
+    }
+
+    /// Check if this represents an edge (Edge or EdgeRef)
+    pub fn is_edge(&self) -> bool {
+        matches!(self, Value::Edge(..) | Value::EdgeRef(..))
+    }
+
+    /// Materialize a NodeRef into a full Node by looking it up in the store.
+    /// Returns self unchanged if already materialized or not a node variant.
+    pub fn materialize_node(self, store: &GraphStore) -> Self {
+        match self {
+            Value::NodeRef(id) => {
+                if let Some(node) = store.get_node(id) {
+                    Value::Node(id, node.clone())
+                } else {
+                    Value::Null
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Materialize an EdgeRef into a full Edge by looking it up in the store.
+    /// Returns self unchanged if already materialized or not an edge variant.
+    pub fn materialize_edge(self, store: &GraphStore) -> Self {
+        match self {
+            Value::EdgeRef(id, ..) => {
+                if let Some(edge) = store.get_edge(id) {
+                    Value::Edge(id, edge.clone())
+                } else {
+                    Value::Null
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Resolve a property from this value, using columnar store first, then
+    /// falling back to materialized node/edge properties or store lookup for refs.
+    pub fn resolve_property(&self, property: &str, store: &GraphStore) -> PropertyValue {
+        match self {
+            Value::Node(id, node) => {
+                let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                if !prop.is_null() {
+                    prop
+                } else {
+                    node.get_property(property).cloned().unwrap_or(PropertyValue::Null)
+                }
+            }
+            Value::NodeRef(id) => {
+                let prop = store.node_columns.get_property(id.as_u64() as usize, property);
+                if !prop.is_null() {
+                    prop
+                } else if let Some(node) = store.get_node(*id) {
+                    node.get_property(property).cloned().unwrap_or(PropertyValue::Null)
+                } else {
+                    PropertyValue::Null
+                }
+            }
+            Value::Edge(id, edge) => {
+                let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                if !prop.is_null() {
+                    prop
+                } else {
+                    edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)
+                }
+            }
+            Value::EdgeRef(id, ..) => {
+                let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
+                if !prop.is_null() {
+                    prop
+                } else if let Some(edge) = store.get_edge(*id) {
+                    edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)
+                } else {
+                    PropertyValue::Null
+                }
+            }
+            _ => PropertyValue::Null,
+        }
     }
 }
 
@@ -149,7 +307,7 @@ impl RecordBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Label, EdgeType};
+    use crate::graph::Label;
 
     #[test]
     fn test_record_creation() {

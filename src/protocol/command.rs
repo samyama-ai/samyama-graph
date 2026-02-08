@@ -137,6 +137,9 @@ impl CommandHandler {
                                     warn!("Failed to persist edge {:?}: {}", edge_id, e);
                                 }
                             }
+                            Value::NodeRef(_) | Value::EdgeRef(..) => {
+                                // Refs from read queries — nothing to persist
+                            }
                             _ => {} // Other value types don't need persistence
                         }
                     }
@@ -291,9 +294,17 @@ impl CommandHandler {
                 let node_str = format!("Node({:?})", id);
                 RespValue::BulkString(Some(node_str.into_bytes()))
             }
+            Value::NodeRef(id) => {
+                let node_str = format!("Node({:?})", id);
+                RespValue::BulkString(Some(node_str.into_bytes()))
+            }
             Value::Edge(id, edge) => {
                 // Format edge as JSON-like string
                 let edge_str = format!("Edge({:?}, {} -> {})", id, edge.source, edge.target);
+                RespValue::BulkString(Some(edge_str.into_bytes()))
+            }
+            Value::EdgeRef(id, src, tgt, _) => {
+                let edge_str = format!("Edge({:?}, {} -> {})", id, src, tgt);
                 RespValue::BulkString(Some(edge_str.into_bytes()))
             }
             Value::Property(prop) => {

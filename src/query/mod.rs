@@ -14,6 +14,9 @@ pub mod ast;
 pub mod parser;
 pub mod executor;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 // Re-export main types
 pub use ast::Query;
 pub use parser::{parse_query, ParseError, ParseResult};
@@ -24,14 +27,45 @@ pub use executor::{
 };
 
 /// Query engine - high-level interface for executing queries
+///
+/// Includes an AST cache that eliminates repeated parsing overhead
+/// for identical queries. The cache is keyed by whitespace-normalized
+/// query strings.
 pub struct QueryEngine {
-    // Future: add query cache, prepared statements, etc.
+    /// Parsed AST cache: normalized query string -> Query AST
+    ast_cache: Mutex<HashMap<String, Query>>,
 }
 
 impl QueryEngine {
     /// Create a new query engine
     pub fn new() -> Self {
-        Self {}
+        Self {
+            ast_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Parse with caching — normalizes whitespace for cache hits
+    fn cached_parse(&self, query_str: &str) -> Result<Query, Box<dyn std::error::Error>> {
+        let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Check cache
+        {
+            let cache = self.ast_cache.lock().unwrap();
+            if let Some(cached) = cache.get(&normalized) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Parse and cache
+        let query = parse_query(query_str)?;
+        {
+            let mut cache = self.ast_cache.lock().unwrap();
+            if cache.len() > 1024 {
+                cache.clear();
+            }
+            cache.insert(normalized, query.clone());
+        }
+        Ok(query)
     }
 
     /// Parse and execute a read-only Cypher query (MATCH, RETURN, etc.)
@@ -40,10 +74,8 @@ impl QueryEngine {
         query_str: &str,
         store: &crate::graph::GraphStore,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        // Parse query
-        let query = parse_query(query_str)?;
+        let query = self.cached_parse(query_str)?;
 
-        // Execute query (read-only)
         let executor = QueryExecutor::new(store);
         let result = executor.execute(&query)?;
 
@@ -58,10 +90,8 @@ impl QueryEngine {
         store: &mut crate::graph::GraphStore,
         tenant_id: &str,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        // Parse query
-        let query = parse_query(query_str)?;
+        let query = self.cached_parse(query_str)?;
 
-        // Execute query (with write access)
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
         let result = executor.execute(&query)?;
 

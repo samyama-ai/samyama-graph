@@ -223,11 +223,8 @@ impl PhysicalOperator for NodeScanOperator {
         let node_id = self.node_ids[self.current];
         self.current += 1;
 
-        let node = store.get_node(node_id)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", node_id)))?;
-
         let mut record = Record::new();
-        record.bind(self.variable.clone(), Value::Node(node_id, node.clone()));
+        record.bind(self.variable.clone(), Value::NodeRef(node_id));
 
         Ok(Some(record))
     }
@@ -245,11 +242,9 @@ impl PhysicalOperator for NodeScanOperator {
 
         let mut records = Vec::with_capacity(range.len());
         for node_id in &self.node_ids[range] {
-             if let Some(node) = store.get_node(*node_id) {
-                 let mut record = Record::new();
-                 record.bind(self.variable.clone(), Value::Node(*node_id, node.clone()));
-                 records.push(record);
-             }
+            let mut record = Record::new();
+            record.bind(self.variable.clone(), Value::NodeRef(*node_id));
+            records.push(record);
         }
 
         Ok(Some(RecordBatch {
@@ -298,31 +293,8 @@ impl FilterOperator {
                 let val = record.get(variable)
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
-                match val {
-                    Value::Node(id, node) => {
-                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = node.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    Value::Edge(id, edge) => {
-                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = edge.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    _ => Ok(Value::Null),
-                }
+                let prop = val.resolve_property(property, store);
+                Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -483,8 +455,8 @@ pub struct ExpandOperator {
     direction: Direction,
     /// Current input record
     current_record: Option<Record>,
-    /// Current edges being iterated
-    current_edges: Vec<(crate::graph::EdgeId, crate::graph::Edge)>,
+    /// Current edges as lightweight tuples (EdgeId, source, target, EdgeType) — no Edge clone
+    current_edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)>,
     /// Current edge index
     edge_index: usize,
 }
@@ -516,27 +488,27 @@ impl ExpandOperator {
         let source_val = record.get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
 
-        let (node_id, _) = source_val.as_node()
+        let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
-        // Get edges based on direction
-        let edges = match self.direction {
-            Direction::Outgoing => store.get_outgoing_edges(node_id),
-            Direction::Incoming => store.get_incoming_edges(node_id),
+        // Get lightweight edge tuples based on direction (no Edge clone)
+        let edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, &EdgeType)> = match self.direction {
+            Direction::Outgoing => store.get_outgoing_edge_targets(node_id),
+            Direction::Incoming => store.get_incoming_edge_sources(node_id),
             Direction::Both => {
-                let mut all = store.get_outgoing_edges(node_id);
-                all.extend(store.get_incoming_edges(node_id));
+                let mut all = store.get_outgoing_edge_targets(node_id);
+                all.extend(store.get_incoming_edge_sources(node_id));
                 all
             }
         };
 
-        // Filter by edge type if specified
+        // Filter by edge type if specified, clone EdgeType ref to owned
         self.current_edges = if self.edge_types.is_empty() {
-            edges.into_iter().map(|e| (e.id, e.clone())).collect()
+            edges.into_iter().map(|(eid, src, tgt, et)| (eid, src, tgt, et.clone())).collect()
         } else {
             edges.into_iter()
-                .filter(|e| self.edge_types.iter().any(|t| e.edge_type.as_str() == t))
-                .map(|e| (e.id, e.clone()))
+                .filter(|(_, _, _, et)| self.edge_types.iter().any(|t| et.as_str() == t))
+                .map(|(eid, src, tgt, et)| (eid, src, tgt, et.clone()))
                 .collect()
         };
 
@@ -550,34 +522,26 @@ impl PhysicalOperator for ExpandOperator {
         loop {
             // If we have edges from current record, return them
             if self.edge_index < self.current_edges.len() {
-                let (edge_id, edge) = &self.current_edges[self.edge_index];
+                let (edge_id, src, tgt, ref edge_type) = self.current_edges[self.edge_index];
                 self.edge_index += 1;
 
                 let mut new_record = self.current_record.as_ref().unwrap().clone();
 
                 // Determine target node based on direction
                 let target_id = match self.direction {
-                    Direction::Outgoing => edge.target,
-                    Direction::Incoming => edge.source,
+                    Direction::Outgoing => tgt,
+                    Direction::Incoming => src,
                     Direction::Both => {
-                        // For both, target is the "other" node
                         let source_val = new_record.get(&self.source_var).unwrap();
-                        let (source_id, _) = source_val.as_node().unwrap();
-                        if edge.source == source_id {
-                            edge.target
-                        } else {
-                            edge.source
-                        }
+                        let source_id = source_val.node_id().unwrap();
+                        if src == source_id { tgt } else { src }
                     }
                 };
 
-                let target_node = store.get_node(target_id)
-                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Target node {:?} not found", target_id)))?;
-
-                new_record.bind(self.target_var.clone(), Value::Node(target_id, target_node.clone()));
+                new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
 
                 if let Some(edge_var) = &self.edge_var {
-                    new_record.bind(edge_var.clone(), Value::Edge(*edge_id, edge.clone()));
+                    new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
                 }
 
                 return Ok(Some(new_record));
@@ -600,28 +564,26 @@ impl PhysicalOperator for ExpandOperator {
             // If we have edges from current record, process them
             if self.edge_index < self.current_edges.len() {
                 let take = (batch_size - expanded_records.len()).min(self.current_edges.len() - self.edge_index);
-                
+
                 for i in 0..take {
-                    let (edge_id, edge) = &self.current_edges[self.edge_index + i];
+                    let (edge_id, src, tgt, ref edge_type) = self.current_edges[self.edge_index + i];
                     let mut new_record = self.current_record.as_ref().unwrap().clone();
 
                     let target_id = match self.direction {
-                        Direction::Outgoing => edge.target,
-                        Direction::Incoming => edge.source,
+                        Direction::Outgoing => tgt,
+                        Direction::Incoming => src,
                         Direction::Both => {
                             let source_val = new_record.get(&self.source_var).unwrap();
-                            let (source_id, _) = source_val.as_node().unwrap();
-                            if edge.source == source_id { edge.target } else { edge.source }
+                            let source_id = source_val.node_id().unwrap();
+                            if src == source_id { tgt } else { src }
                         }
                     };
 
-                    if let Some(target_node) = store.get_node(target_id) {
-                        new_record.bind(self.target_var.clone(), Value::Node(target_id, target_node.clone()));
-                        if let Some(edge_var) = &self.edge_var {
-                            new_record.bind(edge_var.clone(), Value::Edge(*edge_id, edge.clone()));
-                        }
-                        expanded_records.push(new_record);
+                    new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
+                    if let Some(edge_var) = &self.edge_var {
+                        new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
                     }
+                    expanded_records.push(new_record);
                 }
                 self.edge_index += take;
             } else {
@@ -670,39 +632,30 @@ impl ProjectOperator {
     fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             Expression::Variable(var) => {
-                record.get(var)
+                let val = record.get(var)
                     .cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))?;
+                // Materialize refs at projection time (RETURN n)
+                match val {
+                    Value::NodeRef(id) => {
+                        let node = store.get_node(id)
+                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", id)))?;
+                        Ok(Value::Node(id, node.clone()))
+                    }
+                    Value::EdgeRef(id, ..) => {
+                        let edge = store.get_edge(id)
+                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {:?} not found", id)))?;
+                        Ok(Value::Edge(id, edge.clone()))
+                    }
+                    other => Ok(other),
+                }
             }
             Expression::Property { variable, property } => {
                 let val = record.get(variable)
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
-                match val {
-                    Value::Node(id, node) => {
-                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = node.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    Value::Edge(id, edge) => {
-                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = edge.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    _ => Ok(Value::Null),
-                }
+                let prop = val.resolve_property(property, store);
+                Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             _ => Err(ExecutionError::RuntimeError("Unsupported projection expression".to_string())),
@@ -873,26 +826,9 @@ impl AggregateOperator {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable).cloned().unwrap_or(Value::Null);
-                match val {
-                    Value::Node(id, node) => {
-                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            Ok(Value::Property(node.get_property(property).cloned().unwrap_or(PropertyValue::Null)))
-                        }
-                    }
-                    Value::Edge(id, edge) => {
-                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            Ok(Value::Property(edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)))
-                        }
-                    }
-                    _ => Ok(Value::Null),
-                }
+                let val = record.get(variable).unwrap_or(&Value::Null);
+                let prop = val.resolve_property(property, store);
+                Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             _ => Err(ExecutionError::RuntimeError("Unsupported expression in aggregation".to_string())),
@@ -1072,31 +1008,8 @@ impl SortOperator {
                 let val = record.get(variable)
                     .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
 
-                match val {
-                    Value::Node(id, node) => {
-                        let prop = store.node_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = node.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    Value::Edge(id, edge) => {
-                        let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                        if !prop.is_null() {
-                            Ok(Value::Property(prop))
-                        } else {
-                            let prop = edge.get_property(property)
-                                .cloned()
-                                .unwrap_or(PropertyValue::Null);
-                            Ok(Value::Property(prop))
-                        }
-                    }
-                    _ => Ok(Value::Null),
-                }
+                let prop = val.resolve_property(property, store);
+                Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             _ => Err(ExecutionError::RuntimeError("Unsupported sort expression".to_string())),
@@ -1241,13 +1154,13 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if let Some(node) = store.get_node(node_id) {
+            if store.has_node(node_id) {
                 let mut record = Record::new();
-                record.bind(self.variable.clone(), Value::Node(node_id, node.clone()));
+                record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 return Ok(Some(record));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -1263,9 +1176,9 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if let Some(node) = store.get_node(node_id) {
+            if store.has_node(node_id) {
                 let mut record = Record::new();
-                record.bind(self.variable.clone(), Value::Node(node_id, node.clone()));
+                record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 records.push(record);
             }
         }
@@ -1350,12 +1263,9 @@ impl PhysicalOperator for VectorSearchOperator {
         let (node_id, score) = &self.results[self.current];
         self.current += 1;
 
-        let node = store.get_node(*node_id)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", node_id)))?;
-
         let mut record = Record::new();
-        record.bind(self.node_var.clone(), Value::Node(*node_id, node.clone()));
-        
+        record.bind(self.node_var.clone(), Value::NodeRef(*node_id));
+
         if let Some(score_var) = &self.score_var {
             record.bind(score_var.clone(), Value::Property(PropertyValue::Float(*score as f64)));
         }
@@ -1872,9 +1782,9 @@ impl PhysicalOperator for CreateEdgeOperator {
                     let target_val = record.get(target_var)
                         .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
 
-                    let (source_id, _) = source_val.as_node()
+                    let source_id = source_val.node_id()
                         .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", source_var)))?;
-                    let (target_id, _) = target_val.as_node()
+                    let target_id = target_val.node_id()
                         .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", target_var)))?;
 
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
@@ -2091,15 +2001,15 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 // For each matched record, create the specified edges
                 for (source_var, target_var, edge_type, properties, _edge_var) in &self.edges_to_create {
                     // Get source node ID from record bindings
-                    let source_id = match record.get(source_var) {
-                        Some(Value::Node(id, _)) => *id,
-                        _ => continue, // Skip if source not found
+                    let source_id = match record.get(source_var).and_then(|v| v.node_id()) {
+                        Some(id) => id,
+                        None => continue, // Skip if source not found
                     };
 
                     // Get target node ID from record bindings
-                    let target_id = match record.get(target_var) {
-                        Some(Value::Node(id, _)) => *id,
-                        _ => continue, // Skip if target not found
+                    let target_id = match record.get(target_var).and_then(|v| v.node_id()) {
+                        Some(id) => id,
+                        None => continue, // Skip if target not found
                     };
 
                     // Create the edge
@@ -2827,15 +2737,15 @@ mod tests {
             op: BinaryOp::Ge,
             right: Box::new(Expression::Literal(PropertyValue::Integer(5))),
         };
-        
+
         let mut filter = FilterOperator::new(Box::new(scan), predicate);
-        
+
         // Pull in batches of 10 (should get all 5 matches in one go or multiple depending on implementation)
         // Implementation loops until batch filled or source exhausted.
         let batch = filter.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 5);
         for r in batch.records {
-            let val = r.get("n").unwrap().as_node().unwrap().1.get_property("val").unwrap().as_integer().unwrap();
+            let val = r.get("n").unwrap().resolve_property("val", &store).as_integer().unwrap();
             assert!(val >= 5);
         }
     }
@@ -2896,11 +2806,11 @@ mod tests {
 
         let batch = sort.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 5);
-        
+
         let sorted_vals: Vec<i64> = batch.records.iter()
-            .map(|r| r.get("n").unwrap().as_node().unwrap().1.get_property("val").unwrap().as_integer().unwrap())
+            .map(|r| r.get("n").unwrap().resolve_property("val", &store).as_integer().unwrap())
             .collect();
-            
+
         assert_eq!(sorted_vals, vec![1, 2, 3, 4, 5]);
     }
 }
