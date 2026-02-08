@@ -201,6 +201,7 @@ pub enum LLMProvider {
     Gemini,
     AzureOpenAI,
     Anthropic,
+    ClaudeCode,
     Mock,
 }
 

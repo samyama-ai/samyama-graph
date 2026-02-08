@@ -30,6 +30,7 @@ impl EmbeddingClient {
                 LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 LLMProvider::AzureOpenAI => String::new(), // Must be provided
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+                LLMProvider::ClaudeCode => String::new(),
                 LLMProvider::Mock => String::new(),
             }
         });

@@ -4,7 +4,8 @@
 
 pub mod tools;
 
-use crate::persistence::tenant::{AgentConfig, ToolConfig};
+use crate::persistence::tenant::{AgentConfig, NLQConfig};
+use crate::nlq::client::NLQClient;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,23 +53,25 @@ impl AgentRuntime {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Convert AgentConfig to NLQConfig for reusing the NLQ client
+    fn to_nlq_config(config: &AgentConfig) -> NLQConfig {
+        NLQConfig {
+            enabled: config.enabled,
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            api_key: config.api_key.clone(),
+            api_base_url: config.api_base_url.clone(),
+            system_prompt: config.system_prompt.clone(),
+        }
+    }
+
     /// Process a trigger (e.g., "Enrich Company node X")
-    pub async fn process_trigger(&self, prompt: &str, context: &str) -> AgentResult<String> {
-        // 1. Construct prompt for LLM including available tools
-        let tool_descriptions = self.tools.values()
-            .map(|t| format!("{}: {}", t.name(), t.description()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let full_prompt = format!(
-            "You are an agentic graph database. Your goal is to enrich the graph data.\n\nContext: {}\nTask: {}\nAvailable Tools:\n{}\n\nIf you need to use a tool, respond with: TOOL: <tool_name> ARGUMENTS: <json_args>\nOtherwise, respond with the final answer.",
-            context, prompt, tool_descriptions
-        );
-
-        // 2. Call LLM (using a simple client or reusing NLQ client logic - for now mocking the loop)
-        // In a real implementation, this would loop: LLM -> Tool -> LLM -> Answer
-        
-        // For prototype, we just return a placeholder or execute a tool if hardcoded logic matches
-        Ok("Agent processing started (Prototype)".to_string())
+    pub async fn process_trigger(&self, prompt: &str, _context: &str) -> AgentResult<String> {
+        let nlq_config = Self::to_nlq_config(&self.config);
+        let client = NLQClient::new(&nlq_config)
+            .map_err(|e| AgentError::ConfigError(e.to_string()))?;
+        let response = client.generate_cypher(prompt).await
+            .map_err(|e| AgentError::LLMError(e.to_string()))?;
+        Ok(response)
     }
 }
