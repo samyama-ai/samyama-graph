@@ -30,6 +30,14 @@ The first phase involves extracting existing core components into standalone cra
     *   **Planner**: AST $\to$ Logical Plan (algebraic IR).
     *   **Optimizer**: Logical Plan $\to$ Physical Plan (cost-based optimization).
 
+### `crates/samyama-graph-algorithms` (Graph Algorithms) ✅ **Exists**
+*   **Current State**: Already extracted as a standalone crate in `crates/samyama-graph-algorithms/`.
+*   **Implemented Algorithms** (8): PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow (Edmonds-Karp), MST (Prim's), TriangleCount.
+
+### `crates/samyama-optimization` (Optimization Solvers) ✅ **Exists**
+*   **Current State**: Already extracted as a standalone crate in `crates/samyama-optimization/`.
+*   **Implemented Solvers** (23): Single-objective and multi-objective optimization solvers for in-database decision-making.
+
 ## 2. New Capabilities (Expansion)
 
 The second phase introduces new domains to the "Decision Engine" ecosystem.
@@ -53,6 +61,7 @@ The second phase introduces new domains to the "Decision Engine" ecosystem.
 
 ## Execution Plan
 
-1.  **Phase 1 (Refactor)**: Extract `samyama-vector` and `samyama-raft` to `crates/`.
-2.  **Phase 2 (New Feature)**: Build `samyama-ml` prototype with ONNX support.
-3.  **Phase 3 (Utility)**: Extract `samyama-cypher` and implement `samyama-geo` as required by user demand.
+1.  ~~**Phase 0 (Done)**: Extract `samyama-graph-algorithms` and `samyama-optimization` to `crates/`.~~ ✅
+2.  **Phase 1 (Refactor)**: Extract `samyama-vector` and `samyama-raft` to `crates/`.
+3.  **Phase 2 (New Feature)**: Build `samyama-ml` prototype with ONNX support.
+4.  **Phase 3 (Utility)**: Extract `samyama-cypher` and implement `samyama-geo` as required by user demand.

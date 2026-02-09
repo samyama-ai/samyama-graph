@@ -1,17 +1,17 @@
 # Cypher Compatibility Matrix
 
-**Last Updated:** 2026-01-26
-**Version:** Samyama v0.3.1
+**Last Updated:** 2026-02-08
+**Version:** Samyama v0.5.0-alpha.1
 
 This document tracks the compatibility of Samyama's OpenCypher implementation against the industry standard (Neo4j) and modern competitors (FalkorDB).
 
 ## 🚦 Summary
 
-Samyama is currently in an **MVP State** regarding Cypher support. We prioritize high-throughput ingestion and vector search over full query language compliance.
+Samyama provides a **functional Cypher engine** with support for pattern matching, CRUD operations, aggregations, sorting, and vector/algorithm extensions.
 
-*   **Supported:** Basic pattern matching, CRUD operations, Vector Indexing.
-*   **Partial/Buggy:** Filtering logic (precedence issues).
-*   **Unsupported:** Aggregations, Sorting, Pipelining (`WITH`), Upserts (`MERGE`).
+*   **Supported:** Pattern matching, CRUD (CREATE/DELETE/SET), Aggregations (COUNT/SUM/AVG/MIN/MAX/COLLECT), ORDER BY, LIMIT, Vector Indexing, Graph Algorithms, Optimization Solvers.
+*   **Partial:** `SKIP` not implemented, `RETURN DISTINCT` not implemented.
+*   **Unsupported:** Pipelining (`WITH`), Upserts (`MERGE`), `OPTIONAL MATCH`, `UNION`, String/List/Scalar functions.
 
 ## 📊 Feature Matrix
 
@@ -24,14 +24,17 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 | | `RETURN DISTINCT` | ❌ | ✅ | ✅ | Deduplication not implemented. |
 | | `ORDER BY` | ✅ | ✅ | ✅ | **Supported**: In-memory sorting implemented. |
 | | `SKIP` / `LIMIT` | ⚠️ | ✅ | ✅ | `LIMIT` works; `SKIP` not implemented. |
-| **Write Operations** | `CREATE` | ✅ | ✅ | ✅ | Fast node/edge creation. |
-| | `DELETE` | ✅ | ✅ | ✅ | Basic deletion works. |
+| **Write Operations** | `CREATE` | ✅ | ✅ | ✅ | Nodes, edges, chained patterns with properties. |
+| | `DELETE` | ✅ | ✅ | ✅ | Node and edge deletion supported. |
 | | `SET` | ✅ | ✅ | ✅ | Property updates work. |
 | | `REMOVE` | ❌ | ✅ | ✅ | Label/Property removal not implemented. |
 | | `MERGE` | ❌ | ✅ | ✅ | **Critical Gap**: No upsert capability. |
-| **Aggregations** | `count()` | ⚠️ | ✅ | ✅ | **Supported**: Basic global aggregation supported. Grouping not yet supported. |
-| | `sum()`, `avg()`, `max()` | ❌ | ✅ | ✅ | Not implemented. |
-| | `GROUP BY` | ❌ | ✅ | ✅ | Implicit grouping in `RETURN` not supported. |
+| **Aggregations** | `count()` | ✅ | ✅ | ✅ | Global and grouped aggregation supported. |
+| | `sum()` | ✅ | ✅ | ✅ | Numeric summation via AggregateOperator. |
+| | `avg()` | ✅ | ✅ | ✅ | Numeric average via AggregateOperator. |
+| | `min()`, `max()` | ✅ | ✅ | ✅ | Min/Max via AggregateOperator. |
+| | `COLLECT` | ✅ | ✅ | ✅ | List aggregation via AggregateOperator. |
+| | `GROUP BY` | ✅ | ✅ | ✅ | Implicit grouping in `RETURN` supported. |
 | **Query Structure** | `WITH` | ❌ | ✅ | ✅ | Pipelining results to next query stage. |
 | | `UNWIND` | ❌ | ✅ | ✅ | List expansion. |
 | | `UNION` | ❌ | ✅ | ✅ | Combining result sets. |
@@ -52,12 +55,17 @@ Samyama is currently in an **MVP State** regarding Cypher support. We prioritize
 
 ## 🛠 Known Issues
 
-1.  **Aggregation Runtime**: Only `count()` is supported. `GROUP BY` is not yet implemented.
-2.  **Missing Features**: `MERGE`, `WITH`, `OPTIONAL MATCH` are high-priority gaps.
+1.  **Missing Features**: `MERGE`, `WITH`, `OPTIONAL MATCH`, `UNION` are high-priority gaps.
+2.  **Missing Clauses**: `SKIP`, `RETURN DISTINCT` not yet implemented.
+3.  **No String/List/Scalar Functions**: Built-in functions like `toUpper()`, `substring()`, `coalesce()`, `nodes()` are not yet available.
 
 ## 📅 Roadmap for Compatibility
 
-To reach "Bronze" compatibility tier (usable for general apps):
+Remaining gaps to reach "Bronze" compatibility tier (usable for general apps):
 
-1.  **Phase 8.2 (Full Aggregations)**: Implement `AggregateOperator` (Hash/Stream) for `sum`, `avg`, and `GROUP BY`.
-2.  **Phase 8.4 (Pipelining)**: Implement `WITH` to allow multi-stage query plans.
+1.  **WITH (Pipelining)**: Allow multi-stage query plans.
+2.  **MERGE (Upsert)**: Get-or-create semantics.
+3.  **OPTIONAL MATCH**: Return `null` for unmatched patterns.
+4.  **UNION**: Combine result sets from multiple queries.
+5.  **SKIP / DISTINCT**: Pagination and deduplication support.
+6.  **String/List Functions**: `toUpper`, `toLower`, `substring`, `nodes()`, `relationships()`, etc.

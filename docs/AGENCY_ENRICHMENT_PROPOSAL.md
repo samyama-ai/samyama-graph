@@ -1,5 +1,11 @@
 # Agentic Graph Enrichment Proposal
 
+> **Status: Implemented** (v0.5.0-alpha.1)
+>
+> Implementation: `src/agent/`, `src/nlq/`, `src/embed/`
+> Demo: `examples/agentic_enrichment_demo.rs`
+> Domain examples with NLQ pipeline: `banking_demo.rs`, `supply_chain_demo.rs`, `clinical_trials_demo.rs`, `enterprise_soc_demo.rs`, `knowledge_graph_demo.rs`, `smart_manufacturing_demo.rs`, `social_network_demo.rs`
+
 ## Overview
 
 **Agentic Enrichment** transforms the database from a passive store of data into an active knowledge partner. Instead of merely retrieving existing data, the database acts as an agent to fetch, structure, and persist missing information on-demand using Large Language Models (LLMs).
@@ -23,7 +29,7 @@ This feature solves the "Cold Start Problem" in graph databases by allowing the 
 3.  **Self-Healing / Auto-Completion**
     *   *System Action:* Detects a `Person` node with missing properties (e.g., `City`) but has context from neighbors. Asks LLM: "Based on these logs, where does this person live?" and fills the gap.
 
-## Proposed Architecture (Roadmap Phase 13)
+## Architecture (Implemented)
 
 A new **Agent Loop** component, separate from the standard Query Engine.
 

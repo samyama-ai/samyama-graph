@@ -53,18 +53,41 @@ A technique that enhances LLM responses by retrieving relevant data from a knowl
 ### NLQ (Natural Language Querying)
 A feature allowing users to query the graph using plain language (e.g., English). The system uses an LLM to translate the request into an executable OpenCypher query.
 
-### Agentic Enrichment (Proposed)
-**Generation-Augmented Knowledge**. A feature where the database acts as an agent to fetch missing information from external sources (LLMs, APIs) to build or repair the graph on-demand.
+### Agentic Enrichment (Implemented)
+**Generation-Augmented Knowledge (GAK)**. A feature where the database acts as an agent to fetch missing information from external sources (LLMs, APIs) to build or repair the graph on-demand. Implemented in `src/agent/`.
 
 ## Query Languages
 
 ### OpenCypher
 A declarative graph query language used to query the property graph. Uses ASCII-art style patterns (e.g., `(a)-[:KNOWS]->(b)`).
 
-### SPARQL (Planned)
-A semantic query language for databases, able to retrieve and manipulate data stored in Resource Description Framework (RDF) format.
+### SPARQL (Parser Complete)
+A semantic query language for databases, able to retrieve and manipulate data stored in Resource Description Framework (RDF) format. Parser implemented in `src/rdf/sparql/`.
 
 ## Protocols
 
 ### RESP (Redis Serialization Protocol)
 The communication protocol used by Redis. Samyama implements this to be compatible with existing Redis clients.
+
+## Performance & Internals
+
+### Late Materialization
+An optimization where scan and traversal operators pass lightweight references (`NodeRef(NodeId)` / `EdgeRef(EdgeId)`) through the execution pipeline instead of full object clones. Properties are resolved lazily only when projected or filtered. Yields 4-5x improvement in multi-hop query latency.
+
+### CSR (Compressed Sparse Row)
+A memory-efficient representation for graph adjacency. Stores all edge targets in a single contiguous array with an offset index per node, improving cache locality for traversals.
+
+### MVCC (Multi-Version Concurrency Control)
+A concurrency control method where each node/edge maintains version history. Readers access consistent snapshots via `get_node_at_version()` without blocking writers.
+
+### GAK (Generation-Augmented Knowledge)
+The inverse of RAG — using LLMs to *build* the database rather than *query* it. The database acts as an agent to fetch, structure, and persist missing information on-demand.
+
+### ClaudeCode LLM Provider
+An LLM provider integration that uses Anthropic's Claude models for NLQ (Natural Language Querying) and agentic enrichment tasks. Configured per-tenant alongside OpenAI and Ollama providers.
+
+### NLQ Pipeline
+The end-to-end flow for Natural Language Querying: user text → schema injection → LLM translation → Cypher query → execution → results. Supports optional agentic enrichment for missing data.
+
+### HNSW (Hierarchical Navigable Small World)
+A graph-based approximate nearest neighbor (ANN) index used for efficient vector similarity search. Provides sub-millisecond search latency on datasets up to 1M vectors.
