@@ -11,20 +11,33 @@
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::MutQueryExecutor;
 use samyama::query::parser::parse_query;
+use samyama::query::QueryEngine;
 use samyama::algo::{build_view, page_rank, PageRankConfig};
+use samyama::{NLQPipeline, TenantManager};
+use samyama::persistence::tenant::{LLMProvider, NLQConfig};
 use samyama_optimization::algorithms::{CuckooSolver, JayaSolver};
 use samyama_optimization::common::{Problem, SolverConfig};
 use ndarray::Array1;
 use std::time::Instant;
 use std::collections::HashMap;
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!("=========================================================================");
     println!("   SMART MANUFACTURING DIGITAL TWIN -- Industry 4.0 Factory Simulation   ");
     println!("   Samyama Graph Database + Optimization Engine                          ");
     println!("=========================================================================");
 
     let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
     let tenant = "factory_floor";
 
     // ==================================================================================
@@ -709,6 +722,63 @@ fn main() {
         println!("  | {:>4} | {:<26} | {:>10.6} |", rank + 1, name, score);
     }
     println!("  +------+----------------------------+------------+");
+
+    // ==================================================================================
+    // NLQ Manufacturing Intelligence (ClaudeCode)
+    // ==================================================================================
+    println!("\n===========================================================================");
+    println!("   NLQ Manufacturing Intelligence (ClaudeCode)");
+    println!("===========================================================================");
+    println!();
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for a smart manufacturing knowledge graph.".to_string()),
+        };
+
+        let tenant_mgr = TenantManager::new();
+        tenant_mgr.create_tenant("mfg_nlq".to_string(), "Manufacturing NLQ".to_string(), None).unwrap();
+        tenant_mgr.update_nlq_config("mfg_nlq", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: ProductionLine, Machine, Product, Material\n\
+                              Edge types: CONTAINS, PRODUCES, REQUIRES, FEEDS_INTO\n\
+                              Properties: Machine(name, type, status, utilization, vendor), \
+                              Product(name, priority), Material(name, stock_level), \
+                              ProductionLine(name)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+
+        let nlq_questions = vec![
+            "Which products are affected if the CNC machining line goes offline?",
+            "Show machines with utilization above 90%",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
 
     // ==================================================================================
     // SUMMARY

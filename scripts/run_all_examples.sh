@@ -203,6 +203,7 @@ function run_all_batch() {
     echo -e "${YELLOW}--- Knowledge & AI ---${NC}"
     run_rust_example "knowledge_graph_demo" "Knowledge Graph Demo"
     run_rust_example "social_network_demo" "Social Network Demo"
+    run_rust_example "agentic_enrichment_demo" "Agentic Enrichment Demo (GAK)"
 
     # Core Infrastructure
     echo -e "${YELLOW}--- Core Infrastructure ---${NC}"
@@ -262,23 +263,24 @@ while true; do
     echo -e "${YELLOW}--- Knowledge & AI ---${NC}"
     echo "5.  Knowledge Graph Demo (Enterprise RAG)"
     echo "6.  Social Network Demo (Community Analysis)"
+    echo "7.  Agentic Enrichment Demo (GAK via ClaudeCode)"
     echo ""
     echo -e "${YELLOW}--- Core Infrastructure ---${NC}"
-    echo "7.  Cluster Demo (Raft HA)"
-    echo "8.  Persistence Demo (Multi-tenant Storage)"
+    echo "8.  Cluster Demo (Raft HA)"
+    echo "9.  Persistence Demo (Multi-tenant Storage)"
     echo ""
     echo -e "${YELLOW}--- Benchmarks ---${NC}"
-    echo "9.  Full Benchmark Suite"
-    echo "10. Vector Search Benchmark"
-    echo "11. MVCC Benchmark"
-    echo "12. Graph Optimization Benchmark"
+    echo "10. Full Benchmark Suite"
+    echo "11. Vector Search Benchmark"
+    echo "12. MVCC Benchmark"
+    echo "13. Graph Optimization Benchmark"
     echo ""
     echo -e "${YELLOW}--- Connectivity ---${NC}"
-    echo "13. Python Client Demo"
+    echo "14. Python Client Demo"
     echo ""
     echo -e "${YELLOW}--- System ---${NC}"
-    echo "14. Reset Database (Restart Server & Clean Data)"
-    echo "15. View Server Logs"
+    echo "15. Reset Database (Restart Server & Clean Data)"
+    echo "16. View Server Logs"
     echo "a.  Run All Examples (batch)"
     echo "q.  Quit"
     echo -e "${GREEN}==============================================${NC}"
@@ -291,15 +293,16 @@ while true; do
         4) run_rust_example "supply_chain_demo" "Supply Chain Demo" ;;
         5) run_rust_example "knowledge_graph_demo" "Knowledge Graph Demo" ;;
         6) run_rust_example "social_network_demo" "Social Network Demo" ;;
-        7) run_rust_example "cluster_demo" "Cluster Demo" ;;
-        8) run_rust_example "persistence_demo" "Persistence Demo" ;;
-        9) run_rust_example "full_benchmark" "Full Benchmark Suite" ;;
-        10) run_rust_example "vector_benchmark" "Vector Search Benchmark" ;;
-        11) run_rust_example "mvcc_benchmark" "MVCC Benchmark" ;;
-        12) run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark" ;;
-        13) run_python_client ;;
-        14) reset_environment; read -p "Environment Reset. Press Enter..." ;;
-        15) echo "--- Last 30 lines of server.log ---"; tail -n 30 server.log; read -p "Press Enter..." ;;
+        7) run_rust_example "agentic_enrichment_demo" "Agentic Enrichment Demo (GAK)" ;;
+        8) run_rust_example "cluster_demo" "Cluster Demo" ;;
+        9) run_rust_example "persistence_demo" "Persistence Demo" ;;
+        10) run_rust_example "full_benchmark" "Full Benchmark Suite" ;;
+        11) run_rust_example "vector_benchmark" "Vector Search Benchmark" ;;
+        12) run_rust_example "mvcc_benchmark" "MVCC Benchmark" ;;
+        13) run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark" ;;
+        14) run_python_client ;;
+        15) reset_environment; read -p "Environment Reset. Press Enter..." ;;
+        16) echo "--- Last 30 lines of server.log ---"; tail -n 30 server.log; read -p "Press Enter..." ;;
         a) run_all_batch ;;
         q) cleanup_exit ;;
         *) echo "Invalid option"; sleep 1 ;;

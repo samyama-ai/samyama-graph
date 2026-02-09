@@ -12,7 +12,9 @@
 //!
 //! Run: `cargo run --example clinical_trials_demo`
 
-use samyama::{GraphStore, EdgeType, QueryEngine};
+use samyama::{GraphStore, EdgeType, QueryEngine, NLQPipeline, TenantManager};
+use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
+use samyama::agent::AgentRuntime;
 // Vector search uses cosine similarity computed inline for this demo.
 // For production workloads, use: store.create_vector_index() + store.vector_search()
 // with samyama::vector::DistanceMetric::Cosine for HNSW-accelerated ANN queries.
@@ -379,7 +381,16 @@ fn drug_interaction_pairs() -> Vec<(usize, usize, &'static str)> {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!("================================================================");
     println!("   CLINICAL TRIALS INTELLIGENCE PLATFORM");
     println!("   Powered by Samyama Graph Database");
@@ -1018,6 +1029,117 @@ fn main() {
     println!("  └──────────────────────────────────────────────────────────┘");
     println!();
 
+    // ======================================================================
+    // STEP 7: NLQ Clinical Intelligence (ClaudeCode)
+    // ======================================================================
+    println!("┌──────────────────────────────────────────────────────────────┐");
+    println!("│ STEP 7: NLQ Clinical Intelligence (ClaudeCode)              │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for a clinical trials knowledge graph.".to_string()),
+        };
+
+        let tenant_mgr = TenantManager::new();
+        tenant_mgr.create_tenant("clinical_nlq".to_string(), "Clinical NLQ".to_string(), None).unwrap();
+        tenant_mgr.update_nlq_config("clinical_nlq", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: Trial, Drug, Condition, Site, Patient\n\
+                              Edge types: TESTS, STUDIES, CONDUCTED_AT, HAS_CONDITION, INTERACTS_WITH\n\
+                              Properties: Trial(nct_id, title, phase, status, sponsor, target_enrollment), \
+                              Drug(generic_name, brand_name, mechanism, approval_year), \
+                              Condition(name, icd10, therapeutic_area), \
+                              Site(name, city, state, capacity, experience_score), \
+                              Patient(patient_id, age, sex, primary_condition)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+
+        let nlq_questions = vec![
+            "Which Phase III trials are studying non-small cell lung cancer?",
+            "Find drugs that interact with pembrolizumab",
+            "Show sites in the United States with capacity over 200 patients",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+
+        // Agent enrichment: generate a new drug entity
+        println!("  --- Agentic Enrichment: Adding Nivolumab Knowledge ---");
+
+        let mut policies = HashMap::new();
+        policies.insert(
+            "Drug".to_string(),
+            "When a Drug entity is missing, enrich with indications, mechanism, and trials.".to_string(),
+        );
+
+        let agent_config = AgentConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a clinical trials knowledge graph builder.".to_string()),
+            tools: vec![],
+            policies,
+        };
+
+        let runtime = AgentRuntime::new(agent_config);
+        let enrichment_prompt = "Generate Cypher CREATE statements for the drug Nivolumab with its indications, mechanism, and clinical trials.\n\n\
+                                 Create:\n\
+                                 1. One Drug node with properties: generic_name: 'nivolumab', brand_name: 'Opdivo', mechanism: 'PD-1 inhibitor', approval_year: 2014\n\
+                                 2. Two Indication nodes: 'Advanced Melanoma' and 'Non-Small Cell Lung Cancer'\n\
+                                 3. Two ClinicalTrial nodes with properties: nct_id, title, phase (integer), year (integer)\n\
+                                 4. Edges: (Drug)-[:TREATS]->(Indication), (Drug)-[:STUDIED_IN]->(ClinicalTrial)\n\n\
+                                 RULES: Output ONLY Cypher statements, one per line. No markdown. Use single quotes for strings.\n\
+                                 First CREATE nodes, then MATCH...CREATE edges.\n\
+                                 MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
+
+        match runtime.process_trigger(enrichment_prompt, "clinical_nlq").await {
+            Ok(response) => {
+                println!("  Claude generated enrichment:");
+                let stmts: Vec<String> = response.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| {
+                        let u = l.to_uppercase();
+                        u.starts_with("CREATE") || u.starts_with("MATCH")
+                    })
+                    .collect();
+                for stmt in &stmts {
+                    let display = if stmt.len() > 78 { &stmt[..78] } else { stmt.as_str() };
+                    println!("    | {}", display);
+                }
+                println!("  Parsed {} Cypher statements", stmts.len());
+            }
+            Err(e) => println!("  Agent enrichment error: {}", e),
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+    println!();
+
     // Final summary
     println!("================================================================");
     println!("   CLINICAL TRIALS INTELLIGENCE PLATFORM -- COMPLETE");
@@ -1041,5 +1163,7 @@ fn main() {
     println!("    [4] Drug network analysis via PageRank and WCC graph algorithms");
     println!("    [5] Competitive landscape analysis via graph traversal");
     println!("    [6] Enterprise reporting with summary statistics");
+    println!("    [7] NLQ clinical intelligence via ClaudeCode pipeline");
+    println!("    [8] Agentic enrichment for drug knowledge generation");
     println!();
 }
