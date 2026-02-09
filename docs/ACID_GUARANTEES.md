@@ -8,7 +8,7 @@ Samyama is designed to provide strong consistency and durability guarantees suit
 |----------|:------:|--------------------------|
 | **Atomicity** | ✅ Supported | RocksDB `WriteBatch` & WAL |
 | **Consistency** | ✅ Supported | Schema Validation & Raft Consensus |
-| **Isolation** | ⚠️ Partial | Single-node: Sequential (RwLock). Distributed: Linearizable. *Interactive multi-statement transactions are planned.* |
+| **Isolation** | ⚠️ Partial | Single-node: Sequential (RwLock) + MVCC foundation. Distributed: Linearizable. *Interactive multi-statement transactions are planned.* |
 | **Durability** | ✅ Supported | RocksDB Persistence + Raft Replication |
 
 ---
@@ -36,11 +36,12 @@ Samyama enforces constraints to ensure the graph remains in a valid state.
 ### 3. Isolation
 **"Concurrent Transaction Visibility"**
 
-Samyama currently provides **Per-Operation Isolation**.
+Samyama currently provides **Per-Operation Isolation** with MVCC foundation.
 *   **Single Query**: A single Cypher query (e.g., a complex `MATCH ... DELETE`) runs in isolation. Readers will not see partial updates from a running query.
 *   **Concurrency Control**: We utilize `RwLock` (Read-Write Locks) on the in-memory graph structure.
     *   **Writes**: Exclusive access. No other reads or writes can occur during a write operation.
     *   **Reads**: Shared access. Multiple readers can query simultaneously.
+*   **MVCC Foundation**: Versioned nodes and edges with `get_node_at_version()` for snapshot reads. This lays the groundwork for full snapshot isolation.
 *   **Limitation**: We do not yet support *Interactive Transactions* (e.g., `BEGIN` ... multiple queries ... `COMMIT`). This is on the roadmap for Phase 15.
 
 ### 4. Durability

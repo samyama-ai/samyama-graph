@@ -99,3 +99,13 @@ REQ-DEV-002,Integration tests for distributed,P009,WF011,UC020,TC028|TC032,85%,C
 REQ-DEV-003,Performance benchmarks,P009,WF011,UC010,TC009|TC010|TC021|TC022|TC029,90%,High,Verified
 REQ-DEV-004,Documentation for all APIs,P002,WF002,,,50%,High,Not Started
 REQ-DEV-005,Open-source license,All,,,100%,Medium,Verified
+REQ-AGENT-001,Autonomous agents triggered by graph events,P011,WF002,UC028,TC043,85%,High,Verified
+REQ-AGENT-002,Tenant-level agent policy configuration,P011,WF002,UC028,,70%,High,Partial
+REQ-AGENT-003,Agents can execute tools,P011,WF002,UC028,TC043,85%,High,Verified
+REQ-AGENT-004,Agents can read/write graph,P011,WF002,UC028,TC043,85%,High,Verified
+REQ-RAG-001,Auto vector embedding generation,P011,WF005,UC029,TC041|TC044,90%,High,Verified
+REQ-RAG-002,Tenant-level LLM provider config,P011,WF005,UC029,TC041,85%,High,Verified
+REQ-RAG-003,Event-driven background embedding pipeline,P011,WF005,UC029,TC041|TC044,85%,High,Verified
+REQ-RAG-004,Auto-update vector indices on text change,P011,WF005,UC029,TC044,80%,High,Partial
+REQ-NLQ-001,Natural language graph querying,P011|P002,WF017,UC027,TC042,85%,High,Verified
+REQ-NLQ-002,Translate NL to OpenCypher,P011|P002,WF017,UC027,TC042,85%,High,Verified

@@ -1,7 +1,7 @@
 # Samyama Performance Benchmarks
 
-**Date**: January 8, 2026
-**Version**: 0.1.0 (Phase 10 Complete)
+**Date**: February 8, 2026
+**Version**: v0.5.0-alpha.1
 **Hardware**: Mac Mini (M4, 16GB RAM)
 
 ## Executive Summary
@@ -54,6 +54,30 @@ Samyama demonstrates **production-ready performance** at scale. Benchmarks with 
 
 **Conclusion**: Ingestion is extremely fast, capable of loading millions of entities in seconds.
 
+## 5. Cypher Query Execution (Post Late Materialization)
+*Date: 2026-02-07*
+
+Late materialization (`Value::NodeRef`/`Value::EdgeRef`) avoids full object cloning during traversal. Properties are resolved lazily only when projected or filtered.
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| **1-Hop Traversal** | 164ms | **41ms** | **4x** |
+| **2-Hop Traversal** | 1.22s | **259ms** | **4.7x** |
+| **Raw 3-Hop (storage API)** | 17µs | **15µs** | 14% |
+
+### Bottleneck Breakdown (1-Hop Query)
+
+| Component | Time | % of Total |
+| :--- | :--- | :--- |
+| Parse (Pest grammar) | ~20-25ms | ~55% |
+| Plan (AST → operators) | ~15-20ms | ~40% |
+| Execute (scan + expand + project) | <1ms | ~2% |
+| **Total** | **~41ms** | **100%** |
+
+**Key Insight:** Execution is now sub-millisecond. The parser and planner dominate query latency. Query AST caching will bring warm-cache 1-hop latency to ~16-20ms.
+
+See [BENCHMARK_RESULTS_v0.5.0.md](./BENCHMARK_RESULTS_v0.5.0.md) for full details.
+
 ## Reproduction
 
 To run these benchmarks yourself:
@@ -64,4 +88,7 @@ cargo run --release --example full_benchmark
 
 # Run with 1M nodes
 cargo run --release --example full_benchmark 1000000
+
+# Run late materialization benchmark
+cargo run --release --example late_materialization_bench
 ```

@@ -89,27 +89,47 @@ python3 test_resp_basic.py
 - **Files:** `src/query/**/*.rs`, `src/protocol/**/*.rs`
 - **Status:** All passing
 
+### Phase 3: Persistence & Multi-Tenancy ✅
+- **Unit Tests:** Added
+- **Coverage:** WAL, RocksDB, recovery, multi-tenant isolation, resource quotas
+- **Files:** `src/persistence/**/*.rs`
+- **Status:** All passing
+
+### Phase 4: High Availability ✅
+- **Unit Tests:** Added
+- **Coverage:** Raft consensus, state machine, cluster config
+- **Files:** `src/raft/**/*.rs`
+- **Status:** All passing
+
+### Phase 5+: Algorithms, Vector, RDF, NLQ, Agent ✅
+- **Unit Tests:** Added
+- **Coverage:** Graph algorithms (8), vector search, RDF types/store/serializers/RDFS reasoner, SPARQL parser, NLQ pipeline, agent framework, optimization solvers (23), MVCC, columnar storage, late materialization
+- **Files:** `crates/samyama-graph-algorithms/`, `crates/samyama-optimization/`, `src/vector/`, `src/rdf/`, `src/nlq/`, `src/agent/`, `src/embed/`
+- **Status:** All passing
+
 ### Total Test Count
-- **Unit Tests:** 84
+- **Unit Tests:** 188
 - **Integration Tests:** 8
 - **Doc Tests:** 1
-- **Total:** 93 tests
+- **Total:** 197 tests
+- **Example Programs:** 15
 
 ## Performance Benchmarks
 
-### Query Performance (Phase 2)
-- Simple node scan (1000 nodes): ~0.5ms
-- Filter operation (1000 nodes, 10% match): ~0.8ms
-- Edge traversal (avg degree 10): ~1.2ms
-- Complex query (2-hop traversal): ~5ms
+### Query Performance (Post Late Materialization, v0.5.0-alpha.1)
+- 1-hop traversal (10k nodes): ~41ms
+- 2-hop traversal (10k nodes): ~259ms
+- Raw 3-hop (storage API): ~15µs
+- Execution phase only: <1ms
 
-### RESP Server Performance (Phase 2)
-- PING latency: ~50μs
-- GRAPH.QUERY simple: ~1ms
-- Concurrent connections: 10,000+
-- Throughput: ~100K ops/sec (simple queries)
+### Ingestion Performance
+- Node ingestion: ~359K nodes/sec
+- Edge ingestion: ~1.5M edges/sec
 
-*Note: These are preliminary benchmarks from integration tests. Formal benchmarking suite planned for Phase 3.*
+### Vector Search
+- HNSW search (10k vectors, 64d): ~1.33ms avg
+
+See [performance/BENCHMARK_RESULTS_v0.5.0.md](../performance/BENCHMARK_RESULTS_v0.5.0.md) for full details.
 
 ## Continuous Integration
 
@@ -153,25 +173,11 @@ jobs:
 
 | Date | Phase | Tests | Pass | Fail | Coverage |
 |------|-------|-------|------|------|----------|
+| 2026-02-08 | Phase 5+ | 197 | 197 | 0 | Full stack |
 | 2025-10-15 | Phase 2 | 93 | 93 | 0 | Query + RESP |
 | 2025-10-14 | Phase 1 | 35 | 35 | 0 | Property Graph |
 
 ## Future Testing Plans
-
-### Phase 3: Persistence & Multi-Tenancy
-- [ ] WAL (Write-Ahead Log) tests
-- [ ] RocksDB integration tests
-- [ ] Recovery and durability tests
-- [ ] Multi-tenant isolation tests
-- [ ] Resource quota enforcement tests
-- [ ] Performance tests with persistence
-
-### Phase 4: High Availability
-- [ ] Raft consensus tests
-- [ ] Replication tests
-- [ ] Failover tests
-- [ ] Cluster management tests
-- [ ] Network partition tests
 
 ### Test Framework Enhancements
 - [ ] Formal benchmarking suite with Criterion
@@ -206,6 +212,6 @@ For questions about tests or to report test failures:
 
 ---
 
-**Last Updated:** 2025-10-15
-**Total Tests:** 93 (84 unit + 8 integration + 1 doc)
+**Last Updated:** 2026-02-08
+**Total Tests:** 197 (188 unit + 8 integration + 1 doc)
 **Pass Rate:** 100%

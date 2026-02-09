@@ -1,5 +1,26 @@
 # Performance Optimization Progress
 
+## 2026-02-07: Phase 3 - Late Materialization
+
+### Achievements
+- **Late Materialization (NodeRef/EdgeRef)**:
+    - Scan operators now produce `Value::NodeRef(NodeId)` instead of `Value::Node(id, node.clone())`.
+    - `ExpandOperator` uses lightweight `get_outgoing_edge_targets()` returning `(EdgeId, NodeId, NodeId, &EdgeType)` tuples — no Edge clone.
+    - Property access via `Value::resolve_property(prop, store)` — checks columnar store first, falls back to node/edge lookup.
+    - Full materialization only at `ProjectOperator` for `RETURN n` (whole-variable expressions).
+- **Benchmark Results**:
+    - **1-Hop Traversal**: 41ms (was 164ms — **4x improvement**)
+    - **2-Hop Traversal**: 259ms (was 1.22s — **4.7x improvement**)
+    - **Raw 3-Hop (storage API)**: 15µs
+    - **Execution phase**: Sub-millisecond (<1ms). Parser and planner now dominate latency (~95%).
+
+### Next Steps
+- **Query AST Cache**: Cache parsed ASTs keyed by normalized query string to eliminate ~20-25ms parse overhead.
+- **Plan Cache**: Decouple plan from GraphStore references for caching.
+- **JIT Query Compilation**: Long-term — compile hot queries to native code.
+
+---
+
 ## 2026-01-31: Phase 2 - Advanced Memory & Concurrency
 
 ### Achievements

@@ -7,7 +7,7 @@ This directory contains comprehensive product management artifacts for Samyama G
 ## Artifacts
 
 ### 1. Personas (personas.csv)
-**10 User Personas** representing key stakeholders:
+**12 User Personas** representing key stakeholders:
 - Database Administrators
 - Application Developers
 - Data Scientists
@@ -18,6 +18,8 @@ This directory contains comprehensive product management artifacts for Samyama G
 - Security Engineers
 - QA Engineers
 - Startup CTOs
+- AI/ML Engineers
+- Data Engineers
 
 **Columns**: persona_id, name, role, description, goals, pain_points, technical_level, key_needs, success_metrics
 
@@ -42,7 +44,7 @@ This directory contains comprehensive product management artifacts for Samyama G
 **Columns**: workflow_id, persona_ids, name, description, steps, entry_criteria, exit_criteria, success_criteria, estimated_duration, frequency, requirements_refs
 
 ### 3. Use Cases (usecases.csv)
-**25 Detailed Use Cases** including:
+**29 Detailed Use Cases** including:
 - Graph creation and querying
 - Tenant management
 - Performance testing
@@ -53,16 +55,19 @@ This directory contains comprehensive product management artifacts for Samyama G
 - Load testing
 - Client integration
 - Chaos engineering
+- Agent-based graph enrichment
+- Vector similarity search for RAG
 
 **Columns**: usecase_id, workflow_id, persona_id, name, description, preconditions, steps, expected_outcome, postconditions, acceptance_criteria, requirements_refs, priority
 
 ### 4. Test Cases (testcases.csv)
-**40 Test Cases** covering:
+**44 Test Cases** covering:
 - Functional tests (Core, Multi-Tenancy, Query, Operations, Management, Batch)
 - Performance tests (Query, Load, Scalability)
 - Security tests (TLS, RBAC, Audit, Multi-Tenancy)
 - Integration tests (Deployment, Client, Monitoring)
 - Reliability tests (Distributed, Chaos)
+- AI tests (NLQ Pipeline, Agent Enrichment)
 
 **Columns**: testcase_id, usecase_id, requirement_ids, test_type, test_category, name, description, preconditions, test_steps, expected_result, test_data, priority, automated, estimated_duration, notes
 
@@ -98,10 +103,10 @@ Test Cases (40) ← Validation of use cases and requirements
 
 | Artifact | Count | Coverage |
 |----------|-------|----------|
-| **Personas** | 10 | All key stakeholder types |
+| **Personas** | 12 | All key stakeholder types |
 | **Workflows** | 15 | Complete user journeys |
-| **Use Cases** | 25 | All critical scenarios |
-| **Test Cases** | 40 | ~50% of requirements (high-priority focus) |
+| **Use Cases** | 29 | All critical scenarios |
+| **Test Cases** | 44 | ~55% of requirements (high-priority focus) |
 | **Requirements Traced** | 75+ | From REQUIREMENTS.md |
 
 ## Priority Distribution
@@ -278,6 +283,8 @@ WHERE t.requirement_ids LIKE '%REQ-TENANT-003%';
 | P008 (Security Engineer) | 2 | 2 | 4 |
 | P009 (QA Engineer) | 2 | 2 | 4 |
 | P010 (Startup CTO) | 1 | 1 | 1 |
+| P011 (AI/ML Engineer) | 2 | 2 | 2 |
+| P012 (Data Engineer) | 1 | 0 | 0 |
 
 ## Updates and Maintenance
 
@@ -292,6 +299,7 @@ WHERE t.requirement_ids LIKE '%REQ-TENANT-003%';
 
 | Date | Artifact | Changes | Version |
 |------|----------|---------|---------|
+| 2026-02-08 | All | Added P011/P012 personas, UC028/UC029 use cases, TC041-TC044 test cases, updated traceability | 2.0 |
 | 2025-10-14 | All | Initial creation | 1.0 |
 
 ## Related Documents
@@ -303,6 +311,6 @@ WHERE t.requirement_ids LIKE '%REQ-TENANT-003%';
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-10-14
+**Document Version**: 2.0
+**Last Updated**: 2026-02-08
 **Maintained By**: Samyama Product Management Team

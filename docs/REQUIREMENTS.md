@@ -97,7 +97,7 @@ Samyama is a high-performance, distributed graph database designed to provide in
 
 ## 3. Optional Requirements
 
-### 3.1 RDF Support (Optional)
+### 3.1 RDF Support (Foundation Complete)
 - **REQ-RDF-001**: The system SHOULD support Resource Description Framework (RDF) data model
 - **REQ-RDF-002**: The system SHOULD support RDF triples (subject-predicate-object)
 - **REQ-RDF-003**: The system SHOULD support RDF/XML, Turtle, N-Triples serialization formats
@@ -106,7 +106,7 @@ Samyama is a high-performance, distributed graph database designed to provide in
 - **REQ-RDF-006**: The system SHOULD provide mapping between property graph and RDF models
 - **REQ-RDF-007**: The system SHOULD support OWL (Web Ontology Language) reasoning (basic)
 
-### 3.2 SPARQL Support (Optional)
+### 3.2 SPARQL Support (Parser Complete)
 - **REQ-SPARQL-001**: The system SHOULD support SPARQL 1.1 query language
 - **REQ-SPARQL-002**: The system SHOULD implement SPARQL protocol for HTTP
 - **REQ-SPARQL-003**: The system SHOULD support SPARQL query forms:
@@ -253,11 +253,11 @@ Samyama is a high-performance, distributed graph database designed to provide in
 
 ## 12. Future Enhancements (Out of Scope for v1.0)
 
-- Graph algorithms library (PageRank, community detection, etc.)
-- Time-series graph support
+- ~~Graph algorithms library~~ → **Implemented** (PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, TriangleCount in `crates/samyama-graph-algorithms/`)
+- Time-series graph support → **Foundation** (MVCC versioning with `get_node_at_version`)
 - Graph visualization tools
-- Machine learning integration (Graph Neural Networks)
-- Multi-model support (document + graph)
+- ~~Machine learning integration (Graph Neural Networks)~~ → **Proposed** (see `docs/GNN_PROPOSAL.md`)
+- ~~Multi-model support (document + graph)~~ → **Partial** (RDF + Property Graph dual-model)
 - Geospatial query support
 - Full-text search integration
 
@@ -305,7 +305,7 @@ The system will be considered successful if it:
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-10-14
-**Status**: Draft
+**Document Version**: 2.0
+**Last Updated**: 2026-02-08
+**Status**: Active
 **Maintainer**: Samyama Graph Database Team
