@@ -176,4 +176,54 @@ mod tests {
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 2);
     }
+
+    #[test]
+    fn test_execute_is_not_null_filter() {
+        let mut store = GraphStore::new();
+
+        // Alice has email, Bob does not
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("email", "alice@example.com");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            // no email property
+        }
+
+        // IS NOT NULL should return only Alice
+        let query = parse_query("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "IS NOT NULL query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_is_null_filter() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("email", "alice@example.com");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        // IS NULL should return only Bob (no email)
+        let query = parse_query("MATCH (n:Person) WHERE n.email IS NULL RETURN n.name").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "IS NULL query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
+    }
 }
