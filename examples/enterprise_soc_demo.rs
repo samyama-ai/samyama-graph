@@ -14,8 +14,9 @@
 //!
 //! Run: cargo run --example enterprise_soc_demo
 
-use samyama::{GraphStore, Label, EdgeType, PersistenceManager, QueryEngine};
-use samyama::persistence::tenant::{AgentConfig, AutoEmbedConfig, LLMProvider};
+use samyama::{GraphStore, Label, EdgeType, PersistenceManager, QueryEngine, NLQPipeline};
+use samyama::persistence::tenant::{AgentConfig, AutoEmbedConfig, LLMProvider, NLQConfig};
+use samyama::agent::AgentRuntime;
 use samyama::vector::DistanceMetric;
 use samyama::algo::{build_view, page_rank, weakly_connected_components, dijkstra, PageRankConfig};
 use std::collections::HashMap;
@@ -37,7 +38,16 @@ fn subsection(title: &str) {
     println!("    --- {} ---", title);
 }
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!();
     println!("  ╔══════════════════════════════════════════════════════════════════════╗");
     println!("  ║   SAMYAMA GRAPH DATABASE -- Enterprise SOC Demo                      ║");
@@ -56,9 +66,9 @@ fn main() {
 
     let agent_config = AgentConfig {
         enabled: true,
-        provider: LLMProvider::Mock,
+        provider: LLMProvider::ClaudeCode,
         model: "threat-analyst-v1".to_string(),
-        api_key: Some("mock".to_string()),
+        api_key: None,
         api_base_url: None,
         system_prompt: Some("You are a Tier 3 SOC analyst investigating APT campaigns.".to_string()),
         tools: vec![],
@@ -80,6 +90,15 @@ fn main() {
         ]),
     };
 
+    let nlq_config = NLQConfig {
+        enabled: true,
+        provider: LLMProvider::ClaudeCode,
+        model: String::new(),
+        api_key: None,
+        api_base_url: None,
+        system_prompt: Some("You are a Cypher query expert for a cybersecurity knowledge graph.".to_string()),
+    };
+
     persistence.tenants().create_tenant(
         tenant_id.to_string(),
         "Security Operations Center".to_string(),
@@ -87,6 +106,7 @@ fn main() {
     ).unwrap();
     persistence.tenants().update_agent_config(tenant_id, Some(agent_config)).unwrap();
     persistence.tenants().update_embed_config(tenant_id, Some(embed_config)).unwrap();
+    persistence.tenants().update_nlq_config(tenant_id, Some(nlq_config.clone())).unwrap();
 
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
@@ -869,9 +889,83 @@ fn main() {
     }
 
     // ======================================================================
-    // STEP 7: Summary
+    // STEP 7: NLQ Threat Investigation (ClaudeCode)
     // ======================================================================
-    section(7, "Investigation Summary");
+    section(7, "NLQ Threat Investigation (ClaudeCode)");
+
+    if is_claude_available() {
+        println!("    [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let schema_summary = "Node labels: Server, User, ThreatIntel, MitreTechnique, Malware, AttackEvent\n\
+                              Edge types: HAS_ACCESS, CONNECTS_TO, LATERAL_MOVEMENT, USES_TECHNIQUE, ORIGINATED_FROM, TARGETED\n\
+                              Properties: Server(name, ip, zone, os, role, criticality), \
+                              User(name, username, department, mfa_enabled), \
+                              ThreatIntel(cve_id, cvss_score, malware_family)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+
+        let nlq_questions = vec![
+            "Which servers in the DMZ have critical vulnerabilities?",
+            "Show users without MFA who have access to internal servers",
+            "What MITRE ATT&CK techniques were used in the attack chain?",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("    NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("    Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("    Results: {} records", batch.len()),
+                        Err(e) => println!("    Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("    NLQ translation error: {}", e),
+            }
+            println!();
+        }
+
+        // Agent enrichment: generate threat intelligence for a new IOC
+        println!("    --- Agentic Enrichment: Generating Threat Intel ---");
+        let tenant_data = persistence.tenants().get_tenant(tenant_id).unwrap();
+        if let Some(agent_cfg) = tenant_data.agent_config {
+            let runtime = AgentRuntime::new(agent_cfg);
+            let enrichment_prompt = "Generate Cypher CREATE statements for a new threat intelligence entry:\n\
+                                     1. One ThreatIntel node: CVE-2025-99999 with properties cve_id, description: 'Zero-day RCE in enterprise VPN appliance', cvss_score: 9.8, malware_family: 'VPNExploit'\n\
+                                     2. One MitreTechnique node: T1190 with properties technique_id, name: 'Exploit Public-Facing Application', tactic: 'Initial Access'\n\
+                                     3. Edge: (ThreatIntel)-[:USES_TECHNIQUE]->(MitreTechnique)\n\n\
+                                     RULES: Output ONLY Cypher statements, one per line. No markdown. Use single quotes for strings. \
+                                     First CREATE nodes, then MATCH...CREATE edges.\n\
+                                     MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
+
+            match runtime.process_trigger(enrichment_prompt, tenant_id).await {
+                Ok(response) => {
+                    println!("    Claude generated enrichment:");
+                    let stmts: Vec<String> = response.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| {
+                            let u = l.to_uppercase();
+                            u.starts_with("CREATE") || u.starts_with("MATCH")
+                        })
+                        .collect();
+                    for stmt in &stmts {
+                        println!("      | {}", if stmt.len() > 78 { &stmt[..78] } else { stmt });
+                    }
+                    println!("    Parsed {} Cypher statements", stmts.len());
+                }
+                Err(e) => println!("    Agent enrichment error: {}", e),
+            }
+        }
+    } else {
+        println!("    [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("    Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+
+    // ======================================================================
+    // STEP 8: Summary
+    // ======================================================================
+    section(8, "Investigation Summary");
 
     let total_nodes = store.all_nodes().len();
     let server_count = store.get_nodes_by_label(&Label::new("Server")).len();
@@ -914,7 +1008,8 @@ fn main() {
     println!("      7. Dijkstra shortest path for attack path analysis");
     println!("      8. Weakly Connected Components for network segmentation audit");
     println!("      9. MITRE ATT&CK technique mapping");
-    println!("     10. Multi-tenancy with mock LLM agent configuration");
+    println!("     10. NLQ threat investigation via ClaudeCode pipeline");
+    println!("     11. Agentic enrichment for threat intelligence generation");
     println!();
     println!("    Total execution time: {:.2}s", elapsed.as_secs_f64());
 

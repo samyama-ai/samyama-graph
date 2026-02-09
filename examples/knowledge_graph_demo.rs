@@ -12,6 +12,9 @@ use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::vector::DistanceMetric;
 use samyama::query::QueryEngine;
 use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
+use samyama::{NLQPipeline, TenantManager};
+use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
+use samyama::agent::AgentRuntime;
 use std::collections::HashMap;
 
 /// Generate a deterministic 128-dimensional mock embedding from a seed.
@@ -48,7 +51,16 @@ fn separator() {
     );
 }
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!();
     println!("╔══════════════════════════════════════════════════════════════════════════════════════════╗");
     println!("║              Enterprise Knowledge Graph  --  Fortune 500 Tech Company                   ║");
@@ -1340,6 +1352,116 @@ fn main() {
     println!();
 
     // ════════════════════════════════════════════════════════════════════════════════════════
+    // NLQ Knowledge Discovery (ClaudeCode)
+    // ════════════════════════════════════════════════════════════════════════════════════════
+    println!();
+    println!("Step: NLQ Knowledge Discovery (ClaudeCode)");
+    separator();
+    println!();
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for an enterprise knowledge graph.".to_string()),
+        };
+
+        let tenant_mgr = TenantManager::new();
+        tenant_mgr.create_tenant("knowledge_nlq".to_string(), "Knowledge NLQ".to_string(), None).unwrap();
+        tenant_mgr.update_nlq_config("knowledge_nlq", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: Document, Employee, Project, Technology\n\
+                              Edge types: AUTHORED, WORKS_ON, USES_TECH, REFERENCES, TAGGED_WITH\n\
+                              Properties: Document(title, department, date, content_summary), \
+                              Employee(name, title, department), \
+                              Project(name, status, priority), \
+                              Technology(name, category)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+
+        let nlq_questions = vec![
+            "Which engineers authored documents about Kubernetes security?",
+            "Find all high-priority projects using GraphQL",
+            "Show cross-department document references between Engineering and Legal",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+
+        // Agent enrichment: add WebAssembly as a Technology
+        println!("  --- Agentic Enrichment: Adding WebAssembly Technology ---");
+
+        let mut policies = HashMap::new();
+        policies.insert(
+            "Technology".to_string(),
+            "When a Technology entity is missing, enrich with related documents and projects.".to_string(),
+        );
+
+        let agent_config = AgentConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are an enterprise knowledge graph builder.".to_string()),
+            tools: vec![],
+            policies,
+        };
+
+        let runtime = AgentRuntime::new(agent_config);
+        let enrichment_prompt = "Generate Cypher CREATE statements to add WebAssembly as a Technology node with related documents and projects.\n\n\
+                                 Create:\n\
+                                 1. One Technology node: name: 'WebAssembly', category: 'Runtime'\n\
+                                 2. One Document node: title: 'WebAssembly Edge Computing Guide', department: 'Engineering', date: '2025-04-01'\n\
+                                 3. One Project node: name: 'Edge Runtime Migration', status: 'Active', priority: 'High'\n\
+                                 4. Edges: (Document)-[:TAGGED_WITH]->(Technology), (Project)-[:USES_TECH]->(Technology)\n\n\
+                                 RULES: Output ONLY Cypher statements, one per line. No markdown. Use single quotes for strings.\n\
+                                 First CREATE nodes, then MATCH...CREATE edges.\n\
+                                 MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
+
+        match runtime.process_trigger(enrichment_prompt, "knowledge_nlq").await {
+            Ok(response) => {
+                println!("  Claude generated enrichment:");
+                let stmts: Vec<String> = response.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| {
+                        let u = l.to_uppercase();
+                        u.starts_with("CREATE") || u.starts_with("MATCH")
+                    })
+                    .collect();
+                for stmt in &stmts {
+                    let display = if stmt.len() > 78 { &stmt[..78] } else { stmt.as_str() };
+                    println!("    | {}", display);
+                }
+                println!("  Parsed {} Cypher statements", stmts.len());
+            }
+            Err(e) => println!("  Agent enrichment error: {}", e),
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+    println!();
+
+    // ════════════════════════════════════════════════════════════════════════════════════════
     // Summary
     // ════════════════════════════════════════════════════════════════════════════════════════
     let total_nodes =
@@ -1370,7 +1492,9 @@ fn main() {
     println!("    4. Document lineage tracing across departments");
     println!("    5. Topic clustering with Weakly Connected Components");
     println!("    6. Knowledge hub identification with PageRank");
+    println!("    7. NLQ knowledge discovery via ClaudeCode pipeline");
+    println!("    8. Agentic enrichment for technology knowledge generation");
     println!();
-    println!("  All data is deterministic. No API keys required.");
+    println!("  All data is deterministic. NLQ queries require Claude Code CLI.");
     separator();
 }

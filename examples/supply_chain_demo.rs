@@ -14,7 +14,9 @@
 //!
 //! Run: `cargo run --example supply_chain_demo`
 
-use samyama::{GraphStore, Label, PropertyValue, PropertyMap, QueryEngine};
+use samyama::{GraphStore, Label, PropertyValue, PropertyMap, QueryEngine, NLQPipeline, TenantManager};
+use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
+use samyama::agent::AgentRuntime;
 use samyama::vector::DistanceMetric;
 use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
 use samyama_optimization::algorithms::JayaSolver;
@@ -413,7 +415,16 @@ fn supply_links() -> Vec<(usize, usize)> {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!("================================================================");
     println!("   GLOBAL PHARMACEUTICAL SUPPLY CHAIN SIMULATION");
     println!("   Powered by Samyama Graph Database");
@@ -1152,6 +1163,114 @@ fn main() {
     println!();
 
     // ======================================================================
+    // NLQ Supply Chain Intelligence (ClaudeCode)
+    // ======================================================================
+    println!();
+    println!("┌──────────────────────────────────────────────────────────────┐");
+    println!("│ NLQ Supply Chain Intelligence (ClaudeCode)                   │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for a pharmaceutical supply chain knowledge graph.".to_string()),
+        };
+
+        let tenant_mgr = TenantManager::new();
+        tenant_mgr.create_tenant("supply_nlq".to_string(), "Supply Chain NLQ".to_string(), None).unwrap();
+        tenant_mgr.update_nlq_config("supply_nlq", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: Port, Supplier, Product, ShippingLine, Shipment\n\
+                              Edge types: SHIPS_FROM, SHIPS_TO, SUPPLIES, CARRIES, CONTAINS, ROUTES_THROUGH, BASED_AT, MANUFACTURES\n\
+                              Properties: Port(name, country, throughput), Supplier(name, country, tier, capabilities), \
+                              Product(name, category, value), Shipment(id, status, departure_date)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+
+        let nlq_questions = vec![
+            "Which suppliers provide active pharmaceutical ingredients from India?",
+            "Show all in-transit shipments of biologic products",
+            "Find ports connected to both European and Asian shipping routes",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+
+        // Agent enrichment: add a new supplier
+        println!("  --- Agentic Enrichment: Adding New Supplier ---");
+
+        let mut policies = HashMap::new();
+        policies.insert(
+            "Supplier".to_string(),
+            "When a Supplier entity is missing, enrich with capabilities and port connections.".to_string(),
+        );
+
+        let agent_config = AgentConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a pharmaceutical supply chain knowledge graph builder.".to_string()),
+            tools: vec![],
+            policies,
+        };
+
+        let runtime = AgentRuntime::new(agent_config);
+        let enrichment_prompt = "Generate Cypher CREATE statements to add a new supplier to a pharmaceutical supply chain graph.\n\n\
+                                 Create:\n\
+                                 1. One Supplier node: name: 'Lonza Group', country: 'Switzerland', tier: 'Tier 1', capabilities: 'biologics manufacturing, cell therapy, API synthesis'\n\
+                                 2. One Product node: name: 'mRNA Lipid Nanoparticles', category: 'Biologic', value: 85000000\n\
+                                 3. Edges: (Supplier)-[:MANUFACTURES]->(Product)\n\n\
+                                 RULES: Output ONLY Cypher statements, one per line. No markdown. Use single quotes for strings.\n\
+                                 First CREATE nodes, then MATCH...CREATE edges.\n\
+                                 MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
+
+        match runtime.process_trigger(enrichment_prompt, "supply_nlq").await {
+            Ok(response) => {
+                println!("  Claude generated enrichment:");
+                let stmts: Vec<String> = response.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| {
+                        let u = l.to_uppercase();
+                        u.starts_with("CREATE") || u.starts_with("MATCH")
+                    })
+                    .collect();
+                for stmt in &stmts {
+                    let display = if stmt.len() > 78 { &stmt[..78] } else { stmt.as_str() };
+                    println!("    | {}", display);
+                }
+                println!("  Parsed {} Cypher statements", stmts.len());
+            }
+            Err(e) => println!("  Agent enrichment error: {}", e),
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+    println!();
+
+    // ======================================================================
     // FINAL SUMMARY
     // ======================================================================
     let total_time = overall_start.elapsed();
@@ -1186,6 +1305,8 @@ fn main() {
     println!("    [E] PageRank criticality ({} nodes analyzed)", view.node_count);
     println!("    [F] Jaya optimization ({:.0} containers across 3 ports)", total_hamburg_containers);
     println!("    [G] Vector search for alternative suppliers (64-dim embeddings)");
+    println!("    [H] NLQ supply chain intelligence via ClaudeCode pipeline");
+    println!("    [I] Agentic enrichment for supplier knowledge generation");
     println!();
     println!("  Samyama Graph Database -- Global Pharmaceutical Supply Chain");
     println!("================================================================");

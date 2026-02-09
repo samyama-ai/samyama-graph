@@ -35,8 +35,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use samyama::{
-    PersistenceManager, ResourceQuotas, QueryEngine,
+    PersistenceManager, ResourceQuotas, QueryEngine, NLQPipeline,
     graph::{GraphStore, Label, NodeId},
+    persistence::tenant::{LLMProvider, NLQConfig},
 };
 
 // ============================================================================
@@ -574,7 +575,16 @@ fn load_all_data(
 // MAIN DEMO
 // ============================================================================
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     println!("╔══════════════════════════════════════════════════════════════════════╗");
@@ -1158,6 +1168,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // =========================================================================
+    // NLQ FRAUD INVESTIGATION (ClaudeCode)
+    // =========================================================================
+    println!("┌──────────────────────────────────────────────────────────────────────┐");
+    println!("│ NLQ Fraud Investigation (ClaudeCode)                                │");
+    println!("└──────────────────────────────────────────────────────────────────────┘");
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for a banking fraud detection knowledge graph.".to_string()),
+        };
+
+        persist_mgr.tenants().update_nlq_config("retail_banking", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: Branch, Customer, Account, Transaction\n\
+                              Edge types: BANKS_AT, OWNS, HAS_TRANSACTION, TRANSFER_TO, KNOWS\n\
+                              Properties: Customer(name, risk_score, customer_type, kyc_status), \
+                              Account(account_number, account_type, balance), \
+                              Transaction(amount, transaction_type, fraud_flag, description)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+
+        let nlq_questions = vec![
+            "Show high-risk customers with flagged transactions over $10,000",
+            "Find customers with circular transfer patterns",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &graph) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+    println!();
+
+    // =========================================================================
     // SUMMARY
     // =========================================================================
     println!("╔══════════════════════════════════════════════════════════════════════╗");
@@ -1186,6 +1251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    ✓ Network analysis (customer relationships)");
     println!("    ✓ Cypher query execution");
     println!("    ✓ Persistence with checkpointing");
+    println!("    ✓ NLQ fraud investigation via ClaudeCode pipeline");
     println!();
     println!("  To generate different dataset sizes:");
     println!("    cd docs/banking/generators");

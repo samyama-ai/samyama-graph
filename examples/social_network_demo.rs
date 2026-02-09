@@ -6,10 +6,13 @@
 //! statistics, and force-directed SVG visualization.
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
+use samyama::query::QueryEngine;
 use samyama::algo::{
     build_view, page_rank, weakly_connected_components, strongly_connected_components,
     bfs, PageRankConfig,
 };
+use samyama::{NLQPipeline, TenantManager};
+use samyama::persistence::tenant::{LLMProvider, NLQConfig};
 use std::fs::File;
 use std::io::Write;
 use rand::Rng;
@@ -104,11 +107,21 @@ struct Vec2 {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
+fn is_claude_available() -> bool {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tokio::main]
+async fn main() {
     println!("=== Social Network Analysis Platform ===");
     println!("    Samyama Graph Database - Tech Professional Community\n");
 
     let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
     let mut rng = rand::thread_rng();
 
     // -----------------------------------------------------------------------
@@ -738,6 +751,62 @@ fn main() {
     println!();
 
     // -----------------------------------------------------------------------
+    // NLQ Social Network Intelligence (ClaudeCode)
+    // -----------------------------------------------------------------------
+    println!("========================================================================");
+    println!("  NLQ Social Network Intelligence (ClaudeCode)");
+    println!("========================================================================");
+    println!();
+
+    if is_claude_available() {
+        println!("  [ok] Claude Code CLI detected — running NLQ queries");
+        println!();
+
+        let nlq_config = NLQConfig {
+            enabled: true,
+            provider: LLMProvider::ClaudeCode,
+            model: String::new(),
+            api_key: None,
+            api_base_url: None,
+            system_prompt: Some("You are a Cypher query expert for a social network graph.".to_string()),
+        };
+
+        let tenant_mgr = TenantManager::new();
+        tenant_mgr.create_tenant("social_nlq".to_string(), "Social NLQ".to_string(), None).unwrap();
+        tenant_mgr.update_nlq_config("social_nlq", Some(nlq_config.clone())).unwrap();
+
+        let schema_summary = "Node labels: User\n\
+                              Edge types: FOLLOWS, COLLABORATES, ENDORSED\n\
+                              Properties: User(name, company, role, specialty, followers, following)";
+
+        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+
+        let nlq_questions = vec![
+            "Who are the most followed AI/ML engineers at Google?",
+            "Find users who both follow and are followed by the same people",
+        ];
+
+        for (i, question) in nlq_questions.iter().enumerate() {
+            println!("  NLQ Query {}: \"{}\"", i + 1, question);
+            match nlq_pipeline.text_to_cypher(question, schema_summary).await {
+                Ok(cypher) => {
+                    println!("  Generated Cypher: {}", cypher);
+                    match engine.execute(&cypher, &store) {
+                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                        Err(e) => println!("  Execution error: {}", e),
+                    }
+                }
+                Err(e) => println!("  NLQ translation error: {}", e),
+            }
+            println!();
+        }
+    } else {
+        println!("  [skip] Claude Code CLI not found — skipping NLQ queries");
+        println!("  Install: https://docs.anthropic.com/en/docs/claude-code");
+    }
+    println!();
+
+    // -----------------------------------------------------------------------
     // Summary
     // -----------------------------------------------------------------------
     println!("========================================================================");
@@ -751,6 +820,7 @@ fn main() {
     println!("  Network:        avg degree {:.1}, clustering coeff {:.4}",
         avg_degree, avg_clustering);
     println!("  Visualization:  {}", svg_path);
+    println!("  NLQ:            ClaudeCode pipeline (social network intelligence)");
     println!();
     println!("  Samyama Graph Database - Social Network Analysis Demo");
     println!("========================================================================");
