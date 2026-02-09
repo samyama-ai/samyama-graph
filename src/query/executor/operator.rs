@@ -3,7 +3,7 @@
 //! Implements ADR-007 (Volcano Iterator Model)
 
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
-use crate::query::ast::{Expression, BinaryOp, Direction};
+use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
@@ -305,7 +305,33 @@ impl FilterOperator {
             Expression::Function { name, args } => {
                 self.evaluate_function(name, args, record, store)
             }
-            _ => Err(ExecutionError::RuntimeError("Unsupported expression type".to_string())),
+            Expression::Unary { op, expr } => {
+                let val = self.evaluate_expression(expr, record, store)?;
+                match op {
+                    UnaryOp::IsNull => {
+                        let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+                        Ok(Value::Property(PropertyValue::Boolean(is_null)))
+                    }
+                    UnaryOp::IsNotNull => {
+                        let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+                        Ok(Value::Property(PropertyValue::Boolean(!is_null)))
+                    }
+                    UnaryOp::Not => {
+                        let b = match val {
+                            Value::Property(PropertyValue::Boolean(b)) => b,
+                            _ => return Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
+                        };
+                        Ok(Value::Property(PropertyValue::Boolean(!b)))
+                    }
+                    UnaryOp::Minus => {
+                        match val {
+                            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+                            Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+                            _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
+                        }
+                    }
+                }
+            }
         }
     }
 

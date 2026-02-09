@@ -711,13 +711,50 @@ fn parse_op_str(op_str: &str) -> ParseResult<BinaryOp> {
 fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     match pair.as_rule() {
         Rule::term => {
-            let inner: Vec<_> = pair.into_inner().collect();
-            if inner.len() == 1 {
-                parse_term(inner[0].clone())
-            } else {
-                // Has unary operators
-                parse_primary(inner.last().unwrap().clone())
+            let mut prefix_ops = Vec::new();
+            let mut primary_pair = None;
+            let mut postfix_pair = None;
+
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::unary_op => prefix_ops.push(inner),
+                    Rule::primary => primary_pair = Some(inner),
+                    Rule::postfix_op => postfix_pair = Some(inner),
+                    _ => {}
+                }
             }
+
+            let mut expr = parse_primary(primary_pair.unwrap())?;
+
+            // Apply postfix operator (IS NULL / IS NOT NULL)
+            if let Some(postfix) = postfix_pair {
+                let text = postfix.as_str().to_uppercase();
+                let op = if text.contains("NOT") {
+                    UnaryOp::IsNotNull
+                } else {
+                    UnaryOp::IsNull
+                };
+                expr = Expression::Unary {
+                    op,
+                    expr: Box::new(expr),
+                };
+            }
+
+            // Apply prefix operators in reverse order (innermost first)
+            for prefix in prefix_ops.into_iter().rev() {
+                let op_str = prefix.as_str().trim();
+                let op = if op_str == "-" {
+                    UnaryOp::Minus
+                } else {
+                    UnaryOp::Not
+                };
+                expr = Expression::Unary {
+                    op,
+                    expr: Box::new(expr),
+                };
+            }
+
+            Ok(expr)
         }
         Rule::primary => parse_primary(pair),
         _ => Err(ParseError::SemanticError(format!("Unexpected term: {:?}", pair.as_rule())))
@@ -852,5 +889,59 @@ mod tests {
         let result = parse_query(query);
         assert!(result.is_ok());
         assert!(result.unwrap().explain);
+    }
+
+    #[test]
+    fn test_parse_is_null() {
+        let query = "MATCH (n:Person) WHERE n.email IS NULL RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse IS NULL: {:?}", result.err());
+
+        let ast = result.unwrap();
+        let predicate = &ast.where_clause.unwrap().predicate;
+        match predicate {
+            Expression::Unary { op, expr } => {
+                assert_eq!(*op, UnaryOp::IsNull);
+                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "email"));
+            }
+            other => panic!("Expected Unary(IsNull), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_is_not_null() {
+        let query = "MATCH (n:Person) WHERE n.name IS NOT NULL RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse IS NOT NULL: {:?}", result.err());
+
+        let ast = result.unwrap();
+        let predicate = &ast.where_clause.unwrap().predicate;
+        match predicate {
+            Expression::Unary { op, expr } => {
+                assert_eq!(*op, UnaryOp::IsNotNull);
+                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "name"));
+            }
+            other => panic!("Expected Unary(IsNotNull), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_not_expression() {
+        let query = "MATCH (n:Person) WHERE NOT n.active RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse NOT: {:?}", result.err());
+
+        let ast = result.unwrap();
+        let predicate = &ast.where_clause.unwrap().predicate;
+        match predicate {
+            Expression::Unary { op, expr } => {
+                assert_eq!(*op, UnaryOp::Not);
+                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "active"));
+            }
+            other => panic!("Expected Unary(Not), got {:?}", other),
+        }
     }
 }

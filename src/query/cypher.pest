@@ -76,7 +76,8 @@ order_direction = { ^"ASC" | ^"DESC" }
 
 // Expressions
 expression = { term ~ (binary_op ~ term)* }
-term = { unary_op* ~ primary }
+term = { unary_op* ~ primary ~ postfix_op? }
+postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
 primary = {
     function_call |
     property_access |
@@ -98,10 +99,7 @@ or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 binary_op = _{ mul_div_mod_op | add_sub_op | comparison_op | and_op | or_op }
 
-unary_op = {
-    ^"NOT" | "-" |
-    ^"IS" ~ ^"NULL" | ^"IS" ~ ^"NOT" ~ ^"NULL"
-}
+unary_op = { ^"NOT" | "-" }
 
 // Values
 value = {
