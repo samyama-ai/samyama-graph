@@ -3,7 +3,7 @@
 //! Implements ADR-007 (Volcano Iterator Model)
 
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
-use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction};
+use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,601 @@ use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem}
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
 
-// ... (optimization structs remain unchanged)
+/// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
+fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
+    let left_prop = match left {
+        Value::Property(p) => p,
+        Value::Null => PropertyValue::Null,
+        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+    };
+    let right_prop = match right {
+        Value::Property(p) => p,
+        Value::Null => PropertyValue::Null,
+        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+    };
+    let result = match op {
+        BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
+        BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            let cmp = left_prop.partial_cmp(&right_prop);
+            match (op, cmp) {
+                (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
+                (BinaryOp::Le, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (BinaryOp::Gt, Some(std::cmp::Ordering::Greater)) => PropertyValue::Boolean(true),
+                (BinaryOp::Ge, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (_, None) => PropertyValue::Null,
+                _ => PropertyValue::Boolean(false),
+            }
+        }
+        BinaryOp::And => match (&left_prop, &right_prop) {
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l && *r),
+            _ => return Err(ExecutionError::TypeError("AND requires booleans".to_string())),
+        },
+        BinaryOp::Or => match (&left_prop, &right_prop) {
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l || *r),
+            _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
+        },
+        BinaryOp::Add => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l + r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l + r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
+        },
+        BinaryOp::Sub => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l - r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
+            _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
+        },
+        BinaryOp::Mul => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
+            _ => return Err(ExecutionError::TypeError("Mul requires numeric operands".to_string())),
+        },
+        BinaryOp::Div => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
+            _ => return Err(ExecutionError::TypeError("Div requires numeric operands".to_string())),
+        },
+        BinaryOp::Mod => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l % r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
+            _ => return Err(ExecutionError::TypeError("Mod requires numeric operands".to_string())),
+        },
+        BinaryOp::StartsWith => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.starts_with(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("STARTS WITH requires strings".to_string())),
+        },
+        BinaryOp::EndsWith => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.ends_with(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("ENDS WITH requires strings".to_string())),
+        },
+        BinaryOp::Contains => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.contains(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("CONTAINS requires strings".to_string())),
+        },
+        BinaryOp::In => match &right_prop {
+            PropertyValue::Array(arr) => PropertyValue::Boolean(arr.contains(&left_prop)),
+            _ => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
+        },
+        BinaryOp::RegexMatch => match (&left_prop, &right_prop) {
+            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
+                PropertyValue::Boolean(re.is_match(text))
+            }
+            _ => return Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
+        },
+    };
+    Ok(Value::Property(result))
+}
+
+/// Shared unary operator evaluation
+fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
+    match op {
+        UnaryOp::IsNull => {
+            let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(is_null)))
+        }
+        UnaryOp::IsNotNull => {
+            let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(!is_null)))
+        }
+        UnaryOp::Not => match val {
+            Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
+            _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
+        },
+        UnaryOp::Minus => match val {
+            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+            Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+            _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
+        },
+    }
+}
+
+/// Shared list/map indexing evaluation
+fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
+    match (&collection, &index) {
+        (Value::Property(PropertyValue::Array(arr)), Value::Property(PropertyValue::Integer(i))) => {
+            let idx = if *i < 0 { (arr.len() as i64 + *i) as usize } else { *i as usize };
+            Ok(arr.get(idx).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+        }
+        (Value::Property(PropertyValue::Map(map)), Value::Property(PropertyValue::String(key))) => {
+            Ok(map.get(key).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Standalone expression evaluator usable from any operator
+fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    match expr {
+        Expression::Variable(var) => {
+            record.get(var).cloned()
+                .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+        }
+        Expression::Property { variable, property } => {
+            let val = record.get(variable)
+                .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
+            Ok(Value::Property(val.resolve_property(property, store)))
+        }
+        Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
+        Expression::Binary { left, op, right } => {
+            let l = eval_expression(left, record, store)?;
+            let r = eval_expression(right, record, store)?;
+            eval_binary_op(op, l, r)
+        }
+        Expression::Unary { op, expr: e } => {
+            let val = eval_expression(e, record, store)?;
+            eval_unary_op(op, val)
+        }
+        Expression::Function { name, args } => {
+            let arg_vals: Vec<Value> = args.iter()
+                .map(|a| eval_expression(a, record, store))
+                .collect::<Result<_, _>>()?;
+            eval_function(name, &arg_vals)
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| eval_expression(e, record, store))
+        }
+        Expression::Index { expr: e, index } => {
+            let collection = eval_expression(e, record, store)?;
+            let idx = eval_expression(index, record, store)?;
+            eval_index(collection, idx)
+        }
+        Expression::ExistsSubquery { pattern, where_clause } => {
+            eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+        }
+        Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+            eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+        }
+    }
+}
+
+/// Evaluate EXISTS { MATCH pattern WHERE cond }
+fn eval_exists_subquery(
+    pattern: &crate::query::ast::Pattern,
+    where_clause: Option<&crate::query::ast::WhereClause>,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    // Run a mini pattern match against the store
+    for path in &pattern.paths {
+        let start_var = path.start.variable.as_deref();
+        let start_labels = &path.start.labels;
+
+        // Check if the start variable is bound from the outer query
+        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
+            if let Some(val) = record.get(var) {
+                match val {
+                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
+                    _ => vec![],
+                }
+            } else if let Some(first_label) = start_labels.first() {
+                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+            } else {
+                store.all_nodes().iter().map(|n| n.id).collect()
+            }
+        } else if let Some(first_label) = start_labels.first() {
+            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+        } else {
+            store.all_nodes().iter().map(|n| n.id).collect()
+        };
+
+        for node_id in &start_node_ids {
+            let node = match store.get_node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Check labels
+            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
+            if !has_all_labels { continue; }
+
+            // Check properties
+            if let Some(ref props) = path.start.properties {
+                let props_match = props.iter().all(|(k, v)| {
+                    node.properties.get(k).map_or(false, |pv| pv == v)
+                });
+                if !props_match { continue; }
+            }
+
+            // If no segments, just check existence
+            if path.segments.is_empty() {
+                if let Some(wc) = where_clause {
+                    let mut temp_record = record.clone();
+                    if let Some(var) = start_var {
+                        temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
+                    }
+                    let result = eval_expression(&wc.predicate, &temp_record, store)?;
+                    if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
+                        return Ok(Value::Property(PropertyValue::Boolean(true)));
+                    }
+                } else {
+                    return Ok(Value::Property(PropertyValue::Boolean(true)));
+                }
+            } else {
+                // Check edges
+                for segment in &path.segments {
+                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
+                    let outgoing = store.get_outgoing_edges(*node_id);
+                    for edge in &outgoing {
+                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
+                            continue;
+                        }
+                        if !segment.node.labels.is_empty() {
+                            if let Some(target) = store.get_node(edge.target) {
+                                let target_matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
+                                if target_matches {
+                                    return Ok(Value::Property(PropertyValue::Boolean(true)));
+                                }
+                            }
+                        } else {
+                            return Ok(Value::Property(PropertyValue::Boolean(true)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Value::Property(PropertyValue::Boolean(false)))
+}
+
+/// Evaluate list comprehension: [x IN list WHERE cond | expr]
+fn eval_list_comprehension(
+    variable: &str,
+    list_expr: &Expression,
+    filter: Option<&Expression>,
+    map_expr: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    let list_val = eval_expression(list_expr, record, store)?;
+
+    let items = match list_val {
+        Value::Property(PropertyValue::Array(arr)) => arr,
+        _ => return Ok(Value::Property(PropertyValue::Array(vec![]))),
+    };
+
+    let mut result = Vec::new();
+    for item in items {
+        let mut inner_record = record.clone();
+        inner_record.bind(variable.to_string(), Value::Property(item));
+
+        // Apply filter
+        if let Some(f) = filter {
+            let cond = eval_expression(f, &inner_record, store)?;
+            if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) {
+                continue;
+            }
+        }
+
+        // Apply map expression
+        let mapped = eval_expression(map_expr, &inner_record, store)?;
+        match mapped {
+            Value::Property(pv) => result.push(pv),
+            _ => result.push(PropertyValue::Null),
+        }
+    }
+
+    Ok(Value::Property(PropertyValue::Array(result)))
+}
+
+/// Shared function evaluation for scalar functions (not aggregates)
+fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
+    match name.to_lowercase().as_str() {
+        // String functions
+        "toupper" | "touppercase" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.to_uppercase())))
+        }
+        "tolower" | "tolowercase" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.to_lowercase())))
+        }
+        "trim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim().to_string())))
+        }
+        "ltrim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim_start().to_string())))
+        }
+        "rtrim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim_end().to_string())))
+        }
+        "replace" => {
+            if args.len() < 3 { return Err(ExecutionError::RuntimeError("replace() requires 3 arguments".to_string())); }
+            let s = extract_string(&args[0])?;
+            let from = extract_string(&args[1])?;
+            let to = extract_string(&args[2])?;
+            Ok(Value::Property(PropertyValue::String(s.replace(&from, &to))))
+        }
+        "substring" => {
+            if args.len() < 2 { return Err(ExecutionError::RuntimeError("substring() requires at least 2 arguments".to_string())); }
+            let s = extract_string(&args[0])?;
+            let start = extract_int(&args[1])? as usize;
+            let chars: Vec<char> = s.chars().collect();
+            if start >= chars.len() {
+                return Ok(Value::Property(PropertyValue::String(String::new())));
+            }
+            let result = if args.len() >= 3 {
+                let len = extract_int(&args[2])? as usize;
+                chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
+            } else {
+                chars[start..].iter().collect()
+            };
+            Ok(Value::Property(PropertyValue::String(result)))
+        }
+        "left" => {
+            let s = extract_string(&args[0])?;
+            let n = extract_int(&args[1])? as usize;
+            Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
+        }
+        "right" => {
+            let s = extract_string(&args[0])?;
+            let n = extract_int(&args[1])? as usize;
+            let chars: Vec<char> = s.chars().collect();
+            let start = chars.len().saturating_sub(n);
+            Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
+        }
+        "reverse" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.chars().rev().collect())))
+        }
+        "tostring" => {
+            let val = &args[0];
+            let s = match val {
+                Value::Property(PropertyValue::String(s)) => s.clone(),
+                Value::Property(PropertyValue::Integer(i)) => i.to_string(),
+                Value::Property(PropertyValue::Float(f)) => f.to_string(),
+                Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
+                Value::Null | Value::Property(PropertyValue::Null) => "null".to_string(),
+                _ => return Err(ExecutionError::TypeError("Cannot convert to string".to_string())),
+            };
+            Ok(Value::Property(PropertyValue::String(s)))
+        }
+        "tointeger" | "toint" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
+                Value::Property(PropertyValue::String(s)) => {
+                    let i = s.parse::<i64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to integer", s)))?;
+                    Ok(Value::Property(PropertyValue::Integer(i)))
+                }
+                _ => Err(ExecutionError::TypeError("Cannot convert to integer".to_string())),
+            }
+        }
+        "tofloat" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
+                Value::Property(PropertyValue::String(s)) => {
+                    let f = s.parse::<f64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to float", s)))?;
+                    Ok(Value::Property(PropertyValue::Float(f)))
+                }
+                _ => Err(ExecutionError::TypeError("Cannot convert to float".to_string())),
+            }
+        }
+        // Size/length
+        "size" | "length" => {
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
+                Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Integer(a.len() as i64))),
+                _ => Err(ExecutionError::TypeError("size() requires string or list".to_string())),
+            }
+        }
+        // Math functions
+        "abs" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.abs()))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.abs()))),
+                _ => Err(ExecutionError::TypeError("abs() requires numeric".to_string())),
+            }
+        }
+        "ceil" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.ceil() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("ceil() requires numeric".to_string())),
+            }
+        }
+        "floor" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.floor() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("floor() requires numeric".to_string())),
+            }
+        }
+        "round" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.round() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("round() requires numeric".to_string())),
+            }
+        }
+        "sqrt" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.sqrt()))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).sqrt()))),
+                _ => Err(ExecutionError::TypeError("sqrt() requires numeric".to_string())),
+            }
+        }
+        "sign" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.signum()))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 }))),
+                _ => Err(ExecutionError::TypeError("sign() requires numeric".to_string())),
+            }
+        }
+        // Type/meta functions
+        "coalesce" => {
+            for arg in args {
+                if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
+                    return Ok(arg.clone());
+                }
+            }
+            Ok(Value::Null)
+        }
+        "head" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    Ok(arr.first().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+                }
+                _ => Err(ExecutionError::TypeError("head() requires list".to_string())),
+            }
+        }
+        "last" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    Ok(arr.last().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+                }
+                _ => Err(ExecutionError::TypeError("last() requires list".to_string())),
+            }
+        }
+        "tail" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    let tail: Vec<PropertyValue> = arr.iter().skip(1).cloned().collect();
+                    Ok(Value::Property(PropertyValue::Array(tail)))
+                }
+                _ => Err(ExecutionError::TypeError("tail() requires list".to_string())),
+            }
+        }
+        // Meta functions — work on nodes/edges
+        "id" => {
+            match &args[0] {
+                Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
+                Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
+                _ => Err(ExecutionError::TypeError("id() requires node or edge".to_string())),
+            }
+        }
+        "labels" => {
+            match &args[0] {
+                Value::Node(_, node) => {
+                    let labels: Vec<PropertyValue> = node.labels.iter()
+                        .map(|l| PropertyValue::String(l.as_str().to_string()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(labels)))
+                }
+                _ => Err(ExecutionError::TypeError("labels() requires a node".to_string())),
+            }
+        }
+        "type" => {
+            match &args[0] {
+                Value::Edge(_, edge) => {
+                    Ok(Value::Property(PropertyValue::String(edge.edge_type.as_str().to_string())))
+                }
+                _ => Err(ExecutionError::TypeError("type() requires an edge".to_string())),
+            }
+        }
+        "keys" => {
+            match &args[0] {
+                Value::Node(_, node) => {
+                    let keys: Vec<PropertyValue> = node.properties.keys()
+                        .map(|k| PropertyValue::String(k.clone()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(keys)))
+                }
+                Value::Edge(_, edge) => {
+                    let keys: Vec<PropertyValue> = edge.properties.keys()
+                        .map(|k| PropertyValue::String(k.clone()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(keys)))
+                }
+                _ => Err(ExecutionError::TypeError("keys() requires node or edge".to_string())),
+            }
+        }
+        "exists" => {
+            let is_null = matches!(&args[0], Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(!is_null)))
+        }
+        _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
+    }
+}
+
+/// Helper: extract string from Value
+fn extract_string(val: &Value) -> ExecutionResult<String> {
+    match val {
+        Value::Property(PropertyValue::String(s)) => Ok(s.clone()),
+        _ => Err(ExecutionError::TypeError("Expected string argument".to_string())),
+    }
+}
+
+/// Helper: extract integer from Value
+fn extract_int(val: &Value) -> ExecutionResult<i64> {
+    match val {
+        Value::Property(PropertyValue::Integer(i)) => Ok(*i),
+        _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
+    }
+}
+
+/// Shared CASE expression evaluation
+fn eval_case<F>(
+    operand: Option<&Expression>,
+    when_clauses: &[(Expression, Expression)],
+    else_result: Option<&Expression>,
+    eval_fn: F,
+) -> ExecutionResult<Value>
+where
+    F: Fn(&Expression) -> ExecutionResult<Value>,
+{
+    if let Some(op_expr) = operand {
+        // Simple CASE: CASE expr WHEN val THEN result
+        let op_val = eval_fn(op_expr)?;
+        for (when_expr, then_expr) in when_clauses {
+            let when_val = eval_fn(when_expr)?;
+            if op_val == when_val {
+                return eval_fn(then_expr);
+            }
+        }
+    } else {
+        // Searched CASE: CASE WHEN condition THEN result
+        for (when_expr, then_expr) in when_clauses {
+            let when_val = eval_fn(when_expr)?;
+            if matches!(when_val, Value::Property(PropertyValue::Boolean(true))) {
+                return eval_fn(then_expr);
+            }
+        }
+    }
+    // ELSE clause or NULL
+    if let Some(else_expr) = else_result {
+        eval_fn(else_expr)
+    } else {
+        Ok(Value::Null)
+    }
+}
 
 /// Optimization problem wrapper for GraphStore
 struct GraphOptimizationProblem {
@@ -332,6 +926,20 @@ impl FilterOperator {
                     }
                 }
             }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
+            }
+            Expression::Index { expr, index } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let idx = self.evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 
@@ -358,7 +966,16 @@ impl FilterOperator {
             BinaryOp::Ge => self.compare_ge(&left_prop, &right_prop)?,
             BinaryOp::And => self.logical_and(&left_prop, &right_prop)?,
             BinaryOp::Or => self.logical_or(&left_prop, &right_prop)?,
-            _ => return Err(ExecutionError::RuntimeError(format!("Unsupported operator: {:?}", op))),
+            BinaryOp::Add => self.arithmetic_add(&left_prop, &right_prop)?,
+            BinaryOp::Sub => self.arithmetic_sub(&left_prop, &right_prop)?,
+            BinaryOp::Mul => self.arithmetic_mul(&left_prop, &right_prop)?,
+            BinaryOp::Div => self.arithmetic_div(&left_prop, &right_prop)?,
+            BinaryOp::Mod => self.arithmetic_mod(&left_prop, &right_prop)?,
+            BinaryOp::StartsWith => self.string_starts_with(&left_prop, &right_prop)?,
+            BinaryOp::EndsWith => self.string_ends_with(&left_prop, &right_prop)?,
+            BinaryOp::Contains => self.string_contains(&left_prop, &right_prop)?,
+            BinaryOp::In => self.eval_in(&left_prop, &right_prop)?,
+            BinaryOp::RegexMatch => self.regex_match(&left_prop, &right_prop)?,
         };
 
         Ok(Value::Property(result))
@@ -411,6 +1028,97 @@ impl FilterOperator {
         match (left, right) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l || *r)),
             _ => Err(ExecutionError::TypeError("OR requires boolean operands".to_string())),
+        }
+    }
+
+    fn arithmetic_add(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l + r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l + r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 + r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l + *r as f64)),
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::String(format!("{}{}", l, r))),
+            _ => Err(ExecutionError::TypeError("Addition requires numeric or string operands".to_string())),
+        }
+    }
+
+    fn arithmetic_sub(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l - r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l - r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 - r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l - *r as f64)),
+            _ => Err(ExecutionError::TypeError("Subtraction requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_mul(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l * r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l * r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 * r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l * *r as f64)),
+            _ => Err(ExecutionError::TypeError("Multiplication requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_div(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Division by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l / r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l / r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 / r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l / *r as f64)),
+            _ => Err(ExecutionError::TypeError("Division requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_mod(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l % r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l % r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 % r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l % *r as f64)),
+            _ => Err(ExecutionError::TypeError("Modulo requires numeric operands".to_string())),
+        }
+    }
+
+    fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.starts_with(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
+        }
+    }
+
+    fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.ends_with(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
+        }
+    }
+
+    fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.contains(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
+        }
+    }
+
+    fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match right {
+            PropertyValue::Array(arr) => Ok(PropertyValue::Boolean(arr.contains(left))),
+            _ => Err(ExecutionError::TypeError("IN requires a list on the right side".to_string())),
+        }
+    }
+
+    fn regex_match(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
+                Ok(PropertyValue::Boolean(re.is_match(text)))
+            }
+            _ => Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
         }
     }
 
@@ -684,7 +1392,35 @@ impl ProjectOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported projection expression".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = self.evaluate_expression(left, record, store)?;
+                let right_val = self.evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = self.evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
+            }
+            Expression::Index { expr, index } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let idx = self.evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 }
@@ -741,6 +1477,7 @@ pub enum AggregateType {
     Avg,
     Min,
     Max,
+    Collect,
 }
 
 /// Aggregation function definition
@@ -759,6 +1496,7 @@ enum AggregatorState {
     Avg { sum: f64, count: i64 },
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
+    Collect(Vec<PropertyValue>),
 }
 
 impl AggregatorState {
@@ -769,6 +1507,7 @@ impl AggregatorState {
             AggregateType::Avg => AggregatorState::Avg { sum: 0.0, count: 0 },
             AggregateType::Min => AggregatorState::Min(None),
             AggregateType::Max => AggregatorState::Max(None),
+            AggregateType::Collect => AggregatorState::Collect(Vec::new()),
         }
     }
 
@@ -805,6 +1544,11 @@ impl AggregatorState {
                     }
                 }
             }
+            AggregatorState::Collect(items) => {
+                if let Some(prop) = value.as_property() {
+                    items.push(prop.clone());
+                }
+            }
         }
     }
 
@@ -818,6 +1562,7 @@ impl AggregatorState {
             }
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
+            AggregatorState::Collect(items) => Value::Property(PropertyValue::Array(items.clone())),
         }
     }
 }
@@ -857,7 +1602,35 @@ impl AggregateOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported expression in aggregation".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = Self::evaluate_expression(left, record, store)?;
+                let right_val = Self::evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = Self::evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| Self::evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
+            }
+            Expression::Index { expr, index } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let idx = Self::evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 }
@@ -1038,7 +1811,35 @@ impl SortOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported sort expression".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = Self::evaluate_expression(left, record, store)?;
+                let right_val = Self::evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = Self::evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| Self::evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
+            }
+            Expression::Index { expr, index } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let idx = Self::evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 }
@@ -2632,6 +3433,534 @@ impl PhysicalOperator for AlgorithmOperator {
         self.current = 0;
         self.executed = false;
         self.results.clear();
+    }
+}
+
+/// Skip operator: SKIP n
+pub struct SkipOperator {
+    input: OperatorBox,
+    skip: usize,
+    skipped: usize,
+}
+
+impl SkipOperator {
+    pub fn new(input: OperatorBox, skip: usize) -> Self {
+        Self { input, skip, skipped: 0 }
+    }
+}
+
+impl PhysicalOperator for SkipOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        while self.skipped < self.skip {
+            if self.input.next(store)?.is_some() {
+                self.skipped += 1;
+            } else {
+                return Ok(None);
+            }
+        }
+        self.input.next(store)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        while self.skipped < self.skip {
+            if let Some(batch) = self.input.next_batch(store, batch_size)? {
+                for record in batch.records {
+                    self.skipped += 1;
+                    if self.skipped >= self.skip {
+                        // We may have extra records in this batch — collect remaining
+                        let mut remaining = vec![record];
+                        // Continue pulling from current batch not possible since we consumed it,
+                        // but we've finished skipping
+                        break;
+                    }
+                }
+                if self.skipped >= self.skip {
+                    // Start fresh from next batch
+                    break;
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.skipped = 0;
+    }
+}
+
+/// Delete operator: DELETE n or DETACH DELETE n
+pub struct DeleteOperator {
+    input: OperatorBox,
+    variables: Vec<String>,
+    detach: bool,
+}
+
+impl DeleteOperator {
+    pub fn new(input: OperatorBox, variables: Vec<String>, detach: bool) -> Self {
+        Self { input, variables, detach }
+    }
+}
+
+impl PhysicalOperator for DeleteOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for var in &self.variables {
+                if let Some(val) = record.get(var) {
+                    match val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            let node_id = *id;
+                            if self.detach {
+                                let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
+                                let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
+                                for eid in out_edges.into_iter().chain(in_edges) {
+                                    let _ = store.delete_edge(eid);
+                                }
+                            }
+                            let _ = store.delete_node(tenant_id, node_id);
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            let _ = store.delete_edge(*id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
+/// Set property operator: SET n.name = "Alice"
+pub struct SetPropertyOperator {
+    input: OperatorBox,
+    items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
+}
+
+impl SetPropertyOperator {
+    pub fn new(input: OperatorBox, items: Vec<(String, String, Expression)>) -> Self {
+        Self { input, items }
+    }
+}
+
+impl PhysicalOperator for SetPropertyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for (var, prop, expr) in &self.items {
+                // Evaluate the expression
+                let val = match expr {
+                    Expression::Literal(lit) => lit.clone(),
+                    Expression::Property { variable, property } => {
+                        if let Some(v) = record.get(variable) {
+                            v.resolve_property(property, store)
+                        } else {
+                            PropertyValue::Null
+                        }
+                    }
+                    _ => PropertyValue::Null,
+                };
+
+                if let Some(node_val) = record.get(var) {
+                    match node_val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            if let Some(node) = store.get_node_mut(*id) {
+                                node.set_property(prop, val.clone());
+                            }
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            if let Some(edge) = store.get_edge_mut(*id) {
+                                edge.set_property(prop, val.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
+/// Remove property operator: REMOVE n.name
+pub struct RemovePropertyOperator {
+    input: OperatorBox,
+    items: Vec<(String, String)>, // (variable, property)
+}
+
+impl RemovePropertyOperator {
+    pub fn new(input: OperatorBox, items: Vec<(String, String)>) -> Self {
+        Self { input, items }
+    }
+}
+
+impl PhysicalOperator for RemovePropertyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for (var, prop) in &self.items {
+                if let Some(node_val) = record.get(var) {
+                    match node_val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            if let Some(node) = store.get_node_mut(*id) {
+                                node.remove_property(prop);
+                            }
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            if let Some(edge) = store.get_edge_mut(*id) {
+                                edge.remove_property(prop);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
+/// UNWIND operator - expands a list expression into individual rows
+pub struct UnwindOperator {
+    input: OperatorBox,
+    expression: Expression,
+    variable: String,
+    buffer: Vec<Record>,
+    buffer_idx: usize,
+}
+
+impl UnwindOperator {
+    pub fn new(input: OperatorBox, expression: Expression, variable: String) -> Self {
+        Self { input, expression, variable, buffer: Vec::new(), buffer_idx: 0 }
+    }
+}
+
+impl PhysicalOperator for UnwindOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if self.buffer_idx < self.buffer.len() {
+                let record = self.buffer[self.buffer_idx].clone();
+                self.buffer_idx += 1;
+                return Ok(Some(record));
+            }
+
+            let record = match self.input.next(store)? {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+
+            let list_val = eval_expression(&self.expression, &record, store)?;
+
+            let items = match list_val {
+                Value::Property(PropertyValue::Array(arr)) => arr,
+                Value::Property(PropertyValue::Vector(vec)) => {
+                    vec.into_iter().map(|f| PropertyValue::Float(f as f64)).collect()
+                }
+                _ => vec![],
+            };
+
+            self.buffer.clear();
+            self.buffer_idx = 0;
+            for item in items {
+                let mut new_record = record.clone();
+                new_record.bind(self.variable.clone(), Value::Property(item));
+                self.buffer.push(new_record);
+            }
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] })) }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.buffer.clear();
+        self.buffer_idx = 0;
+    }
+}
+
+/// MERGE operator - upsert: match or create pattern
+pub struct MergeOperator {
+    pattern: Pattern,
+    on_create_set: Vec<(String, String, Expression)>,
+    on_match_set: Vec<(String, String, Expression)>,
+    executed: bool,
+}
+
+impl MergeOperator {
+    pub fn new(
+        pattern: Pattern,
+        on_create_set: Vec<(String, String, Expression)>,
+        on_match_set: Vec<(String, String, Expression)>,
+    ) -> Self {
+        Self { pattern, on_create_set, on_match_set, executed: false }
+    }
+}
+
+impl PhysicalOperator for MergeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "MergeOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+        self.executed = true;
+
+        let path = self.pattern.paths.first()
+            .ok_or_else(|| ExecutionError::PlanningError("MERGE pattern has no paths".to_string()))?;
+
+        let start = &path.start;
+        let start_var = start.variable.clone().unwrap_or_else(|| "n".to_string());
+        let labels = &start.labels;
+        let props = start.properties.as_ref();
+
+        // Search for existing nodes matching labels + properties
+        let mut matched_node_id = None;
+        if let Some(first_label) = labels.first() {
+            let candidates = store.get_nodes_by_label(first_label);
+            for node in candidates {
+                let has_all_labels = labels.iter().all(|l| node.labels.contains(l));
+                if !has_all_labels { continue; }
+
+                if let Some(required_props) = props {
+                    let props_match = required_props.iter().all(|(k, v)| {
+                        node.properties.get(k).map_or(false, |pv| pv == v)
+                    });
+                    if !props_match { continue; }
+                }
+
+                matched_node_id = Some(node.id);
+                break;
+            }
+        }
+
+        let node_id;
+        let mut record = Record::new();
+
+        if let Some(existing_id) = matched_node_id {
+            node_id = existing_id;
+            record.bind(start_var.clone(), Value::NodeRef(node_id));
+
+            for (var, prop, expr) in &self.on_match_set {
+                if var == &start_var {
+                    let val = eval_expression(expr, &record, store)?;
+                    if let Value::Property(pv) = val {
+                        if let Some(node) = store.get_node_mut(node_id) {
+                            node.set_property(prop.clone(), pv);
+                        }
+                    }
+                }
+            }
+        } else {
+            let label_str = labels.first().map(|l| l.as_str()).unwrap_or("Node");
+            node_id = store.create_node(label_str);
+
+            for label in labels.iter().skip(1) {
+                if let Some(node) = store.get_node_mut(node_id) {
+                    node.labels.insert(label.clone());
+                }
+            }
+
+            if let Some(required_props) = props {
+                for (k, v) in required_props {
+                    if let Some(node) = store.get_node_mut(node_id) {
+                        node.set_property(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            record.bind(start_var.clone(), Value::NodeRef(node_id));
+
+            for (var, prop, expr) in &self.on_create_set {
+                if var == &start_var {
+                    let val = eval_expression(expr, &record, store)?;
+                    if let Value::Property(pv) = val {
+                        if let Some(node) = store.get_node_mut(node_id) {
+                            node.set_property(prop.clone(), pv);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Some(record))
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store) {
+                Ok(Some(r)) => records.push(r),
+                _ => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+}
+
+/// FOREACH operator: FOREACH (x IN list | SET x.prop = val)
+pub struct ForeachOperator {
+    input: OperatorBox,
+    variable: String,
+    list_expr: Expression,
+    set_items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
+    create_patterns: Vec<Pattern>,
+}
+
+impl ForeachOperator {
+    pub fn new(
+        input: OperatorBox,
+        variable: String,
+        list_expr: Expression,
+        set_items: Vec<(String, String, Expression)>,
+        create_patterns: Vec<Pattern>,
+    ) -> Self {
+        Self { input, variable, list_expr, set_items, create_patterns }
+    }
+}
+
+impl PhysicalOperator for ForeachOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "ForeachOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            // Evaluate the list expression
+            let list_val = eval_expression(&self.list_expr, &record, store)?;
+            let items = match list_val {
+                Value::Property(PropertyValue::Array(arr)) => arr,
+                _ => return Ok(Some(record)),
+            };
+
+            // Iterate over list items
+            for item in &items {
+                let mut inner_record = record.clone();
+                inner_record.bind(self.variable.clone(), Value::Property(item.clone()));
+
+                // Execute SET operations
+                for (var, prop, expr) in &self.set_items {
+                    let val = eval_expression(expr, &inner_record, store)?;
+                    let prop_val = match val {
+                        Value::Property(p) => p,
+                        Value::Null => PropertyValue::Null,
+                        _ => continue,
+                    };
+
+                    if let Some(node_val) = inner_record.get(var) {
+                        match node_val {
+                            Value::NodeRef(id) | Value::Node(id, _) => {
+                                if let Some(node) = store.get_node_mut(*id) {
+                                    node.set_property(prop, prop_val.clone());
+                                }
+                            }
+                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                if let Some(edge) = store.get_edge_mut(*id) {
+                                    edge.set_property(prop, prop_val.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Execute CREATE operations
+                for pattern in &self.create_patterns {
+                    for path in &pattern.paths {
+                        let label_str = path.start.labels.first()
+                            .map(|l| l.as_str())
+                            .unwrap_or("Node");
+                        let node_id = store.create_node(label_str);
+                        if let Some(props) = &path.start.properties {
+                            for (k, v) in props {
+                                if let Some(node) = store.get_node_mut(node_id) {
+                                    node.set_property(k, v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store) {
+                Ok(Some(r)) => records.push(r),
+                _ => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
     }
 }
 

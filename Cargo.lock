@@ -2544,6 +2544,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "rio_api",
  "rio_turtle",

@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -66,6 +66,44 @@ impl QueryPlanner {
             });
         }
 
+        // Handle MERGE-only statement (no MATCH needed)
+        if query.match_clauses.is_empty() && query.call_clause.is_none() {
+            if let Some(merge_clause) = &query.merge_clause {
+                let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
+                    .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                    .collect();
+                let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
+                    .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                    .collect();
+
+                let mut operator: OperatorBox = Box::new(MergeOperator::new(
+                    merge_clause.pattern.clone(),
+                    on_create,
+                    on_match,
+                ));
+
+                let mut output_columns = Vec::new();
+                if let Some(return_clause) = &query.return_clause {
+                    let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                        let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                            _ => format!("col_{}", i),
+                        });
+                        output_columns.push(alias.clone());
+                        (item.expression.clone(), alias)
+                    }).collect();
+                    operator = Box::new(ProjectOperator::new(operator, projections));
+                }
+
+                return Ok(ExecutionPlan {
+                    root: operator,
+                    output_columns,
+                    is_write: true,
+                });
+            }
+        }
+
         // Handle CREATE-only queries (no MATCH/CALL required)
         if query.match_clauses.is_empty() && query.call_clause.is_none() {
             if let Some(create_clause) = &query.create_clause {
@@ -78,9 +116,13 @@ impl QueryPlanner {
 
         let mut operator: Option<OperatorBox> = None;
 
-        // 1. Handle MATCH if present
-        if !query.match_clauses.is_empty() {
-            operator = Some(self.plan_match(&query.match_clauses[0], query.where_clause.as_ref(), _store)?);
+        // 1. Handle MATCH clauses — combine multiple with CartesianProduct
+        for match_clause in &query.match_clauses {
+            let match_op = self.plan_match(match_clause, query.where_clause.as_ref(), _store)?;
+            operator = Some(match operator {
+                Some(existing) => Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox,
+                None => match_op,
+            });
         }
 
         // 2. Handle CALL if present
@@ -90,11 +132,10 @@ impl QueryPlanner {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
                 
-                // Collect variables from MATCH
+                // Collect variables from all MATCH clauses
                 let mut match_vars = HashSet::new();
-                if !query.match_clauses.is_empty() {
-                    let pattern = &query.match_clauses[0].pattern;
-                    for path in &pattern.paths {
+                for mc in &query.match_clauses {
+                    for path in &mc.pattern.paths {
                         if let Some(v) = &path.start.variable { match_vars.insert(v.clone()); }
                         for seg in &path.segments {
                             if let Some(v) = &seg.node.variable { match_vars.insert(v.clone()); }
@@ -128,6 +169,15 @@ impl QueryPlanner {
         // Add WHERE clause if present
         if let Some(where_clause) = &query.where_clause {
             operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+        }
+
+        // Add UNWIND clause if present
+        if let Some(unwind_clause) = &query.unwind_clause {
+            operator = Box::new(UnwindOperator::new(
+                operator,
+                unwind_clause.expression.clone(),
+                unwind_clause.variable.clone(),
+            ));
         }
 
         // Determine output columns
@@ -176,7 +226,73 @@ impl QueryPlanner {
 
             true // This is a write query
         } else {
-            false // Read-only query
+            false
+        };
+
+        // Handle DELETE clause
+        let is_write = if let Some(delete_clause) = &query.delete_clause {
+            let vars: Vec<String> = delete_clause.expressions.iter().filter_map(|e| {
+                if let Expression::Variable(v) = e { Some(v.clone()) } else { None }
+            }).collect();
+            operator = Box::new(DeleteOperator::new(operator, vars, delete_clause.detach));
+            true
+        } else {
+            is_write
+        };
+
+        // Handle SET clauses
+        let is_write = if !query.set_clauses.is_empty() {
+            let mut items = Vec::new();
+            for set_clause in &query.set_clauses {
+                for item in &set_clause.items {
+                    items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+                }
+            }
+            operator = Box::new(SetPropertyOperator::new(operator, items));
+            true
+        } else {
+            is_write
+        };
+
+        // Handle REMOVE clauses
+        let is_write = if !query.remove_clauses.is_empty() {
+            let mut items = Vec::new();
+            for remove_clause in &query.remove_clauses {
+                for item in &remove_clause.items {
+                    if let RemoveItem::Property { variable, property } = item {
+                        items.push((variable.clone(), property.clone()));
+                    }
+                }
+            }
+            if !items.is_empty() {
+                operator = Box::new(RemovePropertyOperator::new(operator, items));
+            }
+            true
+        } else {
+            is_write
+        };
+
+        // Handle FOREACH clause
+        let is_write = if let Some(foreach_clause) = &query.foreach_clause {
+            let mut set_items = Vec::new();
+            for set_clause in &foreach_clause.set_clauses {
+                for item in &set_clause.items {
+                    set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+                }
+            }
+            let create_patterns: Vec<Pattern> = foreach_clause.create_clauses.iter()
+                .map(|c| c.pattern.clone())
+                .collect();
+            operator = Box::new(ForeachOperator::new(
+                operator,
+                foreach_clause.variable.clone(),
+                foreach_clause.expression.clone(),
+                set_items,
+                create_patterns,
+            ));
+            true
+        } else {
+            is_write
         };
 
         // Add RETURN clause if present
@@ -214,6 +330,7 @@ impl QueryPlanner {
                         "avg" => Some(AggregateType::Avg),
                         "min" => Some(AggregateType::Min),
                         "max" => Some(AggregateType::Max),
+                        "collect" => Some(AggregateType::Collect),
                         _ => None,
                     };
 
@@ -260,9 +377,8 @@ impl QueryPlanner {
             }
         } else {
             // No explicit RETURN - return all matched/yielded variables
-            if !query.match_clauses.is_empty() {
-                let pattern = &query.match_clauses[0].pattern;
-                for path in &pattern.paths {
+            for mc in &query.match_clauses {
+                for path in &mc.pattern.paths {
                     if let Some(var) = &path.start.variable {
                         output_columns.push(var.clone());
                     }
@@ -279,6 +395,11 @@ impl QueryPlanner {
                     output_columns.push(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
+        }
+
+        // Add SKIP if present
+        if let Some(skip) = query.skip {
+            operator = Box::new(SkipOperator::new(operator, skip));
         }
 
         // Add LIMIT if present

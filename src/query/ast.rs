@@ -24,10 +24,26 @@ pub struct Query {
     pub skip: Option<usize>,
     /// CALL clause (optional)
     pub call_clause: Option<CallClause>,
+    /// DELETE clause (optional)
+    pub delete_clause: Option<DeleteClause>,
+    /// SET clauses
+    pub set_clauses: Vec<SetClause>,
+    /// REMOVE clauses
+    pub remove_clauses: Vec<RemoveClause>,
+    /// WITH clause (optional)
+    pub with_clause: Option<WithClause>,
     /// CREATE VECTOR INDEX clause (optional)
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
+    /// FOREACH clause (optional)
+    pub foreach_clause: Option<ForeachClause>,
+    /// UNWIND clause (optional)
+    pub unwind_clause: Option<UnwindClause>,
+    /// MERGE clause (optional)
+    pub merge_clause: Option<MergeClause>,
+    /// UNION queries (chained via UNION/UNION ALL)
+    pub union_queries: Vec<(Query, bool)>, // (query, is_union_all)
     /// EXPLAIN clause (optional)
     pub explain: bool,
 }
@@ -193,6 +209,40 @@ pub enum Expression {
     },
     /// Variable reference
     Variable(String),
+    /// CASE expression
+    Case {
+        /// Optional operand for simple CASE
+        operand: Option<Box<Expression>>,
+        /// WHEN condition THEN result pairs
+        when_clauses: Vec<(Expression, Expression)>,
+        /// ELSE default
+        else_result: Option<Box<Expression>>,
+    },
+    /// List/map indexing: expr[index]
+    Index {
+        /// Expression being indexed
+        expr: Box<Expression>,
+        /// Index expression
+        index: Box<Expression>,
+    },
+    /// EXISTS { MATCH pattern WHERE condition }
+    ExistsSubquery {
+        /// Pattern to match
+        pattern: Pattern,
+        /// Optional WHERE predicate
+        where_clause: Option<Box<WhereClause>>,
+    },
+    /// List comprehension: [x IN list WHERE cond | expr]
+    ListComprehension {
+        /// Variable name
+        variable: String,
+        /// List expression
+        list_expr: Box<Expression>,
+        /// Optional filter predicate
+        filter: Option<Box<Expression>>,
+        /// Mapping expression
+        map_expr: Box<Expression>,
+    },
 }
 
 /// Binary operators
@@ -230,6 +280,10 @@ pub enum BinaryOp {
     EndsWith,
     /// String contains
     Contains,
+    /// IN list membership
+    In,
+    /// Regex match (=~)
+    RegexMatch,
 }
 
 /// Unary operators
@@ -270,6 +324,97 @@ pub struct CreateClause {
     pub pattern: Pattern,
 }
 
+/// DELETE clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteClause {
+    /// Expressions to delete (variables referencing nodes/edges)
+    pub expressions: Vec<Expression>,
+    /// Whether DETACH DELETE (also removes relationships)
+    pub detach: bool,
+}
+
+/// SET clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetClause {
+    /// Items to set
+    pub items: Vec<SetItem>,
+}
+
+/// SET item: n.name = "Alice"
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetItem {
+    /// Variable name
+    pub variable: String,
+    /// Property name
+    pub property: String,
+    /// Value expression
+    pub value: Expression,
+}
+
+/// REMOVE clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveClause {
+    /// Items to remove
+    pub items: Vec<RemoveItem>,
+}
+
+/// REMOVE item: n.name or n:Label
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    Property { variable: String, property: String },
+    Label { variable: String, label: Label },
+}
+
+/// FOREACH clause: FOREACH (x IN list | SET x.prop = val)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeachClause {
+    /// Variable name for each element
+    pub variable: String,
+    /// List expression to iterate
+    pub expression: Expression,
+    /// SET items to apply for each element
+    pub set_clauses: Vec<SetClause>,
+    /// CREATE clauses to apply for each element
+    pub create_clauses: Vec<CreateClause>,
+}
+
+/// UNWIND clause: UNWIND [1,2,3] AS x
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindClause {
+    /// Expression to unwind (must evaluate to a list)
+    pub expression: Expression,
+    /// Variable name for each element
+    pub variable: String,
+}
+
+/// MERGE clause: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeClause {
+    /// Pattern to merge
+    pub pattern: Pattern,
+    /// ON CREATE SET items
+    pub on_create_set: Vec<SetItem>,
+    /// ON MATCH SET items
+    pub on_match_set: Vec<SetItem>,
+}
+
+/// WITH clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    /// Items to pass through
+    pub items: Vec<ReturnItem>,
+    /// Whether DISTINCT
+    pub distinct: bool,
+    /// WHERE filter after WITH
+    pub where_clause: Option<WhereClause>,
+    /// ORDER BY within WITH
+    pub order_by: Option<OrderByClause>,
+    /// SKIP within WITH
+    pub skip: Option<usize>,
+    /// LIMIT within WITH
+    pub limit: Option<usize>,
+}
+
 /// ORDER BY clause
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByClause {
@@ -298,8 +443,16 @@ impl Query {
             limit: None,
             skip: None,
             call_clause: None,
+            delete_clause: None,
+            set_clauses: Vec::new(),
+            remove_clauses: Vec::new(),
+            with_clause: None,
             create_vector_index_clause: None,
             create_index_clause: None,
+            foreach_clause: None,
+            unwind_clause: None,
+            merge_clause: None,
+            union_queries: Vec::new(),
             explain: false,
         }
     }

@@ -139,7 +139,7 @@ impl<'a> MutQueryExecutor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Label;
+    use crate::graph::{Label, PropertyValue};
     use crate::query::parser::parse_query;
 
     #[test]
@@ -225,5 +225,546 @@ mod tests {
         assert!(result.is_ok(), "IS NULL query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_case_expression() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 25i64);
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("age", 15i64);
+        }
+
+        // CASE WHEN expression
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name, CASE WHEN n.age > 18 THEN \"adult\" ELSE \"minor\" END AS category"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "CASE query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 2);
+    }
+
+    #[test]
+    fn test_execute_collect_aggregate() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("dept", "Engineering");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("dept", "Engineering");
+        }
+
+        // COLLECT aggregate
+        let query = parse_query(
+            "MATCH (n:Person) RETURN collect(n.name) AS names"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "COLLECT query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_merge_create() {
+        let mut store = GraphStore::new();
+
+        // MERGE should create the node since it doesn't exist
+        let query = parse_query(r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "MERGE create failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+
+        // Verify node was created
+        let nodes = store.get_nodes_by_label(&Label::new("Person"));
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_merge_match() {
+        let mut store = GraphStore::new();
+
+        // Pre-create node
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        // MERGE should match existing node, not create a new one
+        let query = parse_query(r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "MERGE match failed: {:?}", result.err());
+
+        // Should still be 1 node
+        let nodes = store.get_nodes_by_label(&Label::new("Person"));
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_unwind() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("tags", PropertyValue::Array(vec![
+                PropertyValue::String("dev".to_string()),
+                PropertyValue::String("rust".to_string()),
+            ]));
+        }
+
+        // UNWIND the tags array
+        let query = parse_query(
+            "MATCH (n:Person) UNWIND n.tags AS tag RETURN tag"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "UNWIND query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        // Should get 2 rows (one per tag)
+        assert_eq!(batch.records.len(), 2, "Expected 2 rows from UNWIND, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_exists_subquery() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        let company = store.create_node("Company");
+        if let Some(node) = store.get_node_mut(company) {
+            node.set_property("name", "Acme");
+        }
+
+        // Alice works at Acme, Bob doesn't
+        store.create_edge(alice, company, "WORKS_AT").unwrap();
+
+        let query = parse_query(
+            "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "EXISTS query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        // Only Alice has a WORKS_AT edge
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from EXISTS, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_is_null() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("email", "alice@example.com");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            // Bob has no email
+        }
+
+        // IS NULL - should return Bob
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.email IS NULL RETURN n.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "IS NULL query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from IS NULL, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_is_not_null() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("email", "alice@example.com");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        // IS NOT NULL - should return Alice
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "IS NOT NULL query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from IS NOT NULL, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_foreach_set() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("scores", PropertyValue::Array(vec![
+                PropertyValue::Integer(90),
+                PropertyValue::Integer(85),
+            ]));
+        }
+
+        let query = parse_query(
+            "MATCH (n:Person) FOREACH (s IN n.scores | SET n.processed = TRUE)"
+        ).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "FOREACH query failed: {:?}", result.err());
+
+        // The node should have been processed
+        let node = store.get_node(alice).unwrap();
+        assert_eq!(
+            node.properties.get("processed"),
+            Some(&PropertyValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn test_execute_list_comprehension() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("scores", PropertyValue::Array(vec![
+                PropertyValue::Integer(10),
+                PropertyValue::Integer(20),
+                PropertyValue::Integer(30),
+            ]));
+        }
+
+        // Simple list comprehension: [x IN n.scores | x]
+        let query = parse_query(
+            "MATCH (n:Person) RETURN [x IN n.scores | x]"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "List comprehension query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_multiple_match_patterns() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        let acme = store.create_node("Company");
+        if let Some(node) = store.get_node_mut(acme) {
+            node.set_property("name", "Acme");
+        }
+
+        // Multiple MATCH with comma-separated patterns
+        let query = parse_query(
+            "MATCH (p:Person), (c:Company) RETURN p.name, c.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "Multi-pattern MATCH failed: {:?}", result.err());
+        let batch = result.unwrap();
+        // 2 persons × 1 company = 2 results
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from multi-pattern, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_optional_match() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        let company = store.create_node("Company");
+        if let Some(node) = store.get_node_mut(company) {
+            node.set_property("name", "Acme");
+        }
+
+        // Only Alice works at a company
+        store.create_edge(alice, company, "WORKS_AT").unwrap();
+
+        // OPTIONAL MATCH - both persons should be returned
+        let query = parse_query(
+            "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "OPTIONAL MATCH failed: {:?}", result.err());
+        let batch = result.unwrap();
+        // Both Alice and Bob should be in results
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from OPTIONAL MATCH, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_with_clause_passthrough() {
+        // WITH clause is parsed and passes through MATCH results
+        // Full WITH projection support is planned for a future release
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 30i64);
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("age", 25i64);
+        }
+
+        // WITH n passes through the variable binding
+        let query = parse_query(
+            "MATCH (n:Person) WITH n RETURN n.name"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "WITH clause query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 2);
+    }
+
+    #[test]
+    fn test_execute_delete() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 2);
+
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' DELETE n"
+        ).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "DELETE query failed: {:?}", result.err());
+
+        // Alice should be deleted
+        assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 1);
+    }
+
+    #[test]
+    fn test_execute_set_property() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 30i64);
+        }
+
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' SET n.age = 31"
+        ).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "SET query failed: {:?}", result.err());
+
+        let node = store.get_node(alice).unwrap();
+        assert_eq!(node.properties.get("age"), Some(&PropertyValue::Integer(31)));
+    }
+
+    #[test]
+    fn test_execute_remove_property() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("temp", "temporary");
+        }
+
+        assert!(store.get_node(alice).unwrap().properties.contains_key("temp"));
+
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.temp"
+        ).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "REMOVE query failed: {:?}", result.err());
+
+        let node = store.get_node(alice).unwrap();
+        assert!(!node.properties.contains_key("temp"));
+    }
+
+    #[test]
+    fn test_execute_arithmetic() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 30i64);
+            node.set_property("bonus", 5i64);
+        }
+
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.age + n.bonus"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "Arithmetic query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_string_functions() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let query = parse_query(
+            "MATCH (n:Person) RETURN toUpper(n.name)"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "String function query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+        let val = batch.records[0].get("toUpper(n.name)").unwrap();
+        assert_eq!(*val, Value::Property(PropertyValue::String("ALICE".to_string())));
+    }
+
+    #[test]
+    fn test_execute_regex_match() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("email", "alice@example.com");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("email", "bob@test.org");
+        }
+
+        let query = parse_query(
+            r#"MATCH (n:Person) WHERE n.email =~ ".*@example\.com" RETURN n.name"#
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "Regex query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 regex match, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_in_operator() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+        }
+
+        let charlie = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(charlie) {
+            node.set_property("name", "Charlie");
+        }
+
+        let query = parse_query(
+            r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Charlie"] RETURN n.name"#
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "IN operator query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 2, "Expected 2 IN results, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_execute_skip_and_limit() {
+        let mut store = GraphStore::new();
+
+        for i in 0..10 {
+            let id = store.create_node("Person");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Person{}", i));
+                node.set_property("idx", i as i64);
+            }
+        }
+
+        // SKIP 3 LIMIT 2
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name SKIP 3 LIMIT 2"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "SKIP/LIMIT query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from SKIP 3 LIMIT 2, got {}", batch.records.len());
     }
 }

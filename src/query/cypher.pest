@@ -5,9 +5,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
-query = { SOI ~ explain_clause? ~ statement ~ ";"? ~ EOI }
+query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"EXPLAIN" }
-statement = { create_vector_index_stmt | create_index_stmt | call_stmt | match_stmt | create_stmt }
+union_clause = { ^"UNION" ~ ^"ALL"? }
+statement = { create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt }
 
 // CREATE VECTOR INDEX statement
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
@@ -24,13 +25,31 @@ procedure_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 yield_items = { yield_item ~ ("," ~ yield_item)* }
 yield_item = { variable ~ (^"AS" ~ variable)? }
 
-// MATCH clause (can optionally have CALL or CREATE)
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ call_clause? ~ create_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
+// MERGE statement: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
+merge_stmt = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? ~ return_clause? }
+on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
+on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
+
+// MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
+unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
+merge_inline = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? }
+match_clause = { ^"MATCH" ~ pattern }
+optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern }
 where_clause = { ^"WHERE" ~ expression }
+with_clause = { ^"WITH" ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
 create_clause = { ^"CREATE" ~ pattern }
+delete_clause = { ^"DETACH"? ~ ^"DELETE" ~ expression ~ ("," ~ expression)* }
+set_clause = { ^"SET" ~ set_item ~ ("," ~ set_item)* }
+set_item = { property_access ~ "=" ~ expression }
+remove_clause = { ^"REMOVE" ~ remove_item ~ ("," ~ remove_item)* }
+remove_item = { property_access | variable ~ ":" ~ label }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }
 distinct = { ^"DISTINCT" }
 order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
+skip_clause = { ^"SKIP" ~ integer }
 limit_clause = { ^"LIMIT" ~ integer }
 
 // Standalone CREATE clause
@@ -76,15 +95,31 @@ order_direction = { ^"ASC" | ^"DESC" }
 
 // Expressions
 expression = { term ~ (binary_op ~ term)* }
-term = { unary_op* ~ primary ~ postfix_op? }
+term = { unary_op* ~ primary ~ postfix_op? ~ index_op? }
 postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
+index_op = { "[" ~ expression ~ "]" }
 primary = {
+    case_expression |
+    exists_subquery |
+    list_comprehension |
     function_call |
     property_access |
-    variable |
     value |
+    variable |
     "(" ~ expression ~ ")"
 }
+
+// EXISTS { MATCH pattern WHERE condition }
+exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }
+
+// List comprehension: [x IN list WHERE cond | expr]
+list_comprehension = { "[" ~ variable ~ in_op ~ expression ~ (^"WHERE" ~ expression)? ~ "|" ~ expression ~ "]" }
+
+// CASE expression: CASE WHEN condition THEN result [WHEN...] [ELSE default] END
+// Also simple form: CASE expr WHEN val THEN result [WHEN...] [ELSE default] END
+case_expression = { ^"CASE" ~ (!(^"WHEN") ~ expression)? ~ case_when+ ~ case_else? ~ ^"END" }
+case_when = { ^"WHEN" ~ expression ~ ^"THEN" ~ expression }
+case_else = { ^"ELSE" ~ expression }
 
 property_access = { variable ~ "." ~ property_key }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
@@ -93,11 +128,12 @@ function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 // Operators
 mul_div_mod_op = { "*" | "/" | "%" }
 add_sub_op = { "+" | "-" }
-comparison_op = { "<=" | ">=" | "<" | ">" | "==" | "=" | "!=" | "<>" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
+comparison_op = { "<=" | "<>" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
+in_op = @{ ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 and_op = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }
 or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-binary_op = _{ mul_div_mod_op | add_sub_op | comparison_op | and_op | or_op }
+binary_op = _{ mul_div_mod_op | add_sub_op | comparison_op | in_op | and_op | or_op }
 
 unary_op = { ^"NOT" | "-" }
 
