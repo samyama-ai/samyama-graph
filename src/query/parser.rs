@@ -51,13 +51,29 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
     for pair in pairs {
         match pair.as_rule() {
             Rule::query => {
+                let mut is_union_all = false;
+                let mut first = true;
                 for inner in pair.into_inner() {
                     match inner.as_rule() {
                         Rule::explain_clause => {
                             query.explain = true;
                         }
+                        Rule::union_clause => {
+                            // Check if UNION ALL (inner has "ALL" text)
+                            let text = inner.as_str().to_uppercase();
+                            is_union_all = text.contains("ALL");
+                        }
                         Rule::statement => {
-                            parse_statement(inner, &mut query)?;
+                            if first {
+                                parse_statement(inner, &mut query)?;
+                                first = false;
+                            } else {
+                                // UNION query
+                                let mut union_query = Query::new();
+                                parse_statement(inner, &mut union_query)?;
+                                query.union_queries.push((union_query, is_union_all));
+                                is_union_all = false;
+                            }
                         }
                         Rule::EOI => break,
                         _ => {}
@@ -82,6 +98,9 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             }
             Rule::call_stmt => {
                 parse_call_statement(inner, query)?;
+            }
+            Rule::merge_stmt => {
+                parse_merge_statement(inner, query)?;
             }
             Rule::match_stmt => {
                 parse_match_statement(inner, query)?;
@@ -291,6 +310,12 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::remove_clause => {
                 query.remove_clauses.push(parse_remove_clause(inner)?);
             }
+            Rule::unwind_clause => {
+                query.unwind_clause = Some(parse_unwind_clause(inner)?);
+            }
+            Rule::merge_inline => {
+                query.merge_clause = Some(parse_merge_clause(inner)?);
+            }
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }
@@ -456,6 +481,126 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
     }
 
     Ok(RemoveClause { items })
+}
+
+fn parse_unwind_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<UnwindClause> {
+    let mut expression = None;
+    let mut variable = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => expression = Some(parse_expression(inner)?),
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+
+    Ok(UnwindClause {
+        expression: expression.ok_or_else(|| ParseError::SemanticError("UNWIND missing expression".to_string()))?,
+        variable: variable.ok_or_else(|| ParseError::SemanticError("UNWIND missing AS variable".to_string()))?,
+    })
+}
+
+fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    // merge_stmt has pattern, on_create_set?, on_match_set?, return_clause?
+    let mut pattern = None;
+    let mut on_create_set = Vec::new();
+    let mut on_match_set = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::pattern => pattern = Some(parse_pattern(inner)?),
+            Rule::on_create_set => {
+                for si in inner.into_inner() {
+                    if si.as_rule() == Rule::set_item {
+                        on_create_set.push(parse_set_item(si)?);
+                    }
+                }
+            }
+            Rule::on_match_set => {
+                for si in inner.into_inner() {
+                    if si.as_rule() == Rule::set_item {
+                        on_match_set.push(parse_set_item(si)?);
+                    }
+                }
+            }
+            Rule::return_clause => {
+                query.return_clause = Some(parse_return_clause(inner)?);
+            }
+            _ => {}
+        }
+    }
+
+    query.merge_clause = Some(MergeClause {
+        pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
+        on_create_set,
+        on_match_set,
+    });
+    Ok(())
+}
+
+fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeClause> {
+    let mut pattern = None;
+    let mut on_create_set = Vec::new();
+    let mut on_match_set = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::pattern => pattern = Some(parse_pattern(inner)?),
+            Rule::on_create_set => {
+                for si in inner.into_inner() {
+                    if si.as_rule() == Rule::set_item {
+                        on_create_set.push(parse_set_item(si)?);
+                    }
+                }
+            }
+            Rule::on_match_set => {
+                for si in inner.into_inner() {
+                    if si.as_rule() == Rule::set_item {
+                        on_match_set.push(parse_set_item(si)?);
+                    }
+                }
+            }
+            Rule::return_clause => {
+                // Handled at statement level for merge_stmt
+            }
+            _ => {}
+        }
+    }
+
+    Ok(MergeClause {
+        pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
+        on_create_set,
+        on_match_set,
+    })
+}
+
+fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
+    let mut variable = String::new();
+    let mut property = String::new();
+    let mut value = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::property_access => {
+                for pa in inner.into_inner() {
+                    match pa.as_rule() {
+                        Rule::variable => variable = pa.as_str().to_string(),
+                        Rule::property_key => property = pa.as_str().to_string(),
+                        _ => {}
+                    }
+                }
+            }
+            Rule::expression => value = Some(parse_expression(inner)?),
+            _ => {}
+        }
+    }
+
+    Ok(SetItem {
+        variable,
+        property,
+        value: value.ok_or_else(|| ParseError::SemanticError("SET item missing value".to_string()))?,
+    })
 }
 
 fn parse_return_items(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<ReturnItem>> {
@@ -893,12 +1038,14 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             let mut prefix_ops = Vec::new();
             let mut primary_pair = None;
             let mut postfix_pair = None;
+            let mut index_pair = None;
 
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::unary_op => prefix_ops.push(inner),
                     Rule::primary => primary_pair = Some(inner),
                     Rule::postfix_op => postfix_pair = Some(inner),
+                    Rule::index_op => index_pair = Some(inner),
                     _ => {}
                 }
             }
@@ -917,6 +1064,19 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     op,
                     expr: Box::new(expr),
                 };
+            }
+
+            // Apply index operator [expr]
+            if let Some(index) = index_pair {
+                for idx_inner in index.into_inner() {
+                    if idx_inner.as_rule() == Rule::expression {
+                        let index_expr = parse_expression(idx_inner)?;
+                        expr = Expression::Index {
+                            expr: Box::new(expr),
+                            index: Box::new(index_expr),
+                        };
+                    }
+                }
             }
 
             // Apply prefix operators in reverse order (innermost first)
@@ -1284,5 +1444,66 @@ mod tests {
         let query = r#"MATCH (n:Person) RETURN toUpper(n.name), toLower(n.name), trim(n.name)"#;
         let result = parse_query(query);
         assert!(result.is_ok(), "Failed to parse string functions: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_unwind() {
+        let query = "MATCH (n:Person) UNWIND [1, 2, 3] AS x RETURN n, x";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse UNWIND: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.unwind_clause.is_some());
+        assert_eq!(ast.unwind_clause.unwrap().variable, "x");
+    }
+
+    #[test]
+    fn test_parse_merge() {
+        let query = r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.created = "now" ON MATCH SET n.lastSeen = "now" RETURN n"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse MERGE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.merge_clause.is_some());
+        let merge = ast.merge_clause.unwrap();
+        assert_eq!(merge.on_create_set.len(), 1);
+        assert_eq!(merge.on_match_set.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_merge_simple() {
+        let query = r#"MERGE (n:Person {name: "Alice"})"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse simple MERGE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.merge_clause.is_some());
+    }
+
+    #[test]
+    fn test_parse_union() {
+        let query = "MATCH (n:Person) RETURN n.name UNION MATCH (m:Animal) RETURN m.name";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse UNION: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.union_queries.len(), 1);
+        assert!(!ast.union_queries[0].1); // not UNION ALL
+    }
+
+    #[test]
+    fn test_parse_union_all() {
+        let query = "MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse UNION ALL: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.union_queries.len(), 1);
+        assert!(ast.union_queries[0].1); // is UNION ALL
+    }
+
+    #[test]
+    fn test_parse_list_index() {
+        let query = "MATCH (n:Person) RETURN n.tags[0]";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse list index: {:?}", result.err());
+        let ast = result.unwrap();
+        let item = &ast.return_clause.unwrap().items[0];
+        assert!(matches!(&item.expression, Expression::Index { .. }));
     }
 }

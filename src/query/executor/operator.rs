@@ -3,7 +3,7 @@
 //! Implements ADR-007 (Volcano Iterator Model)
 
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
-use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction};
+use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
 use std::collections::{HashMap, HashSet};
@@ -130,6 +130,59 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
             _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
         },
+    }
+}
+
+/// Shared list/map indexing evaluation
+fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
+    match (&collection, &index) {
+        (Value::Property(PropertyValue::Array(arr)), Value::Property(PropertyValue::Integer(i))) => {
+            let idx = if *i < 0 { (arr.len() as i64 + *i) as usize } else { *i as usize };
+            Ok(arr.get(idx).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+        }
+        (Value::Property(PropertyValue::Map(map)), Value::Property(PropertyValue::String(key))) => {
+            Ok(map.get(key).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Standalone expression evaluator usable from any operator
+fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    match expr {
+        Expression::Variable(var) => {
+            record.get(var).cloned()
+                .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+        }
+        Expression::Property { variable, property } => {
+            let val = record.get(variable)
+                .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
+            Ok(Value::Property(val.resolve_property(property, store)))
+        }
+        Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
+        Expression::Binary { left, op, right } => {
+            let l = eval_expression(left, record, store)?;
+            let r = eval_expression(right, record, store)?;
+            eval_binary_op(op, l, r)
+        }
+        Expression::Unary { op, expr: e } => {
+            let val = eval_expression(e, record, store)?;
+            eval_unary_op(op, val)
+        }
+        Expression::Function { name, args } => {
+            let arg_vals: Vec<Value> = args.iter()
+                .map(|a| eval_expression(a, record, store))
+                .collect::<Result<_, _>>()?;
+            eval_function(name, &arg_vals)
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| eval_expression(e, record, store))
+        }
+        Expression::Index { expr: e, index } => {
+            let collection = eval_expression(e, record, store)?;
+            let idx = eval_expression(index, record, store)?;
+            eval_index(collection, idx)
+        }
     }
 }
 
@@ -741,6 +794,11 @@ impl FilterOperator {
             Expression::Case { operand, when_clauses, else_result } => {
                 eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
             }
+            Expression::Index { expr, index } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let idx = self.evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
         }
     }
 
@@ -1211,6 +1269,11 @@ impl ProjectOperator {
             Expression::Case { operand, when_clauses, else_result } => {
                 eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
             }
+            Expression::Index { expr, index } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let idx = self.evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
         }
     }
 }
@@ -1410,6 +1473,11 @@ impl AggregateOperator {
             Expression::Case { operand, when_clauses, else_result } => {
                 eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
             }
+            Expression::Index { expr, index } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let idx = Self::evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
+            }
         }
     }
 }
@@ -1607,6 +1675,11 @@ impl SortOperator {
             }
             Expression::Case { operand, when_clauses, else_result } => {
                 eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
+            }
+            Expression::Index { expr, index } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let idx = Self::evaluate_expression(index, record, store)?;
+                eval_index(collection, idx)
             }
         }
     }
@@ -3427,6 +3500,200 @@ impl PhysicalOperator for RemovePropertyOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+    }
+}
+
+/// UNWIND operator - expands a list expression into individual rows
+pub struct UnwindOperator {
+    input: OperatorBox,
+    expression: Expression,
+    variable: String,
+    buffer: Vec<Record>,
+    buffer_idx: usize,
+}
+
+impl UnwindOperator {
+    pub fn new(input: OperatorBox, expression: Expression, variable: String) -> Self {
+        Self { input, expression, variable, buffer: Vec::new(), buffer_idx: 0 }
+    }
+}
+
+impl PhysicalOperator for UnwindOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if self.buffer_idx < self.buffer.len() {
+                let record = self.buffer[self.buffer_idx].clone();
+                self.buffer_idx += 1;
+                return Ok(Some(record));
+            }
+
+            let record = match self.input.next(store)? {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+
+            let list_val = eval_expression(&self.expression, &record, store)?;
+
+            let items = match list_val {
+                Value::Property(PropertyValue::Array(arr)) => arr,
+                Value::Property(PropertyValue::Vector(vec)) => {
+                    vec.into_iter().map(|f| PropertyValue::Float(f as f64)).collect()
+                }
+                _ => vec![],
+            };
+
+            self.buffer.clear();
+            self.buffer_idx = 0;
+            for item in items {
+                let mut new_record = record.clone();
+                new_record.bind(self.variable.clone(), Value::Property(item));
+                self.buffer.push(new_record);
+            }
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] })) }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.buffer.clear();
+        self.buffer_idx = 0;
+    }
+}
+
+/// MERGE operator - upsert: match or create pattern
+pub struct MergeOperator {
+    pattern: Pattern,
+    on_create_set: Vec<(String, String, Expression)>,
+    on_match_set: Vec<(String, String, Expression)>,
+    executed: bool,
+}
+
+impl MergeOperator {
+    pub fn new(
+        pattern: Pattern,
+        on_create_set: Vec<(String, String, Expression)>,
+        on_match_set: Vec<(String, String, Expression)>,
+    ) -> Self {
+        Self { pattern, on_create_set, on_match_set, executed: false }
+    }
+}
+
+impl PhysicalOperator for MergeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "MergeOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+        self.executed = true;
+
+        let path = self.pattern.paths.first()
+            .ok_or_else(|| ExecutionError::PlanningError("MERGE pattern has no paths".to_string()))?;
+
+        let start = &path.start;
+        let start_var = start.variable.clone().unwrap_or_else(|| "n".to_string());
+        let labels = &start.labels;
+        let props = start.properties.as_ref();
+
+        // Search for existing nodes matching labels + properties
+        let mut matched_node_id = None;
+        if let Some(first_label) = labels.first() {
+            let candidates = store.get_nodes_by_label(first_label);
+            for node in candidates {
+                let has_all_labels = labels.iter().all(|l| node.labels.contains(l));
+                if !has_all_labels { continue; }
+
+                if let Some(required_props) = props {
+                    let props_match = required_props.iter().all(|(k, v)| {
+                        node.properties.get(k).map_or(false, |pv| pv == v)
+                    });
+                    if !props_match { continue; }
+                }
+
+                matched_node_id = Some(node.id);
+                break;
+            }
+        }
+
+        let node_id;
+        let mut record = Record::new();
+
+        if let Some(existing_id) = matched_node_id {
+            node_id = existing_id;
+            record.bind(start_var.clone(), Value::NodeRef(node_id));
+
+            for (var, prop, expr) in &self.on_match_set {
+                if var == &start_var {
+                    let val = eval_expression(expr, &record, store)?;
+                    if let Value::Property(pv) = val {
+                        if let Some(node) = store.get_node_mut(node_id) {
+                            node.set_property(prop.clone(), pv);
+                        }
+                    }
+                }
+            }
+        } else {
+            let label_str = labels.first().map(|l| l.as_str()).unwrap_or("Node");
+            node_id = store.create_node(label_str);
+
+            for label in labels.iter().skip(1) {
+                if let Some(node) = store.get_node_mut(node_id) {
+                    node.labels.insert(label.clone());
+                }
+            }
+
+            if let Some(required_props) = props {
+                for (k, v) in required_props {
+                    if let Some(node) = store.get_node_mut(node_id) {
+                        node.set_property(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            record.bind(start_var.clone(), Value::NodeRef(node_id));
+
+            for (var, prop, expr) in &self.on_create_set {
+                if var == &start_var {
+                    let val = eval_expression(expr, &record, store)?;
+                    if let Value::Property(pv) = val {
+                        if let Some(node) = store.get_node_mut(node_id) {
+                            node.set_property(prop.clone(), pv);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Some(record))
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store) {
+                Ok(Some(r)) => records.push(r),
+                _ => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
     }
 }
 

@@ -5,9 +5,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
-query = { SOI ~ explain_clause? ~ statement ~ ";"? ~ EOI }
+query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"EXPLAIN" }
-statement = { create_vector_index_stmt | create_index_stmt | call_stmt | match_stmt | create_stmt }
+union_clause = { ^"UNION" ~ ^"ALL"? }
+statement = { create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt }
 
 // CREATE VECTOR INDEX statement
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
@@ -24,8 +25,15 @@ procedure_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 yield_items = { yield_item ~ ("," ~ yield_item)* }
 yield_item = { variable ~ (^"AS" ~ variable)? }
 
+// MERGE statement: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
+merge_stmt = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? ~ return_clause? }
+on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
+on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
+
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ delete_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ merge_inline? ~ delete_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
+merge_inline = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? }
 match_clause = { ^"MATCH" ~ pattern }
 optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern }
 where_clause = { ^"WHERE" ~ expression }
@@ -85,8 +93,9 @@ order_direction = { ^"ASC" | ^"DESC" }
 
 // Expressions
 expression = { term ~ (binary_op ~ term)* }
-term = { unary_op* ~ primary ~ postfix_op? }
+term = { unary_op* ~ primary ~ postfix_op? ~ index_op? }
 postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
+index_op = { "[" ~ expression ~ "]" }
 primary = {
     case_expression |
     function_call |

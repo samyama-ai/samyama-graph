@@ -36,6 +36,12 @@ pub struct Query {
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
+    /// UNWIND clause (optional)
+    pub unwind_clause: Option<UnwindClause>,
+    /// MERGE clause (optional)
+    pub merge_clause: Option<MergeClause>,
+    /// UNION queries (chained via UNION/UNION ALL)
+    pub union_queries: Vec<(Query, bool)>, // (query, is_union_all)
     /// EXPLAIN clause (optional)
     pub explain: bool,
 }
@@ -210,6 +216,13 @@ pub enum Expression {
         /// ELSE default
         else_result: Option<Box<Expression>>,
     },
+    /// List/map indexing: expr[index]
+    Index {
+        /// Expression being indexed
+        expr: Box<Expression>,
+        /// Index expression
+        index: Box<Expression>,
+    },
 }
 
 /// Binary operators
@@ -332,6 +345,26 @@ pub enum RemoveItem {
     Label { variable: String, label: Label },
 }
 
+/// UNWIND clause: UNWIND [1,2,3] AS x
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindClause {
+    /// Expression to unwind (must evaluate to a list)
+    pub expression: Expression,
+    /// Variable name for each element
+    pub variable: String,
+}
+
+/// MERGE clause: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeClause {
+    /// Pattern to merge
+    pub pattern: Pattern,
+    /// ON CREATE SET items
+    pub on_create_set: Vec<SetItem>,
+    /// ON MATCH SET items
+    pub on_match_set: Vec<SetItem>,
+}
+
 /// WITH clause
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithClause {
@@ -383,6 +416,9 @@ impl Query {
             with_clause: None,
             create_vector_index_clause: None,
             create_index_clause: None,
+            unwind_clause: None,
+            merge_clause: None,
+            union_queries: Vec::new(),
             explain: false,
         }
     }

@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -64,6 +64,44 @@ impl QueryPlanner {
                 output_columns: vec![],
                 is_write: true,
             });
+        }
+
+        // Handle MERGE-only statement (no MATCH needed)
+        if query.match_clauses.is_empty() && query.call_clause.is_none() {
+            if let Some(merge_clause) = &query.merge_clause {
+                let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
+                    .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                    .collect();
+                let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
+                    .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                    .collect();
+
+                let mut operator: OperatorBox = Box::new(MergeOperator::new(
+                    merge_clause.pattern.clone(),
+                    on_create,
+                    on_match,
+                ));
+
+                let mut output_columns = Vec::new();
+                if let Some(return_clause) = &query.return_clause {
+                    let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                        let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                            _ => format!("col_{}", i),
+                        });
+                        output_columns.push(alias.clone());
+                        (item.expression.clone(), alias)
+                    }).collect();
+                    operator = Box::new(ProjectOperator::new(operator, projections));
+                }
+
+                return Ok(ExecutionPlan {
+                    root: operator,
+                    output_columns,
+                    is_write: true,
+                });
+            }
         }
 
         // Handle CREATE-only queries (no MATCH/CALL required)
@@ -131,6 +169,15 @@ impl QueryPlanner {
         // Add WHERE clause if present
         if let Some(where_clause) = &query.where_clause {
             operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+        }
+
+        // Add UNWIND clause if present
+        if let Some(unwind_clause) = &query.unwind_clause {
+            operator = Box::new(UnwindOperator::new(
+                operator,
+                unwind_clause.expression.clone(),
+                unwind_clause.variable.clone(),
+            ));
         }
 
         // Determine output columns

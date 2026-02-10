@@ -139,7 +139,7 @@ impl<'a> MutQueryExecutor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Label;
+    use crate::graph::{Label, PropertyValue};
     use crate::query::parser::parse_query;
 
     #[test]
@@ -279,5 +279,68 @@ mod tests {
         assert!(result.is_ok(), "COLLECT query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_merge_create() {
+        let mut store = GraphStore::new();
+
+        // MERGE should create the node since it doesn't exist
+        let query = parse_query(r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "MERGE create failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+
+        // Verify node was created
+        let nodes = store.get_nodes_by_label(&Label::new("Person"));
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_merge_match() {
+        let mut store = GraphStore::new();
+
+        // Pre-create node
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        // MERGE should match existing node, not create a new one
+        let query = parse_query(r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "MERGE match failed: {:?}", result.err());
+
+        // Should still be 1 node
+        let nodes = store.get_nodes_by_label(&Label::new("Person"));
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_unwind() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("tags", PropertyValue::Array(vec![
+                PropertyValue::String("dev".to_string()),
+                PropertyValue::String("rust".to_string()),
+            ]));
+        }
+
+        // UNWIND the tags array
+        let query = parse_query(
+            "MATCH (n:Person) UNWIND n.tags AS tag RETURN tag"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "UNWIND query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        // Should get 2 rows (one per tag)
+        assert_eq!(batch.records.len(), 2, "Expected 2 rows from UNWIND, got {}", batch.records.len());
     }
 }
