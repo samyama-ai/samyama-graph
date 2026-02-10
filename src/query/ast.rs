@@ -24,6 +24,14 @@ pub struct Query {
     pub skip: Option<usize>,
     /// CALL clause (optional)
     pub call_clause: Option<CallClause>,
+    /// DELETE clause (optional)
+    pub delete_clause: Option<DeleteClause>,
+    /// SET clauses
+    pub set_clauses: Vec<SetClause>,
+    /// REMOVE clauses
+    pub remove_clauses: Vec<RemoveClause>,
+    /// WITH clause (optional)
+    pub with_clause: Option<WithClause>,
     /// CREATE VECTOR INDEX clause (optional)
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     /// CREATE INDEX clause (optional)
@@ -274,6 +282,64 @@ pub struct CreateClause {
     pub pattern: Pattern,
 }
 
+/// DELETE clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteClause {
+    /// Expressions to delete (variables referencing nodes/edges)
+    pub expressions: Vec<Expression>,
+    /// Whether DETACH DELETE (also removes relationships)
+    pub detach: bool,
+}
+
+/// SET clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetClause {
+    /// Items to set
+    pub items: Vec<SetItem>,
+}
+
+/// SET item: n.name = "Alice"
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetItem {
+    /// Variable name
+    pub variable: String,
+    /// Property name
+    pub property: String,
+    /// Value expression
+    pub value: Expression,
+}
+
+/// REMOVE clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveClause {
+    /// Items to remove
+    pub items: Vec<RemoveItem>,
+}
+
+/// REMOVE item: n.name or n:Label
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    Property { variable: String, property: String },
+    Label { variable: String, label: Label },
+}
+
+/// WITH clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    /// Items to pass through
+    pub items: Vec<ReturnItem>,
+    /// Whether DISTINCT
+    pub distinct: bool,
+    /// WHERE filter after WITH
+    pub where_clause: Option<WhereClause>,
+    /// ORDER BY within WITH
+    pub order_by: Option<OrderByClause>,
+    /// SKIP within WITH
+    pub skip: Option<usize>,
+    /// LIMIT within WITH
+    pub limit: Option<usize>,
+}
+
 /// ORDER BY clause
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByClause {
@@ -302,6 +368,10 @@ impl Query {
             limit: None,
             skip: None,
             call_clause: None,
+            delete_clause: None,
+            set_clauses: Vec::new(),
+            remove_clauses: Vec::new(),
+            with_clause: None,
             create_vector_index_clause: None,
             create_index_clause: None,
             explain: false,

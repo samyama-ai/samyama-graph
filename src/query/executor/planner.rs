@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -179,7 +179,50 @@ impl QueryPlanner {
 
             true // This is a write query
         } else {
-            false // Read-only query
+            false
+        };
+
+        // Handle DELETE clause
+        let is_write = if let Some(delete_clause) = &query.delete_clause {
+            let vars: Vec<String> = delete_clause.expressions.iter().filter_map(|e| {
+                if let Expression::Variable(v) = e { Some(v.clone()) } else { None }
+            }).collect();
+            operator = Box::new(DeleteOperator::new(operator, vars, delete_clause.detach));
+            true
+        } else {
+            is_write
+        };
+
+        // Handle SET clauses
+        let is_write = if !query.set_clauses.is_empty() {
+            let mut items = Vec::new();
+            for set_clause in &query.set_clauses {
+                for item in &set_clause.items {
+                    items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+                }
+            }
+            operator = Box::new(SetPropertyOperator::new(operator, items));
+            true
+        } else {
+            is_write
+        };
+
+        // Handle REMOVE clauses
+        let is_write = if !query.remove_clauses.is_empty() {
+            let mut items = Vec::new();
+            for remove_clause in &query.remove_clauses {
+                for item in &remove_clause.items {
+                    if let RemoveItem::Property { variable, property } = item {
+                        items.push((variable.clone(), property.clone()));
+                    }
+                }
+            }
+            if !items.is_empty() {
+                operator = Box::new(RemovePropertyOperator::new(operator, items));
+            }
+            true
+        } else {
+            is_write
         };
 
         // Add RETURN clause if present
@@ -281,6 +324,11 @@ impl QueryPlanner {
                     output_columns.push(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
+        }
+
+        // Add SKIP if present
+        if let Some(skip) = query.skip {
+            operator = Box::new(SkipOperator::new(operator, skip));
         }
 
         // Add LIMIT if present

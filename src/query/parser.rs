@@ -242,21 +242,38 @@ fn parse_yield_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<YieldItem>
 }
 
 fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
-    let mut pattern = None;
-
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::pattern => {
-                pattern = Some(parse_pattern(inner)?);
+            Rule::match_clause => {
+                for mc_inner in inner.into_inner() {
+                    if mc_inner.as_rule() == Rule::pattern {
+                        query.match_clauses.push(MatchClause {
+                            pattern: parse_pattern(mc_inner)?,
+                            optional: false,
+                        });
+                    }
+                }
+            }
+            Rule::optional_match_clause => {
+                for mc_inner in inner.into_inner() {
+                    if mc_inner.as_rule() == Rule::pattern {
+                        query.match_clauses.push(MatchClause {
+                            pattern: parse_pattern(mc_inner)?,
+                            optional: true,
+                        });
+                    }
+                }
             }
             Rule::where_clause => {
                 query.where_clause = Some(parse_where_clause(inner)?);
+            }
+            Rule::with_clause => {
+                query.with_clause = Some(parse_with_clause(inner)?);
             }
             Rule::call_clause => {
                 query.call_clause = Some(parse_call_clause(inner)?);
             }
             Rule::create_clause => {
-                // Handle CREATE clause inside MATCH (for MATCH...CREATE pattern)
                 for create_inner in inner.into_inner() {
                     if create_inner.as_rule() == Rule::pattern {
                         query.create_clause = Some(CreateClause {
@@ -265,11 +282,27 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     }
                 }
             }
+            Rule::delete_clause => {
+                query.delete_clause = Some(parse_delete_clause(inner)?);
+            }
+            Rule::set_clause => {
+                query.set_clauses.push(parse_set_clause(inner)?);
+            }
+            Rule::remove_clause => {
+                query.remove_clauses.push(parse_remove_clause(inner)?);
+            }
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }
             Rule::order_by_clause => {
                 query.order_by = Some(parse_order_by_clause(inner)?);
+            }
+            Rule::skip_clause => {
+                for skip_inner in inner.into_inner() {
+                    if skip_inner.as_rule() == Rule::integer {
+                        query.skip = Some(skip_inner.as_str().parse().unwrap());
+                    }
+                }
             }
             Rule::limit_clause => {
                 for limit_inner in inner.into_inner() {
@@ -280,13 +313,6 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             }
             _ => {}
         }
-    }
-
-    if let Some(p) = pattern {
-        query.match_clauses.push(MatchClause {
-            pattern: p,
-            optional: false,
-        });
     }
 
     Ok(())
@@ -301,6 +327,156 @@ fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) 
         }
     }
     Ok(())
+}
+
+fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClause> {
+    let mut items = Vec::new();
+    let mut distinct = false;
+    let mut where_clause = None;
+    let mut order_by = None;
+    let mut skip = None;
+    let mut limit = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::distinct => { distinct = true; }
+            Rule::return_items => {
+                items = parse_return_items(inner)?;
+            }
+            Rule::where_clause => {
+                where_clause = Some(parse_where_clause(inner)?);
+            }
+            Rule::order_by_clause => {
+                order_by = Some(parse_order_by_clause(inner)?);
+            }
+            Rule::skip_clause => {
+                for skip_inner in inner.into_inner() {
+                    if skip_inner.as_rule() == Rule::integer {
+                        skip = Some(skip_inner.as_str().parse().unwrap());
+                    }
+                }
+            }
+            Rule::limit_clause => {
+                for limit_inner in inner.into_inner() {
+                    if limit_inner.as_rule() == Rule::integer {
+                        limit = Some(limit_inner.as_str().parse().unwrap());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit })
+}
+
+fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteClause> {
+    let text = pair.as_str().to_uppercase();
+    let detach = text.starts_with("DETACH");
+    let mut expressions = Vec::new();
+
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::expression {
+            expressions.push(parse_expression(inner)?);
+        }
+    }
+
+    Ok(DeleteClause { expressions, detach })
+}
+
+fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause> {
+    let mut items = Vec::new();
+
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::set_item {
+            let mut variable = String::new();
+            let mut property = String::new();
+            let mut value = None;
+
+            for si in inner.into_inner() {
+                match si.as_rule() {
+                    Rule::property_access => {
+                        for pa in si.into_inner() {
+                            match pa.as_rule() {
+                                Rule::variable => variable = pa.as_str().to_string(),
+                                Rule::property_key => property = pa.as_str().to_string(),
+                                _ => {}
+                            }
+                        }
+                    }
+                    Rule::expression => {
+                        value = Some(parse_expression(si)?);
+                    }
+                    _ => {}
+                }
+            }
+
+            items.push(SetItem {
+                variable,
+                property,
+                value: value.ok_or_else(|| ParseError::SemanticError("SET item missing value".to_string()))?,
+            });
+        }
+    }
+
+    Ok(SetClause { items })
+}
+
+fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveClause> {
+    let mut items = Vec::new();
+
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::remove_item {
+            let children: Vec<_> = inner.into_inner().collect();
+            if children.len() == 1 && children[0].as_rule() == Rule::property_access {
+                let mut variable = String::new();
+                let mut property = String::new();
+                for pa in children[0].clone().into_inner() {
+                    match pa.as_rule() {
+                        Rule::variable => variable = pa.as_str().to_string(),
+                        Rule::property_key => property = pa.as_str().to_string(),
+                        _ => {}
+                    }
+                }
+                items.push(RemoveItem::Property { variable, property });
+            } else {
+                // variable : label
+                let mut variable = String::new();
+                let mut label = String::new();
+                for child in children {
+                    match child.as_rule() {
+                        Rule::variable => variable = child.as_str().to_string(),
+                        Rule::label => label = child.as_str().to_string(),
+                        _ => {}
+                    }
+                }
+                items.push(RemoveItem::Label { variable, label: Label::new(&label) });
+            }
+        }
+    }
+
+    Ok(RemoveClause { items })
+}
+
+fn parse_return_items(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<ReturnItem>> {
+    let mut items = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::return_item {
+            let mut expr = None;
+            let mut alias = None;
+            for ri in inner.into_inner() {
+                match ri.as_rule() {
+                    Rule::expression => expr = Some(parse_expression(ri)?),
+                    Rule::variable => alias = Some(ri.as_str().to_string()),
+                    _ => {}
+                }
+            }
+            if let Some(e) = expr {
+                items.push(ReturnItem { expression: e, alias });
+            }
+        }
+    }
+    Ok(items)
 }
 
 fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Pattern> {
@@ -946,5 +1122,101 @@ mod tests {
             }
             other => panic!("Expected Unary(Not), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_optional_match() {
+        let query = "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN n, m";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse OPTIONAL MATCH: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.match_clauses.len(), 2);
+        assert!(!ast.match_clauses[0].optional);
+        assert!(ast.match_clauses[1].optional);
+    }
+
+    #[test]
+    fn test_parse_with_clause() {
+        let query = "MATCH (n:Person) WITH n.name AS name RETURN name";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse WITH: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.with_clause.is_some());
+    }
+
+    #[test]
+    fn test_parse_skip() {
+        let query = "MATCH (n:Person) RETURN n SKIP 5 LIMIT 10";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse SKIP: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.skip, Some(5));
+        assert_eq!(ast.limit, Some(10));
+    }
+
+    #[test]
+    fn test_parse_delete() {
+        let query = "MATCH (n:Person) DELETE n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse DELETE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.delete_clause.is_some());
+        assert!(!ast.delete_clause.unwrap().detach);
+    }
+
+    #[test]
+    fn test_parse_detach_delete() {
+        let query = "MATCH (n:Person) DETACH DELETE n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse DETACH DELETE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.delete_clause.as_ref().unwrap().detach);
+    }
+
+    #[test]
+    fn test_parse_set() {
+        let query = r#"MATCH (n:Person) SET n.name = "Bob" RETURN n"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse SET: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.set_clauses.len(), 1);
+        assert_eq!(ast.set_clauses[0].items[0].variable, "n");
+        assert_eq!(ast.set_clauses[0].items[0].property, "name");
+    }
+
+    #[test]
+    fn test_parse_remove() {
+        let query = "MATCH (n:Person) REMOVE n.email RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse REMOVE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert_eq!(ast.remove_clauses.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_in_operator() {
+        let query = r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Bob"] RETURN n"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse IN: {:?}", result.err());
+        let ast = result.unwrap();
+        let pred = &ast.where_clause.unwrap().predicate;
+        assert!(matches!(pred, Expression::Binary { op: BinaryOp::In, .. }));
+    }
+
+    #[test]
+    fn test_parse_arithmetic() {
+        let query = "MATCH (n:Person) RETURN n.age + 1";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse arithmetic: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_regex() {
+        let query = r#"MATCH (n:Person) WHERE n.email =~ ".*@gmail.com" RETURN n"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse regex: {:?}", result.err());
+        let ast = result.unwrap();
+        let pred = &ast.where_clause.unwrap().predicate;
+        assert!(matches!(pred, Expression::Binary { op: BinaryOp::RegexMatch, .. }));
     }
 }

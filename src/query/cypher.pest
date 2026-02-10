@@ -24,13 +24,22 @@ procedure_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 yield_items = { yield_item ~ ("," ~ yield_item)* }
 yield_item = { variable ~ (^"AS" ~ variable)? }
 
-// MATCH clause (can optionally have CALL or CREATE)
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? ~ call_clause? ~ create_clause? ~ return_clause? ~ order_by_clause? ~ limit_clause? }
+// MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ delete_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_clause = { ^"MATCH" ~ pattern }
+optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern }
 where_clause = { ^"WHERE" ~ expression }
+with_clause = { ^"WITH" ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
 create_clause = { ^"CREATE" ~ pattern }
+delete_clause = { ^"DETACH"? ~ ^"DELETE" ~ expression ~ ("," ~ expression)* }
+set_clause = { ^"SET" ~ set_item ~ ("," ~ set_item)* }
+set_item = { property_access ~ "=" ~ expression }
+remove_clause = { ^"REMOVE" ~ remove_item ~ ("," ~ remove_item)* }
+remove_item = { property_access | variable ~ ":" ~ label }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }
 distinct = { ^"DISTINCT" }
 order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
+skip_clause = { ^"SKIP" ~ integer }
 limit_clause = { ^"LIMIT" ~ integer }
 
 // Standalone CREATE clause

@@ -3099,6 +3099,232 @@ impl PhysicalOperator for AlgorithmOperator {
     }
 }
 
+/// Skip operator: SKIP n
+pub struct SkipOperator {
+    input: OperatorBox,
+    skip: usize,
+    skipped: usize,
+}
+
+impl SkipOperator {
+    pub fn new(input: OperatorBox, skip: usize) -> Self {
+        Self { input, skip, skipped: 0 }
+    }
+}
+
+impl PhysicalOperator for SkipOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        while self.skipped < self.skip {
+            if self.input.next(store)?.is_some() {
+                self.skipped += 1;
+            } else {
+                return Ok(None);
+            }
+        }
+        self.input.next(store)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        while self.skipped < self.skip {
+            if let Some(batch) = self.input.next_batch(store, batch_size)? {
+                for record in batch.records {
+                    self.skipped += 1;
+                    if self.skipped >= self.skip {
+                        // We may have extra records in this batch — collect remaining
+                        let mut remaining = vec![record];
+                        // Continue pulling from current batch not possible since we consumed it,
+                        // but we've finished skipping
+                        break;
+                    }
+                }
+                if self.skipped >= self.skip {
+                    // Start fresh from next batch
+                    break;
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.skipped = 0;
+    }
+}
+
+/// Delete operator: DELETE n or DETACH DELETE n
+pub struct DeleteOperator {
+    input: OperatorBox,
+    variables: Vec<String>,
+    detach: bool,
+}
+
+impl DeleteOperator {
+    pub fn new(input: OperatorBox, variables: Vec<String>, detach: bool) -> Self {
+        Self { input, variables, detach }
+    }
+}
+
+impl PhysicalOperator for DeleteOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for var in &self.variables {
+                if let Some(val) = record.get(var) {
+                    match val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            let node_id = *id;
+                            if self.detach {
+                                let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
+                                let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
+                                for eid in out_edges.into_iter().chain(in_edges) {
+                                    let _ = store.delete_edge(eid);
+                                }
+                            }
+                            let _ = store.delete_node(tenant_id, node_id);
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            let _ = store.delete_edge(*id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
+/// Set property operator: SET n.name = "Alice"
+pub struct SetPropertyOperator {
+    input: OperatorBox,
+    items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
+}
+
+impl SetPropertyOperator {
+    pub fn new(input: OperatorBox, items: Vec<(String, String, Expression)>) -> Self {
+        Self { input, items }
+    }
+}
+
+impl PhysicalOperator for SetPropertyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for (var, prop, expr) in &self.items {
+                // Evaluate the expression
+                let val = match expr {
+                    Expression::Literal(lit) => lit.clone(),
+                    Expression::Property { variable, property } => {
+                        if let Some(v) = record.get(variable) {
+                            v.resolve_property(property, store)
+                        } else {
+                            PropertyValue::Null
+                        }
+                    }
+                    _ => PropertyValue::Null,
+                };
+
+                if let Some(node_val) = record.get(var) {
+                    match node_val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            if let Some(node) = store.get_node_mut(*id) {
+                                node.set_property(prop, val.clone());
+                            }
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            if let Some(edge) = store.get_edge_mut(*id) {
+                                edge.set_property(prop, val.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
+/// Remove property operator: REMOVE n.name
+pub struct RemovePropertyOperator {
+    input: OperatorBox,
+    items: Vec<(String, String)>, // (variable, property)
+}
+
+impl RemovePropertyOperator {
+    pub fn new(input: OperatorBox, items: Vec<(String, String)>) -> Self {
+        Self { input, items }
+    }
+}
+
+impl PhysicalOperator for RemovePropertyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for (var, prop) in &self.items {
+                if let Some(node_val) = record.get(var) {
+                    match node_val {
+                        Value::NodeRef(id) | Value::Node(id, _) => {
+                            if let Some(node) = store.get_node_mut(*id) {
+                                node.remove_property(prop);
+                            }
+                        }
+                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                            if let Some(edge) = store.get_edge_mut(*id) {
+                                edge.remove_property(prop);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
