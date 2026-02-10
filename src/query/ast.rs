@@ -201,6 +201,15 @@ pub enum Expression {
     },
     /// Variable reference
     Variable(String),
+    /// CASE expression
+    Case {
+        /// Optional operand for simple CASE
+        operand: Option<Box<Expression>>,
+        /// WHEN condition THEN result pairs
+        when_clauses: Vec<(Expression, Expression)>,
+        /// ELSE default
+        else_result: Option<Box<Expression>>,
+    },
 }
 
 /// Binary operators

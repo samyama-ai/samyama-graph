@@ -943,6 +943,9 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
 fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::case_expression => {
+                return parse_case_expression(inner);
+            }
             Rule::property_access => {
                 return parse_property_access(inner);
             }
@@ -963,6 +966,48 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
         }
     }
     Err(ParseError::SemanticError("Invalid primary expression".to_string()))
+}
+
+fn parse_case_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut operand = None;
+    let mut when_clauses = Vec::new();
+    let mut else_result = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => {
+                // First expression is the operand for simple CASE form
+                if operand.is_none() && when_clauses.is_empty() {
+                    operand = Some(Box::new(parse_expression(inner)?));
+                }
+            }
+            Rule::case_when => {
+                let mut exprs: Vec<Expression> = Vec::new();
+                for wi in inner.into_inner() {
+                    if wi.as_rule() == Rule::expression {
+                        exprs.push(parse_expression(wi)?);
+                    }
+                }
+                if exprs.len() == 2 {
+                    when_clauses.push((exprs.remove(0), exprs.remove(0)));
+                }
+            }
+            Rule::case_else => {
+                for ei in inner.into_inner() {
+                    if ei.as_rule() == Rule::expression {
+                        else_result = Some(Box::new(parse_expression(ei)?));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Expression::Case {
+        operand,
+        when_clauses,
+        else_result,
+    })
 }
 
 fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
@@ -1218,5 +1263,26 @@ mod tests {
         let ast = result.unwrap();
         let pred = &ast.where_clause.unwrap().predicate;
         assert!(matches!(pred, Expression::Binary { op: BinaryOp::RegexMatch, .. }));
+    }
+
+    #[test]
+    fn test_parse_case_expression() {
+        let query = r#"MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN "adult" ELSE "minor" END"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse CASE: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_collect() {
+        let query = "MATCH (n:Person) RETURN collect(n.name)";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse collect: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_string_functions() {
+        let query = r#"MATCH (n:Person) RETURN toUpper(n.name), toLower(n.name), trim(n.name)"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse string functions: {:?}", result.err());
     }
 }

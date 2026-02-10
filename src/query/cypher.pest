@@ -88,12 +88,19 @@ expression = { term ~ (binary_op ~ term)* }
 term = { unary_op* ~ primary ~ postfix_op? }
 postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
 primary = {
+    case_expression |
     function_call |
     property_access |
     variable |
     value |
     "(" ~ expression ~ ")"
 }
+
+// CASE expression: CASE WHEN condition THEN result [WHEN...] [ELSE default] END
+// Also simple form: CASE expr WHEN val THEN result [WHEN...] [ELSE default] END
+case_expression = { ^"CASE" ~ (!(^"WHEN") ~ expression)? ~ case_when+ ~ case_else? ~ ^"END" }
+case_when = { ^"WHEN" ~ expression ~ ^"THEN" ~ expression }
+case_else = { ^"ELSE" ~ expression }
 
 property_access = { variable ~ "." ~ property_key }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }

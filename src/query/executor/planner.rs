@@ -260,6 +260,7 @@ impl QueryPlanner {
                         "avg" => Some(AggregateType::Avg),
                         "min" => Some(AggregateType::Min),
                         "max" => Some(AggregateType::Max),
+                        "collect" => Some(AggregateType::Collect),
                         _ => None,
                     };
 

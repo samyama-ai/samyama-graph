@@ -315,6 +315,54 @@ fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
                 _ => Err(ExecutionError::TypeError("tail() requires list".to_string())),
             }
         }
+        // Meta functions — work on nodes/edges
+        "id" => {
+            match &args[0] {
+                Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
+                Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
+                _ => Err(ExecutionError::TypeError("id() requires node or edge".to_string())),
+            }
+        }
+        "labels" => {
+            match &args[0] {
+                Value::Node(_, node) => {
+                    let labels: Vec<PropertyValue> = node.labels.iter()
+                        .map(|l| PropertyValue::String(l.as_str().to_string()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(labels)))
+                }
+                _ => Err(ExecutionError::TypeError("labels() requires a node".to_string())),
+            }
+        }
+        "type" => {
+            match &args[0] {
+                Value::Edge(_, edge) => {
+                    Ok(Value::Property(PropertyValue::String(edge.edge_type.as_str().to_string())))
+                }
+                _ => Err(ExecutionError::TypeError("type() requires an edge".to_string())),
+            }
+        }
+        "keys" => {
+            match &args[0] {
+                Value::Node(_, node) => {
+                    let keys: Vec<PropertyValue> = node.properties.keys()
+                        .map(|k| PropertyValue::String(k.clone()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(keys)))
+                }
+                Value::Edge(_, edge) => {
+                    let keys: Vec<PropertyValue> = edge.properties.keys()
+                        .map(|k| PropertyValue::String(k.clone()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(keys)))
+                }
+                _ => Err(ExecutionError::TypeError("keys() requires node or edge".to_string())),
+            }
+        }
+        "exists" => {
+            let is_null = matches!(&args[0], Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(!is_null)))
+        }
         _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
     }
 }
@@ -332,6 +380,42 @@ fn extract_int(val: &Value) -> ExecutionResult<i64> {
     match val {
         Value::Property(PropertyValue::Integer(i)) => Ok(*i),
         _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
+    }
+}
+
+/// Shared CASE expression evaluation
+fn eval_case<F>(
+    operand: Option<&Expression>,
+    when_clauses: &[(Expression, Expression)],
+    else_result: Option<&Expression>,
+    eval_fn: F,
+) -> ExecutionResult<Value>
+where
+    F: Fn(&Expression) -> ExecutionResult<Value>,
+{
+    if let Some(op_expr) = operand {
+        // Simple CASE: CASE expr WHEN val THEN result
+        let op_val = eval_fn(op_expr)?;
+        for (when_expr, then_expr) in when_clauses {
+            let when_val = eval_fn(when_expr)?;
+            if op_val == when_val {
+                return eval_fn(then_expr);
+            }
+        }
+    } else {
+        // Searched CASE: CASE WHEN condition THEN result
+        for (when_expr, then_expr) in when_clauses {
+            let when_val = eval_fn(when_expr)?;
+            if matches!(when_val, Value::Property(PropertyValue::Boolean(true))) {
+                return eval_fn(then_expr);
+            }
+        }
+    }
+    // ELSE clause or NULL
+    if let Some(else_expr) = else_result {
+        eval_fn(else_expr)
+    } else {
+        Ok(Value::Null)
     }
 }
 
@@ -653,6 +737,9 @@ impl FilterOperator {
                         }
                     }
                 }
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
             }
         }
     }
@@ -1121,6 +1208,9 @@ impl ProjectOperator {
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals)
             }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
+            }
         }
     }
 }
@@ -1177,6 +1267,7 @@ pub enum AggregateType {
     Avg,
     Min,
     Max,
+    Collect,
 }
 
 /// Aggregation function definition
@@ -1195,6 +1286,7 @@ enum AggregatorState {
     Avg { sum: f64, count: i64 },
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
+    Collect(Vec<PropertyValue>),
 }
 
 impl AggregatorState {
@@ -1205,6 +1297,7 @@ impl AggregatorState {
             AggregateType::Avg => AggregatorState::Avg { sum: 0.0, count: 0 },
             AggregateType::Min => AggregatorState::Min(None),
             AggregateType::Max => AggregatorState::Max(None),
+            AggregateType::Collect => AggregatorState::Collect(Vec::new()),
         }
     }
 
@@ -1241,6 +1334,11 @@ impl AggregatorState {
                     }
                 }
             }
+            AggregatorState::Collect(items) => {
+                if let Some(prop) = value.as_property() {
+                    items.push(prop.clone());
+                }
+            }
         }
     }
 
@@ -1254,6 +1352,7 @@ impl AggregatorState {
             }
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
+            AggregatorState::Collect(items) => Value::Property(PropertyValue::Array(items.clone())),
         }
     }
 }
@@ -1307,6 +1406,9 @@ impl AggregateOperator {
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals)
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
             }
         }
     }
@@ -1502,6 +1604,9 @@ impl SortOperator {
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals)
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
             }
         }
     }

@@ -226,4 +226,58 @@ mod tests {
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
     }
+
+    #[test]
+    fn test_execute_case_expression() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 25i64);
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("age", 15i64);
+        }
+
+        // CASE WHEN expression
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name, CASE WHEN n.age > 18 THEN \"adult\" ELSE \"minor\" END AS category"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "CASE query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 2);
+    }
+
+    #[test]
+    fn test_execute_collect_aggregate() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("dept", "Engineering");
+        }
+
+        let bob = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("dept", "Engineering");
+        }
+
+        // COLLECT aggregate
+        let query = parse_query(
+            "MATCH (n:Person) RETURN collect(n.name) AS names"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "COLLECT query failed: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
 }
