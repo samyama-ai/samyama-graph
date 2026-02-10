@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -267,6 +267,29 @@ impl QueryPlanner {
             if !items.is_empty() {
                 operator = Box::new(RemovePropertyOperator::new(operator, items));
             }
+            true
+        } else {
+            is_write
+        };
+
+        // Handle FOREACH clause
+        let is_write = if let Some(foreach_clause) = &query.foreach_clause {
+            let mut set_items = Vec::new();
+            for set_clause in &foreach_clause.set_clauses {
+                for item in &set_clause.items {
+                    set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+                }
+            }
+            let create_patterns: Vec<Pattern> = foreach_clause.create_clauses.iter()
+                .map(|c| c.pattern.clone())
+                .collect();
+            operator = Box::new(ForeachOperator::new(
+                operator,
+                foreach_clause.variable.clone(),
+                foreach_clause.expression.clone(),
+                set_items,
+                create_patterns,
+            ));
             true
         } else {
             is_write

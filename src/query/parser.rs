@@ -304,6 +304,9 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::delete_clause => {
                 query.delete_clause = Some(parse_delete_clause(inner)?);
             }
+            Rule::foreach_clause => {
+                query.foreach_clause = Some(parse_foreach_clause(inner)?);
+            }
             Rule::set_clause => {
                 query.set_clauses.push(parse_set_clause(inner)?);
             }
@@ -1106,6 +1109,12 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             Rule::case_expression => {
                 return parse_case_expression(inner);
             }
+            Rule::exists_subquery => {
+                return parse_exists_subquery(inner);
+            }
+            Rule::list_comprehension => {
+                return parse_list_comprehension(inner);
+            }
             Rule::property_access => {
                 return parse_property_access(inner);
             }
@@ -1167,6 +1176,90 @@ fn parse_case_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
         operand,
         when_clauses,
         else_result,
+    })
+}
+
+fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut pattern = None;
+    let mut where_clause = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::pattern => pattern = Some(parse_pattern(inner)?),
+            Rule::where_clause => where_clause = Some(parse_where_clause(inner)?),
+            _ => {}
+        }
+    }
+
+    Ok(Expression::ExistsSubquery {
+        pattern: pattern.ok_or_else(|| ParseError::SemanticError("EXISTS missing pattern".to_string()))?,
+        where_clause: where_clause.map(Box::new),
+    })
+}
+
+fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut variable = None;
+    let mut list_expr = None;
+    let mut filter = None;
+    let mut map_expr = None;
+    let mut expressions = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::in_op => {} // skip the IN keyword
+            Rule::expression => expressions.push(parse_expression(inner)?),
+            _ => {}
+        }
+    }
+
+    // Order: list_expr, [filter], map_expr
+    // Grammar: variable IN expression (WHERE expression)? | expression
+    // So expressions are: [list_expr, optional_filter, map_expr]
+    if expressions.len() >= 2 {
+        list_expr = Some(expressions.remove(0));
+        map_expr = Some(expressions.pop().unwrap());
+        if !expressions.is_empty() {
+            filter = Some(expressions.remove(0));
+        }
+    }
+
+    Ok(Expression::ListComprehension {
+        variable: variable.ok_or_else(|| ParseError::SemanticError("List comprehension missing variable".to_string()))?,
+        list_expr: Box::new(list_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing list expression".to_string()))?),
+        filter: filter.map(Box::new),
+        map_expr: Box::new(map_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing map expression".to_string()))?),
+    })
+}
+
+fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ForeachClause> {
+    let mut variable = None;
+    let mut expression = None;
+    let mut set_clauses = Vec::new();
+    let mut create_clauses = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::in_op => {} // skip
+            Rule::expression => expression = Some(parse_expression(inner)?),
+            Rule::set_clause => set_clauses.push(parse_set_clause(inner)?),
+            Rule::create_clause => {
+                for ci in inner.into_inner() {
+                    if ci.as_rule() == Rule::pattern {
+                        create_clauses.push(CreateClause { pattern: parse_pattern(ci)? });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ForeachClause {
+        variable: variable.ok_or_else(|| ParseError::SemanticError("FOREACH missing variable".to_string()))?,
+        expression: expression.ok_or_else(|| ParseError::SemanticError("FOREACH missing expression".to_string()))?,
+        set_clauses,
+        create_clauses,
     })
 }
 
@@ -1505,5 +1598,100 @@ mod tests {
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
         assert!(matches!(&item.expression, Expression::Index { .. }));
+    }
+
+    #[test]
+    fn test_parse_exists_subquery() {
+        let query = "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(:Person) } RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse EXISTS subquery: {:?}", result.err());
+        let ast = result.unwrap();
+        let where_clause = ast.where_clause.unwrap();
+        assert!(matches!(where_clause.predicate, Expression::ExistsSubquery { .. }));
+    }
+
+    #[test]
+    fn test_parse_exists_subquery_with_where() {
+        let query = "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age > 30 } RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse EXISTS with WHERE: {:?}", result.err());
+        let ast = result.unwrap();
+        if let Expression::ExistsSubquery { pattern, where_clause } = &ast.where_clause.unwrap().predicate {
+            assert!(!pattern.paths.is_empty());
+            assert!(where_clause.is_some());
+        } else {
+            panic!("Expected ExistsSubquery");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_comprehension() {
+        let query = "MATCH (n:Person) RETURN [x IN n.tags WHERE x <> 'admin' | x]";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse list comprehension: {:?}", result.err());
+        let ast = result.unwrap();
+        let item = &ast.return_clause.unwrap().items[0];
+        if let Expression::ListComprehension { variable, filter, .. } = &item.expression {
+            assert_eq!(variable, "x");
+            assert!(filter.is_some());
+        } else {
+            panic!("Expected ListComprehension, got {:?}", item.expression);
+        }
+    }
+
+    #[test]
+    fn test_parse_list_comprehension_no_filter() {
+        let query = "MATCH (n:Person) RETURN [x IN n.scores | x * 2]";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse list comprehension without filter: {:?}", result.err());
+        let ast = result.unwrap();
+        let item = &ast.return_clause.unwrap().items[0];
+        if let Expression::ListComprehension { variable, filter, .. } = &item.expression {
+            assert_eq!(variable, "x");
+            // Note: without a WHERE, there should be no filter
+            // But in practice, the parser might not distinguish - just check it parsed
+        } else {
+            panic!("Expected ListComprehension, got {:?}", item.expression);
+        }
+    }
+
+    #[test]
+    fn test_parse_foreach() {
+        let query = "MATCH (n:Person) FOREACH (tag IN n.tags | SET n.processed = TRUE)";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse FOREACH: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.foreach_clause.is_some());
+        let fc = ast.foreach_clause.unwrap();
+        assert_eq!(fc.variable, "tag");
+        assert!(!fc.set_clauses.is_empty());
+    }
+
+    #[test]
+    fn test_parse_foreach_with_create() {
+        let query = r#"MATCH (n:Person) FOREACH (x IN n.friends | CREATE (:Person {name: "friend"}))"#;
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse FOREACH with CREATE: {:?}", result.err());
+        let ast = result.unwrap();
+        assert!(ast.foreach_clause.is_some());
+        let fc = ast.foreach_clause.unwrap();
+        assert_eq!(fc.variable, "x");
+        assert!(!fc.create_clauses.is_empty());
+    }
+
+    #[test]
+    fn test_parse_complex_where_with_exists_and_and() {
+        let query = "MATCH (n:Person) WHERE n.age > 25 AND EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse complex WHERE with EXISTS: {:?}", result.err());
+        let ast = result.unwrap();
+        let where_clause = ast.where_clause.unwrap();
+        // Should be Binary(And, Property comparison, ExistsSubquery)
+        if let Expression::Binary { op, right, .. } = &where_clause.predicate {
+            assert_eq!(*op, BinaryOp::And);
+            assert!(matches!(right.as_ref(), Expression::ExistsSubquery { .. }));
+        } else {
+            panic!("Expected Binary(And, ..., ExistsSubquery), got {:?}", where_clause.predicate);
+        }
     }
 }

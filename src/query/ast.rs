@@ -36,6 +36,8 @@ pub struct Query {
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
+    /// FOREACH clause (optional)
+    pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
     pub unwind_clause: Option<UnwindClause>,
     /// MERGE clause (optional)
@@ -223,6 +225,24 @@ pub enum Expression {
         /// Index expression
         index: Box<Expression>,
     },
+    /// EXISTS { MATCH pattern WHERE condition }
+    ExistsSubquery {
+        /// Pattern to match
+        pattern: Pattern,
+        /// Optional WHERE predicate
+        where_clause: Option<Box<WhereClause>>,
+    },
+    /// List comprehension: [x IN list WHERE cond | expr]
+    ListComprehension {
+        /// Variable name
+        variable: String,
+        /// List expression
+        list_expr: Box<Expression>,
+        /// Optional filter predicate
+        filter: Option<Box<Expression>>,
+        /// Mapping expression
+        map_expr: Box<Expression>,
+    },
 }
 
 /// Binary operators
@@ -345,6 +365,19 @@ pub enum RemoveItem {
     Label { variable: String, label: Label },
 }
 
+/// FOREACH clause: FOREACH (x IN list | SET x.prop = val)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeachClause {
+    /// Variable name for each element
+    pub variable: String,
+    /// List expression to iterate
+    pub expression: Expression,
+    /// SET items to apply for each element
+    pub set_clauses: Vec<SetClause>,
+    /// CREATE clauses to apply for each element
+    pub create_clauses: Vec<CreateClause>,
+}
+
 /// UNWIND clause: UNWIND [1,2,3] AS x
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnwindClause {
@@ -416,6 +449,7 @@ impl Query {
             with_clause: None,
             create_vector_index_clause: None,
             create_index_clause: None,
+            foreach_clause: None,
             unwind_clause: None,
             merge_clause: None,
             union_queries: Vec::new(),

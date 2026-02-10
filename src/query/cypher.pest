@@ -31,7 +31,9 @@ on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ merge_inline? ~ delete_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ with_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 merge_inline = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? }
 match_clause = { ^"MATCH" ~ pattern }
@@ -98,12 +100,20 @@ postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
 index_op = { "[" ~ expression ~ "]" }
 primary = {
     case_expression |
+    exists_subquery |
+    list_comprehension |
     function_call |
     property_access |
-    variable |
     value |
+    variable |
     "(" ~ expression ~ ")"
 }
+
+// EXISTS { MATCH pattern WHERE condition }
+exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }
+
+// List comprehension: [x IN list WHERE cond | expr]
+list_comprehension = { "[" ~ variable ~ in_op ~ expression ~ (^"WHERE" ~ expression)? ~ "|" ~ expression ~ "]" }
 
 // CASE expression: CASE WHEN condition THEN result [WHEN...] [ELSE default] END
 // Also simple form: CASE expr WHEN val THEN result [WHEN...] [ELSE default] END
@@ -118,7 +128,7 @@ function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 // Operators
 mul_div_mod_op = { "*" | "/" | "%" }
 add_sub_op = { "+" | "-" }
-comparison_op = { "<=" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | "<>" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
+comparison_op = { "<=" | "<>" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
 in_op = @{ ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 and_op = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }
 or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }

@@ -183,7 +183,142 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             let idx = eval_expression(index, record, store)?;
             eval_index(collection, idx)
         }
+        Expression::ExistsSubquery { pattern, where_clause } => {
+            eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+        }
+        Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+            eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+        }
     }
+}
+
+/// Evaluate EXISTS { MATCH pattern WHERE cond }
+fn eval_exists_subquery(
+    pattern: &crate::query::ast::Pattern,
+    where_clause: Option<&crate::query::ast::WhereClause>,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    // Run a mini pattern match against the store
+    for path in &pattern.paths {
+        let start_var = path.start.variable.as_deref();
+        let start_labels = &path.start.labels;
+
+        // Check if the start variable is bound from the outer query
+        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
+            if let Some(val) = record.get(var) {
+                match val {
+                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
+                    _ => vec![],
+                }
+            } else if let Some(first_label) = start_labels.first() {
+                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+            } else {
+                store.all_nodes().iter().map(|n| n.id).collect()
+            }
+        } else if let Some(first_label) = start_labels.first() {
+            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+        } else {
+            store.all_nodes().iter().map(|n| n.id).collect()
+        };
+
+        for node_id in &start_node_ids {
+            let node = match store.get_node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Check labels
+            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
+            if !has_all_labels { continue; }
+
+            // Check properties
+            if let Some(ref props) = path.start.properties {
+                let props_match = props.iter().all(|(k, v)| {
+                    node.properties.get(k).map_or(false, |pv| pv == v)
+                });
+                if !props_match { continue; }
+            }
+
+            // If no segments, just check existence
+            if path.segments.is_empty() {
+                if let Some(wc) = where_clause {
+                    let mut temp_record = record.clone();
+                    if let Some(var) = start_var {
+                        temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
+                    }
+                    let result = eval_expression(&wc.predicate, &temp_record, store)?;
+                    if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
+                        return Ok(Value::Property(PropertyValue::Boolean(true)));
+                    }
+                } else {
+                    return Ok(Value::Property(PropertyValue::Boolean(true)));
+                }
+            } else {
+                // Check edges
+                for segment in &path.segments {
+                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
+                    let outgoing = store.get_outgoing_edges(*node_id);
+                    for edge in &outgoing {
+                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
+                            continue;
+                        }
+                        if !segment.node.labels.is_empty() {
+                            if let Some(target) = store.get_node(edge.target) {
+                                let target_matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
+                                if target_matches {
+                                    return Ok(Value::Property(PropertyValue::Boolean(true)));
+                                }
+                            }
+                        } else {
+                            return Ok(Value::Property(PropertyValue::Boolean(true)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Value::Property(PropertyValue::Boolean(false)))
+}
+
+/// Evaluate list comprehension: [x IN list WHERE cond | expr]
+fn eval_list_comprehension(
+    variable: &str,
+    list_expr: &Expression,
+    filter: Option<&Expression>,
+    map_expr: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    let list_val = eval_expression(list_expr, record, store)?;
+
+    let items = match list_val {
+        Value::Property(PropertyValue::Array(arr)) => arr,
+        _ => return Ok(Value::Property(PropertyValue::Array(vec![]))),
+    };
+
+    let mut result = Vec::new();
+    for item in items {
+        let mut inner_record = record.clone();
+        inner_record.bind(variable.to_string(), Value::Property(item));
+
+        // Apply filter
+        if let Some(f) = filter {
+            let cond = eval_expression(f, &inner_record, store)?;
+            if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) {
+                continue;
+            }
+        }
+
+        // Apply map expression
+        let mapped = eval_expression(map_expr, &inner_record, store)?;
+        match mapped {
+            Value::Property(pv) => result.push(pv),
+            _ => result.push(PropertyValue::Null),
+        }
+    }
+
+    Ok(Value::Property(PropertyValue::Array(result)))
 }
 
 /// Shared function evaluation for scalar functions (not aggregates)
@@ -799,6 +934,12 @@ impl FilterOperator {
                 let idx = self.evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 
@@ -1274,6 +1415,12 @@ impl ProjectOperator {
                 let idx = self.evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 }
@@ -1478,6 +1625,12 @@ impl AggregateOperator {
                 let idx = Self::evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
         }
     }
 }
@@ -1680,6 +1833,12 @@ impl SortOperator {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
+            }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            }
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
             }
         }
     }
@@ -3694,6 +3853,114 @@ impl PhysicalOperator for MergeOperator {
 
     fn reset(&mut self) {
         self.executed = false;
+    }
+}
+
+/// FOREACH operator: FOREACH (x IN list | SET x.prop = val)
+pub struct ForeachOperator {
+    input: OperatorBox,
+    variable: String,
+    list_expr: Expression,
+    set_items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
+    create_patterns: Vec<Pattern>,
+}
+
+impl ForeachOperator {
+    pub fn new(
+        input: OperatorBox,
+        variable: String,
+        list_expr: Expression,
+        set_items: Vec<(String, String, Expression)>,
+        create_patterns: Vec<Pattern>,
+    ) -> Self {
+        Self { input, variable, list_expr, set_items, create_patterns }
+    }
+}
+
+impl PhysicalOperator for ForeachOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "ForeachOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            // Evaluate the list expression
+            let list_val = eval_expression(&self.list_expr, &record, store)?;
+            let items = match list_val {
+                Value::Property(PropertyValue::Array(arr)) => arr,
+                _ => return Ok(Some(record)),
+            };
+
+            // Iterate over list items
+            for item in &items {
+                let mut inner_record = record.clone();
+                inner_record.bind(self.variable.clone(), Value::Property(item.clone()));
+
+                // Execute SET operations
+                for (var, prop, expr) in &self.set_items {
+                    let val = eval_expression(expr, &inner_record, store)?;
+                    let prop_val = match val {
+                        Value::Property(p) => p,
+                        Value::Null => PropertyValue::Null,
+                        _ => continue,
+                    };
+
+                    if let Some(node_val) = inner_record.get(var) {
+                        match node_val {
+                            Value::NodeRef(id) | Value::Node(id, _) => {
+                                if let Some(node) = store.get_node_mut(*id) {
+                                    node.set_property(prop, prop_val.clone());
+                                }
+                            }
+                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                if let Some(edge) = store.get_edge_mut(*id) {
+                                    edge.set_property(prop, prop_val.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Execute CREATE operations
+                for pattern in &self.create_patterns {
+                    for path in &pattern.paths {
+                        let label_str = path.start.labels.first()
+                            .map(|l| l.as_str())
+                            .unwrap_or("Node");
+                        let node_id = store.create_node(label_str);
+                        if let Some(props) = &path.start.properties {
+                            for (k, v) in props {
+                                if let Some(node) = store.get_node_mut(node_id) {
+                                    node.set_property(k, v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store) {
+                Ok(Some(r)) => records.push(r),
+                _ => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
     }
 }
 
