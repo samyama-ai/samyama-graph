@@ -617,7 +617,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Retail Banking Division".to_string(),
         Some(retail_quotas),
     )?;
-    println!("  ✓ Created 'retail_banking' tenant (10M nodes, 50M edges)");
+    println!("  ✓ Created 'retail_banking' tenant (quota: 10M nodes, 50M edges)");
 
     // Corporate Banking Division
     let corporate_quotas = ResourceQuotas {
@@ -633,7 +633,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Corporate Banking Division".to_string(),
         Some(corporate_quotas),
     )?;
-    println!("  ✓ Created 'corporate_banking' tenant (1M nodes, 10M edges)");
+    println!("  ✓ Created 'corporate_banking' tenant (quota: 1M nodes, 10M edges)");
 
     // Wealth Management Division
     let wealth_quotas = ResourceQuotas {
@@ -649,7 +649,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Wealth Management Division".to_string(),
         Some(wealth_quotas),
     )?;
-    println!("  ✓ Created 'wealth_management' tenant (500K nodes, 5M edges)");
+    println!("  ✓ Created 'wealth_management' tenant (quota: 500K nodes, 5M edges)");
     println!();
 
     // =========================================================================
