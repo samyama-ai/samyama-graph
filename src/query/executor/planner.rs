@@ -78,9 +78,13 @@ impl QueryPlanner {
 
         let mut operator: Option<OperatorBox> = None;
 
-        // 1. Handle MATCH if present
-        if !query.match_clauses.is_empty() {
-            operator = Some(self.plan_match(&query.match_clauses[0], query.where_clause.as_ref(), _store)?);
+        // 1. Handle MATCH clauses — combine multiple with CartesianProduct
+        for match_clause in &query.match_clauses {
+            let match_op = self.plan_match(match_clause, query.where_clause.as_ref(), _store)?;
+            operator = Some(match operator {
+                Some(existing) => Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox,
+                None => match_op,
+            });
         }
 
         // 2. Handle CALL if present
@@ -90,11 +94,10 @@ impl QueryPlanner {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
                 
-                // Collect variables from MATCH
+                // Collect variables from all MATCH clauses
                 let mut match_vars = HashSet::new();
-                if !query.match_clauses.is_empty() {
-                    let pattern = &query.match_clauses[0].pattern;
-                    for path in &pattern.paths {
+                for mc in &query.match_clauses {
+                    for path in &mc.pattern.paths {
                         if let Some(v) = &path.start.variable { match_vars.insert(v.clone()); }
                         for seg in &path.segments {
                             if let Some(v) = &seg.node.variable { match_vars.insert(v.clone()); }
@@ -260,9 +263,8 @@ impl QueryPlanner {
             }
         } else {
             // No explicit RETURN - return all matched/yielded variables
-            if !query.match_clauses.is_empty() {
-                let pattern = &query.match_clauses[0].pattern;
-                for path in &pattern.paths {
+            for mc in &query.match_clauses {
+                for path in &mc.pattern.paths {
                     if let Some(var) = &path.start.variable {
                         output_columns.push(var.clone());
                     }

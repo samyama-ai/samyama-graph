@@ -230,6 +230,10 @@ pub enum BinaryOp {
     EndsWith,
     /// String contains
     Contains,
+    /// IN list membership
+    In,
+    /// Regex match (=~)
+    RegexMatch,
 }
 
 /// Unary operators

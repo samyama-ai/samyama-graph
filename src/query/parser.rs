@@ -19,7 +19,7 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
         .op(Op::infix(Rule::or_op, Assoc::Left))
         .op(Op::infix(Rule::and_op, Assoc::Left))
-        .op(Op::infix(Rule::comparison_op, Assoc::Left))
+        .op(Op::infix(Rule::in_op, Assoc::Left) | Op::infix(Rule::comparison_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
 });
@@ -674,6 +674,7 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
                 Rule::or_op => BinaryOp::Or,
                 Rule::and_op => BinaryOp::And,
                 Rule::comparison_op => parse_op_str(op.as_str())?,
+                Rule::in_op => BinaryOp::In,
                 Rule::add_sub_op => parse_op_str(op.as_str())?,
                 Rule::mul_div_mod_op => parse_op_str(op.as_str())?,
                 _ => return Err(ParseError::SemanticError(format!("Unexpected operator: {:?}", op.as_rule()))),
@@ -704,6 +705,8 @@ fn parse_op_str(op_str: &str) -> ParseResult<BinaryOp> {
         _ if op_str.eq_ignore_ascii_case("STARTS WITH") => BinaryOp::StartsWith,
         _ if op_str.eq_ignore_ascii_case("ENDS WITH") => BinaryOp::EndsWith,
         _ if op_str.eq_ignore_ascii_case("CONTAINS") => BinaryOp::Contains,
+        _ if op_str.eq_ignore_ascii_case("IN") => BinaryOp::In,
+        "=~" => BinaryOp::RegexMatch,
         _ => return Err(ParseError::SemanticError(format!("Unknown operator: {}", op_str))),
     })
 }

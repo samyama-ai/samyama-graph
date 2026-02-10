@@ -11,7 +11,329 @@ use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem}
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
 
-// ... (optimization structs remain unchanged)
+/// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
+fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
+    let left_prop = match left {
+        Value::Property(p) => p,
+        Value::Null => PropertyValue::Null,
+        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+    };
+    let right_prop = match right {
+        Value::Property(p) => p,
+        Value::Null => PropertyValue::Null,
+        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+    };
+    let result = match op {
+        BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
+        BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            let cmp = left_prop.partial_cmp(&right_prop);
+            match (op, cmp) {
+                (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
+                (BinaryOp::Le, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (BinaryOp::Gt, Some(std::cmp::Ordering::Greater)) => PropertyValue::Boolean(true),
+                (BinaryOp::Ge, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (_, None) => PropertyValue::Null,
+                _ => PropertyValue::Boolean(false),
+            }
+        }
+        BinaryOp::And => match (&left_prop, &right_prop) {
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l && *r),
+            _ => return Err(ExecutionError::TypeError("AND requires booleans".to_string())),
+        },
+        BinaryOp::Or => match (&left_prop, &right_prop) {
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l || *r),
+            _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
+        },
+        BinaryOp::Add => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l + r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l + r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
+        },
+        BinaryOp::Sub => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l - r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
+            _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
+        },
+        BinaryOp::Mul => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
+            _ => return Err(ExecutionError::TypeError("Mul requires numeric operands".to_string())),
+        },
+        BinaryOp::Div => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
+            _ => return Err(ExecutionError::TypeError("Div requires numeric operands".to_string())),
+        },
+        BinaryOp::Mod => match (&left_prop, &right_prop) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l % r),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
+            _ => return Err(ExecutionError::TypeError("Mod requires numeric operands".to_string())),
+        },
+        BinaryOp::StartsWith => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.starts_with(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("STARTS WITH requires strings".to_string())),
+        },
+        BinaryOp::EndsWith => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.ends_with(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("ENDS WITH requires strings".to_string())),
+        },
+        BinaryOp::Contains => match (&left_prop, &right_prop) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.contains(r.as_str())),
+            _ => return Err(ExecutionError::TypeError("CONTAINS requires strings".to_string())),
+        },
+        BinaryOp::In => match &right_prop {
+            PropertyValue::Array(arr) => PropertyValue::Boolean(arr.contains(&left_prop)),
+            _ => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
+        },
+        BinaryOp::RegexMatch => match (&left_prop, &right_prop) {
+            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
+                PropertyValue::Boolean(re.is_match(text))
+            }
+            _ => return Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
+        },
+    };
+    Ok(Value::Property(result))
+}
+
+/// Shared unary operator evaluation
+fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
+    match op {
+        UnaryOp::IsNull => {
+            let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(is_null)))
+        }
+        UnaryOp::IsNotNull => {
+            let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+            Ok(Value::Property(PropertyValue::Boolean(!is_null)))
+        }
+        UnaryOp::Not => match val {
+            Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
+            _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
+        },
+        UnaryOp::Minus => match val {
+            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+            Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+            _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
+        },
+    }
+}
+
+/// Shared function evaluation for scalar functions (not aggregates)
+fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
+    match name.to_lowercase().as_str() {
+        // String functions
+        "toupper" | "touppercase" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.to_uppercase())))
+        }
+        "tolower" | "tolowercase" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.to_lowercase())))
+        }
+        "trim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim().to_string())))
+        }
+        "ltrim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim_start().to_string())))
+        }
+        "rtrim" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.trim_end().to_string())))
+        }
+        "replace" => {
+            if args.len() < 3 { return Err(ExecutionError::RuntimeError("replace() requires 3 arguments".to_string())); }
+            let s = extract_string(&args[0])?;
+            let from = extract_string(&args[1])?;
+            let to = extract_string(&args[2])?;
+            Ok(Value::Property(PropertyValue::String(s.replace(&from, &to))))
+        }
+        "substring" => {
+            if args.len() < 2 { return Err(ExecutionError::RuntimeError("substring() requires at least 2 arguments".to_string())); }
+            let s = extract_string(&args[0])?;
+            let start = extract_int(&args[1])? as usize;
+            let chars: Vec<char> = s.chars().collect();
+            if start >= chars.len() {
+                return Ok(Value::Property(PropertyValue::String(String::new())));
+            }
+            let result = if args.len() >= 3 {
+                let len = extract_int(&args[2])? as usize;
+                chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
+            } else {
+                chars[start..].iter().collect()
+            };
+            Ok(Value::Property(PropertyValue::String(result)))
+        }
+        "left" => {
+            let s = extract_string(&args[0])?;
+            let n = extract_int(&args[1])? as usize;
+            Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
+        }
+        "right" => {
+            let s = extract_string(&args[0])?;
+            let n = extract_int(&args[1])? as usize;
+            let chars: Vec<char> = s.chars().collect();
+            let start = chars.len().saturating_sub(n);
+            Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
+        }
+        "reverse" => {
+            let s = extract_string(&args[0])?;
+            Ok(Value::Property(PropertyValue::String(s.chars().rev().collect())))
+        }
+        "tostring" => {
+            let val = &args[0];
+            let s = match val {
+                Value::Property(PropertyValue::String(s)) => s.clone(),
+                Value::Property(PropertyValue::Integer(i)) => i.to_string(),
+                Value::Property(PropertyValue::Float(f)) => f.to_string(),
+                Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
+                Value::Null | Value::Property(PropertyValue::Null) => "null".to_string(),
+                _ => return Err(ExecutionError::TypeError("Cannot convert to string".to_string())),
+            };
+            Ok(Value::Property(PropertyValue::String(s)))
+        }
+        "tointeger" | "toint" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
+                Value::Property(PropertyValue::String(s)) => {
+                    let i = s.parse::<i64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to integer", s)))?;
+                    Ok(Value::Property(PropertyValue::Integer(i)))
+                }
+                _ => Err(ExecutionError::TypeError("Cannot convert to integer".to_string())),
+            }
+        }
+        "tofloat" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
+                Value::Property(PropertyValue::String(s)) => {
+                    let f = s.parse::<f64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to float", s)))?;
+                    Ok(Value::Property(PropertyValue::Float(f)))
+                }
+                _ => Err(ExecutionError::TypeError("Cannot convert to float".to_string())),
+            }
+        }
+        // Size/length
+        "size" | "length" => {
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
+                Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Integer(a.len() as i64))),
+                _ => Err(ExecutionError::TypeError("size() requires string or list".to_string())),
+            }
+        }
+        // Math functions
+        "abs" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.abs()))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.abs()))),
+                _ => Err(ExecutionError::TypeError("abs() requires numeric".to_string())),
+            }
+        }
+        "ceil" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.ceil() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("ceil() requires numeric".to_string())),
+            }
+        }
+        "floor" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.floor() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("floor() requires numeric".to_string())),
+            }
+        }
+        "round" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.round() as i64))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                _ => Err(ExecutionError::TypeError("round() requires numeric".to_string())),
+            }
+        }
+        "sqrt" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.sqrt()))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).sqrt()))),
+                _ => Err(ExecutionError::TypeError("sqrt() requires numeric".to_string())),
+            }
+        }
+        "sign" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.signum()))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 }))),
+                _ => Err(ExecutionError::TypeError("sign() requires numeric".to_string())),
+            }
+        }
+        // Type/meta functions
+        "coalesce" => {
+            for arg in args {
+                if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
+                    return Ok(arg.clone());
+                }
+            }
+            Ok(Value::Null)
+        }
+        "head" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    Ok(arr.first().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+                }
+                _ => Err(ExecutionError::TypeError("head() requires list".to_string())),
+            }
+        }
+        "last" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    Ok(arr.last().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+                }
+                _ => Err(ExecutionError::TypeError("last() requires list".to_string())),
+            }
+        }
+        "tail" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Array(arr)) => {
+                    let tail: Vec<PropertyValue> = arr.iter().skip(1).cloned().collect();
+                    Ok(Value::Property(PropertyValue::Array(tail)))
+                }
+                _ => Err(ExecutionError::TypeError("tail() requires list".to_string())),
+            }
+        }
+        _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
+    }
+}
+
+/// Helper: extract string from Value
+fn extract_string(val: &Value) -> ExecutionResult<String> {
+    match val {
+        Value::Property(PropertyValue::String(s)) => Ok(s.clone()),
+        _ => Err(ExecutionError::TypeError("Expected string argument".to_string())),
+    }
+}
+
+/// Helper: extract integer from Value
+fn extract_int(val: &Value) -> ExecutionResult<i64> {
+    match val {
+        Value::Property(PropertyValue::Integer(i)) => Ok(*i),
+        _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
+    }
+}
 
 /// Optimization problem wrapper for GraphStore
 struct GraphOptimizationProblem {
@@ -358,7 +680,16 @@ impl FilterOperator {
             BinaryOp::Ge => self.compare_ge(&left_prop, &right_prop)?,
             BinaryOp::And => self.logical_and(&left_prop, &right_prop)?,
             BinaryOp::Or => self.logical_or(&left_prop, &right_prop)?,
-            _ => return Err(ExecutionError::RuntimeError(format!("Unsupported operator: {:?}", op))),
+            BinaryOp::Add => self.arithmetic_add(&left_prop, &right_prop)?,
+            BinaryOp::Sub => self.arithmetic_sub(&left_prop, &right_prop)?,
+            BinaryOp::Mul => self.arithmetic_mul(&left_prop, &right_prop)?,
+            BinaryOp::Div => self.arithmetic_div(&left_prop, &right_prop)?,
+            BinaryOp::Mod => self.arithmetic_mod(&left_prop, &right_prop)?,
+            BinaryOp::StartsWith => self.string_starts_with(&left_prop, &right_prop)?,
+            BinaryOp::EndsWith => self.string_ends_with(&left_prop, &right_prop)?,
+            BinaryOp::Contains => self.string_contains(&left_prop, &right_prop)?,
+            BinaryOp::In => self.eval_in(&left_prop, &right_prop)?,
+            BinaryOp::RegexMatch => self.regex_match(&left_prop, &right_prop)?,
         };
 
         Ok(Value::Property(result))
@@ -411,6 +742,97 @@ impl FilterOperator {
         match (left, right) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l || *r)),
             _ => Err(ExecutionError::TypeError("OR requires boolean operands".to_string())),
+        }
+    }
+
+    fn arithmetic_add(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l + r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l + r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 + r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l + *r as f64)),
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::String(format!("{}{}", l, r))),
+            _ => Err(ExecutionError::TypeError("Addition requires numeric or string operands".to_string())),
+        }
+    }
+
+    fn arithmetic_sub(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l - r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l - r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 - r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l - *r as f64)),
+            _ => Err(ExecutionError::TypeError("Subtraction requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_mul(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l * r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l * r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 * r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l * *r as f64)),
+            _ => Err(ExecutionError::TypeError("Multiplication requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_div(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Division by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l / r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l / r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 / r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l / *r as f64)),
+            _ => Err(ExecutionError::TypeError("Division requires numeric operands".to_string())),
+        }
+    }
+
+    fn arithmetic_mod(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l % r)),
+            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l % r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 % r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l % *r as f64)),
+            _ => Err(ExecutionError::TypeError("Modulo requires numeric operands".to_string())),
+        }
+    }
+
+    fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.starts_with(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
+        }
+    }
+
+    fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.ends_with(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
+        }
+    }
+
+    fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.contains(r.as_str()))),
+            _ => Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
+        }
+    }
+
+    fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match right {
+            PropertyValue::Array(arr) => Ok(PropertyValue::Boolean(arr.contains(left))),
+            _ => Err(ExecutionError::TypeError("IN requires a list on the right side".to_string())),
+        }
+    }
+
+    fn regex_match(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        match (left, right) {
+            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
+                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
+                Ok(PropertyValue::Boolean(re.is_match(text)))
+            }
+            _ => Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
         }
     }
 
@@ -684,7 +1106,21 @@ impl ProjectOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported projection expression".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = self.evaluate_expression(left, record, store)?;
+                let right_val = self.evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = self.evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
         }
     }
 }
@@ -857,7 +1293,21 @@ impl AggregateOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported expression in aggregation".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = Self::evaluate_expression(left, record, store)?;
+                let right_val = Self::evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = Self::evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| Self::evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
         }
     }
 }
@@ -1038,7 +1488,21 @@ impl SortOperator {
                 Ok(Value::Property(prop))
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
-            _ => Err(ExecutionError::RuntimeError("Unsupported sort expression".to_string())),
+            Expression::Binary { left, op, right } => {
+                let left_val = Self::evaluate_expression(left, record, store)?;
+                let right_val = Self::evaluate_expression(right, record, store)?;
+                eval_binary_op(op, left_val, right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = Self::evaluate_expression(expr, record, store)?;
+                eval_unary_op(op, val)
+            }
+            Expression::Function { name, args } => {
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| Self::evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals)
+            }
         }
     }
 }

@@ -62,6 +62,7 @@ mime = "0.3"               # MIME types
 # Vector Search (Phase 6)
 hnsw_rs = "0.2.1"
 rand = "0.8"
+regex = "1"
 
 # Optimization Engine (Phase 7)
 samyama-optimization = { path = "crates/samyama-optimization", version = "0.5.0-alpha.1" }
