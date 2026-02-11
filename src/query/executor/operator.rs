@@ -1185,6 +1185,8 @@ pub struct ExpandOperator {
     edge_var: Option<String>,
     /// Edge types to expand (empty = all types)
     edge_types: Vec<String>,
+    /// Target node labels to filter (empty = any label)
+    target_labels: Vec<Label>,
     /// Direction
     direction: Direction,
     /// Current input record
@@ -1211,11 +1213,18 @@ impl ExpandOperator {
             target_var,
             edge_var,
             edge_types,
+            target_labels: Vec::new(),
             direction,
             current_record: None,
             current_edges: Vec::new(),
             edge_index: 0,
         }
+    }
+
+    /// Set target node labels to filter during expansion
+    pub fn with_target_labels(mut self, labels: Vec<Label>) -> Self {
+        self.target_labels = labels;
+        self
     }
 
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
@@ -1245,6 +1254,25 @@ impl ExpandOperator {
                 .map(|(eid, src, tgt, et)| (eid, src, tgt, et.clone()))
                 .collect()
         };
+
+        // Filter by target node labels if specified
+        if !self.target_labels.is_empty() {
+            self.current_edges.retain(|(_, src, tgt, _)| {
+                let target_id = match self.direction {
+                    Direction::Outgoing => *tgt,
+                    Direction::Incoming => *src,
+                    Direction::Both => {
+                        let source_id = store.get_node(node_id).map(|_| node_id);
+                        if source_id == Some(*src) { *tgt } else { *src }
+                    }
+                };
+                if let Some(node) = store.get_node(target_id) {
+                    self.target_labels.iter().all(|l| node.has_label(l))
+                } else {
+                    false
+                }
+            });
+        }
 
         self.edge_index = 0;
         Ok(())
