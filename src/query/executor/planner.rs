@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -135,7 +135,13 @@ impl QueryPlanner {
                 Some(existing) => {
                     let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
                     if !shared.is_empty() {
-                        Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                        if match_clause.optional {
+                            // OPTIONAL MATCH uses left outer join — unmatched left rows get NULLs
+                            let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
+                            Box::new(LeftOuterJoinOperator::new(existing, match_op, shared[0].clone(), right_only)) as OperatorBox
+                        } else {
+                            Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                        }
                     } else {
                         Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                     }
