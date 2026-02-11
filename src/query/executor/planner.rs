@@ -550,14 +550,29 @@ impl QueryPlanner {
                     .map(|t| t.as_str().to_string())
                     .collect();
 
-                path_operator = Box::new(ExpandOperator::new(
+                let expand = ExpandOperator::new(
                     path_operator,
                     current_var.clone(),
                     target_var.clone(),
                     edge_var,
                     edge_types,
                     segment.edge.direction.clone(),
-                ));
+                );
+
+                // Add target label filter if labels specified on target node
+                path_operator = if !segment.node.labels.is_empty() {
+                    Box::new(expand.with_target_labels(segment.node.labels.clone()))
+                } else {
+                    Box::new(expand)
+                };
+
+                // Add property filter for target node if properties specified
+                if let Some(ref props) = segment.node.properties {
+                    if !props.is_empty() {
+                        let filter_expr = self.build_property_filter(&target_var, props);
+                        path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                    }
+                }
 
                 current_var = target_var;
             }
