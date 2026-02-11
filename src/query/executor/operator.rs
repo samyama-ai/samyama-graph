@@ -2378,6 +2378,143 @@ impl PhysicalOperator for JoinOperator {
     }
 }
 
+/// Left outer join operator for OPTIONAL MATCH
+/// Iterates left records and probes right records by join variable.
+/// When no right match exists, emits the left record with NULL for right-only variables.
+pub struct LeftOuterJoinOperator {
+    left: OperatorBox,
+    right: OperatorBox,
+    join_var: String,
+    right_only_vars: Vec<String>,
+    // Materialized data
+    left_records: Vec<Record>,
+    right_hash: HashMap<Value, Vec<Record>>,
+    // Iteration state
+    current_left_idx: usize,
+    current_right_match_idx: usize,
+    null_emitted: bool,
+    materialized: bool,
+}
+
+impl LeftOuterJoinOperator {
+    pub fn new(
+        left: OperatorBox,
+        right: OperatorBox,
+        join_var: String,
+        right_only_vars: Vec<String>,
+    ) -> Self {
+        Self {
+            left,
+            right,
+            join_var,
+            right_only_vars,
+            left_records: Vec::new(),
+            right_hash: HashMap::new(),
+            current_left_idx: 0,
+            current_right_match_idx: 0,
+            null_emitted: false,
+            materialized: false,
+        }
+    }
+
+    fn materialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        if self.materialized {
+            return Ok(());
+        }
+
+        // Materialize left as flat list
+        while let Some(record) = self.left.next(store)? {
+            self.left_records.push(record);
+        }
+
+        // Materialize right into a hash map by join variable
+        while let Some(record) = self.right.next(store)? {
+            if let Some(val) = record.get(&self.join_var) {
+                self.right_hash.entry(val.clone()).or_default().push(record);
+            }
+        }
+
+        self.materialized = true;
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for LeftOuterJoinOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.materialize(store)?;
+
+        while self.current_left_idx < self.left_records.len() {
+            let left_record = &self.left_records[self.current_left_idx];
+
+            if let Some(join_val) = left_record.get(&self.join_var) {
+                if let Some(right_list) = self.right_hash.get(join_val) {
+                    // Has right matches — emit merged records
+                    if self.current_right_match_idx < right_list.len() {
+                        let right_record = &right_list[self.current_right_match_idx];
+                        self.current_right_match_idx += 1;
+
+                        let mut merged = left_record.clone();
+                        for (key, value) in right_record.bindings() {
+                            merged.bind(key.clone(), value.clone());
+                        }
+                        return Ok(Some(merged));
+                    }
+                    // Exhausted right matches for this left record — advance
+                } else if !self.null_emitted {
+                    // No right matches — emit left record with NULLs
+                    self.null_emitted = true;
+                    let mut merged = left_record.clone();
+                    for var in &self.right_only_vars {
+                        merged.bind(var.clone(), Value::Null);
+                    }
+                    return Ok(Some(merged));
+                }
+            } else if !self.null_emitted {
+                // Left record has no join var value — emit with NULLs
+                self.null_emitted = true;
+                let mut merged = left_record.clone();
+                for var in &self.right_only_vars {
+                    merged.bind(var.clone(), Value::Null);
+                }
+                return Ok(Some(merged));
+            }
+
+            // Move to next left record
+            self.current_left_idx += 1;
+            self.current_right_match_idx = 0;
+            self.null_emitted = false;
+        }
+
+        Ok(None)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut results = Vec::with_capacity(batch_size);
+        while results.len() < batch_size {
+            match self.next(store)? {
+                Some(record) => results.push(record),
+                None => break,
+            }
+        }
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.left.reset();
+        self.right.reset();
+        self.left_records.clear();
+        self.right_hash.clear();
+        self.current_left_idx = 0;
+        self.current_right_match_idx = 0;
+        self.null_emitted = false;
+        self.materialized = false;
+    }
+}
+
 /// Create node operator: CREATE (n:Person {name: "Alice"})
 pub struct CreateNodeOperator {
     /// Nodes to create (label, properties, variable)

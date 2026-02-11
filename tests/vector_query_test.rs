@@ -11,12 +11,12 @@ fn test_vector_call_query() {
     
     let mut props1 = std::collections::HashMap::new();
     props1.insert("name".to_string(), "Alice".into());
-    props1.insert("embedding".to_string(), PropertyValue::Vector(vec![1.0, 0.0]));
+    props1.insert("embedding".to_string(), PropertyValue::Vector(vec![1.0, 0.0, 0.0]));
     store.create_node_with_properties("default", vec![Label::new("Person")], props1);
-    
+
     let mut props2 = std::collections::HashMap::new();
     props2.insert("name".to_string(), "Bob".into());
-    props2.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 1.0]));
+    props2.insert("embedding".to_string(), PropertyValue::Vector(vec![0.0, 1.0, 0.0]));
     store.create_node_with_properties("default", vec![Label::new("Person")], props2);
     
     // 2. Execute query
