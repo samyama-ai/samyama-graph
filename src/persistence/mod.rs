@@ -205,6 +205,11 @@ impl PersistenceManager {
         Ok(())
     }
 
+    /// List all tenants that have persisted data in RocksDB
+    pub fn list_persisted_tenants(&self) -> Result<Vec<String>, PersistenceError> {
+        Ok(self.storage.list_persisted_tenants()?)
+    }
+
     /// Recover from storage and WAL
     pub fn recover(&self, tenant: &str) -> Result<(Vec<Node>, Vec<Edge>), PersistenceError> {
         info!("Starting recovery for tenant: {}", tenant);

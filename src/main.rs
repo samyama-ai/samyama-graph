@@ -382,7 +382,61 @@ fn load_phegeni_data(store: &mut GraphStore) {
 async fn start_server() {
     let (mut graph, rx) = GraphStore::with_async_indexing();
 
-    {
+    let mut config = ServerConfig::default();
+    config.address = std::env::args().find(|a| a.starts_with("--host"))
+        .and_then(|_| std::env::args().skip_while(|a| a != "--host").nth(1))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    config.port = std::env::args().find(|a| a.starts_with("--port"))
+        .and_then(|_| std::env::args().skip_while(|a| a != "--port").nth(1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(6379);
+
+    // Initialize persistence FIRST (before loading data)
+    let persistence = if let Some(path) = &config.data_path {
+        match samyama::PersistenceManager::new(path) {
+            Ok(pm) => Some(Arc::new(pm)),
+            Err(e) => {
+                eprintln!("Failed to initialize persistence: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Recover persisted data from RocksDB
+    let mut recovered = false;
+    if let Some(ref pm) = persistence {
+        match pm.list_persisted_tenants() {
+            Ok(tenants) if !tenants.is_empty() => {
+                println!("Recovering data for {} tenant(s)...", tenants.len());
+                for tenant in &tenants {
+                    match pm.recover(tenant) {
+                        Ok((nodes, edges)) => {
+                            println!("  Tenant '{}': {} nodes, {} edges", tenant, nodes.len(), edges.len());
+                            for node in nodes {
+                                graph.insert_recovered_node(node);
+                            }
+                            for edge in edges {
+                                if let Err(e) = graph.insert_recovered_edge(edge) {
+                                    eprintln!("  Warning: edge recovery error: {}", e);
+                                }
+                            }
+                            recovered = true;
+                        }
+                        Err(e) => eprintln!("  Error recovering tenant '{}': {}", tenant, e),
+                    }
+                }
+                println!("Recovery complete. Total: {} nodes, {} edges in-memory", graph.node_count(), graph.edge_count());
+            }
+            Ok(_) => println!("No persisted tenants found."),
+            Err(e) => eprintln!("Error listing persisted tenants: {}", e),
+        }
+    }
+
+    // Only load demo data if no persisted data was recovered
+    if !recovered {
+        println!("No persisted data found, loading demo data...");
         let alice = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(alice) {
             node.set_property("name", "Alice");
@@ -396,38 +450,25 @@ async fn start_server() {
         }
 
         graph.create_edge(alice, bob, "KNOWS").unwrap();
-        
+
         let (mut disease_ids, _drug_ids) = load_clinical_trials_data(&mut graph);
         load_hetionet_data(&mut graph, &mut disease_ids);
         load_phegeni_data(&mut graph);
         load_aact_data(&mut graph, &disease_ids);
-        
-        println!("\nGraph Statistics:");
-        println!("  Total nodes: {}", graph.node_count());
-        println!("  Total edges: {}", graph.edge_count());
     }
+
+    println!("\nGraph Statistics:");
+    println!("  Total nodes: {}", graph.node_count());
+    println!("  Total edges: {}", graph.edge_count());
 
     let store = Arc::new(RwLock::new(graph));
 
-    let mut config = ServerConfig::default();
-    config.address = std::env::args().find(|a| a.starts_with("--host"))
-        .and_then(|_| std::env::args().skip_while(|a| a != "--host").nth(1))
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    config.port = std::env::args().find(|a| a.starts_with("--port"))
-        .and_then(|_| std::env::args().skip_while(|a| a != "--port").nth(1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(6379);
-    
     println!("\nServer starting on {}:{}", config.address, config.port);
-    
-    // Initialize persistence if path is configured
-    let persistence = if let Some(path) = &config.data_path {
-        let pm = Arc::new(samyama::PersistenceManager::new(path).expect("Failed to initialize persistence"));
+
+    // Start background indexer now that store is wrapped in Arc
+    if let Some(ref pm) = persistence {
         pm.start_indexer(&*store.read().await, rx);
-        Some(pm)
-    } else {
-        None
-    };
+    }
 
     let server = if let Some(pm) = persistence {
         RespServer::new_with_persistence(config, store, pm)

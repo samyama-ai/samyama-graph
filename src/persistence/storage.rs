@@ -6,6 +6,7 @@
 use crate::graph::{Edge, EdgeId, Node, NodeId, PropertyMap};
 use rocksdb::{ColumnFamilyDescriptor, Options, DB};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -345,6 +346,26 @@ impl PersistentStorage {
         }
 
         Ok(edges)
+    }
+
+    /// List all tenants that have persisted data
+    pub fn list_persisted_tenants(&self) -> StorageResult<Vec<String>> {
+        let cf = self.db.cf_handle("nodes")
+            .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
+
+        let mut tenants = HashSet::new();
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (key, _) = item?;
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if let Some(tenant) = key_str.split(':').next() {
+                    tenants.insert(tenant.to_string());
+                }
+            }
+        }
+
+        Ok(tenants.into_iter().collect())
     }
 
     /// Create node key with tenant prefix
