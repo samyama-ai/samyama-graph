@@ -115,14 +115,34 @@ impl QueryPlanner {
         }
 
         let mut operator: Option<OperatorBox> = None;
+        let mut known_vars: HashSet<String> = HashSet::new();
 
-        // 1. Handle MATCH clauses — combine multiple with CartesianProduct
+        // 1. Handle MATCH clauses — use JoinOperator when clauses share variables
         for match_clause in &query.match_clauses {
             let match_op = self.plan_match(match_clause, query.where_clause.as_ref(), _store)?;
+
+            // Collect variables from this MATCH clause
+            let mut clause_vars = HashSet::new();
+            for path in &match_clause.pattern.paths {
+                if let Some(v) = &path.start.variable { clause_vars.insert(v.clone()); }
+                for seg in &path.segments {
+                    if let Some(v) = &seg.node.variable { clause_vars.insert(v.clone()); }
+                    if let Some(v) = &seg.edge.variable { clause_vars.insert(v.clone()); }
+                }
+            }
+
             operator = Some(match operator {
-                Some(existing) => Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox,
+                Some(existing) => {
+                    let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
+                    if !shared.is_empty() {
+                        Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                    } else {
+                        Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                    }
+                }
                 None => match_op,
             });
+            known_vars.extend(clause_vars);
         }
 
         // 2. Handle CALL if present
@@ -480,9 +500,10 @@ impl QueryPlanner {
             return Err(ExecutionError::PlanningError("Match pattern has no paths".to_string()));
         }
 
-        // Handle multiple paths with CartesianProductOperator
-        // Example: MATCH (a:Trial), (b:Condition) -> CartesianProduct of two node scans
+        // Handle multiple paths — use JoinOperator when paths share variables,
+        // CartesianProductOperator otherwise.
         let mut operators: Vec<OperatorBox> = Vec::new();
+        let mut path_vars: Vec<HashSet<String>> = Vec::new();
 
         for path in &pattern.paths {
             // Start with node scan for this path
@@ -577,13 +598,29 @@ impl QueryPlanner {
                 current_var = target_var;
             }
 
+            // Collect variables used in this path for join detection
+            let mut vars = HashSet::new();
+            if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+            }
+            path_vars.push(vars);
+
             operators.push(path_operator);
         }
 
-        // Combine operators: single path returns directly, multiple paths use CartesianProduct
+        // Combine operators: use JoinOperator when paths share a variable, CartesianProduct otherwise
         let mut result = operators.remove(0);
-        for op in operators {
-            result = Box::new(CartesianProductOperator::new(result, op));
+        let mut combined_vars = path_vars.remove(0);
+        for (op, vars) in operators.into_iter().zip(path_vars.into_iter()) {
+            let shared: Vec<String> = combined_vars.intersection(&vars).cloned().collect();
+            if !shared.is_empty() {
+                result = Box::new(JoinOperator::new(result, op, shared[0].clone()));
+            } else {
+                result = Box::new(CartesianProductOperator::new(result, op));
+            }
+            combined_vars.extend(vars);
         }
 
         Ok(result)

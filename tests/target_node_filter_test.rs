@@ -251,3 +251,100 @@ fn test_target_property_with_count() {
         panic!("Expected integer, got {:?}", count);
     }
 }
+
+/// Set up a graph with trials, diseases, countries, and relationships for multi-path join tests
+fn setup_multi_path_graph() -> GraphStore {
+    let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    // Countries
+    for country in &["India", "USA", "UK"] {
+        engine.execute_mut(&format!("CREATE (c:Country {{name: '{}'}})", country), &mut store, "default").unwrap();
+    }
+
+    // Disease categories
+    for disease in &["Diabetes", "Cancer", "Respiratory"] {
+        engine.execute_mut(&format!("CREATE (d:DiseaseCategory {{name: '{}'}})", disease), &mut store, "default").unwrap();
+    }
+
+    // Trials with country + disease relationships
+    let trials = vec![
+        ("T001", "India", "Diabetes"),
+        ("T002", "India", "Cancer"),
+        ("T003", "USA", "Diabetes"),
+        ("T004", "UK", "Respiratory"),
+        ("T005", "India", "Respiratory"),
+    ];
+
+    for (tid, country, disease) in &trials {
+        engine.execute_mut(&format!("CREATE (t:Trial {{trial_id: '{}'}})", tid), &mut store, "default").unwrap();
+        engine.execute_mut(
+            &format!("MATCH (t:Trial {{trial_id: '{}'}}), (c:Country {{name: '{}'}}) CREATE (t)-[:CONDUCTED_IN]->(c)", tid, country),
+            &mut store, "default"
+        ).unwrap();
+        engine.execute_mut(
+            &format!("MATCH (t:Trial {{trial_id: '{}'}}), (d:DiseaseCategory {{name: '{}'}}) CREATE (t)-[:STUDIES]->(d)", tid, disease),
+            &mut store, "default"
+        ).unwrap();
+    }
+
+    store
+}
+
+#[test]
+fn test_multi_path_join_shared_variable() {
+    let store = setup_multi_path_graph();
+    let engine = QueryEngine::new();
+
+    // Multi-path MATCH with shared variable t — should JOIN, not cross-product
+    let query = "MATCH (t:Trial)-[:CONDUCTED_IN]->(c:Country {name: 'India'}), (t)-[:STUDIES]->(d:DiseaseCategory) RETURN d.name, t.trial_id LIMIT 20";
+    let result = engine.execute(query, &store).unwrap();
+
+    // India trials: T001 (Diabetes), T002 (Cancer), T005 (Respiratory)
+    assert_eq!(result.len(), 3, "Expected 3 India trials but got {}", result.len());
+
+    let mut trial_disease: Vec<(String, String)> = result.records.iter()
+        .map(|r| {
+            let tid = r.get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap().to_string();
+            let disease = r.get("d.name").unwrap().as_property().unwrap().as_string().unwrap().to_string();
+            (tid, disease)
+        })
+        .collect();
+    trial_disease.sort();
+
+    assert!(trial_disease.contains(&("T001".to_string(), "Diabetes".to_string())));
+    assert!(trial_disease.contains(&("T002".to_string(), "Cancer".to_string())));
+    assert!(trial_disease.contains(&("T005".to_string(), "Respiratory".to_string())));
+}
+
+#[test]
+fn test_multi_path_join_with_both_target_filters() {
+    let store = setup_multi_path_graph();
+    let engine = QueryEngine::new();
+
+    // Both paths have target property filters + shared variable t
+    let query = "MATCH (t:Trial)-[:CONDUCTED_IN]->(c:Country {name: 'India'}), (t)-[:STUDIES]->(d:DiseaseCategory {name: 'Diabetes'}) RETURN t.trial_id";
+    let result = engine.execute(query, &store).unwrap();
+
+    // Only T001 is India + Diabetes
+    assert_eq!(result.len(), 1, "Expected 1 result but got {}", result.len());
+    let tid = result.records[0].get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap();
+    assert_eq!(tid, "T001");
+}
+
+#[test]
+fn test_multi_path_no_shared_variable() {
+    let store = setup_multi_path_graph();
+    let engine = QueryEngine::new();
+
+    // Two independent paths with NO shared variable — should be CartesianProduct
+    let query = "MATCH (c:Country {name: 'India'}), (d:DiseaseCategory {name: 'Diabetes'}) RETURN c.name, d.name";
+    let result = engine.execute(query, &store).unwrap();
+
+    // 1 country x 1 disease = 1 result
+    assert_eq!(result.len(), 1);
+    let country = result.records[0].get("c.name").unwrap().as_property().unwrap().as_string().unwrap();
+    let disease = result.records[0].get("d.name").unwrap().as_property().unwrap().as_string().unwrap();
+    assert_eq!(country, "India");
+    assert_eq!(disease, "Diabetes");
+}
