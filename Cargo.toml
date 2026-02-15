@@ -74,6 +74,10 @@ reqwest = { version = "0.13.1", features = ["json"] }
 tempfile = "3.8"
 criterion = "0.5"
 
+[[bench]]
+name = "graph_benchmarks"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -751,6 +751,83 @@ pub trait PhysicalOperator: Send {
     fn is_mutating(&self) -> bool {
         false
     }
+
+    /// Describe this operator for EXPLAIN output
+    /// Returns (operator_name, details, children)
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Unknown".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Description of an operator for EXPLAIN output
+pub struct OperatorDescription {
+    pub name: String,
+    pub details: String,
+    pub children: Vec<OperatorDescription>,
+}
+
+impl OperatorDescription {
+    /// Format the operator tree as a string
+    pub fn format(&self, indent: usize) -> String {
+        let mut result = String::new();
+        let prefix = if indent == 0 {
+            String::new()
+        } else {
+            format!("{}+- ", "   ".repeat(indent - 1))
+        };
+
+        if self.details.is_empty() {
+            result.push_str(&format!("{}{}\n", prefix, self.name));
+        } else {
+            result.push_str(&format!("{}{} ({})\n", prefix, self.name, self.details));
+        }
+
+        for child in &self.children {
+            result.push_str(&child.format(indent + 1));
+        }
+        result
+    }
+}
+
+/// Format an Expression for EXPLAIN output
+fn format_expression(expr: &Expression) -> String {
+    match expr {
+        Expression::Variable(v) => v.clone(),
+        Expression::Property { variable, property } => format!("{}.{}", variable, property),
+        Expression::Literal(val) => format!("{:?}", val),
+        Expression::Binary { left, op, right } => {
+            let op_str = match op {
+                BinaryOp::Eq => "=", BinaryOp::Ne => "<>", BinaryOp::Lt => "<",
+                BinaryOp::Le => "<=", BinaryOp::Gt => ">", BinaryOp::Ge => ">=",
+                BinaryOp::And => "AND", BinaryOp::Or => "OR",
+                BinaryOp::Add => "+", BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Mod => "%",
+                BinaryOp::StartsWith => "STARTS WITH", BinaryOp::EndsWith => "ENDS WITH",
+                BinaryOp::Contains => "CONTAINS", BinaryOp::In => "IN",
+                BinaryOp::RegexMatch => "=~",
+            };
+            format!("{} {} {}", format_expression(left), op_str, format_expression(right))
+        }
+        Expression::Unary { op, expr } => {
+            let op_str = match op {
+                UnaryOp::Not => "NOT", UnaryOp::Minus => "-",
+                UnaryOp::IsNull => "IS NULL", UnaryOp::IsNotNull => "IS NOT NULL",
+            };
+            match op {
+                UnaryOp::IsNull | UnaryOp::IsNotNull => format!("{} {}", format_expression(expr), op_str),
+                _ => format!("{} {}", op_str, format_expression(expr)),
+            }
+        }
+        Expression::Function { name, args } => {
+            let arg_strs: Vec<String> = args.iter().map(format_expression).collect();
+            format!("{}({})", name, arg_strs.join(", "))
+        }
+        _ => "...".to_string(),
+    }
 }
 
 /// Type alias for boxed operators
@@ -849,6 +926,19 @@ impl PhysicalOperator for NodeScanOperator {
 
     fn reset(&mut self) {
         self.current = 0;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let details = if self.labels.is_empty() {
+            format!("var={}, all labels", self.variable)
+        } else {
+            format!("var={}, labels={:?}", self.variable, self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>())
+        };
+        OperatorDescription {
+            name: "NodeScan".to_string(),
+            details,
+            children: Vec::new(),
+        }
     }
 }
 
@@ -1171,6 +1261,14 @@ impl PhysicalOperator for FilterOperator {
     fn reset(&mut self) {
         self.input.reset();
     }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Filter".to_string(),
+            details: format_expression(&self.predicate),
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 /// Expand operator: -[:KNOWS]->
@@ -1375,6 +1473,19 @@ impl PhysicalOperator for ExpandOperator {
         self.current_edges.clear();
         self.edge_index = 0;
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let dir_str = match self.direction {
+            Direction::Outgoing => format!("({})-[:{}]->({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
+            Direction::Incoming => format!("({})<-[:{}]-({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
+            Direction::Both => format!("({})--[:{}]--({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
+        };
+        OperatorDescription {
+            name: "Expand".to_string(),
+            details: dir_str,
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 /// Project operator: RETURN n.name, n.age
@@ -1494,6 +1605,18 @@ impl PhysicalOperator for ProjectOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let cols: Vec<String> = self.projections.iter().map(|(e, a)| {
+            let expr_str = format_expression(e);
+            if expr_str == *a { a.clone() } else { format!("{} AS {}", expr_str, a) }
+        }).collect();
+        OperatorDescription {
+            name: "Project".to_string(),
+            details: cols.join(", "),
+            children: vec![self.input.describe()],
+        }
     }
 }
 
@@ -1697,6 +1820,21 @@ impl PhysicalOperator for AggregateOperator {
         self.executed = false;
         self.results = Vec::new().into_iter();
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let agg_strs: Vec<String> = self.aggregates.iter().map(|a| {
+            format!("{}({}) AS {}", format!("{:?}", a.func).to_lowercase(), format_expression(&a.expr), a.alias)
+        }).collect();
+        let group_strs: Vec<String> = self.group_by.iter().map(|(e, a)| format!("{} AS {}", format_expression(e), a)).collect();
+        let mut details = Vec::new();
+        if !group_strs.is_empty() { details.push(format!("group_by=[{}]", group_strs.join(", "))); }
+        details.push(format!("aggs=[{}]", agg_strs.join(", ")));
+        OperatorDescription {
+            name: "Aggregate".to_string(),
+            details: details.join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 impl AggregateOperator {
@@ -1801,6 +1939,14 @@ impl PhysicalOperator for LimitOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.count = 0;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Limit".to_string(),
+            details: format!("{}", self.limit),
+            children: vec![self.input.describe()],
+        }
     }
 }
 
@@ -1908,6 +2054,17 @@ impl PhysicalOperator for SortOperator {
         self.records.clear();
         self.current = 0;
         self.executed = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let items: Vec<String> = self.sort_items.iter().map(|(e, asc)| {
+            format!("{} {}", format_expression(e), if *asc { "ASC" } else { "DESC" })
+        }).collect();
+        OperatorDescription {
+            name: "Sort".to_string(),
+            details: items.join(", "),
+            children: vec![self.input.describe()],
+        }
     }
 }
 
@@ -2048,6 +2205,18 @@ impl PhysicalOperator for IndexScanOperator {
     fn reset(&mut self) {
         self.current = 0;
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let op_str = match self.op {
+            BinaryOp::Eq => "=", BinaryOp::Gt => ">", BinaryOp::Ge => ">=",
+            BinaryOp::Lt => "<", BinaryOp::Le => "<=", _ => "?",
+        };
+        OperatorDescription {
+            name: "IndexScan".to_string(),
+            details: format!("var={}, {}.{} {} {:?}", self.variable, self.label, self.property, op_str, self.value),
+            children: Vec::new(),
+        }
+    }
 }
 
 /// Vector search operator: CALL db.index.vector.queryNodes(...)
@@ -2130,6 +2299,14 @@ impl PhysicalOperator for VectorSearchOperator {
 
     fn reset(&mut self) {
         self.current = 0;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "VectorSearch".to_string(),
+            details: format!("{}.{}, k={}", self.label, self.property_key, self.k),
+            children: Vec::new(),
+        }
     }
 }
 
@@ -2245,6 +2422,14 @@ impl PhysicalOperator for CartesianProductOperator {
         self.left_index = 0;
         self.current_right = None;
         self.left_materialized = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CartesianProduct".to_string(),
+            details: String::new(),
+            children: vec![self.left.describe(), self.right.describe()],
+        }
     }
 }
 
@@ -2375,6 +2560,14 @@ impl PhysicalOperator for JoinOperator {
         self.current_right_index = 0;
         self.current_left_list_index = 0;
         self.materialized = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "HashJoin".to_string(),
+            details: format!("on={}", self.join_var),
+            children: vec![self.left.describe(), self.right.describe()],
+        }
     }
 }
 
@@ -2512,6 +2705,14 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         self.current_right_match_idx = 0;
         self.null_emitted = false;
         self.materialized = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "LeftOuterJoin".to_string(),
+            details: format!("on={}", self.join_var),
+            children: vec![self.left.describe(), self.right.describe()],
+        }
     }
 }
 
@@ -3654,6 +3855,14 @@ impl PhysicalOperator for SkipOperator {
         self.input.reset();
         self.skipped = 0;
     }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Skip".to_string(),
+            details: format!("{}", self.skip),
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 /// Delete operator: DELETE n or DETACH DELETE n
@@ -3710,6 +3919,17 @@ impl PhysicalOperator for DeleteOperator {
     fn reset(&mut self) {
         self.input.reset();
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let vars = self.variables.join(", ");
+        OperatorDescription {
+            name: if self.detach { "DetachDelete" } else { "Delete" }.to_string(),
+            details: vars,
+            children: vec![self.input.describe()],
+        }
+    }
+
+    fn is_mutating(&self) -> bool { true }
 }
 
 /// Set property operator: SET n.name = "Alice"
@@ -3774,6 +3994,17 @@ impl PhysicalOperator for SetPropertyOperator {
     fn reset(&mut self) {
         self.input.reset();
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let sets: Vec<String> = self.items.iter().map(|(v, p, e)| format!("{}.{} = {}", v, p, format_expression(e))).collect();
+        OperatorDescription {
+            name: "SetProperty".to_string(),
+            details: sets.join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
+
+    fn is_mutating(&self) -> bool { true }
 }
 
 /// Remove property operator: REMOVE n.name
@@ -3825,6 +4056,17 @@ impl PhysicalOperator for RemovePropertyOperator {
     fn reset(&mut self) {
         self.input.reset();
     }
+
+    fn describe(&self) -> OperatorDescription {
+        let removes: Vec<String> = self.items.iter().map(|(v, p)| format!("{}.{}", v, p)).collect();
+        OperatorDescription {
+            name: "RemoveProperty".to_string(),
+            details: removes.join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
+
+    fn is_mutating(&self) -> bool { true }
 }
 
 /// UNWIND operator - expands a list expression into individual rows
@@ -3891,6 +4133,14 @@ impl PhysicalOperator for UnwindOperator {
         self.input.reset();
         self.buffer.clear();
         self.buffer_idx = 0;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Unwind".to_string(),
+            details: format!("{} AS {}", format_expression(&self.expression), self.variable),
+            children: vec![self.input.describe()],
+        }
     }
 }
 
