@@ -971,4 +971,28 @@ mod tests {
         // Item0=true, Item1=false, Item2=true, Item3=false
         assert_eq!(result.records.len(), 2, "Expected 2 active items");
     }
+
+    #[test]
+    fn test_null_comparison_filters_gracefully() {
+        // When a property doesn't exist, comparison should return Null (falsy),
+        // NOT a TypeError. This mirrors Neo4j's three-valued logic.
+        let mut store = GraphStore::new();
+        for i in 0..5 {
+            let id = store.create_node("Machine");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Machine{}", i));
+                // Only set utilization on some nodes
+                if i % 2 == 0 {
+                    node.set_property("utilization", PropertyValue::Float(80.0 + (i as f64) * 10.0));
+                }
+                // Nodes 1 and 3 have NO utilization property → Null
+            }
+        }
+        let executor = QueryExecutor::new(&store);
+        // This should NOT error — Null > 90 returns Null, which filters out the record
+        let query = parse_query("MATCH (m:Machine) WHERE m.utilization > 90 RETURN m.name").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // Machine0=80.0, Machine2=100.0, Machine4=120.0 — only Machine2 and Machine4 > 90
+        assert_eq!(result.records.len(), 2, "Expected 2 machines with utilization > 90");
+    }
 }

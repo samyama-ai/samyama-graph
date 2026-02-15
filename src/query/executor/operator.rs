@@ -961,7 +961,7 @@ impl FilterOperator {
 
         match result {
             Value::Property(PropertyValue::Boolean(b)) => Ok(b),
-            Value::Null => Ok(false),
+            Value::Null | Value::Property(PropertyValue::Null) => Ok(false),
             _ => Err(ExecutionError::TypeError("Predicate must evaluate to boolean".to_string())),
         }
     }
@@ -1096,6 +1096,7 @@ impl FilterOperator {
 
     fn compare_lt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l < r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l < r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) < *r)),
@@ -1107,6 +1108,7 @@ impl FilterOperator {
 
     fn compare_le(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l <= r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l <= r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) <= *r)),
@@ -1118,6 +1120,7 @@ impl FilterOperator {
 
     fn compare_gt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l > r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l > r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) > *r)),
@@ -1129,6 +1132,7 @@ impl FilterOperator {
 
     fn compare_ge(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l >= r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l >= r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) >= *r)),
