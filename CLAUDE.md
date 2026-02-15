@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Samyama is a high-performance distributed graph database written in Rust with OpenCypher query support, Redis protocol (RESP) compatibility, and multi-tenancy. Currently at Phase 4 (High Availability Foundation).
+Samyama is a high-performance distributed graph database written in Rust with ~90% OpenCypher query support, Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v0.5.4.
 
 ## Build & Development Commands
 
@@ -13,18 +13,28 @@ Samyama is a high-performance distributed graph database written in Rust with Op
 cargo build                    # Debug build
 cargo build --release          # Release build (optimized)
 
-# Run tests
-cargo test                     # All tests (119 unit + 1 doc)
+# Run tests (248 unit tests)
+cargo test                     # All tests
 cargo test graph::node         # Specific module tests
 cargo test -- --nocapture      # Tests with output
 
+# Benchmarks (Criterion)
+cargo bench                    # 15 benchmarks across 5 groups
+
 # Run examples
-cargo run --example persistence_demo    # Phase 3: Persistence & multi-tenancy
-cargo run --example cluster_demo        # Phase 4: Raft clustering
-cargo run --example banking_demo        # Banking use case demo
+cargo run --example banking_demo              # Banking fraud detection + NLQ
+cargo run --example clinical_trials_demo      # Clinical trials + vector search
+cargo run --example supply_chain_demo         # Supply chain + optimization
+cargo run --example smart_manufacturing_demo  # Digital twin + scheduling
+cargo run --example social_network_demo       # Social network analysis
+cargo run --example knowledge_graph_demo      # Enterprise knowledge graph
+cargo run --example enterprise_soc_demo       # Security operations center
+cargo run --example agentic_enrichment_demo   # GAK (Generation-Augmented Knowledge)
+cargo run --example persistence_demo          # Persistence & multi-tenancy
+cargo run --example cluster_demo              # Raft clustering
 
 # Start RESP server
-cargo run                      # Starts on 127.0.0.1:6379
+cargo run                      # RESP on 127.0.0.1:6379, HTTP on :8080
 
 # Code quality
 cargo fmt -- --check           # Check formatting
@@ -42,103 +52,104 @@ python3 test_resp_visual.py
 
 ```
 src/
-├── graph/           # Phase 1: Property Graph Model
-│   ├── store.rs     # GraphStore - in-memory storage with indices
+├── graph/           # Property Graph Model
+│   ├── store.rs     # GraphStore - in-memory storage with indices + cardinality stats
 │   ├── node.rs      # Node with labels and properties
 │   ├── edge.rs      # Directed edges with types
-│   ├── property.rs  # PropertyValue (7 types: String, Integer, Float, Boolean, DateTime, Array, Map)
+│   ├── property.rs  # PropertyValue (String, Integer, Float, Boolean, DateTime, Array, Map, Null)
 │   └── types.rs     # NodeId, EdgeId, Label, EdgeType
 │
-├── query/           # Phase 2: OpenCypher Query Engine
+├── query/           # OpenCypher Query Engine (~90% coverage)
 │   ├── parser.rs    # Pest-based OpenCypher parser
-│   ├── cypher.pest  # OpenCypher grammar
+│   ├── cypher.pest  # PEG grammar (atomic keyword rules for word boundaries)
 │   ├── ast.rs       # Query AST
 │   └── executor/
 │       ├── planner.rs   # Query planner (AST → ExecutionPlan)
 │       ├── operator.rs  # Physical operators (Volcano iterator model)
-│       └── record.rs    # Record, RecordBatch, Value
+│       └── record.rs    # Record, RecordBatch, Value (with late materialization)
 │
-├── protocol/        # Phase 2: RESP Protocol
+├── protocol/        # RESP Protocol
 │   ├── resp.rs      # RESP3 encoder/decoder
 │   ├── server.rs    # Tokio TCP server
 │   └── command.rs   # GRAPH.* command handler
 │
-├── persistence/     # Phase 3: Persistence & Multi-Tenancy
+├── persistence/     # Persistence & Multi-Tenancy
 │   ├── storage.rs   # RocksDB with column families
 │   ├── wal.rs       # Write-Ahead Log
 │   └── tenant.rs    # Multi-tenancy & resource quotas
 │
-└── raft/            # Phase 4: High Availability
-    ├── node.rs      # RaftNode using openraft
-    ├── state_machine.rs  # GraphStateMachine
-    ├── cluster.rs   # ClusterConfig, ClusterManager
-    ├── network.rs   # Inter-node communication
-    └── storage.rs   # Raft log storage
+├── raft/            # High Availability
+│   ├── node.rs      # RaftNode using openraft
+│   ├── state_machine.rs  # GraphStateMachine
+│   ├── cluster.rs   # ClusterConfig, ClusterManager
+│   ├── network.rs   # Inter-node communication
+│   └── storage.rs   # Raft log storage
+│
+├── nlq/             # Natural Language Query Pipeline
+│   ├── mod.rs       # NLQPipeline (text_to_cypher, extract_cypher, is_safe_query)
+│   └── client.rs    # NLQClient (OpenAI, Gemini, Ollama, Claude Code providers)
+│
+├── vector/          # HNSW Vector Index
+└── sharding/        # Tenant-level sharding
 ```
 
 ### Key Architectural Patterns
 
-1. **Volcano Iterator Model (ADR-007)**: Query execution uses lazy, pull-based operators:
+1. **Volcano Iterator Model (ADR-007)**: Lazy, pull-based operators:
    - `NodeScanOperator` → `FilterOperator` → `ExpandOperator` → `ProjectOperator` → `LimitOperator`
 
-2. **In-Memory Graph Storage**: O(1) lookups via HashMaps with adjacency lists for traversal:
-   - `nodes: HashMap<NodeId, Node>`
-   - `label_index: HashMap<Label, HashSet<NodeId>>`
-   - `outgoing/incoming: HashMap<NodeId, Vec<EdgeId>>`
+2. **Late Materialization (ADR-012)**: Scan produces `Value::NodeRef(id)` not full clones. Properties resolved on demand via `resolve_property()`.
 
-3. **Multi-Tenancy**: RocksDB column families with tenant-prefixed keys, per-tenant quotas
+3. **In-Memory Graph Storage**: O(1) lookups via HashMaps with adjacency lists for traversal.
 
-4. **Raft Consensus**: Uses `openraft` crate with custom `GraphStateMachine`
+4. **Multi-Tenancy**: RocksDB column families with tenant-prefixed keys, per-tenant quotas.
 
-## Known Limitations
+5. **Raft Consensus**: Uses `openraft` crate with custom `GraphStateMachine`.
 
-**Query Engine (not yet implemented):**
-- CREATE, DELETE, SET, REMOVE (write operations via Cypher)
-- MERGE, OPTIONAL MATCH, UNION, WITH, subqueries
-- Aggregation functions (COUNT, SUM, AVG)
+6. **Cross-Type Coercion**: Integer/Float promotion, String/Boolean coercion, Null propagation (three-valued logic).
 
-**Note**: The parser accepts CREATE clauses but the planner requires at least one MATCH clause. Write operations must use the Rust API directly (`graph.create_node()`, `persist_mgr.persist_create_node()`).
+## Cypher Support
+
+**Supported clauses:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, UNION, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries.
+
+**Supported functions (30+):** toUpper, toLower, trim, replace, substring, left, right, reverse, toString, toInteger, toFloat, abs, ceil, floor, round, sqrt, sign, count, sum, avg, min, max, collect, size, length, head, last, tail, keys, id, labels, type, exists, coalesce.
+
+**Remaining gaps:** WITH projection barrier (partial), list slicing, pattern comprehensions, named paths, CASE expressions, collect(DISTINCT x).
 
 ## API Patterns
+
+### Query Engine
+```rust
+// Read-only queries
+let executor = QueryExecutor::new(&store);
+let result: RecordBatch = executor.execute(&query)?;
+
+// Write queries (CREATE, DELETE, SET, MERGE)
+let mut executor = MutQueryExecutor::new(&mut store, tenant_id);
+executor.execute(&query)?;
+
+// EXPLAIN (no execution)
+// Returns plan as RecordBatch with operator descriptions
+```
+
+### NLQ Pipeline
+```rust
+let pipeline = NLQPipeline::new(nlq_config)?;
+let cypher = pipeline.text_to_cypher("Who knows Alice?", &schema_summary).await?;
+// Returns clean Cypher with markdown fences stripped and safety validation
+```
 
 ### Graph Store
 ```rust
 let mut graph = GraphStore::new();
-let node_id = graph.create_node("Person");                    // Returns NodeId
+let node_id = graph.create_node("Person");
 graph.get_node_mut(node_id)?.set_property("name", "Alice");
-graph.create_edge(source_id, target_id, "KNOWS")?;            // Returns EdgeId
-let nodes: Vec<&Node> = graph.get_nodes_by_label(&Label::new("Person"));
-let edges: Vec<&Edge> = graph.get_outgoing_edges(node_id);
-```
-
-### Query Engine
-```rust
-let engine = QueryEngine::new();
-let result: RecordBatch = engine.execute("MATCH (n:Person) RETURN n", &graph)?;
-for record in &result.records {
-    if let Some(value) = record.get("n") { /* Value::Node(id, node) */ }
-}
-```
-
-### Persistence
-```rust
-let persist_mgr = PersistenceManager::new("./data")?;
-persist_mgr.tenants().create_tenant(id, name, Some(quotas))?;
-persist_mgr.persist_create_node("tenant_id", &node)?;
-persist_mgr.checkpoint()?;
-let (nodes, edges) = persist_mgr.recover("tenant_id")?;
+graph.create_edge(source_id, target_id, "KNOWS")?;
 ```
 
 ## Testing
 
-- **Unit tests**: 119 tests across all modules
-- **Integration tests**: Python scripts in `tests/integration/` for RESP server
-- **Examples**: `persistence_demo.rs`, `cluster_demo.rs`, `banking_demo.rs`
-
-Connect to RESP server with any Redis client:
-```bash
-redis-cli
-GRAPH.QUERY mygraph "MATCH (n:Person) RETURN n"
-GRAPH.LIST
-PING
-```
+- **248 unit tests** across all modules
+- **15 Criterion benchmarks** (node insertion, label scan, traversal, WHERE filter, Cypher parse)
+- **Integration tests**: Python scripts in `tests/integration/`
+- **8 domain-specific example demos** with NLQ integration

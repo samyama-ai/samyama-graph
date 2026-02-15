@@ -1,247 +1,160 @@
 # Samyama Graph Database
 
-**Samyama** is a high-performance, distributed, AI-native Graph Vector Database written in **Rust**.
-
-It bridges the gap between **Transactional Graph Databases**, **Vector Databases**, and **Graph Analytics Engines** by providing a single, unified engine that does it all.
+**Samyama** is a high-performance, distributed, AI-native graph database written in **Rust**. It combines a **property graph engine**, **vector search**, **graph analytics**, and **natural language querying** in a single binary.
 
 ![Samyama Analytics Visualization](./visualization.svg)
 
-## 🚀 Key Features
+## Key Features
 
-*   **⚡ Speed**: 115,000+ Queries Per Second (QPS) for lookups; 800,000+ Nodes/sec ingestion.
-*   **🧠 Vector Search**: Built-in HNSW indexing for millisecond-speed Semantic Search.
-*   **🤖 Auto-Embed**: Automatically generate vector embeddings from text properties using LLMs.
-## 📚 Documentation
+- **OpenCypher Query Engine**: ~90% OpenCypher coverage — MATCH, CREATE, DELETE, SET, MERGE, OPTIONAL MATCH, UNION, WITH, UNWIND, aggregations, and 30+ built-in functions.
+- **RESP Protocol**: Drop-in compatibility with any Redis client (`redis-cli`, Jedis, ioredis).
+- **Vector Search**: Built-in HNSW indexing for millisecond semantic search and Graph RAG.
+- **NLQ (Natural Language Queries)**: Ask questions in plain English — the LLM translates to Cypher automatically.
+- **Graph Algorithms**: Native PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, Triangle Counting.
+- **Optimization Solvers**: 15+ metaheuristic algorithms (Jaya, Rao, GWO, PSO, Firefly, Cuckoo, ABC, NSGA-II) for in-database optimization.
+- **Multi-Tenancy**: Tenant-level isolation with per-tenant quotas via RocksDB column families.
+- **High Availability**: Raft consensus (via `openraft`) for cluster replication and automatic failover.
+- **Persistence**: RocksDB storage with Write-Ahead Log and checkpointing.
+- **EXPLAIN Queries**: Inspect query execution plans without running them.
 
-*   **[ACID Guarantees](docs/ACID_GUARANTEES.md)**: Detailed breakdown of consistency and durability.
-*   **[Architecture](docs/ARCHITECTURE.md)**: System design and components.
-*   **[Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)**: Supported query features.
-*   **[Benchmarks](docs/performance/BENCHMARKS.md)**: Performance metrics.
-*   **[Latest Benchmarks (v0.5.0)](docs/performance/BENCHMARK_RESULTS_v0.5.0.md)**: Results after CSR and Vectorization.
-*   **[Performance Roadmap](docs/performance/PERFORMANCE_ROADMAP.md)**: Strategy for world-class speed.
+## Getting Started
 
-## 📦 Crates
-
-*   **[samyama-graph-algorithms](crates/samyama-graph-algorithms/README.md)**: Native graph analytics (PageRank, WCC, MaxFlow, etc.).
-*   **[samyama-optimization](crates/samyama-optimization/README.md)**: 15+ Metaheuristic Solvers (Jaya, Rao, GWO, PSO, etc.).
-
-## 🚀 Key Features
-
-*   **⚡ High Performance**: In-memory graph storage with RocksDB persistence.
-*   **🔄 Distributed**: Raft-based consensus for High Availability.
-*   **🔍 Vector Search**: Native HNSW indexing for RAG applications.
-*   **🧠 AI-Native**: "Auto-Embed" pipelines and Agentic Enrichment.
-*   **🗣️ NLQ**: Query your graph using plain English ("Who knows Alice?") instead of Cypher code.
-*   **🕵️ Agents**: Autonomous agents that can enrich your graph data by calling external tools (e.g., Web Search).
-*   **🕸️ Graph RAG**: Combine vector similarity ("Find nodes meaning X") with graph structure ("...connected to Y").
-*   **📊 Analytics**: Native PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, and Triangle Counting algorithms.
-*   **🎯 Optimization**: Built-in metaheuristic solvers (15+ algorithms including Jaya, Rao, GWO, Firefly, Cuckoo, ABC, NSGA-II) for single and multi-objective resource allocation directly on the graph.
-*   **🛡️ Reliability**: Raft Consensus for High Availability and RocksDB for persistence.
-*   **⚖️ Scalability**: Native Tenant-Level Sharding for horizontal scaling.
-*   **🎨 Visualization**: Built-in interactive Web UI.
-
----
-
-## 🏁 Getting Started
-
-### 1. Installation & Build
-
-Samyama is distributed as a single binary. The Web Visualizer is **embedded** into this binary during compilation.
+### Build
 
 ```bash
-# Clone repository
-git clone https://gitlab.com/samyama-ai/samyama-graph
+git clone https://github.com/samyama-ai/samyama-graph
 cd samyama-graph
-
-# Build release binary (This compiles the Rust code AND embeds the Web UI)
 cargo build --release
 ```
 
-### 2. Run the Server
-
-Start the database server. This launches both the **RESP Protocol Server** (port 6379) and the **Web Visualizer** (port 8080).
+### Run the Server
 
 ```bash
 ./target/release/samyama
 ```
 
-You should see:
-```text
-Samyama Graph Database v0.1.0
-...
-RESP server listening on 127.0.0.1:6379
-Visualizer available at: http://localhost:8080
-```
+This starts the RESP server on port 6379 and the HTTP API on port 8080.
 
-### 3. Use the Web Visualizer
-
-Open **[http://localhost:8080](http://localhost:8080)** in your browser.
-
-*   **Explore**: Run Cypher queries interactively.
-*   **Visualize**: See your data as a force-directed node-link graph.
-*   **Inspect**: Click nodes to view properties and vector embeddings.
-
-### 4. Connect via CLI
-
-You can use any standard Redis client (like `redis-cli`) to talk to Samyama.
+### Connect
 
 ```bash
 redis-cli -p 6379
 
-# Create a node
-127.0.0.1:6379> GRAPH.QUERY mygraph "CREATE (n:Person {name: 'Alice', age: 30})"
+# Create nodes
+GRAPH.QUERY mygraph "CREATE (n:Person {name: 'Alice', age: 30})"
 
-# Query the graph
-127.0.0.1:6379> GRAPH.QUERY mygraph "MATCH (n:Person) RETURN n"
+# Query
+GRAPH.QUERY mygraph "MATCH (n:Person) RETURN n"
+
+# Explain a query plan
+GRAPH.QUERY mygraph "EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n"
 ```
 
----
+## Examples
 
-## 🧪 Running Examples
+Samyama ships with domain-specific demos that showcase the full feature set.
 
-We provide several fully functional examples to demonstrate different capabilities.
+### Core Infrastructure
 
-### 1. Banking / Fraud Detection Demo
-Simulates a banking system with accounts, transactions, and fraud detection patterns.
+| Example | Command | Description |
+|---------|---------|-------------|
+| Persistence | `cargo run --example persistence_demo` | RocksDB persistence, WAL, multi-tenancy, recovery |
+| Cluster | `cargo run --example cluster_demo` | 3-node Raft cluster with leader election and failover |
+| Full Benchmark | `cargo run --example full_benchmark` | Scale test up to 1M+ nodes |
+
+### Industry Demos (with NLQ + Agentic Enrichment)
+
+Each demo builds a domain-specific knowledge graph, runs Cypher queries, executes graph algorithms, and demonstrates natural language querying via the NLQ pipeline.
+
+| Example | Command | What it demonstrates |
+|---------|---------|---------------------|
+| Banking / Fraud Detection | `cargo run --example banking_demo` | Customer segmentation, fraud patterns, money laundering detection, OFAC screening |
+| Clinical Trials | `cargo run --example clinical_trials_demo` | Patient-trial matching (vector search), drug interactions (PageRank), site optimization (NSGA-II) |
+| Supply Chain | `cargo run --example supply_chain_demo` | Disruption analysis, cold-chain monitoring, port optimization (Jaya), alternative suppliers (vector search) |
+| Smart Manufacturing | `cargo run --example smart_manufacturing_demo` | Digital twin, failure cascade analysis, production scheduling (Cuckoo Search), energy optimization |
+| Social Network | `cargo run --example social_network_demo` | Follower graphs, mutual connections, influence analysis (PageRank), community detection (WCC) |
+| Knowledge Graph | `cargo run --example knowledge_graph_demo` | Document lineage, expert finding (vector search), topic clustering, knowledge hub identification |
+| Enterprise SOC | `cargo run --example enterprise_soc_demo` | Threat intel, MITRE ATT&CK mapping, attack path analysis (Dijkstra), lateral movement simulation |
+| Agentic Enrichment | `cargo run --example agentic_enrichment_demo` | Generation-Augmented Knowledge (GAK) — LLM generates Cypher to enrich the graph autonomously |
+
+## Cypher Support
+
+**~90% OpenCypher coverage.** See [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) for the full matrix.
+
+### Supported Clauses
+
+`MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `RETURN DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`, `CREATE`, `DELETE`, `DETACH DELETE`, `SET`, `REMOVE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`), `WITH`, `UNWIND`, `UNION` / `UNION ALL`, `EXPLAIN`, `EXISTS` subqueries
+
+### Supported Functions
+
+| Category | Functions |
+|----------|-----------|
+| String | `toUpper`, `toLower`, `trim`, `replace`, `substring`, `left`, `right`, `reverse`, `toString` |
+| Numeric | `abs`, `ceil`, `floor`, `round`, `sqrt`, `sign`, `toInteger`, `toFloat` |
+| Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect` |
+| List/Collection | `size`, `length`, `head`, `last`, `tail`, `keys`, `range` |
+| Graph | `id`, `labels`, `type`, `exists`, `coalesce`, `startsWith`, `endsWith`, `contains` |
+
+### Operators
+
+Arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`), logical (`AND`, `OR`, `NOT`, `XOR`), string (`STARTS WITH`, `ENDS WITH`, `CONTAINS`, `=~`), null (`IS NULL`, `IS NOT NULL`), list (`IN`).
+
+Cross-type coercion: Integer/Float promotion and String/Boolean coercion for LLM-generated queries. Null propagation follows Neo4j three-valued logic.
+
+## Architecture
+
+```
+src/
+├── graph/           # Property graph model (Node, Edge, PropertyValue, GraphStore)
+├── query/           # OpenCypher engine
+│   ├── cypher.pest  #   PEG grammar (Pest)
+│   ├── parser.rs    #   Parser → AST
+│   └── executor/    #   Volcano iterator model (scan, filter, expand, project, aggregate, sort, limit)
+├── protocol/        # RESP3 server (Tokio TCP)
+├── persistence/     # RocksDB + WAL + multi-tenancy
+├── raft/            # Raft consensus (openraft)
+├── nlq/             # Natural Language Query pipeline (OpenAI, Gemini, Ollama, Claude Code)
+├── vector/          # HNSW vector index
+└── sharding/        # Tenant-level sharding
+```
+
+Key design decisions are documented as [Architecture Decision Records](docs/ADR/).
+
+## Companion Crates
+
+- **[samyama-graph-algorithms](crates/samyama-graph-algorithms/)**: PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, Triangle Counting
+- **[samyama-optimization](crates/samyama-optimization/)**: 15+ metaheuristic solvers for single and multi-objective optimization
+
+## Benchmarks
+
+Run with `cargo bench`. See [docs/performance/](docs/performance/) for detailed results.
+
+| Operation | Throughput | Notes |
+|-----------|-----------|-------|
+| Node insertion | ~3.4M nodes/sec | At 1K batch, single-threaded |
+| Label scan | <1 us | 100-node label groups |
+| 1-hop traversal | ~22 us | MATCH-WHERE-RETURN pattern |
+| Cypher parse | <8 us | Multi-hop patterns with aggregation |
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)
+- [ACID Guarantees](docs/ACID_GUARANTEES.md)
+- [Benchmarks](docs/performance/BENCHMARKS.md)
+- [Architecture Decision Records](docs/ADR/)
+- [Technology Comparisons](docs/TECHNOLOGY_COMPARISONS.md)
+
+## Testing
+
+248 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
 
 ```bash
-cargo run --release --example banking_demo
+cargo test                     # Run all tests
+cargo bench                    # Run benchmarks
+cargo clippy -- -D warnings    # Lint
+cargo fmt -- --check           # Format check
 ```
-*   **What it does**: Generates synthetic accounts/transactions, builds a graph, and runs queries to find circular money movement (potential money laundering).
-
-### 2. Graph RAG (AI) Demo
-Demonstrates how to combine Vector Search with Graph queries.
-
-```bash
-cargo run --release --example graph_rag_demo
-```
-*   **What it does**: Creates documents with 128d vector embeddings. Runs a hybrid query: *"Find documents semantically similar to this vector that were written by 'Alice'"*.
-
-### 3. Distributed Cluster Demo
-Simulates a 3-node Raft cluster with automatic failover.
-
-```bash
-cargo run --release --example cluster_demo
-```
-*   **What it does**: Spins up 3 in-memory Raft nodes, elects a leader, replicates writes, and simulates a node crash/recovery to prove high availability.
-
-### 4. High-Scale Benchmark
-Pushes the system to its limits (1M+ nodes).
-
-```bash
-# Run with default 10k nodes
-cargo run --release --example full_benchmark
-
-# Run with 1 Million nodes (Requires ~8GB RAM)
-cargo run --release --example full_benchmark 1000000
-```
-
-### 5. Auto-Embed Demo
-Demonstrates automatic embedding generation.
-
-```bash
-export GEMINI_API_KEY="your_key"
-cargo run --release --example auto_embed_demo
-```
-*   **What it does**: Creates a document node with text. The system automatically calls Gemini to generate an embedding and indexes it for vector search.
-
-### 6. NLQ (Natural Language Query) Demo
-Query the database using English.
-
-```bash
-export GEMINI_API_KEY="your_key"
-cargo run --release --example nlq_demo
-```
-*   **What it does**: Translates "Who knows Alice?" into a valid Cypher query using an LLM and executes it.
-
-### 7. Agentic Enrichment Demo
-Demonstrates an autonomous agent enriching data.
-
-```bash
-cargo run --release --example agent_demo
-```
-*   **What it does**: Simulates a new company node being created. An agent automatically wakes up, searches the web for info (mocked), and updates the node.
-
----
-
-## 📚 Advanced Usage
-
-### Vector Search (AI Integration)
-
-Samyama supports `Vector` as a first-class property type.
-
-1.  **Create Index**:
-    ```cypher
-    CREATE VECTOR INDEX doc_idx FOR (n:Doc) ON (n.embedding) 
-    OPTIONS {dimensions: 1536, similarity: 'cosine'}
-    ```
-
-2.  **Insert Data**:
-    ```cypher
-    CREATE (n:Doc {content: "Hello", embedding: [0.1, 0.9, ...]})
-    ```
-
-3.  **Query**:
-    ```cypher
-    CALL db.index.vector.queryNodes('Doc', 'embedding', $query_vector, 5) 
-    YIELD node, score
-    RETURN node.content, score
-    ```
-
-### Graph Algorithms
-
-Run analytics directly on your data without exporting it.
-
-```cypher
-// Calculate PageRank
-CALL algo.pageRank('Person', 'KNOWS') 
-YIELD node, score 
-RETURN node.name, score 
-ORDER BY score DESC LIMIT 10
-
-// Find Shortest Path (BFS)
-CALL algo.shortestPath($start_id, $end_id) YIELD path, cost
-```
-
-### In-Database Optimization
-
-Use the graph as your optimization model. Automatically adjust node properties to minimize/maximize an objective.
-
-```cypher
-// Optimize Factory production to minimize cost
-CALL algo.or.solve({
-  algorithm: 'Jaya',
-  label: 'Factory',
-  property: 'production_rate',
-  min: 10.0,
-  max: 100.0,
-  cost_property: 'unit_cost',
-  budget: 50000.0
-}) 
-YIELD fitness, algorithm
-```
-
----
-
-## 🛠 Architecture
-
-Samyama is built on a modern Rust stack:
-
-*   **Storage**: **RocksDB** (LSM-Tree) with custom serialization (bincode).
-*   **Consensus**: **Raft** (via `openraft`) for consistency and replication.
-*   **Indexing**: 
-    *   **HNSW** (`hnsw_rs`) for Vectors.
-    *   **B-Tree** (`BTreeMap`) for Properties.
-*   **Query Engine**: **Volcano Iterator Model** with a Cost-Based Optimizer.
-*   **Networking**: **Tokio** (Async I/O) and **Axum** (HTTP).
-
-## 📖 Documentation
-
-For developers and contributors:
-- [Benchmarks](./docs/BENCHMARKS.md)
-- [Requirements](./docs/REQUIREMENTS.md)
-- [Architecture](./docs/ARCHITECTURE.md)
-- [Roadmap](./ROADMAP.md)
 
 ## License
 
