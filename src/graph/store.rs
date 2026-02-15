@@ -62,6 +62,79 @@ pub enum GraphError {
 
 pub type GraphResult<T> = Result<T, GraphError>;
 
+/// Statistics about graph contents for cost-based query optimization
+#[derive(Debug, Clone)]
+pub struct GraphStatistics {
+    /// Total number of nodes
+    pub total_nodes: usize,
+    /// Total number of edges
+    pub total_edges: usize,
+    /// Node count per label
+    pub label_counts: HashMap<Label, usize>,
+    /// Edge count per type
+    pub edge_type_counts: HashMap<EdgeType, usize>,
+    /// Average outgoing degree
+    pub avg_out_degree: f64,
+    /// Property statistics per (label, property_name)
+    pub property_stats: HashMap<(Label, String), PropertyStats>,
+}
+
+/// Statistics about a specific property
+#[derive(Debug, Clone)]
+pub struct PropertyStats {
+    /// Fraction of nodes with this label that have NULL for this property
+    pub null_fraction: f64,
+    /// Estimated number of distinct values
+    pub distinct_count: usize,
+    /// Selectivity: probability of matching a random value (1/distinct_count)
+    pub selectivity: f64,
+}
+
+impl GraphStatistics {
+    /// Estimate the number of rows from a label scan
+    pub fn estimate_label_scan(&self, label: &Label) -> usize {
+        self.label_counts.get(label).copied().unwrap_or(self.total_nodes)
+    }
+
+    /// Estimate the number of rows after an expand (edge traversal)
+    pub fn estimate_expand(&self, edge_type: Option<&EdgeType>) -> f64 {
+        match edge_type {
+            Some(et) => self.edge_type_counts.get(et).copied().unwrap_or(0) as f64,
+            None => self.total_edges as f64,
+        }
+    }
+
+    /// Estimate selectivity of an equality filter on a property
+    pub fn estimate_equality_selectivity(&self, label: &Label, property: &str) -> f64 {
+        self.property_stats
+            .get(&(label.clone(), property.to_string()))
+            .map(|ps| ps.selectivity)
+            .unwrap_or(0.1) // Default 10% selectivity
+    }
+
+    /// Format statistics as human-readable text
+    pub fn format(&self) -> String {
+        let mut result = String::new();
+        result.push_str(&format!("Graph Statistics:\n"));
+        result.push_str(&format!("  Total nodes: {}\n", self.total_nodes));
+        result.push_str(&format!("  Total edges: {}\n", self.total_edges));
+        result.push_str(&format!("  Avg out-degree: {:.2}\n", self.avg_out_degree));
+        result.push_str(&format!("  Labels:\n"));
+        let mut labels: Vec<_> = self.label_counts.iter().collect();
+        labels.sort_by(|a, b| b.1.cmp(a.1));
+        for (label, count) in labels {
+            result.push_str(&format!("    :{} = {} nodes\n", label.as_str(), count));
+        }
+        result.push_str(&format!("  Edge types:\n"));
+        let mut types: Vec<_> = self.edge_type_counts.iter().collect();
+        types.sort_by(|a, b| b.1.cmp(a.1));
+        for (etype, count) in types {
+            result.push_str(&format!("    :{} = {} edges\n", etype.as_str(), count));
+        }
+        result
+    }
+}
+
 /// In-memory graph storage
 ///
 /// Uses hash maps for O(1) lookup performance:
@@ -881,6 +954,97 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get all nodes in the graph
     pub fn all_nodes(&self) -> Vec<&Node> {
         self.nodes.iter().flatten().collect()
+    }
+
+    // ============================================================
+    // Graph Statistics (for cost-based query optimization)
+    // ============================================================
+
+    /// Compute statistics for the current graph state
+    pub fn compute_statistics(&self) -> GraphStatistics {
+        let total_nodes = self.node_count();
+        let total_edges = self.edge_count();
+
+        let mut label_counts = HashMap::new();
+        for (label, node_ids) in &self.label_index {
+            label_counts.insert(label.clone(), node_ids.len());
+        }
+
+        let mut edge_type_counts = HashMap::new();
+        for (edge_type, edge_ids) in &self.edge_type_index {
+            edge_type_counts.insert(edge_type.clone(), edge_ids.len());
+        }
+
+        // Compute average degree
+        let avg_out_degree = if total_nodes > 0 {
+            total_edges as f64 / total_nodes as f64
+        } else {
+            0.0
+        };
+
+        // Sample property selectivity for common properties
+        let mut property_stats: HashMap<(Label, String), PropertyStats> = HashMap::new();
+        for (label, node_ids) in &self.label_index {
+            let sample_size = node_ids.len().min(1000);
+            let mut property_presence: HashMap<String, usize> = HashMap::new();
+            let mut property_distinct: HashMap<String, HashSet<u64>> = HashMap::new();
+
+            for (i, &node_id) in node_ids.iter().enumerate() {
+                if i >= sample_size { break; }
+                if let Some(node) = self.get_node(node_id) {
+                    for (key, val) in &node.properties {
+                        *property_presence.entry(key.clone()).or_insert(0) += 1;
+
+                        let hash = {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            val.hash(&mut hasher);
+                            hasher.finish()
+                        };
+                        property_distinct.entry(key.clone()).or_default().insert(hash);
+                    }
+                }
+            }
+
+            for (prop, count) in &property_presence {
+                let distinct = property_distinct.get(prop).map(|s| s.len()).unwrap_or(0);
+                let selectivity = if distinct > 0 { 1.0 / distinct as f64 } else { 1.0 };
+                property_stats.insert((label.clone(), prop.clone()), PropertyStats {
+                    null_fraction: 1.0 - (*count as f64 / sample_size as f64),
+                    distinct_count: distinct,
+                    selectivity,
+                });
+            }
+        }
+
+        GraphStatistics {
+            total_nodes,
+            total_edges,
+            label_counts,
+            edge_type_counts,
+            avg_out_degree,
+            property_stats,
+        }
+    }
+
+    /// Get node count for a specific label (fast, O(1))
+    pub fn label_node_count(&self, label: &Label) -> usize {
+        self.label_index.get(label).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Get edge count for a specific type (fast, O(1))
+    pub fn edge_type_count(&self, edge_type: &EdgeType) -> usize {
+        self.edge_type_index.get(edge_type).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Get all label names in the graph
+    pub fn all_labels(&self) -> Vec<&Label> {
+        self.label_index.keys().collect()
+    }
+
+    /// Get all edge type names in the graph
+    pub fn all_edge_types(&self) -> Vec<&EdgeType> {
+        self.edge_type_index.keys().collect()
     }
 
     /// Clear all data from the graph

@@ -7,7 +7,7 @@ pub mod planner;
 pub mod record;
 
 // Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
-pub use operator::{PhysicalOperator, OperatorBox, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
+pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
 pub use planner::{QueryPlanner, ExecutionPlan};
 pub use record::{Record, RecordBatch, Value};
 
@@ -61,6 +61,11 @@ impl<'a> QueryExecutor<'a> {
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
 
+        // Handle EXPLAIN - return plan description instead of executing
+        if query.explain {
+            return Ok(Self::explain_plan_with_stats(&plan, Some(self.store)));
+        }
+
         // Check if this is a write query - if so, error out
         if plan.is_write {
             return Err(ExecutionError::RuntimeError(
@@ -70,6 +75,33 @@ impl<'a> QueryExecutor<'a> {
 
         // Execute the plan
         self.execute_plan(plan)
+    }
+
+    /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
+    fn explain_plan(plan: &ExecutionPlan) -> RecordBatch {
+        Self::explain_plan_with_stats(plan, None)
+    }
+
+    fn explain_plan_with_stats(plan: &ExecutionPlan, store: Option<&GraphStore>) -> RecordBatch {
+        use crate::graph::PropertyValue;
+
+        let description = plan.root.describe();
+        let mut plan_text = description.format(0);
+
+        // Append statistics summary if store is available
+        if let Some(store) = store {
+            let stats = store.compute_statistics();
+            plan_text.push_str("\n--- Statistics ---\n");
+            plan_text.push_str(&stats.format());
+        }
+
+        let mut record = Record::new();
+        record.bind("plan".to_string(), Value::Property(PropertyValue::String(plan_text)));
+
+        RecordBatch {
+            records: vec![record],
+            columns: vec!["plan".to_string()],
+        }
     }
 
     fn execute_plan(&self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
@@ -114,6 +146,12 @@ impl<'a> MutQueryExecutor<'a> {
             let store_ref: &GraphStore = self.store;
             self.planner.plan(query, store_ref)?
         };
+
+        // Handle EXPLAIN - return plan description instead of executing
+        if query.explain {
+            let store_ref: &GraphStore = self.store;
+            return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref)));
+        }
 
         // Execute the plan with mutable access
         self.execute_plan_mut(plan)
@@ -766,5 +804,134 @@ mod tests {
         assert!(result.is_ok(), "SKIP/LIMIT query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 2, "Expected 2 results from SKIP 3 LIMIT 2, got {}", batch.records.len());
+    }
+
+    #[test]
+    fn test_explain_simple_scan() {
+        let mut store = GraphStore::new();
+
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        // EXPLAIN should return the plan, not execute the query
+        let query = parse_query("EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n.name").unwrap();
+        assert!(query.explain);
+
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "EXPLAIN query failed: {:?}", result.err());
+
+        let batch = result.unwrap();
+        assert_eq!(batch.columns, vec!["plan".to_string()]);
+        assert_eq!(batch.records.len(), 1);
+
+        // The plan should contain operator names
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Project"), "Plan should contain Project operator, got: {}", plan_text);
+            assert!(plan_text.contains("Filter"), "Plan should contain Filter operator, got: {}", plan_text);
+            assert!(plan_text.contains("NodeScan"), "Plan should contain NodeScan operator, got: {}", plan_text);
+        } else {
+            panic!("Expected plan text in result");
+        }
+    }
+
+    #[test]
+    fn test_explain_traversal() {
+        let store = GraphStore::new();
+
+        let query = parse_query("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "EXPLAIN traversal failed: {:?}", result.err());
+
+        let batch = result.unwrap();
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Expand"), "Plan should contain Expand operator, got: {}", plan_text);
+            assert!(plan_text.contains("NodeScan"), "Plan should contain NodeScan operator, got: {}", plan_text);
+        } else {
+            panic!("Expected plan text in result");
+        }
+    }
+
+    #[test]
+    fn test_explain_aggregation() {
+        let store = GraphStore::new();
+
+        let query = parse_query("EXPLAIN MATCH (n:Person) RETURN n.dept, count(n)").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "EXPLAIN aggregation failed: {:?}", result.err());
+
+        let batch = result.unwrap();
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Aggregate"), "Plan should contain Aggregate operator, got: {}", plan_text);
+        } else {
+            panic!("Expected plan text in result");
+        }
+    }
+
+    #[test]
+    fn test_explain_with_statistics() {
+        let mut store = GraphStore::new();
+
+        // Create some data so statistics are meaningful
+        for i in 0..50 {
+            let id = store.create_node("Person");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Person{}", i));
+                node.set_property("age", (20 + i % 60) as i64);
+            }
+        }
+        for i in 0..10 {
+            let id = store.create_node("Company");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Company{}", i));
+            }
+        }
+
+        let query = parse_query("EXPLAIN MATCH (n:Person) RETURN n.name").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = result.records[0].get("plan") {
+            // Should contain statistics section
+            assert!(plan_text.contains("Statistics"), "Plan should contain Statistics, got: {}", plan_text);
+            assert!(plan_text.contains("Person"), "Statistics should mention Person label, got: {}", plan_text);
+            assert!(plan_text.contains("Company"), "Statistics should mention Company label, got: {}", plan_text);
+        } else {
+            panic!("Expected plan text in result");
+        }
+    }
+
+    #[test]
+    fn test_graph_statistics() {
+        let mut store = GraphStore::new();
+
+        for i in 0..100 {
+            let id = store.create_node("Person");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Person{}", i));
+                node.set_property("city", if i % 2 == 0 { "NYC" } else { "LA" });
+            }
+        }
+        for i in 0..20 {
+            let id = store.create_node("Company");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Company{}", i));
+            }
+        }
+
+        let stats = store.compute_statistics();
+        assert_eq!(stats.total_nodes, 120);
+        assert_eq!(*stats.label_counts.get(&Label::new("Person")).unwrap(), 100);
+        assert_eq!(*stats.label_counts.get(&Label::new("Company")).unwrap(), 20);
+        assert_eq!(stats.estimate_label_scan(&Label::new("Person")), 100);
+        assert_eq!(stats.estimate_label_scan(&Label::new("Company")), 20);
+
+        // Selectivity for "city" on Person — should be ~0.5 (2 distinct values)
+        let city_sel = stats.estimate_equality_selectivity(&Label::new("Person"), "city");
+        assert!(city_sel > 0.3 && city_sel < 0.7, "City selectivity should be ~0.5, got {}", city_sel);
     }
 }

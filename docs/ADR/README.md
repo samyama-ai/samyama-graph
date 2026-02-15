@@ -45,6 +45,10 @@ Links to related ADRs
 | [008](./ADR-008-multi-tenancy-namespace-isolation.md) | Use Namespace Isolation for Multi-Tenancy | Accepted | 2025-10-14 |
 | [009](./ADR-009-graph-partitioning-strategy.md) | Graph-Aware Partitioning for Distributed Mode | Proposed | 2025-10-14 |
 | [010](./ADR-010-observability-stack.md) | Use Prometheus + OpenTelemetry for Observability | Accepted | 2025-10-14 |
+| [011](./ADR-011-cypher-crud-operations.md) | Implement Cypher CRUD Operations (DELETE, SET, REMOVE) | Proposed | 2025-12-27 |
+| [012](./ADR-012-late-materialization.md) | Late Materialization with NodeRef/EdgeRef | Accepted | 2025-12-15 |
+| [013](./ADR-013-peg-grammar-atomic-keywords.md) | PEG Grammar with Atomic Keyword Rules | Accepted | 2025-12-20 |
+| [014](./ADR-014-explain-profile-queries.md) | EXPLAIN and PROFILE Query Plan Visualization | Accepted | 2026-02-16 |
 
 ## Decision Process
 
@@ -56,4 +60,4 @@ Links to related ADRs
 ---
 
 **Maintained by**: Samyama Graph Database Team
-**Last Updated**: 2025-10-14
+**Last Updated**: 2026-02-16
