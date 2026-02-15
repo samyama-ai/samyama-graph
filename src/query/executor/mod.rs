@@ -934,4 +934,41 @@ mod tests {
         let city_sel = stats.estimate_equality_selectivity(&Label::new("Person"), "city");
         assert!(city_sel > 0.3 && city_sel < 0.7, "City selectivity should be ~0.5, got {}", city_sel);
     }
+
+    #[test]
+    fn test_cross_type_numeric_comparison() {
+        let mut store = GraphStore::new();
+        // Create nodes with Float properties
+        for i in 0..5 {
+            let id = store.create_node("Sensor");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Sensor{}", i));
+                node.set_property("value", PropertyValue::Float(10.0 * (i as f64) + 5.0));
+            }
+        }
+        // Query: compare Float property to Integer literal (value > 20)
+        let executor = QueryExecutor::new(&store);
+        let query = parse_query("MATCH (s:Sensor) WHERE s.value > 20 RETURN s.name").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // Sensor0=5.0, Sensor1=15.0, Sensor2=25.0, Sensor3=35.0, Sensor4=45.0
+        assert_eq!(result.records.len(), 3, "Expected 3 sensors with value > 20");
+    }
+
+    #[test]
+    fn test_cross_type_string_boolean_eq() {
+        let mut store = GraphStore::new();
+        for i in 0..4 {
+            let id = store.create_node("Item");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Item{}", i));
+                node.set_property("active", PropertyValue::Boolean(i % 2 == 0));
+            }
+        }
+        // Query: compare Boolean property to String literal 'true'
+        let executor = QueryExecutor::new(&store);
+        let query = parse_query("MATCH (i:Item) WHERE i.active = 'true' RETURN i.name").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // Item0=true, Item1=false, Item2=true, Item3=false
+        assert_eq!(result.records.len(), 2, "Expected 2 active items");
+    }
 }

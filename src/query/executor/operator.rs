@@ -1048,8 +1048,8 @@ impl FilterOperator {
         };
 
         let result = match op {
-            BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
-            BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+            BinaryOp::Eq => PropertyValue::Boolean(self.coerced_eq(&left_prop, &right_prop)),
+            BinaryOp::Ne => PropertyValue::Boolean(!self.coerced_eq(&left_prop, &right_prop)),
             BinaryOp::Lt => self.compare_lt(&left_prop, &right_prop)?,
             BinaryOp::Le => self.compare_le(&left_prop, &right_prop)?,
             BinaryOp::Gt => self.compare_gt(&left_prop, &right_prop)?,
@@ -1071,10 +1071,35 @@ impl FilterOperator {
         Ok(Value::Property(result))
     }
 
+    /// Equality with type coercion: Integer↔Float numeric promotion,
+    /// String↔Boolean coercion ("true"/"false"), and Null handling.
+    fn coerced_eq(&self, left: &PropertyValue, right: &PropertyValue) -> bool {
+        match (left, right) {
+            // Same-type: use derived PartialEq
+            _ if std::mem::discriminant(left) == std::mem::discriminant(right) => left == right,
+            // Integer ↔ Float promotion
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => (*l as f64) == *r,
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => *l == (*r as f64),
+            // String ↔ Boolean coercion (LLMs often generate `prop = 'true'`)
+            (PropertyValue::Boolean(b), PropertyValue::String(s)) |
+            (PropertyValue::String(s), PropertyValue::Boolean(b)) => {
+                match s.to_lowercase().as_str() {
+                    "true" => *b,
+                    "false" => !*b,
+                    _ => false,
+                }
+            }
+            // Everything else: not equal
+            _ => false,
+        }
+    }
+
     fn compare_lt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l < r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l < r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) < *r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l < (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l < r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
@@ -1084,6 +1109,8 @@ impl FilterOperator {
         match (left, right) {
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l <= r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l <= r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) <= *r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l <= (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l <= r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
@@ -1093,6 +1120,8 @@ impl FilterOperator {
         match (left, right) {
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l > r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l > r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) > *r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l > (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l > r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
@@ -1102,6 +1131,8 @@ impl FilterOperator {
         match (left, right) {
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l >= r)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l >= r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) >= *r)),
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l >= (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l >= r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }

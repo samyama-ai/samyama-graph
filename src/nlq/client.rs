@@ -144,6 +144,9 @@ impl NLQClient {
         let output = tokio::process::Command::new("claude")
             .arg("-p")
             .arg(prompt)
+            .arg("--max-turns")
+            .arg("2")
+            .env_remove("CLAUDECODE")
             .output()
             .await
             .map_err(|e| NLQError::ApiError(format!("Claude Code CLI error: {}", e)))?;
