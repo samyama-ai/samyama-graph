@@ -443,12 +443,16 @@ async fn main() {
     let mut proj_ids: Vec<u64> = Vec::new();
     let mut proj_names: HashMap<u64, String> = HashMap::new();
 
-    for (name, status, dept) in &projects {
+    let priority_cycle = ["high", "medium", "low", "high", "medium"];
+    for (i, (name, status, dept)) in projects.iter().enumerate() {
         let nid = store.create_node("Project");
         if let Some(node) = store.get_node_mut(nid) {
             node.set_property("name", *name);
             node.set_property("status", *status);
             node.set_property("department", *dept);
+            // Apex API Platform (idx 9) uses GraphQL — ensure it's high priority for NLQ demo
+            let priority = if i == 9 { "high" } else { priority_cycle[i % priority_cycle.len()] };
+            node.set_property("priority", priority);
         }
         proj_ids.push(nid.as_u64());
         proj_names.insert(nid.as_u64(), name.to_string());
@@ -555,6 +559,10 @@ async fn main() {
         (69, 31), // Disaster Recovery -> Incident Response
         (71, 69), // SRE On-Call -> Disaster Recovery
         (73, 1),  // Cost Tagging -> AWS Cost Optimization
+        // Cross-department: Engineering -> Legal
+        (94, 53),  // Dependency Management Policy -> Open Source License Compliance
+        (12, 50),  // Data Lake Architecture -> GDPR Data Deletion Policy
+        (112, 55), // API SDK Generation Pipeline -> Intellectual Property Policy
         (76, 3),  // Platform ADR Index -> Event-Driven Architecture
         (77, 3),  // Event Mesh -> Event-Driven Architecture
         (78, 7),  // API Versioning -> GraphQL Federation
@@ -814,6 +822,45 @@ async fn main() {
         let proj = samyama::graph::NodeId::new(proj_ids[*proj_idx]);
         let tech = samyama::graph::NodeId::new(tech_ids[*tech_idx]);
         store.create_edge(proj, tech, "USES_TECH").unwrap();
+        edge_count += 1;
+    }
+
+    // TAGGED_WITH: Document -> Technology (based on document content)
+    let tagged_with: Vec<(usize, usize)> = vec![
+        (6, 0),    // K8s Hardening Guide -> Kubernetes
+        (95, 0),   // Distributed Tracing -> Kubernetes (K8s-based tracing)
+        (133, 0),  // Container Runtime Security -> Kubernetes (seccomp/AppArmor for K8s pods)
+        (110, 0),  // Network Segmentation -> Kubernetes (VPC + K8s isolation)
+        (173, 0),  // K8s Upgrade Runbook -> Kubernetes
+        (7, 11),   // GraphQL Federation -> GraphQL
+        (104, 11), // GraphQL Schema Design -> GraphQL
+        (4, 1),    // Database Sharding -> PostgreSQL
+        (18, 1),   // PostgreSQL Replication -> PostgreSQL
+        (8, 2),    // Redis Caching Strategy -> Redis
+        (3, 3),    // Event-Driven Architecture -> Kafka
+        (88, 3),   // Async Message Processing -> Kafka
+        (14, 4),   // Terraform Module Library -> Terraform
+        (13, 5),   // Frontend Performance -> React
+        (11, 6),   // gRPC Service Mesh -> gRPC
+        (2, 6),    // API Gateway Design -> gRPC
+        (19, 7),   // Container Image Security -> Docker
+        (9, 8),    // Observability Stack -> Prometheus
+        (9, 9),    // Observability Stack -> Grafana
+        (11, 10),  // gRPC Service Mesh -> Istio
+        (12, 14),  // Data Lake Architecture -> Delta Lake
+        (12, 13),  // Data Lake Architecture -> S3
+        (34, 18),  // SIEM Configuration -> Splunk
+        (38, 17),  // Secret Management -> Vault
+        (19, 23),  // Container Image Security -> Trivy
+        (95, 20),  // Distributed Tracing -> OpenTelemetry
+        (17, 21),  // Service Discovery with Consul -> Consul
+        (61, 22),  // Feature Store Architecture -> Feast
+    ];
+
+    for (doc_idx, tech_idx) in &tagged_with {
+        let doc_nid = samyama::graph::NodeId::new(doc_ids[*doc_idx]);
+        let tech_nid = samyama::graph::NodeId::new(tech_ids[*tech_idx]);
+        store.create_edge(doc_nid, tech_nid, "TAGGED_WITH").unwrap();
         edge_count += 1;
     }
 
@@ -1377,16 +1424,20 @@ async fn main() {
         tenant_mgr.update_nlq_config("knowledge_nlq", Some(nlq_config.clone())).unwrap();
 
         let schema_summary = "Node labels: Document, Employee, Project, Technology\n\
-                              Edge types: AUTHORED, WORKS_ON, USES_TECH, REFERENCES, TAGGED_WITH\n\
-                              Properties: Document(title, department, date, content_summary), \
+                              Edge types: AUTHORED, WORKS_ON, USES_TECH, REFERENCES, TAGGED_WITH, DEPENDS_ON\n\
+                              Relationship paths: (Employee)-[:AUTHORED]->(Document), (Employee)-[:WORKS_ON]->(Project), (Project)-[:USES_TECH]->(Technology), (Document)-[:REFERENCES]->(Document), (Document)-[:TAGGED_WITH]->(Technology)\n\
+                              Properties: Document(title, department['Engineering'/'Product'/'Security'/'HR'/'Legal'/'Data Science'/'DevOps'/'Architecture'], date, content_summary), \
                               Employee(name, title, department), \
-                              Project(name, status, priority), \
-                              Technology(name, category)";
+                              Project(name, status['Active'], priority['high'/'medium'/'low'], department), \
+                              Technology(name[e.g. 'Kubernetes', 'GraphQL', 'PostgreSQL', 'Kafka', 'React'], category)\n\
+                              Notes: TAGGED_WITH links Documents to Technologies they discuss (e.g. K8s Hardening Guide -> Kubernetes). \
+                              REFERENCES links Documents to other Documents, including cross-department. \
+                              Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses.";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
 
         let nlq_questions = vec![
-            "Which engineers authored documents about Kubernetes security?",
+            "Which employees authored documents related to Kubernetes?",
             "Find all high-priority projects using GraphQL",
             "Show cross-department document references between Engineering and Legal",
         ];

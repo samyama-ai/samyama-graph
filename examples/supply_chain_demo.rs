@@ -198,14 +198,14 @@ fn product_data() -> Vec<ProductDef> {
         ProductDef { name: "Montelukast",    category: "Respiratory",    cold_chain: false, unit_value: 0.28,    annual_demand_m: 450.0 },
         ProductDef { name: "Ibuprofen",      category: "Pain",           cold_chain: false, unit_value: 0.08,    annual_demand_m: 3000.0 },
         ProductDef { name: "Acetaminophen",  category: "Pain",           cold_chain: false, unit_value: 0.06,    annual_demand_m: 4000.0 },
-        ProductDef { name: "Ozempic",        category: "Diabetes",       cold_chain: true,  unit_value: 850.00,  annual_demand_m: 25.0 },
-        ProductDef { name: "Keytruda",       category: "Oncology",       cold_chain: true,  unit_value: 4800.00, annual_demand_m: 5.0 },
-        ProductDef { name: "Humira",         category: "Immunology",     cold_chain: true,  unit_value: 2700.00, annual_demand_m: 12.0 },
-        ProductDef { name: "Remdesivir",     category: "Antiviral",      cold_chain: true,  unit_value: 520.00,  annual_demand_m: 8.0 },
+        ProductDef { name: "Ozempic",        category: "Diabetes",       cold_chain: true,  unit_value: 850.00,  annual_demand_m: 25.0 },   // biologic
+        ProductDef { name: "Keytruda",       category: "Oncology",       cold_chain: true,  unit_value: 4800.00, annual_demand_m: 5.0 },   // biologic
+        ProductDef { name: "Humira",         category: "Immunology",     cold_chain: true,  unit_value: 2700.00, annual_demand_m: 12.0 },  // biologic
+        ProductDef { name: "Remdesivir",     category: "Antiviral",      cold_chain: true,  unit_value: 520.00,  annual_demand_m: 8.0 },   // biologic
         ProductDef { name: "Paxlovid",       category: "Antiviral",      cold_chain: false, unit_value: 530.00,  annual_demand_m: 15.0 },
         ProductDef { name: "Eliquis",        category: "Cardiovascular", cold_chain: false, unit_value: 7.50,    annual_demand_m: 200.0 },
         ProductDef { name: "Jardiance",      category: "Diabetes",       cold_chain: false, unit_value: 15.00,   annual_demand_m: 100.0 },
-        ProductDef { name: "Dupixent",       category: "Immunology",     cold_chain: true,  unit_value: 3200.00, annual_demand_m: 6.0 },
+        ProductDef { name: "Dupixent",       category: "Immunology",     cold_chain: true,  unit_value: 3200.00, annual_demand_m: 6.0 },   // biologic
     ]
 }
 
@@ -503,6 +503,12 @@ async fn main() {
             node.set_property("cold_chain", p.cold_chain);
             node.set_property("unit_value", p.unit_value);
             node.set_property("annual_demand_m", p.annual_demand_m);
+            // Classify as biologic or small molecule based on cold chain and high unit value
+            let product_type = match p.name {
+                "Ozempic" | "Keytruda" | "Humira" | "Remdesivir" | "Dupixent" => "biologic",
+                _ => "small molecule",
+            };
+            node.set_property("product_type", product_type);
         }
         product_ids.push(id);
     }
@@ -1189,9 +1195,15 @@ async fn main() {
         tenant_mgr.update_nlq_config("supply_nlq", Some(nlq_config.clone())).unwrap();
 
         let schema_summary = "Node labels: Port, Supplier, Product, ShippingLine, Shipment\n\
-                              Edge types: SHIPS_FROM, SHIPS_TO, SUPPLIES, CARRIES, CONTAINS, ROUTES_THROUGH, BASED_AT, MANUFACTURES\n\
-                              Properties: Port(name, country, throughput), Supplier(name, country, tier, capabilities), \
-                              Product(name, category, value), Shipment(id, status, departure_date)";
+                              Edge types: SHIPS_FROM, SHIPS_TO, SUPPLIES, CONTAINS (Shipment->Product), CARRIES (ShippingLine->Shipment), ROUTES_THROUGH, BASED_AT\n\
+                              Relationship paths: (Supplier)-[:SUPPLIES]->(Product), (Supplier)-[:BASED_AT]->(Port), (Shipment)-[:SHIPS_FROM]->(Port), (Shipment)-[:SHIPS_TO]->(Port), (Shipment)-[:CONTAINS]->(Product), (ShippingLine)-[:CARRIES]->(Shipment)\n\
+                              Properties: Port(name, country, region['East Asia'/'Europe'/'North America'/'Southeast Asia'/'South Asia'/'Middle East'/'South America'], capacity_teu), \
+                              Supplier(name, country[e.g. 'India', 'Germany', 'USA', 'China', 'Japan', 'Switzerland'], capabilities, annual_revenue_m, gmp_certified), \
+                              Product(name, category['Diabetes'/'Cardiovascular'/'Oncology'/'Immunology'/'Antibiotic'/'Antiviral'/'GI'/'Pain'/'Neurology'/'Psychiatry'/'Respiratory'], product_type['small molecule'/'biologic'], unit_value, cold_chain), \
+                              Shipment(shipment_id, status['In Transit'/'Loading'], value_usd, containers), \
+                              ShippingLine(name, fleet_size, headquarter)\n\
+                              Notes: Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses. \
+                              Use CONTAINS (not CARRIES) to go from Shipment to Product.";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
 

@@ -777,7 +777,8 @@ async fn main() {
 
         let schema_summary = "Node labels: User\n\
                               Edge types: FOLLOWS, COLLABORATES, ENDORSED\n\
-                              Properties: User(name, company, role, specialty, followers, following)";
+                              Properties: User(name, company['Google'/'Meta'/'Apple'/'Amazon'/'Microsoft'/'Netflix'/'Stripe'/'Airbnb'/'Uber'/etc.], primary_skill, community['AI/ML Engineers'/'Frontend Developers'/'Backend Engineers'/'DevOps/SRE'/'Data Engineers'/'Mobile Developers'/'Security Engineers'/'Product Managers'/'UX Designers'/'QA Engineers'], years_experience)\n\
+                              Notes: Follower counts are computed from FOLLOWS edges, not stored as properties. Filter by community or primary_skill, not role/specialty.";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
 

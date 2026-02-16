@@ -235,10 +235,10 @@ fn condition_data() -> Vec<ConditionDef> {
 
 fn site_data() -> Vec<SiteDef> {
     vec![
-        SiteDef { name: "Mayo Clinic", city: "Rochester", state: "MN", capacity: 120, experience_score: 0.97, cost_per_patient: 42000.0, diversity_index: 0.62 },
-        SiteDef { name: "MD Anderson Cancer Center", city: "Houston", state: "TX", capacity: 150, experience_score: 0.98, cost_per_patient: 48000.0, diversity_index: 0.78 },
+        SiteDef { name: "Mayo Clinic", city: "Rochester", state: "MN", capacity: 250, experience_score: 0.97, cost_per_patient: 42000.0, diversity_index: 0.62 },
+        SiteDef { name: "MD Anderson Cancer Center", city: "Houston", state: "TX", capacity: 280, experience_score: 0.98, cost_per_patient: 48000.0, diversity_index: 0.78 },
         SiteDef { name: "Johns Hopkins Hospital", city: "Baltimore", state: "MD", capacity: 110, experience_score: 0.96, cost_per_patient: 45000.0, diversity_index: 0.74 },
-        SiteDef { name: "Memorial Sloan Kettering", city: "New York", state: "NY", capacity: 140, experience_score: 0.97, cost_per_patient: 52000.0, diversity_index: 0.81 },
+        SiteDef { name: "Memorial Sloan Kettering", city: "New York", state: "NY", capacity: 260, experience_score: 0.97, cost_per_patient: 52000.0, diversity_index: 0.81 },
         SiteDef { name: "Dana-Farber Cancer Institute", city: "Boston", state: "MA", capacity: 100, experience_score: 0.95, cost_per_patient: 49000.0, diversity_index: 0.68 },
         SiteDef { name: "Cleveland Clinic", city: "Cleveland", state: "OH", capacity: 95, experience_score: 0.93, cost_per_patient: 38000.0, diversity_index: 0.65 },
         SiteDef { name: "UCSF Medical Center", city: "San Francisco", state: "CA", capacity: 105, experience_score: 0.94, cost_per_patient: 51000.0, diversity_index: 0.83 },
@@ -1056,11 +1056,12 @@ async fn main() {
 
         let schema_summary = "Node labels: Trial, Drug, Condition, Site, Patient\n\
                               Edge types: TESTS, STUDIES, CONDUCTED_AT, HAS_CONDITION, INTERACTS_WITH\n\
-                              Properties: Trial(nct_id, title, phase, status, sponsor, target_enrollment), \
+                              Properties: Trial(nct_id, title, phase['Phase I'/'Phase II'/'Phase III'], status['Recruiting'/'Active'/'Completed'], sponsor, target_enrollment), \
                               Drug(generic_name, brand_name, mechanism, approval_year), \
-                              Condition(name, icd10, therapeutic_area), \
-                              Site(name, city, state, capacity, experience_score), \
-                              Patient(patient_id, age, sex, primary_condition)";
+                              Condition(name[e.g. 'Non-Small Cell Lung Cancer', 'Melanoma', 'Type 2 Diabetes', 'Alzheimer\\'s Disease'], icd10, therapeutic_area), \
+                              Site(name[e.g. 'Mayo Clinic', 'MD Anderson Cancer Center'], city, state, capacity[70-300], experience_score, cost_per_patient, diversity_index), \
+                              Patient(patient_id, age, sex, primary_condition, biomarker_pdl1, biomarker_egfr, bmi)\n\
+                              Notes: Use exact condition names for matching. All sites are in the United States.";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
 

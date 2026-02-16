@@ -1190,10 +1190,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         persist_mgr.tenants().update_nlq_config("retail_banking", Some(nlq_config.clone())).unwrap();
 
         let schema_summary = "Node labels: Branch, Customer, Account, Transaction\n\
-                              Edge types: BANKS_AT, OWNS, HAS_TRANSACTION, TRANSFER_TO, KNOWS\n\
-                              Properties: Customer(name, risk_score, customer_type, kyc_status), \
-                              Account(account_number, account_type, balance), \
-                              Transaction(amount, transaction_type, fraud_flag, description)";
+                              Additional labels: HighRisk, MediumRisk, LowRisk, Individual, Corporate, HighNetWorth, Flagged\n\
+                              Edge types: BANKS_AT, OWNS, HAS_TRANSACTION, TRANSFER_TO, KNOWS, REFERRED_BY\n\
+                              Relationship paths: (Customer)-[:OWNS]->(Account)-[:HAS_TRANSACTION]->(Transaction), (Account)-[:TRANSFER_TO]->(Account)\n\
+                              Properties: Customer(name, customer_type['Individual'/'Corporate'/'HighNetWorth'], risk_score[1-100], kyc_status), \
+                              Account(account_id, account_number, account_type['Checking'/'Savings'/'CreditCard'/'Investment'/'BusinessChecking'], balance), \
+                              Transaction(amount[range: $0.06-$150,000], transaction_type, fraud_flag[true/false], description, fraud_score), \
+                              Branch(name, city, state)\n\
+                              Notes: Flagged transactions have fraud_flag=true. High-risk customers have risk_score >= 80. \
+                              Use property comparisons (e.g. a.account_number <> b.account_number) rather than node variable comparisons (a <> b). \
+                              Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses.";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
 
@@ -1492,6 +1498,10 @@ fn create_sample_data(graph: &mut GraphStore) -> Result<LoadStats, Box<dyn std::
         (12, "Deposit",    9_950.00, "Cash deposit",                      true),
         (12, "Deposit",    9_750.00, "Cash deposit - inventory sale",     true),
         (24, "Deposit",    9_999.00, "Cash deposit - consulting",         true),
+        // High-value flagged transactions (> $10,000) on high-risk customer accounts
+        ( 5, "Transfer",  25_000.00, "Wire transfer to offshore account", true),
+        (12, "Transfer",  15_500.00, "Suspicious wire to shell company",  true),
+        (24, "Deposit",   50_000.00, "Large cash deposit - unexplained",  true),
         // More normal transactions
         (22, "Transfer", 100_000.00, "Quarterly investment rebalance",    false),
         (23, "Deposit",   35_000.00, "Monthly management fee",            false),
@@ -1594,7 +1604,9 @@ fn create_sample_data(graph: &mut GraphStore) -> Result<LoadStats, Box<dyn std::
     let transfer_pairs: Vec<(usize, usize)> = vec![
         (5, 12),   // ACC-06 -> ACC-13
         (12, 24),  // ACC-13 -> ACC-25
-        (24, 5),   // ACC-25 -> ACC-06 (completes the circle)
+        (24, 5),   // ACC-25 -> ACC-06 (completes 3-hop circle)
+        (12, 5),   // ACC-13 -> ACC-06 (2-hop circle: ACC-06 -> ACC-13 -> ACC-06)
+        (24, 12),  // ACC-25 -> ACC-13 (2-hop circle: ACC-13 -> ACC-25 -> ACC-13)
         (0, 2),    // Normal transfers
         (6, 21),   // Investment account transfers
         (29, 34),  // Corporate to HNW
