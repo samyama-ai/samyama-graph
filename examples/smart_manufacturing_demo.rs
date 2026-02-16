@@ -130,6 +130,9 @@ async fn main() {
         store.set_node_property(tenant, id, "power_kw", PropertyValue::Float(*power)).unwrap();
         store.set_node_property(tenant, id, "failure_prob", PropertyValue::Float(*fail_prob)).unwrap();
         store.set_node_property(tenant, id, "status", PropertyValue::String("Operational".to_string())).unwrap();
+        // Set utilization (deterministic: 60-98% based on index)
+        let utilization = 60.0 + ((i * 17 + 7) % 39) as f64;
+        store.set_node_property(tenant, id, "utilization", PropertyValue::Float(utilization)).unwrap();
         // Link machine to production line
         store.create_edge(id, line_ids[*line_idx], "BELONGS_TO").unwrap();
         machine_ids.push(id);
@@ -749,10 +752,11 @@ async fn main() {
         tenant_mgr.update_nlq_config("mfg_nlq", Some(nlq_config.clone())).unwrap();
 
         let schema_summary = "Node labels: ProductionLine, Machine, Product, Material\n\
-                              Edge types: CONTAINS, PRODUCES, REQUIRES, FEEDS_INTO\n\
-                              Properties: Machine(name, type, status, utilization, vendor), \
-                              Product(name, priority), Material(name, stock_level), \
-                              ProductionLine(name)";
+                              Edge types: BELONGS_TO, PRODUCES, REQUIRES, FEEDS_INTO\n\
+                              Relationship paths: (Machine)-[:BELONGS_TO]->(ProductionLine), (Machine)-[:PRODUCES]->(Product)-[:REQUIRES]->(Material), (ProductionLine)-[:FEEDS_INTO]->(ProductionLine)\n\
+                              Properties: Machine(name, vendor, capacity_hr, power_kw, failure_prob, status['Operational'], utilization[0.0-100.0]), \
+                              Product(name, part_number, daily_demand), Material(name, cost_per_kg, supplier), \
+                              ProductionLine(name[e.g. 'CNC Machining Center', 'Assembly Line A', 'Robotic Welding Bay', 'Automated Paint Shop', 'Quality Inspection Lab'])";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
 

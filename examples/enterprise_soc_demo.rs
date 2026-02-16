@@ -515,6 +515,21 @@ async fn main() {
     println!("    MITRE techniques ingested: {}", techniques.len());
     println!("    CVE-to-technique links: {}", cve_technique_links.len());
 
+    // -- TARGETED: High-CVSS CVEs targeting DMZ servers --
+    let targeted_links: Vec<(&str, &str)> = vec![
+        ("CVE-2021-44228", "dmz-web-01"),    // Log4Shell → Web Server
+        ("CVE-2021-44228", "dmz-web-02"),    // Log4Shell → Web Server
+        ("CVE-2021-27065", "dmz-mail-01"),   // ProxyLogon → Mail Gateway
+        ("CVE-2023-27997", "dmz-vpn-01"),    // FortiOS → VPN Gateway
+    ];
+
+    for (cve, server) in &targeted_links {
+        if let (Some(&cid), Some(&sid)) = (cve_ids.get(*cve), server_ids.get(*server)) {
+            store.create_edge(cid, sid, EdgeType::new("TARGETED")).unwrap();
+        }
+    }
+    println!("    CVE-to-server TARGETED links: {}", targeted_links.len());
+
     // -- Malware families -------
     subsection("Known Malware Families");
 
@@ -898,10 +913,13 @@ async fn main() {
         println!();
 
         let schema_summary = "Node labels: Server, User, ThreatIntel, MitreTechnique, Malware, AttackEvent\n\
-                              Edge types: HAS_ACCESS, CONNECTS_TO, LATERAL_MOVEMENT, USES_TECHNIQUE, ORIGINATED_FROM, TARGETED\n\
-                              Properties: Server(name, ip, zone, os, role, criticality), \
-                              User(name, username, department, mfa_enabled), \
-                              ThreatIntel(cve_id, cvss_score, malware_family)";
+                              Additional labels on Server: DMZ, Internal, Cloud, OT (matching the zone)\n\
+                              Edge types: HAS_ACCESS, CONNECTS_TO, LATERAL_MOVEMENT, USES_TECHNIQUE, ORIGINATED_FROM, TARGETED, ROUTES_TO, PROTECTS\n\
+                              Relationship paths: (User)-[:HAS_ACCESS]->(Server), (Server)-[:CONNECTS_TO]->(Server), (ThreatIntel)-[:TARGETED]->(Server), (AttackEvent)-[:USES_TECHNIQUE]->(MitreTechnique), (Malware)-[:USES_TECHNIQUE]->(MitreTechnique)\n\
+                              Properties: Server(name, ip, zone['DMZ'/'Internal'/'Cloud'/'OT'], os, role, criticality['Critical'/'High'/'Medium'/'Low']), \
+                              User(name, username, department, title, access_level, mfa_enabled[true/false]), \
+                              ThreatIntel(cve_id, description, cvss_score[0.0-10.0], malware_family, affected), \
+                              MitreTechnique(technique_id, name, tactic), Malware(name, type, first_seen)";
 
         let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
 
