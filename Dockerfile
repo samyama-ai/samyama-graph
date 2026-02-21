@@ -14,6 +14,8 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY crates ./crates
+COPY benches ./benches
+COPY examples ./examples
 
 # Build the application
 RUN cargo build --release
