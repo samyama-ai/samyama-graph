@@ -13,6 +13,7 @@ WORKDIR /app
 # Copy all source files
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY crates ./crates
 
 # Build the application
 RUN cargo build --release
@@ -41,7 +42,10 @@ EXPOSE 8080
 
 # Set environment variables
 ENV RUST_LOG=info
-ENV BIND_ADDRESS=0.0.0.0
 
-# Run the server
-CMD ["samyama"]
+# Healthcheck via RESP PING
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD echo "PING" | nc -w1 localhost 6379 | grep -q PONG || exit 1
+
+# Run the server, binding to 0.0.0.0 so it's reachable from outside the container
+CMD ["samyama", "--host", "0.0.0.0"]
