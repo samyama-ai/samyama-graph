@@ -1,0 +1,19 @@
+[package]
+name = "samyama-cli"
+version = "0.5.0-alpha.1"
+edition = "2021"
+authors = ["Samyama Graph Database Team"]
+description = "CLI for Samyama Graph Database"
+license = "Apache-2.0"
+repository = "https://github.com/samyama-ai/samyama-graph"
+
+[[bin]]
+name = "samyama"
+path = "src/main.rs"
+
+[dependencies]
+samyama-sdk = { path = "../crates/samyama-sdk", version = "0.5.0-alpha.1" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1.35", features = ["full"] }
+serde_json = "1.0"
+comfy-table = "7"

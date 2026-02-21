@@ -1,0 +1,182 @@
+openapi: 3.1.0
+info:
+  title: Samyama Graph Database API
+  version: 0.5.0-alpha.1
+  description: |
+    HTTP API for the Samyama high-performance distributed graph database.
+    Supports OpenCypher queries, graph status, and CRUD operations.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /api/query:
+    post:
+      operationId: executeQuery
+      summary: Execute a Cypher query
+      description: |
+        Execute an OpenCypher query against the graph database.
+        Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+            examples:
+              matchAll:
+                summary: Match all Person nodes
+                value:
+                  query: "MATCH (n:Person) RETURN n"
+              matchWithFilter:
+                summary: Match with WHERE filter
+                value:
+                  query: "MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age"
+              createNode:
+                summary: Create a new node
+                value:
+                  query: 'CREATE (n:Person {name: "Alice", age: 30})'
+              traversal:
+                summary: Traverse relationships
+                value:
+                  query: "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
+      responses:
+        '200':
+          description: Query executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          description: Query error (parse error, execution error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/status:
+    get:
+      operationId: getStatus
+      summary: Get server status
+      description: Returns the health status, version, and storage statistics of the database.
+      responses:
+        '200':
+          description: Server status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: healthy
+                version: 0.5.0-alpha.1
+                storage:
+                  nodes: 2000
+                  edges: 11000
+
+components:
+  schemas:
+    QueryRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          description: An OpenCypher query string
+          examples:
+            - "MATCH (n:Person) RETURN n"
+
+    QueryResponse:
+      type: object
+      properties:
+        nodes:
+          type: array
+          description: Graph nodes referenced in the result (for visualization)
+          items:
+            $ref: '#/components/schemas/GraphNode'
+        edges:
+          type: array
+          description: Graph edges referenced in the result (for visualization)
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+        columns:
+          type: array
+          description: Column names for the tabular result
+          items:
+            type: string
+        records:
+          type: array
+          description: Tabular result rows, one array per record
+          items:
+            type: array
+            items: {}
+
+    GraphNode:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Node ID
+        labels:
+          type: array
+          items:
+            type: string
+          description: Node labels
+        properties:
+          type: object
+          additionalProperties: true
+          description: Node properties
+
+    GraphEdge:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Edge ID
+        source:
+          type: string
+          description: Source node ID
+        target:
+          type: string
+          description: Target node ID
+        type:
+          type: string
+          description: Relationship type
+        properties:
+          type: object
+          additionalProperties: true
+          description: Edge properties
+
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Server health status
+          examples:
+            - healthy
+        version:
+          type: string
+          description: Server version
+          examples:
+            - 0.5.0-alpha.1
+        storage:
+          type: object
+          properties:
+            nodes:
+              type: integer
+              description: Number of nodes in the graph
+            edges:
+              type: integer
+              description: Number of edges in the graph
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
