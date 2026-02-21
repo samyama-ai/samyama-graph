@@ -2,7 +2,10 @@
 members = [
     ".", "crates/samyama-graph-algorithms",
     "crates/samyama-optimization",
+    "crates/samyama-sdk",
+    "cli",
 ]
+exclude = ["sdk/python"]
 
 [package]
 name = "samyama"
@@ -73,6 +76,7 @@ reqwest = { version = "0.13.1", features = ["json"] }
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
+samyama-sdk = { path = "crates/samyama-sdk", version = "0.5.0-alpha.1" }
 
 [[bench]]
 name = "graph_benchmarks"

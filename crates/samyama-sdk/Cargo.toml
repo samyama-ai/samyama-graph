@@ -1,0 +1,31 @@
+[package]
+name = "samyama-sdk"
+version = "0.5.0-alpha.1"
+edition = "2021"
+authors = ["Samyama Graph Database Team"]
+description = "Client SDK for Samyama Graph Database — embedded and remote modes"
+license = "Apache-2.0"
+repository = "https://github.com/samyama-ai/samyama-graph"
+keywords = ["graph", "database", "sdk", "cypher", "client"]
+categories = ["database", "api-bindings"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["net", "io-util", "rt"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client (for RemoteClient)
+reqwest = { version = "0.13.1", features = ["json"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Core graph database (for EmbeddedClient)
+samyama = { path = "../..", version = "0.5.0-alpha.1" }
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full"] }

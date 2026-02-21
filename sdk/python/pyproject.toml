@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "samyama"
+version = "0.5.0a1"
+description = "Python SDK for the Samyama Graph Database"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [{name = "Samyama Graph Database Team"}]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Database",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
