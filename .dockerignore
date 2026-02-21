@@ -4,7 +4,6 @@ target/
 *.md
 docs/
 tests/
-examples/
 .claude/
 *_data/
 vectors/
