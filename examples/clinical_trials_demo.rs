@@ -12,16 +12,13 @@
 //!
 //! Run: `cargo run --example clinical_trials_demo`
 
-use samyama::{GraphStore, EdgeType, QueryEngine, NLQPipeline, TenantManager};
-use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
-use samyama::agent::AgentRuntime;
-// Vector search uses cosine similarity computed inline for this demo.
-// For production workloads, use: store.create_vector_index() + store.vector_search()
-// with samyama::vector::DistanceMetric::Cosine for HNSW-accelerated ANN queries.
-use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
-use samyama_optimization::algorithms::NSGA2Solver;
-use samyama_optimization::common::{MultiObjectiveProblem, SolverConfig};
-use ndarray::Array1;
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient,
+    EdgeType, NodeId,
+    NLQConfig, LLMProvider, AgentConfig,
+    PageRankConfig,
+    NSGA2Solver, SolverConfig, MultiObjectiveProblem, Array1,
+};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -397,8 +394,7 @@ async fn main() {
     println!("================================================================");
     println!();
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
+    let client = EmbeddedClient::new();
 
     // ======================================================================
     // STEP 1: BUILD KNOWLEDGE GRAPH
@@ -408,160 +404,166 @@ async fn main() {
     println!("└──────────────────────────────────────────────────────────────┘");
     println!();
 
-    // -- Trials --
     let trials = trial_data();
-    let mut trial_ids = Vec::new();
-    for (i, t) in trials.iter().enumerate() {
-        let nid = store.create_node("Trial");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("nct_id", t.nct_id);
-            node.set_property("title", t.title);
-            node.set_property("phase", t.phase);
-            node.set_property("status", t.status);
-            node.set_property("sponsor", t.sponsor);
-            node.set_property("target_enrollment", t.target_enrollment);
-            node.set_property("seed", i as i64);
-        }
-        trial_ids.push(nid);
-    }
-    println!("  [+] Created {} Trial nodes", trial_ids.len());
-
-    // -- Drugs --
     let drugs = drug_data();
-    let mut drug_ids = Vec::new();
-    for d in &drugs {
-        let nid = store.create_node("Drug");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("generic_name", d.generic_name);
-            node.set_property("brand_name", d.brand_name);
-            node.set_property("mechanism", d.mechanism);
-            node.set_property("approval_year", d.approval_year);
-        }
-        drug_ids.push(nid);
-    }
-    println!("  [+] Created {} Drug nodes", drug_ids.len());
-
-    // -- Conditions --
     let conditions = condition_data();
-    let mut condition_ids = Vec::new();
-    for c in &conditions {
-        let nid = store.create_node("Condition");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("name", c.name);
-            node.set_property("icd10", c.icd10);
-            node.set_property("therapeutic_area", c.therapeutic_area);
-        }
-        condition_ids.push(nid);
-    }
-    println!("  [+] Created {} Condition nodes", condition_ids.len());
-
-    // -- Sites --
     let sites = site_data();
-    let mut site_ids = Vec::new();
-    for s in &sites {
-        let nid = store.create_node("Site");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("name", s.name);
-            node.set_property("city", s.city);
-            node.set_property("state", s.state);
-            node.set_property("capacity", s.capacity);
-            node.set_property("experience_score", s.experience_score);
-            node.set_property("cost_per_patient", s.cost_per_patient);
-            node.set_property("diversity_index", s.diversity_index);
-        }
-        site_ids.push(nid);
-    }
-    println!("  [+] Created {} Site nodes", site_ids.len());
-
-    // -- Patients (with vector embeddings) --
-    // Store embeddings as node properties for cosine similarity matching.
-    // We use direct node.set_property for bulk loading and perform brute-force
-    // cosine search at query time (see Step 2).
     let patients = patient_data();
+
+    let mut trial_ids = Vec::new();
+    let mut drug_ids = Vec::new();
+    let mut condition_ids = Vec::new();
+    let mut site_ids = Vec::new();
     let mut patient_ids = Vec::new();
-    for p in &patients {
-        let nid = store.create_node("Patient");
-        let emb = mock_embedding(p.id);
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("patient_id", format!("PT-{}", p.id));
-            node.set_property("age", p.age);
-            node.set_property("sex", p.sex);
-            node.set_property("primary_condition", p.primary_condition);
-            node.set_property("biomarker_pdl1", p.biomarker_pdl1);
-            node.set_property("biomarker_egfr", p.biomarker_egfr);
-            node.set_property("biomarker_hba1c", p.biomarker_hba1c);
-            node.set_property("bmi", p.bmi);
-            node.set_property("comorbidities", p.comorbidities);
-            node.set_property("ehr_embedding", emb);
-        }
-        patient_ids.push(nid);
-    }
-    println!("  [+] Created {} Patient nodes with 128-dim EHR embeddings", patient_ids.len());
-
-    // Set trial protocol embeddings
-    for (i, &tid) in trial_ids.iter().enumerate() {
-        let emb = mock_embedding(10000 + i);
-        if let Some(node) = store.get_node_mut(tid) {
-            node.set_property("protocol_embedding", emb);
-        }
-    }
-    println!("  [+] Indexed {} Trial protocol embeddings", trial_ids.len());
-
-    // -- Relationships --
     let mut edge_count = 0usize;
 
-    // Trial -[TESTS]-> Drug
-    for (ti, drug_indices) in trial_drug_links() {
-        for &di in &drug_indices {
-            if ti < trial_ids.len() && di < drug_ids.len() {
-                store.create_edge(trial_ids[ti], drug_ids[di], EdgeType::new("TESTS")).unwrap();
+    {
+        let mut store = client.store_write().await;
+
+        // -- Trials --
+        for (i, t) in trials.iter().enumerate() {
+            let nid = store.create_node("Trial");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("nct_id", t.nct_id);
+                node.set_property("title", t.title);
+                node.set_property("phase", t.phase);
+                node.set_property("status", t.status);
+                node.set_property("sponsor", t.sponsor);
+                node.set_property("target_enrollment", t.target_enrollment);
+                node.set_property("seed", i as i64);
+            }
+            trial_ids.push(nid);
+        }
+        println!("  [+] Created {} Trial nodes", trial_ids.len());
+
+        // -- Drugs --
+        for d in &drugs {
+            let nid = store.create_node("Drug");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("generic_name", d.generic_name);
+                node.set_property("brand_name", d.brand_name);
+                node.set_property("mechanism", d.mechanism);
+                node.set_property("approval_year", d.approval_year);
+            }
+            drug_ids.push(nid);
+        }
+        println!("  [+] Created {} Drug nodes", drug_ids.len());
+
+        // -- Conditions --
+        for c in &conditions {
+            let nid = store.create_node("Condition");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("name", c.name);
+                node.set_property("icd10", c.icd10);
+                node.set_property("therapeutic_area", c.therapeutic_area);
+            }
+            condition_ids.push(nid);
+        }
+        println!("  [+] Created {} Condition nodes", condition_ids.len());
+
+        // -- Sites --
+        for s in &sites {
+            let nid = store.create_node("Site");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("name", s.name);
+                node.set_property("city", s.city);
+                node.set_property("state", s.state);
+                node.set_property("capacity", s.capacity);
+                node.set_property("experience_score", s.experience_score);
+                node.set_property("cost_per_patient", s.cost_per_patient);
+                node.set_property("diversity_index", s.diversity_index);
+            }
+            site_ids.push(nid);
+        }
+        println!("  [+] Created {} Site nodes", site_ids.len());
+
+        // -- Patients (with vector embeddings) --
+        // Store embeddings as node properties for cosine similarity matching.
+        // We use direct node.set_property for bulk loading and perform brute-force
+        // cosine search at query time (see Step 2).
+        for p in &patients {
+            let nid = store.create_node("Patient");
+            let emb = mock_embedding(p.id);
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("patient_id", format!("PT-{}", p.id));
+                node.set_property("age", p.age);
+                node.set_property("sex", p.sex);
+                node.set_property("primary_condition", p.primary_condition);
+                node.set_property("biomarker_pdl1", p.biomarker_pdl1);
+                node.set_property("biomarker_egfr", p.biomarker_egfr);
+                node.set_property("biomarker_hba1c", p.biomarker_hba1c);
+                node.set_property("bmi", p.bmi);
+                node.set_property("comorbidities", p.comorbidities);
+                node.set_property("ehr_embedding", emb);
+            }
+            patient_ids.push(nid);
+        }
+        println!("  [+] Created {} Patient nodes with 128-dim EHR embeddings", patient_ids.len());
+
+        // Set trial protocol embeddings
+        for (i, &tid) in trial_ids.iter().enumerate() {
+            let emb = mock_embedding(10000 + i);
+            if let Some(node) = store.get_node_mut(tid) {
+                node.set_property("protocol_embedding", emb);
+            }
+        }
+        println!("  [+] Indexed {} Trial protocol embeddings", trial_ids.len());
+
+        // -- Relationships --
+
+        // Trial -[TESTS]-> Drug
+        for (ti, drug_indices) in trial_drug_links() {
+            for &di in &drug_indices {
+                if ti < trial_ids.len() && di < drug_ids.len() {
+                    store.create_edge(trial_ids[ti], drug_ids[di], EdgeType::new("TESTS")).unwrap();
+                    edge_count += 1;
+                }
+            }
+        }
+
+        // Trial -[STUDIES]-> Condition
+        for (ti, ci) in trial_condition_links() {
+            if ti < trial_ids.len() && ci < condition_ids.len() {
+                store.create_edge(trial_ids[ti], condition_ids[ci], EdgeType::new("STUDIES")).unwrap();
                 edge_count += 1;
             }
         }
-    }
 
-    // Trial -[STUDIES]-> Condition
-    for (ti, ci) in trial_condition_links() {
-        if ti < trial_ids.len() && ci < condition_ids.len() {
-            store.create_edge(trial_ids[ti], condition_ids[ci], EdgeType::new("STUDIES")).unwrap();
-            edge_count += 1;
-        }
-    }
-
-    // Trial -[CONDUCTED_AT]-> Site (distribute trials across sites)
-    for (i, &tid) in trial_ids.iter().enumerate() {
-        let primary_site = i % sites.len();
-        let secondary_site = (i * 3 + 7) % sites.len();
-        store.create_edge(tid, site_ids[primary_site], EdgeType::new("CONDUCTED_AT")).unwrap();
-        if primary_site != secondary_site {
-            store.create_edge(tid, site_ids[secondary_site], EdgeType::new("CONDUCTED_AT")).unwrap();
-            edge_count += 2;
-        } else {
-            edge_count += 1;
-        }
-    }
-
-    // Patient -[HAS_CONDITION]-> Condition (map primary condition)
-    let condition_names: Vec<&str> = conditions.iter().map(|c| c.name).collect();
-    for (pi, p) in patients.iter().enumerate() {
-        if let Some(ci) = condition_names.iter().position(|&n| n == p.primary_condition) {
-            store.create_edge(patient_ids[pi], condition_ids[ci], EdgeType::new("HAS_CONDITION")).unwrap();
-            edge_count += 1;
-        }
-    }
-
-    // Drug -[INTERACTS_WITH]-> Drug
-    for (d1, d2, interaction_type) in drug_interaction_pairs() {
-        if d1 < drug_ids.len() && d2 < drug_ids.len() {
-            let eid = store.create_edge(drug_ids[d1], drug_ids[d2], EdgeType::new("INTERACTS_WITH")).unwrap();
-            if let Some(edge) = store.get_edge_mut(eid) {
-                edge.set_property("interaction_type", interaction_type);
+        // Trial -[CONDUCTED_AT]-> Site (distribute trials across sites)
+        for (i, &tid) in trial_ids.iter().enumerate() {
+            let primary_site = i % sites.len();
+            let secondary_site = (i * 3 + 7) % sites.len();
+            store.create_edge(tid, site_ids[primary_site], EdgeType::new("CONDUCTED_AT")).unwrap();
+            if primary_site != secondary_site {
+                store.create_edge(tid, site_ids[secondary_site], EdgeType::new("CONDUCTED_AT")).unwrap();
+                edge_count += 2;
+            } else {
+                edge_count += 1;
             }
-            edge_count += 1;
         }
-    }
 
-    println!("  [+] Created {} relationships", edge_count);
+        // Patient -[HAS_CONDITION]-> Condition (map primary condition)
+        let condition_names: Vec<&str> = conditions.iter().map(|c| c.name).collect();
+        for (pi, p) in patients.iter().enumerate() {
+            if let Some(ci) = condition_names.iter().position(|&n| n == p.primary_condition) {
+                store.create_edge(patient_ids[pi], condition_ids[ci], EdgeType::new("HAS_CONDITION")).unwrap();
+                edge_count += 1;
+            }
+        }
+
+        // Drug -[INTERACTS_WITH]-> Drug
+        for (d1, d2, interaction_type) in drug_interaction_pairs() {
+            if d1 < drug_ids.len() && d2 < drug_ids.len() {
+                let eid = store.create_edge(drug_ids[d1], drug_ids[d2], EdgeType::new("INTERACTS_WITH")).unwrap();
+                if let Some(edge) = store.get_edge_mut(eid) {
+                    edge.set_property("interaction_type", interaction_type);
+                }
+                edge_count += 1;
+            }
+        }
+
+        println!("  [+] Created {} relationships", edge_count);
+    } // drop store write lock
     println!();
 
     // Summary table
@@ -593,7 +595,7 @@ async fn main() {
     println!();
 
     // Brute-force cosine similarity search across all Trial protocol embeddings.
-    // In production, use store.vector_search() with an HNSW index for O(log N)
+    // In production, use client.vector_search() with an HNSW index for O(log N)
     // approximate nearest neighbor queries at scale.
     let sample_patients = [0usize, 42, 150];
     for &pi in &sample_patients {
@@ -608,7 +610,8 @@ async fn main() {
             p.bmi);
 
         // Compute cosine similarity against all trial protocol embeddings
-        let mut scored: Vec<(samyama::NodeId, f32)> = trial_ids.iter().filter_map(|&tid| {
+        let store = client.store_read().await;
+        let mut scored: Vec<(NodeId, f32)> = trial_ids.iter().filter_map(|&tid| {
             store.get_node(tid).and_then(|node| {
                 node.get_property("protocol_embedding")
                     .and_then(|pv| pv.as_vector().cloned())
@@ -631,6 +634,7 @@ async fn main() {
                 println!("    │ {:>2} │ {:<54} │ {:.4} │", rank + 1, truncated, score);
             }
         }
+        drop(store);
         println!("    └────┴────────────────────────────────────────────────────────┴────────┘");
         println!();
     }
@@ -782,23 +786,29 @@ async fn main() {
     // 4a. PageRank on Drug nodes via INTERACTS_WITH edges
     println!("  4a. PageRank: Identifying Most Connected Drugs");
     println!("  ------------------------------------------------");
-    let drug_view = build_view(&store, Some("Drug"), Some("INTERACTS_WITH"), None);
-    let pr_scores = page_rank(&drug_view, PageRankConfig {
-        damping_factor: 0.85,
-        iterations: 30,
-        tolerance: 0.0001,
-    });
+    let pr_scores = client.page_rank(
+        PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 30,
+            tolerance: 0.0001,
+        },
+        Some("Drug"),
+        Some("INTERACTS_WITH"),
+    ).await;
 
     // Map algo NodeId (u64) back to graph NodeId and sort
     let mut drug_ranks: Vec<(String, String, f64)> = Vec::new();
-    for (&algo_id, &score) in &pr_scores {
-        let graph_nid = samyama::NodeId::new(algo_id);
-        if let Some(node) = store.get_node(graph_nid) {
-            let generic = node.get_property("generic_name")
-                .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
-            let brand = node.get_property("brand_name")
-                .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
-            drug_ranks.push((generic.to_string(), brand.to_string(), score));
+    {
+        let store = client.store_read().await;
+        for (&algo_id, &score) in &pr_scores {
+            let graph_nid = NodeId::new(algo_id);
+            if let Some(node) = store.get_node(graph_nid) {
+                let generic = node.get_property("generic_name")
+                    .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
+                let brand = node.get_property("brand_name")
+                    .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
+                drug_ranks.push((generic.to_string(), brand.to_string(), score));
+            }
         }
     }
     drug_ranks.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
@@ -817,20 +827,23 @@ async fn main() {
     // 4b. Weakly Connected Components on Drug interaction graph
     println!("  4b. Drug Clusters (Weakly Connected Components)");
     println!("  ------------------------------------------------");
-    let wcc = weakly_connected_components(&drug_view);
+    let wcc = client.weakly_connected_components(Some("Drug"), Some("INTERACTS_WITH")).await;
     let mut cluster_sizes: Vec<(usize, Vec<String>)> = Vec::new();
-    for (_comp_id, node_ids) in &wcc.components {
-        let mut names: Vec<String> = Vec::new();
-        for &algo_id in node_ids {
-            let graph_nid = samyama::NodeId::new(algo_id);
-            if let Some(node) = store.get_node(graph_nid) {
-                let generic = node.get_property("generic_name")
-                    .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
-                names.push(generic.to_string());
+    {
+        let store = client.store_read().await;
+        for (_comp_id, node_ids) in &wcc.components {
+            let mut names: Vec<String> = Vec::new();
+            for &algo_id in node_ids {
+                let graph_nid = NodeId::new(algo_id);
+                if let Some(node) = store.get_node(graph_nid) {
+                    let generic = node.get_property("generic_name")
+                        .map(|v| v.as_string().unwrap_or_default()).unwrap_or_default();
+                    names.push(generic.to_string());
+                }
             }
+            names.sort();
+            cluster_sizes.push((names.len(), names));
         }
-        names.sort();
-        cluster_sizes.push((names.len(), names));
     }
     cluster_sizes.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -855,34 +868,31 @@ async fn main() {
     println!("  (trials studying the same condition).");
     println!();
 
-    // Build condition -> trials map via Cypher
+    // Build condition -> trials map via direct store traversal
     let mut condition_trials: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
-    let result = engine.execute("MATCH (t:Trial) RETURN t", &store).unwrap();
-    for record in &result.records {
-        if let Some(val) = record.get("t") {
-            if let Some((nid, _node_ref)) = val.as_node() {
-                let trial_nid = nid;
-                let edges = store.get_outgoing_edges(trial_nid);
-                for edge in &edges {
-                    if edge.edge_type.as_str() == "STUDIES" {
-                        if let Some(cond_node) = store.get_node(edge.target) {
-                            let cond_name = cond_node.get_property("name")
+    {
+        let store = client.store_read().await;
+        for &tid in &trial_ids {
+            let edges = store.get_outgoing_edges(tid);
+            for edge in &edges {
+                if edge.edge_type.as_str() == "STUDIES" {
+                    if let Some(cond_node) = store.get_node(edge.target) {
+                        let cond_name = cond_node.get_property("name")
+                            .map(|v| v.as_string().unwrap_or_default())
+                            .unwrap_or_default();
+                        if let Some(trial_node) = store.get_node(tid) {
+                            let nct = trial_node.get_property("nct_id")
                                 .map(|v| v.as_string().unwrap_or_default())
                                 .unwrap_or_default();
-                            if let Some(trial_node) = store.get_node(trial_nid) {
-                                let nct = trial_node.get_property("nct_id")
-                                    .map(|v| v.as_string().unwrap_or_default())
-                                    .unwrap_or_default();
-                                let sponsor = trial_node.get_property("sponsor")
-                                    .map(|v| v.as_string().unwrap_or_default())
-                                    .unwrap_or_default();
-                                let status = trial_node.get_property("status")
-                                    .map(|v| v.as_string().unwrap_or_default())
-                                    .unwrap_or_default();
-                                condition_trials.entry(cond_name.to_string())
-                                    .or_default()
-                                    .push((nct.to_string(), sponsor.to_string(), status.to_string()));
-                            }
+                            let sponsor = trial_node.get_property("sponsor")
+                                .map(|v| v.as_string().unwrap_or_default())
+                                .unwrap_or_default();
+                            let status = trial_node.get_property("status")
+                                .map(|v| v.as_string().unwrap_or_default())
+                                .unwrap_or_default();
+                            condition_trials.entry(cond_name.to_string())
+                                .or_default()
+                                .push((nct.to_string(), sponsor.to_string(), status.to_string()));
                         }
                     }
                 }
@@ -1007,23 +1017,23 @@ async fn main() {
     println!("  ┌──────────────────────────────────────────────────────────┐");
 
     let q1 = "MATCH (t:Trial) RETURN t";
-    let r1 = engine.execute(q1, &store).unwrap();
+    let r1 = client.query_readonly("default", q1).await.unwrap();
     println!("  │ MATCH (t:Trial) RETURN t             -> {} results {:>6} │", r1.len(), "");
 
     let q2 = "MATCH (d:Drug) RETURN d";
-    let r2 = engine.execute(q2, &store).unwrap();
+    let r2 = client.query_readonly("default", q2).await.unwrap();
     println!("  │ MATCH (d:Drug) RETURN d              -> {} results {:>6} │", r2.len(), "");
 
     let q3 = "MATCH (c:Condition) RETURN c";
-    let r3 = engine.execute(q3, &store).unwrap();
+    let r3 = client.query_readonly("default", q3).await.unwrap();
     println!("  │ MATCH (c:Condition) RETURN c         -> {} results {:>5} │", r3.len(), "");
 
     let q4 = "MATCH (s:Site) RETURN s";
-    let r4 = engine.execute(q4, &store).unwrap();
+    let r4 = client.query_readonly("default", q4).await.unwrap();
     println!("  │ MATCH (s:Site) RETURN s              -> {} results {:>6} │", r4.len(), "");
 
     let q5 = "MATCH (p:Patient) RETURN p LIMIT 5";
-    let r5 = engine.execute(q5, &store).unwrap();
+    let r5 = client.query_readonly("default", q5).await.unwrap();
     println!("  │ MATCH (p:Patient) RETURN p LIMIT 5   -> {} results {:>7} │", r5.len(), "");
 
     println!("  └──────────────────────────────────────────────────────────┘");
@@ -1050,7 +1060,7 @@ async fn main() {
             system_prompt: Some("You are a Cypher query expert for a clinical trials knowledge graph.".to_string()),
         };
 
-        let tenant_mgr = TenantManager::new();
+        let tenant_mgr = client.tenant_manager();
         tenant_mgr.create_tenant("clinical_nlq".to_string(), "Clinical NLQ".to_string(), None).unwrap();
         tenant_mgr.update_nlq_config("clinical_nlq", Some(nlq_config.clone())).unwrap();
 
@@ -1063,7 +1073,7 @@ async fn main() {
                               Patient(patient_id, age, sex, primary_condition, biomarker_pdl1, biomarker_egfr, bmi)\n\
                               Notes: Use exact condition names for matching. All sites are in the United States.";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config.clone()).unwrap();
 
         let nlq_questions = vec![
             "Which Phase III trials are studying non-small cell lung cancer?",
@@ -1076,8 +1086,8 @@ async fn main() {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("  Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &store) {
-                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                    match client.query_readonly("default", &cypher).await {
+                        Ok(result) => println!("  Results: {} records", result.len()),
                         Err(e) => println!("  Execution error: {}", e),
                     }
                 }
@@ -1106,7 +1116,7 @@ async fn main() {
             policies,
         };
 
-        let runtime = AgentRuntime::new(agent_config);
+        let runtime = client.agent_runtime(agent_config);
         let enrichment_prompt = "Generate Cypher CREATE statements for the drug Nivolumab with its indications, mechanism, and clinical trials.\n\n\
                                  Create:\n\
                                  1. One Drug node with properties: generic_name: 'nivolumab', brand_name: 'Opdivo', mechanism: 'PD-1 inhibitor', approval_year: 2014\n\

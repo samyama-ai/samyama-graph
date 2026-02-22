@@ -14,11 +14,13 @@
 //!
 //! Run: cargo run --example enterprise_soc_demo
 
-use samyama::{GraphStore, Label, EdgeType, PersistenceManager, QueryEngine, NLQPipeline};
-use samyama::persistence::tenant::{AgentConfig, AutoEmbedConfig, LLMProvider, NLQConfig};
-use samyama::agent::AgentRuntime;
-use samyama::vector::DistanceMetric;
-use samyama::algo::{build_view, page_rank, weakly_connected_components, dijkstra, PageRankConfig};
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    EdgeType, Label, NodeId, PageRankConfig,
+    PersistenceManager,
+    NLQConfig, LLMProvider, AgentConfig, AutoEmbedConfig,
+    DistanceMetric,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,8 +60,10 @@ async fn main() {
     let overall_start = Instant::now();
 
     // ======================================================================
-    // Setup: persistence, tenant, vector index
+    // Setup: persistence, tenant, vector index, SDK client
     // ======================================================================
+    let client = EmbeddedClient::new();
+
     let temp_dir = tempfile::TempDir::new().unwrap();
     let persistence = Arc::new(PersistenceManager::new(temp_dir.path()).unwrap());
     let tenant_id = "soc_ops";
@@ -104,15 +108,12 @@ async fn main() {
         "Security Operations Center".to_string(),
         None,
     ).unwrap();
-    persistence.tenants().update_agent_config(tenant_id, Some(agent_config)).unwrap();
+    persistence.tenants().update_agent_config(tenant_id, Some(agent_config.clone())).unwrap();
     persistence.tenants().update_embed_config(tenant_id, Some(embed_config)).unwrap();
     persistence.tenants().update_nlq_config(tenant_id, Some(nlq_config.clone())).unwrap();
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
-
     // Create vector index for threat signature matching (128-dim)
-    store.create_vector_index("ThreatIntel", "signature_embedding", 128, DistanceMetric::Cosine).unwrap();
+    client.create_vector_index("ThreatIntel", "signature_embedding", 128, DistanceMetric::Cosine).await.unwrap();
 
     // ======================================================================
     // STEP 1: Build Enterprise Network Topology
@@ -188,20 +189,23 @@ async fn main() {
         ServerDef { name: "ot-antivirus-01", ip: "192.168.6.10",zone: "OT",       os: "Windows Server 2019", role: "AV Management",      criticality: "Medium" },
     ];
 
-    let mut server_ids: HashMap<String, samyama::NodeId> = HashMap::new();
+    let mut server_ids: HashMap<String, NodeId> = HashMap::new();
 
-    for s in &servers {
-        let nid = store.create_node("Server");
-        if let Some(n) = store.get_node_mut(nid) {
-            n.set_property("name", s.name);
-            n.set_property("ip", s.ip);
-            n.set_property("zone", s.zone);
-            n.set_property("os", s.os);
-            n.set_property("role", s.role);
-            n.set_property("criticality", s.criticality);
+    {
+        let mut store = client.store_write().await;
+        for s in &servers {
+            let nid = store.create_node("Server");
+            if let Some(n) = store.get_node_mut(nid) {
+                n.set_property("name", s.name);
+                n.set_property("ip", s.ip);
+                n.set_property("zone", s.zone);
+                n.set_property("os", s.os);
+                n.set_property("role", s.role);
+                n.set_property("criticality", s.criticality);
+            }
+            let _ = store.add_label_to_node(tenant_id, nid, s.zone);
+            server_ids.insert(s.name.to_string(), nid);
         }
-        let _ = store.add_label_to_node(tenant_id, nid, s.zone);
-        server_ids.insert(s.name.to_string(), nid);
     }
 
     println!("    Servers ingested: {}", servers.len());
@@ -266,10 +270,13 @@ async fn main() {
     ];
 
     let mut edge_count = 0;
-    for (src, tgt, etype) in &fw_pairs {
-        if let (Some(&s), Some(&t)) = (server_ids.get(*src), server_ids.get(*tgt)) {
-            store.create_edge(s, t, EdgeType::new(*etype)).unwrap();
-            edge_count += 1;
+    {
+        let mut store = client.store_write().await;
+        for (src, tgt, etype) in &fw_pairs {
+            if let (Some(&s), Some(&t)) = (server_ids.get(*src), server_ids.get(*tgt)) {
+                store.create_edge(s, t, EdgeType::new(*etype)).unwrap();
+                edge_count += 1;
+            }
         }
     }
     println!("    Network edges created: {}", edge_count);
@@ -321,19 +328,22 @@ async fn main() {
         UserDef { name: "Wendy Chu",         username: "wchu",        department: "IT Security",     title: "Vulnerability Analyst",     access_level: "Admin",      mfa_enabled: true },
     ];
 
-    let mut user_ids: HashMap<String, samyama::NodeId> = HashMap::new();
+    let mut user_ids: HashMap<String, NodeId> = HashMap::new();
 
-    for u in &users {
-        let nid = store.create_node("User");
-        if let Some(n) = store.get_node_mut(nid) {
-            n.set_property("name", u.name);
-            n.set_property("username", u.username);
-            n.set_property("department", u.department);
-            n.set_property("title", u.title);
-            n.set_property("access_level", u.access_level);
-            n.set_property("mfa_enabled", u.mfa_enabled);
+    {
+        let mut store = client.store_write().await;
+        for u in &users {
+            let nid = store.create_node("User");
+            if let Some(n) = store.get_node_mut(nid) {
+                n.set_property("name", u.name);
+                n.set_property("username", u.username);
+                n.set_property("department", u.department);
+                n.set_property("title", u.title);
+                n.set_property("access_level", u.access_level);
+                n.set_property("mfa_enabled", u.mfa_enabled);
+            }
+            user_ids.insert(u.username.to_string(), nid);
         }
-        user_ids.insert(u.username.to_string(), nid);
     }
 
     // User -> Server access relationships
@@ -355,10 +365,13 @@ async fn main() {
     ];
 
     let mut access_edge_count = 0;
-    for (user, server) in &access_map {
-        if let (Some(&uid), Some(&sid)) = (user_ids.get(*user), server_ids.get(*server)) {
-            store.create_edge(uid, sid, EdgeType::new("HAS_ACCESS")).unwrap();
-            access_edge_count += 1;
+    {
+        let mut store = client.store_write().await;
+        for (user, server) in &access_map {
+            if let (Some(&uid), Some(&sid)) = (user_ids.get(*user), server_ids.get(*server)) {
+                store.create_edge(uid, sid, EdgeType::new("HAS_ACCESS")).unwrap();
+                access_edge_count += 1;
+            }
         }
     }
 
@@ -414,23 +427,26 @@ async fn main() {
         CveDef { id: "CVE-2021-40444", description: "MSHTML RCE via ActiveX in Office docs",             cvss: 8.8,  family: "MSHTML",        affected: "Microsoft Office" },
     ];
 
-    let mut cve_ids: HashMap<String, samyama::NodeId> = HashMap::new();
+    let mut cve_ids: HashMap<String, NodeId> = HashMap::new();
 
-    for (i, cve) in cves.iter().enumerate() {
-        let nid = store.create_node("ThreatIntel");
-        if let Some(n) = store.get_node_mut(nid) {
-            n.set_property("cve_id", cve.id);
-            n.set_property("description", cve.description);
-            n.set_property("cvss_score", cve.cvss);
-            n.set_property("malware_family", cve.family);
-            n.set_property("affected_product", cve.affected);
-            // Deterministic 128-dim embedding for vector search
-            let embedding: Vec<f32> = (0..128)
-                .map(|j| ((i * 7 + j * 13) % 100) as f32 / 100.0)
-                .collect();
-            n.set_property("signature_embedding", embedding);
+    {
+        let mut store = client.store_write().await;
+        for (i, cve) in cves.iter().enumerate() {
+            let nid = store.create_node("ThreatIntel");
+            if let Some(n) = store.get_node_mut(nid) {
+                n.set_property("cve_id", cve.id);
+                n.set_property("description", cve.description);
+                n.set_property("cvss_score", cve.cvss);
+                n.set_property("malware_family", cve.family);
+                n.set_property("affected_product", cve.affected);
+                // Deterministic 128-dim embedding for vector search
+                let embedding: Vec<f32> = (0..128)
+                    .map(|j| ((i * 7 + j * 13) % 100) as f32 / 100.0)
+                    .collect();
+                n.set_property("signature_embedding", embedding);
+            }
+            cve_ids.insert(cve.id.to_string(), nid);
         }
-        cve_ids.insert(cve.id.to_string(), nid);
     }
 
     println!("    CVEs ingested: {}", cves.len());
@@ -477,16 +493,19 @@ async fn main() {
         MitreDef { technique_id: "T1570",     name: "Lateral Tool Transfer",              tactic: "Lateral Movement" },
     ];
 
-    let mut technique_ids: HashMap<String, samyama::NodeId> = HashMap::new();
+    let mut technique_ids: HashMap<String, NodeId> = HashMap::new();
 
-    for t in &techniques {
-        let nid = store.create_node("MitreTechnique");
-        if let Some(n) = store.get_node_mut(nid) {
-            n.set_property("technique_id", t.technique_id);
-            n.set_property("name", t.name);
-            n.set_property("tactic", t.tactic);
+    {
+        let mut store = client.store_write().await;
+        for t in &techniques {
+            let nid = store.create_node("MitreTechnique");
+            if let Some(n) = store.get_node_mut(nid) {
+                n.set_property("technique_id", t.technique_id);
+                n.set_property("name", t.name);
+                n.set_property("tactic", t.tactic);
+            }
+            technique_ids.insert(t.technique_id.to_string(), nid);
         }
-        technique_ids.insert(t.technique_id.to_string(), nid);
     }
 
     // Link CVEs to MITRE techniques
@@ -506,9 +525,12 @@ async fn main() {
         ("CVE-2021-40444", "T1566.002"),
     ];
 
-    for (cve, tech) in &cve_technique_links {
-        if let (Some(&cid), Some(&tid)) = (cve_ids.get(*cve), technique_ids.get(*tech)) {
-            store.create_edge(cid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
+    {
+        let mut store = client.store_write().await;
+        for (cve, tech) in &cve_technique_links {
+            if let (Some(&cid), Some(&tid)) = (cve_ids.get(*cve), technique_ids.get(*tech)) {
+                store.create_edge(cid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
+            }
         }
     }
 
@@ -523,9 +545,12 @@ async fn main() {
         ("CVE-2023-27997", "dmz-vpn-01"),    // FortiOS → VPN Gateway
     ];
 
-    for (cve, server) in &targeted_links {
-        if let (Some(&cid), Some(&sid)) = (cve_ids.get(*cve), server_ids.get(*server)) {
-            store.create_edge(cid, sid, EdgeType::new("TARGETED")).unwrap();
+    {
+        let mut store = client.store_write().await;
+        for (cve, server) in &targeted_links {
+            if let (Some(&cid), Some(&sid)) = (cve_ids.get(*cve), server_ids.get(*server)) {
+                store.create_edge(cid, sid, EdgeType::new("TARGETED")).unwrap();
+            }
         }
     }
     println!("    CVE-to-server TARGETED links: {}", targeted_links.len());
@@ -542,16 +567,19 @@ async fn main() {
         ("Raspberry Robin","Worm",            "USB worm that spreads via removable drives"),
     ];
 
-    let mut malware_ids: HashMap<String, samyama::NodeId> = HashMap::new();
+    let mut malware_ids: HashMap<String, NodeId> = HashMap::new();
 
-    for (name, mtype, desc) in &malware_families {
-        let nid = store.create_node("Malware");
-        if let Some(n) = store.get_node_mut(nid) {
-            n.set_property("name", *name);
-            n.set_property("malware_type", *mtype);
-            n.set_property("description", *desc);
+    {
+        let mut store = client.store_write().await;
+        for (name, mtype, desc) in &malware_families {
+            let nid = store.create_node("Malware");
+            if let Some(n) = store.get_node_mut(nid) {
+                n.set_property("name", *name);
+                n.set_property("malware_type", *mtype);
+                n.set_property("description", *desc);
+            }
+            malware_ids.insert(name.to_string(), nid);
         }
-        malware_ids.insert(name.to_string(), nid);
     }
 
     // Link malware to techniques
@@ -568,9 +596,12 @@ async fn main() {
         ("Raspberry Robin","T1570"),
     ];
 
-    for (mal, tech) in &malware_technique_links {
-        if let (Some(&mid), Some(&tid)) = (malware_ids.get(*mal), technique_ids.get(*tech)) {
-            store.create_edge(mid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
+    {
+        let mut store = client.store_write().await;
+        for (mal, tech) in &malware_technique_links {
+            if let (Some(&mid), Some(&tid)) = (malware_ids.get(*mal), technique_ids.get(*tech)) {
+                store.create_edge(mid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
+            }
         }
     }
 
@@ -618,41 +649,44 @@ async fn main() {
     ];
 
     // Create attack event nodes and edges
-    let mut attack_event_ids: Vec<samyama::NodeId> = Vec::new();
+    let mut attack_event_ids: Vec<NodeId> = Vec::new();
 
-    for a in &attack_chain {
-        let event_id = store.create_node("AttackEvent");
-        if let Some(n) = store.get_node_mut(event_id) {
-            n.set_property("step", a.step as i64);
-            n.set_property("technique", a.technique);
-            n.set_property("description", a.description);
-            n.set_property("timestamp", format!("2025-01-15T0{}:00:00Z", a.step));
+    {
+        let mut store = client.store_write().await;
+        for a in &attack_chain {
+            let event_id = store.create_node("AttackEvent");
+            if let Some(n) = store.get_node_mut(event_id) {
+                n.set_property("step", a.step as i64);
+                n.set_property("technique", a.technique);
+                n.set_property("description", a.description);
+                n.set_property("timestamp", format!("2025-01-15T0{}:00:00Z", a.step));
+            }
+            let _ = store.add_label_to_node(tenant_id, event_id, "Alert");
+
+            // Link event to source
+            let source_id = user_ids.get(a.source_name)
+                .or_else(|| server_ids.get(a.source_name));
+            let target_id = server_ids.get(a.target_name);
+
+            if let (Some(&sid), Some(&tid)) = (source_id, target_id) {
+                store.create_edge(event_id, sid, EdgeType::new("ORIGINATED_FROM")).unwrap();
+                store.create_edge(event_id, tid, EdgeType::new("TARGETED")).unwrap();
+                // Direct lateral movement edge for path analysis
+                store.create_edge(sid, tid, EdgeType::new("LATERAL_MOVEMENT")).unwrap();
+            }
+
+            // Link event to MITRE technique
+            if let Some(&tech_nid) = technique_ids.get(a.technique) {
+                store.create_edge(event_id, tech_nid, EdgeType::new("USES_TECHNIQUE")).unwrap();
+            }
+
+            attack_event_ids.push(event_id);
         }
-        let _ = store.add_label_to_node(tenant_id, event_id, "Alert");
 
-        // Link event to source
-        let source_id = user_ids.get(a.source_name)
-            .or_else(|| server_ids.get(a.source_name));
-        let target_id = server_ids.get(a.target_name);
-
-        if let (Some(&sid), Some(&tid)) = (source_id, target_id) {
-            store.create_edge(event_id, sid, EdgeType::new("ORIGINATED_FROM")).unwrap();
-            store.create_edge(event_id, tid, EdgeType::new("TARGETED")).unwrap();
-            // Direct lateral movement edge for path analysis
-            store.create_edge(sid, tid, EdgeType::new("LATERAL_MOVEMENT")).unwrap();
+        // Chain attack events sequentially
+        for i in 0..attack_event_ids.len() - 1 {
+            store.create_edge(attack_event_ids[i], attack_event_ids[i + 1], EdgeType::new("LEADS_TO")).unwrap();
         }
-
-        // Link event to MITRE technique
-        if let Some(&tech_nid) = technique_ids.get(a.technique) {
-            store.create_edge(event_id, tech_nid, EdgeType::new("USES_TECHNIQUE")).unwrap();
-        }
-
-        attack_event_ids.push(event_id);
-    }
-
-    // Chain attack events sequentially
-    for i in 0..attack_event_ids.len() - 1 {
-        store.create_edge(attack_event_ids[i], attack_event_ids[i + 1], EdgeType::new("LEADS_TO")).unwrap();
     }
 
     println!("    Attack chain (8 steps):");
@@ -678,7 +712,7 @@ async fn main() {
     subsection("4a. Lateral Movement Trace (Cypher)");
 
     let query = "MATCH (e:AttackEvent) RETURN e LIMIT 10";
-    let result = engine.execute(query, &store);
+    let result = client.query_readonly("default", query).await;
     match result {
         Ok(batch) => {
             println!("    Query: {}", query);
@@ -693,19 +727,22 @@ async fn main() {
     println!();
     println!("    Tracing attack path via graph API:");
     let compromised_user = user_ids.get("cmendez").unwrap();
-    let edges = store.get_outgoing_edges(*compromised_user);
-    let accessed_servers: Vec<_> = edges.iter()
-        .filter(|e| e.edge_type.as_str() == "HAS_ACCESS" || e.edge_type.as_str() == "LATERAL_MOVEMENT")
-        .collect();
+    {
+        let store = client.store_read().await;
+        let edges = store.get_outgoing_edges(*compromised_user);
+        let accessed_servers: Vec<_> = edges.iter()
+            .filter(|e| e.edge_type.as_str() == "HAS_ACCESS" || e.edge_type.as_str() == "LATERAL_MOVEMENT")
+            .collect();
 
-    println!("    Initial compromise: cmendez (Carlos Mendez - no MFA)");
-    println!("    Directly accessible from compromised user: {} servers", accessed_servers.len());
+        println!("    Initial compromise: cmendez (Carlos Mendez - no MFA)");
+        println!("    Directly accessible from compromised user: {} servers", accessed_servers.len());
 
-    for edge in &accessed_servers {
-        if let Some(target_node) = store.get_node(edge.target) {
-            let sname = target_node.get_property("name").unwrap().as_string().unwrap();
-            let sip = target_node.get_property("ip").unwrap().as_string().unwrap();
-            println!("      -> {} ({}) via {}", sname, sip, edge.edge_type.as_str());
+        for edge in &accessed_servers {
+            if let Some(target_node) = store.get_node(edge.target) {
+                let sname = target_node.get_property("name").unwrap().as_string().unwrap();
+                let sip = target_node.get_property("ip").unwrap().as_string().unwrap();
+                println!("      -> {} ({}) via {}", sname, sip, edge.edge_type.as_str());
+            }
         }
     }
 
@@ -722,22 +759,25 @@ async fn main() {
         .map(|j| ((5 * 7 + j * 13) % 100) as f32 / 100.0) // close to CVE index 5
         .collect();
 
-    let search_results = store.vector_search("ThreatIntel", "signature_embedding", &query_vec, 5).unwrap();
+    let search_results = client.vector_search("ThreatIntel", "signature_embedding", &query_vec, 5).await.unwrap();
 
     println!("    Top 5 matching threat signatures:");
     println!("    ┌────┬──────────────────┬─────────┬───────────────────────────────────────┐");
     println!("    │  # │ CVE ID           │  Score  │ Description                           │");
     println!("    ├────┼──────────────────┼─────────┼───────────────────────────────────────┤");
-    for (rank, (nid, score)) in search_results.iter().enumerate() {
-        if let Some(node) = store.get_node(*nid) {
-            let cve = node.get_property("cve_id").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
-            let desc = node.get_property("description").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
-            let desc_trunc = if desc.len() > 37 {
-                format!("{}...", &desc[..34])
-            } else {
-                format!("{:<37}", desc)
-            };
-            println!("    │ {:>2} │ {:<16} │ {:>6.4}  │ {} │", rank + 1, cve, score, desc_trunc);
+    {
+        let store = client.store_read().await;
+        for (rank, (nid, score)) in search_results.iter().enumerate() {
+            if let Some(node) = store.get_node(*nid) {
+                let cve = node.get_property("cve_id").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let desc = node.get_property("description").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let desc_trunc = if desc.len() > 37 {
+                    format!("{}...", &desc[..34])
+                } else {
+                    format!("{:<37}", desc)
+                };
+                println!("    │ {:>2} │ {:<16} │ {:>6.4}  │ {} │", rank + 1, cve, score, desc_trunc);
+            }
         }
     }
     println!("    └────┴──────────────────┴─────────┴───────────────────────────────────────┘");
@@ -751,12 +791,11 @@ async fn main() {
     subsection("5a. Critical Asset Identification (PageRank)");
     println!("    Running PageRank across all servers to identify most-connected assets...");
 
-    let view_all = build_view(&store, Some("Server"), None, None);
-    let pr_scores = page_rank(&view_all, PageRankConfig::default());
+    let pr_scores = client.page_rank(PageRankConfig::default(), Some("Server"), None).await;
 
     // Sort by score descending, map back to server names
-    let mut scored_servers: Vec<(samyama::NodeId, f64)> = pr_scores.iter()
-        .map(|(&node_id_u64, &score)| (samyama::NodeId::new(node_id_u64), score))
+    let mut scored_servers: Vec<(NodeId, f64)> = pr_scores.iter()
+        .map(|(&node_id_u64, &score)| (NodeId::new(node_id_u64), score))
         .collect();
     scored_servers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -765,12 +804,15 @@ async fn main() {
     println!("    ┌────┬────────────────────┬──────────────┬──────────────┬───────────┐");
     println!("    │  # │ Server             │ IP Address   │ Zone         │ PageRank  │");
     println!("    ├────┼────────────────────┼──────────────┼──────────────┼───────────┤");
-    for (rank, (nid, score)) in scored_servers.iter().take(10).enumerate() {
-        if let Some(node) = store.get_node(*nid) {
-            let sname = node.get_property("name").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
-            let sip = node.get_property("ip").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
-            let szone = node.get_property("zone").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
-            println!("    │ {:>2} │ {:<18} │ {:<12} │ {:<12} │ {:>8.4}  │", rank + 1, sname, sip, szone, score);
+    {
+        let store = client.store_read().await;
+        for (rank, (nid, score)) in scored_servers.iter().take(10).enumerate() {
+            if let Some(node) = store.get_node(*nid) {
+                let sname = node.get_property("name").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let sip = node.get_property("ip").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let szone = node.get_property("zone").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                println!("    │ {:>2} │ {:<18} │ {:<12} │ {:<12} │ {:>8.4}  │", rank + 1, sname, sip, szone, score);
+            }
         }
     }
     println!("    └────┴────────────────────┴──────────────┴──────────────┴───────────┘");
@@ -778,21 +820,19 @@ async fn main() {
     // 5b. Dijkstra -- Shortest attack path
     subsection("5b. Attack Path Analysis (Dijkstra Shortest Path)");
 
-    // Build a view of all nodes with all edge types for path analysis
-    let view_path = build_view(&store, None, None, None);
-
     // Find shortest path from the compromised user to the OT SCADA controller
     let entry_point = *user_ids.get("cmendez").unwrap();
     let target_asset = *server_ids.get("ot-scada-01").unwrap();
 
     println!("    Finding shortest path from cmendez (entry) to ot-scada-01 (target)...");
 
-    match dijkstra(&view_path, entry_point.as_u64(), target_asset.as_u64()) {
+    match client.dijkstra(entry_point.as_u64(), target_asset.as_u64(), None, None, None).await {
         Some(path_result) => {
             println!("    Path found! Cost (hops): {}", path_result.cost);
             println!("    Path:");
+            let store = client.store_read().await;
             for (i, node_id_u64) in path_result.path.iter().enumerate() {
-                let nid = samyama::NodeId::new(*node_id_u64);
+                let nid = NodeId::new(*node_id_u64);
                 if let Some(node) = store.get_node(nid) {
                     let name = node.get_property("name")
                         .or_else(|| node.get_property("username"))
@@ -810,12 +850,13 @@ async fn main() {
             // Try alternative path: entry -> int-git-01 -> int-ci-01 -> int-app-01 -> int-dc-01
             let intermediate = *server_ids.get("int-dc-01").unwrap();
             println!("    Trying path to int-dc-01 (Domain Controller) instead...");
-            match dijkstra(&view_path, entry_point.as_u64(), intermediate.as_u64()) {
+            match client.dijkstra(entry_point.as_u64(), intermediate.as_u64(), None, None, None).await {
                 Some(path_result) => {
                     println!("    Path found! Cost (hops): {}", path_result.cost);
                     println!("    Path:");
+                    let store = client.store_read().await;
                     for (i, node_id_u64) in path_result.path.iter().enumerate() {
-                        let nid = samyama::NodeId::new(*node_id_u64);
+                        let nid = NodeId::new(*node_id_u64);
                         if let Some(node) = store.get_node(nid) {
                             let name = node.get_property("name")
                                 .or_else(|| node.get_property("username"))
@@ -838,8 +879,7 @@ async fn main() {
 
     println!("    Running Weakly Connected Components to verify network zones...");
 
-    let view_servers = build_view(&store, Some("Server"), None, None);
-    let wcc_result = weakly_connected_components(&view_servers);
+    let wcc_result = client.weakly_connected_components(Some("Server"), None).await;
 
     let num_components = wcc_result.components.len();
     println!("    Connected components found: {}", num_components);
@@ -852,21 +892,24 @@ async fn main() {
     println!("    ┌─────────────┬──────────┬────────────────────────────────────────────────┐");
     println!("    │ Component   │   Size   │ Sample Members                                 │");
     println!("    ├─────────────┼──────────┼────────────────────────────────────────────────┤");
-    for (idx, (_, members)) in components_sorted.iter().enumerate().take(8) {
-        let sample: Vec<String> = members.iter().take(4).map(|&nid_u64| {
-            let nid = samyama::NodeId::new(nid_u64);
-            store.get_node(nid)
-                .and_then(|n| n.get_property("name"))
-                .and_then(|v| v.as_string().map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("node-{}", nid_u64))
-        }).collect();
-        let sample_str = sample.join(", ");
-        let sample_display = if sample_str.len() > 48 {
-            format!("{}...", &sample_str[..45])
-        } else {
-            format!("{:<48}", sample_str)
-        };
-        println!("    │ Segment {:>2}  │ {:>8} │ {} │", idx + 1, members.len(), sample_display);
+    {
+        let store = client.store_read().await;
+        for (idx, (_, members)) in components_sorted.iter().enumerate().take(8) {
+            let sample: Vec<String> = members.iter().take(4).map(|&nid_u64| {
+                let nid = NodeId::new(nid_u64);
+                store.get_node(nid)
+                    .and_then(|n| n.get_property("name"))
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+                    .unwrap_or_else(|| format!("node-{}", nid_u64))
+            }).collect();
+            let sample_str = sample.join(", ");
+            let sample_display = if sample_str.len() > 48 {
+                format!("{}...", &sample_str[..45])
+            } else {
+                format!("{:<48}", sample_str)
+            };
+            println!("    │ Segment {:>2}  │ {:>8} │ {} │", idx + 1, members.len(), sample_display);
+        }
     }
     if components_sorted.len() > 8 {
         println!("    │ ... {} more │          │                                                │", components_sorted.len() - 8);
@@ -892,7 +935,7 @@ async fn main() {
 
     for (cypher, label) in &queries {
         let start = Instant::now();
-        match engine.execute(cypher, &store) {
+        match client.query_readonly("default", cypher).await {
             Ok(batch) => {
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                 println!("    [OK] {} => {} results ({:.2}ms)", label, batch.len(), elapsed);
@@ -921,7 +964,7 @@ async fn main() {
                               ThreatIntel(cve_id, description, cvss_score[0.0-10.0], malware_family, affected), \
                               MitreTechnique(technique_id, name, tactic), Malware(name, type, first_seen)";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config).unwrap();
 
         let nlq_questions = vec![
             "Which servers in the DMZ have critical vulnerabilities?",
@@ -934,7 +977,7 @@ async fn main() {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("    Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &store) {
+                    match client.query_readonly("default", &cypher).await {
                         Ok(batch) => println!("    Results: {} records", batch.len()),
                         Err(e) => println!("    Execution error: {}", e),
                     }
@@ -948,7 +991,7 @@ async fn main() {
         println!("    --- Agentic Enrichment: Generating Threat Intel ---");
         let tenant_data = persistence.tenants().get_tenant(tenant_id).unwrap();
         if let Some(agent_cfg) = tenant_data.agent_config {
-            let runtime = AgentRuntime::new(agent_cfg);
+            let runtime = client.agent_runtime(agent_cfg);
             let enrichment_prompt = "Generate Cypher CREATE statements for a new threat intelligence entry:\n\
                                      1. One ThreatIntel node: CVE-2025-99999 with properties cve_id, description: 'Zero-day RCE in enterprise VPN appliance', cvss_score: 9.8, malware_family: 'VPNExploit'\n\
                                      2. One MitreTechnique node: T1190 with properties technique_id, name: 'Exploit Public-Facing Application', tactic: 'Initial Access'\n\
@@ -985,19 +1028,23 @@ async fn main() {
     // ======================================================================
     section(8, "Investigation Summary");
 
-    let total_nodes = store.all_nodes().len();
-    let server_count = store.get_nodes_by_label(&Label::new("Server")).len();
-    let user_count = store.get_nodes_by_label(&Label::new("User")).len();
-    let threat_count = store.get_nodes_by_label(&Label::new("ThreatIntel")).len();
-    let mitre_count = store.get_nodes_by_label(&Label::new("MitreTechnique")).len();
-    let malware_count = store.get_nodes_by_label(&Label::new("Malware")).len();
-    let alert_count = store.get_nodes_by_label(&Label::new("Alert")).len();
+    let (total_nodes, server_count, user_count, threat_count, mitre_count, malware_count, alert_count, total_edges) = {
+        let store = client.store_read().await;
+        let total_nodes = store.all_nodes().len();
+        let server_count = store.get_nodes_by_label(&Label::new("Server")).len();
+        let user_count = store.get_nodes_by_label(&Label::new("User")).len();
+        let threat_count = store.get_nodes_by_label(&Label::new("ThreatIntel")).len();
+        let mitre_count = store.get_nodes_by_label(&Label::new("MitreTechnique")).len();
+        let malware_count = store.get_nodes_by_label(&Label::new("Malware")).len();
+        let alert_count = store.get_nodes_by_label(&Label::new("Alert")).len();
 
-    // Count edges by iterating over all nodes
-    let mut total_edges = 0;
-    for node in store.all_nodes() {
-        total_edges += store.get_outgoing_edges(node.id).len();
-    }
+        // Count edges by iterating over all nodes
+        let mut total_edges = 0;
+        for node in store.all_nodes() {
+            total_edges += store.get_outgoing_edges(node.id).len();
+        }
+        (total_nodes, server_count, user_count, threat_count, mitre_count, malware_count, alert_count, total_edges)
+    };
 
     let elapsed = overall_start.elapsed();
 

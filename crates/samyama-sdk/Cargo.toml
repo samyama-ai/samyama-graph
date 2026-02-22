@@ -27,5 +27,14 @@ thiserror = "1.0"
 # Core graph database (for EmbeddedClient)
 samyama = { path = "../..", version = "0.5.0-alpha.1" }
 
+# Graph algorithms (for AlgorithmClient)
+samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "0.5.0-alpha.1" }
+
+# Optimization engine (re-exported for examples)
+samyama-optimization = { path = "../samyama-optimization", version = "0.5.0-alpha.1" }
+
+# Numeric arrays (re-exported for optimization problems)
+ndarray = "0.15"
+
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }

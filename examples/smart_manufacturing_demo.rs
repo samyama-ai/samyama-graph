@@ -8,16 +8,13 @@
 //! 5. Quality traceability - defect root cause analysis
 //! 6. Machine criticality analysis using PageRank
 
-use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::executor::MutQueryExecutor;
-use samyama::query::parser::parse_query;
-use samyama::query::QueryEngine;
-use samyama::algo::{build_view, page_rank, PageRankConfig};
-use samyama::{NLQPipeline, TenantManager};
-use samyama::persistence::tenant::{LLMProvider, NLQConfig};
-use samyama_optimization::algorithms::{CuckooSolver, JayaSolver};
-use samyama_optimization::common::{Problem, SolverConfig};
-use ndarray::Array1;
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient,
+    Label, PropertyValue, PageRankConfig,
+    NLQConfig, LLMProvider,
+    CuckooSolver, JayaSolver, SolverConfig, Problem,
+    Array1,
+};
 use std::time::Instant;
 use std::collections::HashMap;
 
@@ -36,8 +33,7 @@ async fn main() {
     println!("   Samyama Graph Database + Optimization Engine                          ");
     println!("=========================================================================");
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
+    let client = EmbeddedClient::new();
     let tenant = "factory_floor";
 
     // ==================================================================================
@@ -53,10 +49,13 @@ async fn main() {
         "Automated Paint Shop", "Quality Inspection Lab",
     ];
     let mut line_ids = Vec::new();
-    for name in &line_names {
-        let id = store.create_node("ProductionLine");
-        store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
-        line_ids.push(id);
+    {
+        let mut store = client.store_write().await;
+        for name in &line_names {
+            let id = store.create_node("ProductionLine");
+            store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
+            line_ids.push(id);
+        }
     }
 
     // --- Machines (50+ across 5 lines) ---
@@ -122,21 +121,24 @@ async fn main() {
     let mut machine_ids = Vec::new();
     let mut machine_line_map: HashMap<usize, Vec<usize>> = HashMap::new(); // line_idx -> vec of machine indices
 
-    for (i, (name, vendor, capacity, power, fail_prob, line_idx)) in machines_data.iter().enumerate() {
-        let id = store.create_node("Machine");
-        store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
-        store.set_node_property(tenant, id, "vendor", PropertyValue::String(vendor.to_string())).unwrap();
-        store.set_node_property(tenant, id, "capacity_hr", PropertyValue::Float(*capacity)).unwrap();
-        store.set_node_property(tenant, id, "power_kw", PropertyValue::Float(*power)).unwrap();
-        store.set_node_property(tenant, id, "failure_prob", PropertyValue::Float(*fail_prob)).unwrap();
-        store.set_node_property(tenant, id, "status", PropertyValue::String("Operational".to_string())).unwrap();
-        // Set utilization (deterministic: 60-98% based on index)
-        let utilization = 60.0 + ((i * 17 + 7) % 39) as f64;
-        store.set_node_property(tenant, id, "utilization", PropertyValue::Float(utilization)).unwrap();
-        // Link machine to production line
-        store.create_edge(id, line_ids[*line_idx], "BELONGS_TO").unwrap();
-        machine_ids.push(id);
-        machine_line_map.entry(*line_idx).or_default().push(i);
+    {
+        let mut store = client.store_write().await;
+        for (i, (name, vendor, capacity, power, fail_prob, line_idx)) in machines_data.iter().enumerate() {
+            let id = store.create_node("Machine");
+            store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
+            store.set_node_property(tenant, id, "vendor", PropertyValue::String(vendor.to_string())).unwrap();
+            store.set_node_property(tenant, id, "capacity_hr", PropertyValue::Float(*capacity)).unwrap();
+            store.set_node_property(tenant, id, "power_kw", PropertyValue::Float(*power)).unwrap();
+            store.set_node_property(tenant, id, "failure_prob", PropertyValue::Float(*fail_prob)).unwrap();
+            store.set_node_property(tenant, id, "status", PropertyValue::String("Operational".to_string())).unwrap();
+            // Set utilization (deterministic: 60-98% based on index)
+            let utilization = 60.0 + ((i * 17 + 7) % 39) as f64;
+            store.set_node_property(tenant, id, "utilization", PropertyValue::Float(utilization)).unwrap();
+            // Link machine to production line
+            store.create_edge(id, line_ids[*line_idx], "BELONGS_TO").unwrap();
+            machine_ids.push(id);
+            machine_line_map.entry(*line_idx).or_default().push(i);
+        }
     }
 
     // --- Products (30 automotive parts) ---
@@ -175,14 +177,17 @@ async fn main() {
     ];
 
     let mut product_ids = Vec::new();
-    for (name, part_no, demand, line_idx) in &products_data {
-        let id = store.create_node("Product");
-        store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
-        store.set_node_property(tenant, id, "part_number", PropertyValue::String(part_no.to_string())).unwrap();
-        store.set_node_property(tenant, id, "daily_demand", PropertyValue::Float(*demand)).unwrap();
-        // Link product to primary production line
-        store.create_edge(id, line_ids[*line_idx], "PRODUCED_ON").unwrap();
-        product_ids.push(id);
+    {
+        let mut store = client.store_write().await;
+        for (name, part_no, demand, line_idx) in &products_data {
+            let id = store.create_node("Product");
+            store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
+            store.set_node_property(tenant, id, "part_number", PropertyValue::String(part_no.to_string())).unwrap();
+            store.set_node_property(tenant, id, "daily_demand", PropertyValue::Float(*demand)).unwrap();
+            // Link product to primary production line
+            store.create_edge(id, line_ids[*line_idx], "PRODUCED_ON").unwrap();
+            product_ids.push(id);
+        }
     }
 
     // --- Raw Materials (20+) ---
@@ -211,12 +216,15 @@ async fn main() {
     ];
 
     let mut material_ids = Vec::new();
-    for (name, cost, supplier) in &materials_data {
-        let id = store.create_node("Material");
-        store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
-        store.set_node_property(tenant, id, "cost_per_kg", PropertyValue::Float(*cost)).unwrap();
-        store.set_node_property(tenant, id, "supplier", PropertyValue::String(supplier.to_string())).unwrap();
-        material_ids.push(id);
+    {
+        let mut store = client.store_write().await;
+        for (name, cost, supplier) in &materials_data {
+            let id = store.create_node("Material");
+            store.set_node_property(tenant, id, "name", PropertyValue::String(name.to_string())).unwrap();
+            store.set_node_property(tenant, id, "cost_per_kg", PropertyValue::Float(*cost)).unwrap();
+            store.set_node_property(tenant, id, "supplier", PropertyValue::String(supplier.to_string())).unwrap();
+            material_ids.push(id);
+        }
     }
 
     // --- Bill of Materials edges (Product -> Material) ---
@@ -254,40 +262,51 @@ async fn main() {
         (29, vec![2, 0]),       // A-Pillar Bracket: Steel, Aluminum
     ];
 
-    for (prod_idx, mat_indices) in &bom_links {
-        for mat_idx in mat_indices {
-            store.create_edge(product_ids[*prod_idx], material_ids[*mat_idx], "REQUIRES").unwrap();
+    {
+        let mut store = client.store_write().await;
+        for (prod_idx, mat_indices) in &bom_links {
+            for mat_idx in mat_indices {
+                store.create_edge(product_ids[*prod_idx], material_ids[*mat_idx], "REQUIRES").unwrap();
+            }
         }
     }
 
     // --- Machine -> Product edges (which machines produce which products) ---
     // Distribute products across machines on their line (round-robin pairs)
-    for (prod_idx, prod_data) in products_data.iter().enumerate() {
-        let line_idx = prod_data.3;
-        if let Some(line_machines) = machine_line_map.get(&line_idx) {
-            let nm = line_machines.len();
-            // Each product assigned to 2-3 machines, cycling through line
-            let start = (prod_idx * 2) % nm;
-            for offset in 0..3.min(nm) {
-                let m_idx = line_machines[(start + offset) % nm];
-                store.create_edge(machine_ids[m_idx], product_ids[prod_idx], "PRODUCES").unwrap();
+    {
+        let mut store = client.store_write().await;
+        for (prod_idx, prod_data) in products_data.iter().enumerate() {
+            let line_idx = prod_data.3;
+            if let Some(line_machines) = machine_line_map.get(&line_idx) {
+                let nm = line_machines.len();
+                // Each product assigned to 2-3 machines, cycling through line
+                let start = (prod_idx * 2) % nm;
+                for offset in 0..3.min(nm) {
+                    let m_idx = line_machines[(start + offset) % nm];
+                    store.create_edge(machine_ids[m_idx], product_ids[prod_idx], "PRODUCES").unwrap();
+                }
             }
         }
-    }
 
-    // --- Inter-line flow edges (production sequence) ---
-    // CNC Machining -> Welding -> Painting -> Assembly -> Quality Inspection
-    store.create_edge(line_ids[1], line_ids[2], "FEEDS_INTO").unwrap();
-    store.create_edge(line_ids[2], line_ids[3], "FEEDS_INTO").unwrap();
-    store.create_edge(line_ids[3], line_ids[0], "FEEDS_INTO").unwrap();
-    store.create_edge(line_ids[0], line_ids[4], "FEEDS_INTO").unwrap();
+        // --- Inter-line flow edges (production sequence) ---
+        // CNC Machining -> Welding -> Painting -> Assembly -> Quality Inspection
+        store.create_edge(line_ids[1], line_ids[2], "FEEDS_INTO").unwrap();
+        store.create_edge(line_ids[2], line_ids[3], "FEEDS_INTO").unwrap();
+        store.create_edge(line_ids[3], line_ids[0], "FEEDS_INTO").unwrap();
+        store.create_edge(line_ids[0], line_ids[4], "FEEDS_INTO").unwrap();
+    }
 
     let build_time = start.elapsed();
 
-    let total_nodes = store.all_nodes().len();
-    let total_machines = store.get_nodes_by_label(&Label::new("Machine")).len();
-    let total_products = store.get_nodes_by_label(&Label::new("Product")).len();
-    let total_materials = store.get_nodes_by_label(&Label::new("Material")).len();
+    let (total_nodes, total_machines, total_products, total_materials) = {
+        let store = client.store_read().await;
+        (
+            store.all_nodes().len(),
+            store.get_nodes_by_label(&Label::new("Machine")).len(),
+            store.get_nodes_by_label(&Label::new("Product")).len(),
+            store.get_nodes_by_label(&Label::new("Material")).len(),
+        )
+    };
 
     println!("  Digital twin constructed in {:.2?}", build_time);
     println!();
@@ -403,9 +422,7 @@ async fn main() {
             max_iterations: 200
         }) YIELD fitness, algorithm, iterations
     "#;
-    let query = parse_query(cypher_str).expect("Failed to parse optimization query");
-    let mut executor = MutQueryExecutor::new(&mut store, tenant.to_string());
-    let _cypher_result = executor.execute(&query).expect("Cypher optimization failed");
+    let _cypher_result = client.query(tenant, cypher_str).await.expect("Cypher optimization failed");
 
     // ==================================================================================
     // STEP 3: Failure Cascade Analysis (Predictive Maintenance)
@@ -423,20 +440,23 @@ async fn main() {
     println!();
 
     // Find all products this machine produces (via outgoing PRODUCES edges)
-    let affected_edges = store.get_outgoing_edges(failed_id);
     let mut affected_products: Vec<(String, String, f64)> = Vec::new();
+    {
+        let store = client.store_read().await;
+        let affected_edges = store.get_outgoing_edges(failed_id);
 
-    for edge in &affected_edges {
-        if let Some(target_node) = store.get_node(edge.target) {
-            let labels: Vec<_> = target_node.labels.iter().map(|l| l.as_str().to_string()).collect();
-            if labels.contains(&"Product".to_string()) {
-                let name = target_node.get_property("name")
-                    .and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default();
-                let pn = target_node.get_property("part_number")
-                    .and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default();
-                let demand = target_node.get_property("daily_demand")
-                    .and_then(|v| v.as_float()).unwrap_or(0.0);
-                affected_products.push((name, pn, demand));
+        for edge in &affected_edges {
+            if let Some(target_node) = store.get_node(edge.target) {
+                let labels: Vec<_> = target_node.labels.iter().map(|l| l.as_str().to_string()).collect();
+                if labels.contains(&"Product".to_string()) {
+                    let name = target_node.get_property("name")
+                        .and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default();
+                    let pn = target_node.get_property("part_number")
+                        .and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default();
+                    let demand = target_node.get_property("daily_demand")
+                        .and_then(|v| v.as_float()).unwrap_or(0.0);
+                    affected_products.push((name, pn, demand));
+                }
             }
         }
     }
@@ -449,24 +469,27 @@ async fn main() {
     println!("  |    1 | {:<23} | Machine   | OFFLINE          |", failed_name);
 
     let mut impacted_material_names: Vec<String> = Vec::new();
-    for (i, (name, pn, demand)) in affected_products.iter().enumerate() {
-        println!("  |    {} | {:<23} | Product   | -{:.0} units/day   |", i + 2, name, demand);
+    {
+        let store = client.store_read().await;
+        for (i, (name, pn, demand)) in affected_products.iter().enumerate() {
+            println!("  |    {} | {:<23} | Product   | -{:.0} units/day   |", i + 2, name, demand);
 
-        // Find materials required by this product
-        let prod_id = product_ids.iter().position(|pid| {
-            store.get_node(*pid)
-                .and_then(|n| n.get_property("part_number"))
-                .and_then(|v| v.as_string())
-                .map(|s| s == pn)
-                .unwrap_or(false)
-        });
+            // Find materials required by this product
+            let prod_id = product_ids.iter().position(|pid| {
+                store.get_node(*pid)
+                    .and_then(|n| n.get_property("part_number"))
+                    .and_then(|v| v.as_string())
+                    .map(|s| s == pn)
+                    .unwrap_or(false)
+            });
 
-        if let Some(pidx) = prod_id {
-            if let Some((_, mat_indices)) = bom_links.iter().find(|(pi, _)| *pi == pidx) {
-                for &mi in mat_indices {
-                    let mat_name = materials_data[mi].0;
-                    if !impacted_material_names.contains(&mat_name.to_string()) {
-                        impacted_material_names.push(mat_name.to_string());
+            if let Some(pidx) = prod_id {
+                if let Some((_, mat_indices)) = bom_links.iter().find(|(pi, _)| *pi == pidx) {
+                    for &mi in mat_indices {
+                        let mat_name = materials_data[mi].0;
+                        if !impacted_material_names.contains(&mat_name.to_string()) {
+                            impacted_material_names.push(mat_name.to_string());
+                        }
                     }
                 }
             }
@@ -625,14 +648,17 @@ async fn main() {
 
     // 1. Find which machines produce this product (reverse lookup)
     let mut producing_machines: Vec<(String, String)> = Vec::new();
-    for (m_idx, &mid) in machine_ids.iter().enumerate() {
-        let edges = store.get_outgoing_edges(mid);
-        for e in &edges {
-            if e.target == product_ids[defect_product_idx] {
-                producing_machines.push((
-                    machines_data[m_idx].0.to_string(),
-                    machines_data[m_idx].1.to_string(),
-                ));
+    {
+        let store = client.store_read().await;
+        for (m_idx, &mid) in machine_ids.iter().enumerate() {
+            let edges = store.get_outgoing_edges(mid);
+            for e in &edges {
+                if e.target == product_ids[defect_product_idx] {
+                    producing_machines.push((
+                        machines_data[m_idx].0.to_string(),
+                        machines_data[m_idx].1.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -679,12 +705,12 @@ async fn main() {
     println!("  Running PageRank on factory graph to identify critical machines...");
 
     let start = Instant::now();
-    let view = build_view(&store, None, None, None);
-    let scores = page_rank(&view, PageRankConfig {
+    let view = client.build_view(None, None, None).await;
+    let scores = client.page_rank(PageRankConfig {
         damping_factor: 0.85,
         iterations: 30,
         tolerance: 0.0001,
-    });
+    }, None, None).await;
     let pr_time = start.elapsed();
 
     // Collect machine scores and sort by criticality
@@ -747,7 +773,7 @@ async fn main() {
             system_prompt: Some("You are a Cypher query expert for a smart manufacturing knowledge graph.".to_string()),
         };
 
-        let tenant_mgr = TenantManager::new();
+        let tenant_mgr = client.tenant_manager();
         tenant_mgr.create_tenant("mfg_nlq".to_string(), "Manufacturing NLQ".to_string(), None).unwrap();
         tenant_mgr.update_nlq_config("mfg_nlq", Some(nlq_config.clone())).unwrap();
 
@@ -758,7 +784,7 @@ async fn main() {
                               Product(name, part_number, daily_demand), Material(name, cost_per_kg, supplier), \
                               ProductionLine(name[e.g. 'CNC Machining Center', 'Assembly Line A', 'Robotic Welding Bay', 'Automated Paint Shop', 'Quality Inspection Lab'])";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config).unwrap();
 
         let nlq_questions = vec![
             "Which products are affected if the CNC machining line goes offline?",
@@ -770,8 +796,8 @@ async fn main() {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("  Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &store) {
-                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                    match client.query_readonly(tenant, &cypher).await {
+                        Ok(batch) => println!("  Results: {} records", batch.records.len()),
                         Err(e) => println!("  Execution error: {}", e),
                     }
                 }

@@ -2656,8 +2656,11 @@ name = "samyama-sdk"
 version = "0.5.0-alpha.1"
 dependencies = [
  "async-trait",
+ "ndarray",
  "reqwest",
  "samyama",
+ "samyama-graph-algorithms",
+ "samyama-optimization",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
