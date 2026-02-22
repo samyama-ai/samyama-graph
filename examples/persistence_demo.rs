@@ -7,9 +7,9 @@
 //! - Checkpoint, recovery, and incremental persistence
 //! - Backup/restore simulation
 
-use samyama::{
+use samyama_sdk::{
     PersistenceManager, ResourceQuotas,
-    graph::{Node, Edge, NodeId, EdgeId, Label, EdgeType},
+    Node, Edge, NodeId, EdgeId, Label, EdgeType,
 };
 use std::time::Instant;
 

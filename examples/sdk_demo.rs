@@ -5,10 +5,15 @@
 //! - Running read-only queries
 //! - Getting server status
 //! - Working with query results
+//! - Algorithm extension trait (PageRank, WCC)
+//! - Vector search extension trait
 //!
 //! Run with: cargo run --example sdk_demo
 
-use samyama_sdk::{EmbeddedClient, SamyamaClient, GraphStore, Label};
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    GraphStore, Label, NodeId, PageRankConfig, DistanceMetric,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -102,6 +107,69 @@ async fn main() {
     ).await.unwrap();
     for row in &result.records {
         println!("  {} -> {} -> {}", row[0], row[1], row[2]);
+    }
+    println!();
+
+    // --- NEW: Algorithm Extension Trait ---
+    println!("--- PageRank (via AlgorithmClient) ---");
+    let scores = client.page_rank(PageRankConfig::default(), Some("Person"), None).await;
+    let mut ranked: Vec<_> = scores.iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    {
+        let store = client.store_read().await;
+        for (node_id, score) in ranked.iter().take(3) {
+            let nid = NodeId::new(**node_id);
+            if let Some(node) = store.get_node(nid) {
+                let name = node.get_property("name")
+                    .map(|p| format!("{:?}", p))
+                    .unwrap_or_default();
+                println!("  {} -> PageRank {:.4}", name, score);
+            }
+        }
+    }
+    println!();
+
+    println!("--- WCC (via AlgorithmClient) ---");
+    let wcc = client.weakly_connected_components(Some("Person"), None).await;
+    println!("  {} weakly connected component(s)", wcc.components.len());
+    println!();
+
+    // --- NEW: Vector Search Extension Trait ---
+    println!("--- Vector Search (via VectorClient) ---");
+    client.create_vector_index("Person", "embedding", 3, DistanceMetric::Cosine)
+        .await.unwrap();
+
+    // Add embeddings to each person
+    let embeddings = [
+        [1.0f32, 0.0, 0.0],  // Alice
+        [0.9, 0.1, 0.0],     // Bob
+        [0.0, 1.0, 0.0],     // Carol
+        [0.8, 0.2, 0.0],     // Dave
+        [0.0, 0.9, 0.1],     // Eve
+    ];
+    {
+        let store = client.store_read().await;
+        let nodes: Vec<_> = store.all_nodes().iter().map(|n| n.id).collect();
+        drop(store);
+        for (i, emb) in embeddings.iter().enumerate() {
+            if i < nodes.len() {
+                client.add_vector("Person", "embedding", nodes[i], emb).await.unwrap();
+            }
+        }
+    }
+
+    let results = client.vector_search("Person", "embedding", &[0.95, 0.05, 0.0], 3).await.unwrap();
+    println!("  Top 3 nearest to engineering embedding:");
+    {
+        let store = client.store_read().await;
+        for (nid, dist) in &results {
+            if let Some(node) = store.get_node(*nid) {
+                let name = node.get_property("name")
+                    .map(|p| format!("{:?}", p))
+                    .unwrap_or_default();
+                println!("    {} (distance: {:.4})", name, dist);
+            }
+        }
     }
     println!();
 

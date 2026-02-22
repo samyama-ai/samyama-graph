@@ -14,14 +14,13 @@
 //!
 //! Run: `cargo run --example supply_chain_demo`
 
-use samyama::{GraphStore, Label, PropertyValue, PropertyMap, QueryEngine, NLQPipeline, TenantManager};
-use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
-use samyama::agent::AgentRuntime;
-use samyama::vector::DistanceMetric;
-use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
-use samyama_optimization::algorithms::JayaSolver;
-use samyama_optimization::common::{Problem, SolverConfig};
-use ndarray::Array1;
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    Label, PropertyValue, PropertyMap,
+    AgentConfig, LLMProvider, NLQConfig,
+    DistanceMetric, PageRankConfig,
+    JayaSolver, SolverConfig, Problem, Array1,
+};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -431,8 +430,7 @@ async fn main() {
     println!("================================================================");
     println!();
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
+    let client = EmbeddedClient::new();
     let tenant = "default";
 
     let overall_start = Instant::now();
@@ -449,160 +447,166 @@ async fn main() {
 
     // -- Ports --
     let ports = port_data();
-    let mut port_ids = Vec::new();
-    for p in &ports {
-        let id = store.create_node("Port");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", p.name);
-            node.set_property("country", p.country);
-            node.set_property("region", p.region);
-            node.set_property("capacity_teu_k", p.capacity_teu);
-            node.set_property("lat", p.lat);
-            node.set_property("lon", p.lon);
-            node.set_property("status", "Operational");
-        }
-        port_ids.push(id);
-    }
-    println!("  [+] Created {} Port nodes across {} countries",
-        port_ids.len(),
-        ports.iter().map(|p| p.country).collect::<std::collections::HashSet<_>>().len());
-
-    // -- Suppliers with vector embeddings --
-    store.create_vector_index("Supplier", "capabilities_vec", 64, DistanceMetric::Cosine).unwrap();
-
     let suppliers = supplier_data();
-    let mut supplier_ids = Vec::new();
-    for s in &suppliers {
-        let emb = mock_embedding(s.capabilities, 64);
-        let mut props = PropertyMap::new();
-        props.insert("name".to_string(), PropertyValue::String(s.name.to_string()));
-        props.insert("country".to_string(), PropertyValue::String(s.country.to_string()));
-        props.insert("capabilities".to_string(), PropertyValue::String(s.capabilities.to_string()));
-        props.insert("annual_revenue_m".to_string(), PropertyValue::Integer(s.annual_revenue_m));
-        props.insert("gmp_certified".to_string(), PropertyValue::Boolean(s.gmp_certified));
-        props.insert("capabilities_vec".to_string(), PropertyValue::Vector(emb));
-        let id = store.create_node_with_properties(
-            tenant,
-            vec![Label::new("Supplier")],
-            props,
-        );
-        supplier_ids.push(id);
-    }
-    println!("  [+] Created {} Supplier nodes with 64-dim capability embeddings across {} countries",
-        supplier_ids.len(),
-        suppliers.iter().map(|s| s.country).collect::<std::collections::HashSet<_>>().len());
-
-    // -- Products --
     let products = product_data();
-    let mut product_ids = Vec::new();
-    for p in &products {
-        let id = store.create_node("Product");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", p.name);
-            node.set_property("category", p.category);
-            node.set_property("cold_chain", p.cold_chain);
-            node.set_property("unit_value", p.unit_value);
-            node.set_property("annual_demand_m", p.annual_demand_m);
-            // Classify as biologic or small molecule based on cold chain and high unit value
-            let product_type = match p.name {
-                "Ozempic" | "Keytruda" | "Humira" | "Remdesivir" | "Dupixent" => "biologic",
-                _ => "small molecule",
-            };
-            node.set_property("product_type", product_type);
-        }
-        product_ids.push(id);
-    }
-    println!("  [+] Created {} Product nodes ({} require cold chain)",
-        product_ids.len(),
-        products.iter().filter(|p| p.cold_chain).count());
-
-    // -- Shipping Lines --
     let lines = shipping_line_data();
-    let mut line_ids = Vec::new();
-    for l in &lines {
-        let id = store.create_node("ShippingLine");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", l.name);
-            node.set_property("fleet_size", l.fleet_size);
-            node.set_property("headquarter", l.headquarter);
-        }
-        line_ids.push(id);
-    }
-    println!("  [+] Created {} ShippingLine nodes", line_ids.len());
-
-    // -- Shipments --
     let shipments = shipment_data();
-    let mut shipment_ids = Vec::new();
-    for s in &shipments {
-        let id = store.create_node("Shipment");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("shipment_id", s.id);
-            node.set_property("containers", s.containers);
-            node.set_property("value_usd", s.value_usd);
-            node.set_property("status", s.status);
-            // Store product name for easy lookup
-            node.set_property("product", products[s.product_idx].name);
-            node.set_property("cold_chain", products[s.product_idx].cold_chain);
-        }
-        shipment_ids.push(id);
-    }
-    println!("  [+] Created {} Shipment nodes", shipment_ids.len());
 
-    // -- Relationships --
+    let mut port_ids = Vec::new();
+    let mut supplier_ids = Vec::new();
+    let mut product_ids = Vec::new();
+    let mut line_ids = Vec::new();
+    let mut shipment_ids = Vec::new();
     let mut edge_count = 0usize;
 
-    // ROUTES_THROUGH: port -> port
-    for (a, b) in route_connections() {
-        store.create_edge(port_ids[a], port_ids[b], "ROUTES_THROUGH").unwrap();
-        store.create_edge(port_ids[b], port_ids[a], "ROUTES_THROUGH").unwrap();
-        edge_count += 2;
-    }
+    {
+        let mut store = client.store_write().await;
 
-    // SUPPLIES: supplier -> product
-    for (si, pi) in supply_links() {
-        store.create_edge(supplier_ids[si], product_ids[pi], "SUPPLIES").unwrap();
-        edge_count += 1;
-    }
+        for p in &ports {
+            let id = store.create_node("Port");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", p.name);
+                node.set_property("country", p.country);
+                node.set_property("region", p.region);
+                node.set_property("capacity_teu_k", p.capacity_teu);
+                node.set_property("lat", p.lat);
+                node.set_property("lon", p.lon);
+                node.set_property("status", "Operational");
+            }
+            port_ids.push(id);
+        }
+        println!("  [+] Created {} Port nodes across {} countries",
+            port_ids.len(),
+            ports.iter().map(|p| p.country).collect::<std::collections::HashSet<_>>().len());
 
-    // MANUFACTURES: supplier -> product (same as SUPPLIES for pharma context)
-    // We mark a subset as MANUFACTURES (primary manufacturer vs distributor)
-    let mfg_links = [
-        (0, 0), (1, 1), (3, 3), (9, 16), (12, 13), (13, 12),
-        (14, 14), (17, 10), (19, 11), (20, 4), (23, 9), (25, 19),
-    ];
-    for (si, pi) in mfg_links {
-        store.create_edge(supplier_ids[si], product_ids[pi], "MANUFACTURES").unwrap();
-        edge_count += 1;
-    }
+        // -- Suppliers with vector embeddings --
+        store.create_vector_index("Supplier", "capabilities_vec", 64, DistanceMetric::Cosine).unwrap();
 
-    // BASED_AT: supplier -> nearest port
-    for (i, s) in suppliers.iter().enumerate() {
-        store.create_edge(supplier_ids[i], port_ids[s.nearest_port_idx], "BASED_AT").unwrap();
-        edge_count += 1;
-    }
+        for s in &suppliers {
+            let emb = mock_embedding(s.capabilities, 64);
+            let mut props = PropertyMap::new();
+            props.insert("name".to_string(), PropertyValue::String(s.name.to_string()));
+            props.insert("country".to_string(), PropertyValue::String(s.country.to_string()));
+            props.insert("capabilities".to_string(), PropertyValue::String(s.capabilities.to_string()));
+            props.insert("annual_revenue_m".to_string(), PropertyValue::Integer(s.annual_revenue_m));
+            props.insert("gmp_certified".to_string(), PropertyValue::Boolean(s.gmp_certified));
+            props.insert("capabilities_vec".to_string(), PropertyValue::Vector(emb));
+            let id = store.create_node_with_properties(
+                tenant,
+                vec![Label::new("Supplier")],
+                props,
+            );
+            supplier_ids.push(id);
+        }
+        println!("  [+] Created {} Supplier nodes with 64-dim capability embeddings across {} countries",
+            supplier_ids.len(),
+            suppliers.iter().map(|s| s.country).collect::<std::collections::HashSet<_>>().len());
 
-    // SHIPS_VIA: shipment -> origin port, via ports, destination port
-    // CARRIES: shipping line -> shipment
-    // CONTAINS: shipment -> product
-    for (i, s) in shipments.iter().enumerate() {
-        // Origin
-        store.create_edge(shipment_ids[i], port_ids[s.origin_port_idx], "SHIPS_FROM").unwrap();
-        edge_count += 1;
-        // Destination
-        store.create_edge(shipment_ids[i], port_ids[s.dest_port_idx], "SHIPS_TO").unwrap();
-        edge_count += 1;
-        // Via ports
-        for &via in &s.via_port_indices {
-            store.create_edge(shipment_ids[i], port_ids[via], "SHIPS_VIA").unwrap();
+        // -- Products --
+        for p in &products {
+            let id = store.create_node("Product");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", p.name);
+                node.set_property("category", p.category);
+                node.set_property("cold_chain", p.cold_chain);
+                node.set_property("unit_value", p.unit_value);
+                node.set_property("annual_demand_m", p.annual_demand_m);
+                // Classify as biologic or small molecule based on cold chain and high unit value
+                let product_type = match p.name {
+                    "Ozempic" | "Keytruda" | "Humira" | "Remdesivir" | "Dupixent" => "biologic",
+                    _ => "small molecule",
+                };
+                node.set_property("product_type", product_type);
+            }
+            product_ids.push(id);
+        }
+        println!("  [+] Created {} Product nodes ({} require cold chain)",
+            product_ids.len(),
+            products.iter().filter(|p| p.cold_chain).count());
+
+        // -- Shipping Lines --
+        for l in &lines {
+            let id = store.create_node("ShippingLine");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", l.name);
+                node.set_property("fleet_size", l.fleet_size);
+                node.set_property("headquarter", l.headquarter);
+            }
+            line_ids.push(id);
+        }
+        println!("  [+] Created {} ShippingLine nodes", line_ids.len());
+
+        // -- Shipments --
+        for s in &shipments {
+            let id = store.create_node("Shipment");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("shipment_id", s.id);
+                node.set_property("containers", s.containers);
+                node.set_property("value_usd", s.value_usd);
+                node.set_property("status", s.status);
+                // Store product name for easy lookup
+                node.set_property("product", products[s.product_idx].name);
+                node.set_property("cold_chain", products[s.product_idx].cold_chain);
+            }
+            shipment_ids.push(id);
+        }
+        println!("  [+] Created {} Shipment nodes", shipment_ids.len());
+
+        // -- Relationships --
+
+        // ROUTES_THROUGH: port -> port
+        for (a, b) in route_connections() {
+            store.create_edge(port_ids[a], port_ids[b], "ROUTES_THROUGH").unwrap();
+            store.create_edge(port_ids[b], port_ids[a], "ROUTES_THROUGH").unwrap();
+            edge_count += 2;
+        }
+
+        // SUPPLIES: supplier -> product
+        for (si, pi) in supply_links() {
+            store.create_edge(supplier_ids[si], product_ids[pi], "SUPPLIES").unwrap();
             edge_count += 1;
         }
-        // Carrier
-        store.create_edge(line_ids[s.carrier_idx], shipment_ids[i], "CARRIES").unwrap();
-        edge_count += 1;
-        // Product
-        store.create_edge(shipment_ids[i], product_ids[s.product_idx], "CONTAINS").unwrap();
-        edge_count += 1;
-    }
+
+        // MANUFACTURES: supplier -> product (same as SUPPLIES for pharma context)
+        // We mark a subset as MANUFACTURES (primary manufacturer vs distributor)
+        let mfg_links = [
+            (0, 0), (1, 1), (3, 3), (9, 16), (12, 13), (13, 12),
+            (14, 14), (17, 10), (19, 11), (20, 4), (23, 9), (25, 19),
+        ];
+        for (si, pi) in mfg_links {
+            store.create_edge(supplier_ids[si], product_ids[pi], "MANUFACTURES").unwrap();
+            edge_count += 1;
+        }
+
+        // BASED_AT: supplier -> nearest port
+        for (i, s) in suppliers.iter().enumerate() {
+            store.create_edge(supplier_ids[i], port_ids[s.nearest_port_idx], "BASED_AT").unwrap();
+            edge_count += 1;
+        }
+
+        // SHIPS_VIA: shipment -> origin port, via ports, destination port
+        // CARRIES: shipping line -> shipment
+        // CONTAINS: shipment -> product
+        for (i, s) in shipments.iter().enumerate() {
+            // Origin
+            store.create_edge(shipment_ids[i], port_ids[s.origin_port_idx], "SHIPS_FROM").unwrap();
+            edge_count += 1;
+            // Destination
+            store.create_edge(shipment_ids[i], port_ids[s.dest_port_idx], "SHIPS_TO").unwrap();
+            edge_count += 1;
+            // Via ports
+            for &via in &s.via_port_indices {
+                store.create_edge(shipment_ids[i], port_ids[via], "SHIPS_VIA").unwrap();
+                edge_count += 1;
+            }
+            // Carrier
+            store.create_edge(line_ids[s.carrier_idx], shipment_ids[i], "CARRIES").unwrap();
+            edge_count += 1;
+            // Product
+            store.create_edge(shipment_ids[i], product_ids[s.product_idx], "CONTAINS").unwrap();
+            edge_count += 1;
+        }
+    } // drop store write lock
 
     let build_time = start.elapsed();
     let total_nodes = port_ids.len() + supplier_ids.len() + product_ids.len()
@@ -629,13 +633,13 @@ async fn main() {
     println!();
 
     // Cypher verification
-    let r1 = engine.execute("MATCH (p:Port) RETURN p", &store).unwrap();
-    let r2 = engine.execute("MATCH (s:Supplier) RETURN s", &store).unwrap();
-    let r3 = engine.execute("MATCH (sh:Shipment) RETURN sh", &store).unwrap();
+    let r1 = client.query_readonly(tenant, "MATCH (p:Port) RETURN p").await.unwrap();
+    let r2 = client.query_readonly(tenant, "MATCH (s:Supplier) RETURN s").await.unwrap();
+    let r3 = client.query_readonly(tenant, "MATCH (sh:Shipment) RETURN sh").await.unwrap();
     println!("  Cypher Verification:");
-    println!("    MATCH (p:Port) RETURN p       -> {} results", r1.len());
-    println!("    MATCH (s:Supplier) RETURN s   -> {} results", r2.len());
-    println!("    MATCH (sh:Shipment) RETURN sh -> {} results", r3.len());
+    println!("    MATCH (p:Port) RETURN p       -> {} results", r1.records.len());
+    println!("    MATCH (s:Supplier) RETURN s   -> {} results", r2.records.len());
+    println!("    MATCH (sh:Shipment) RETURN sh -> {} results", r3.records.len());
     println!();
 
     // ======================================================================
@@ -791,12 +795,15 @@ async fn main() {
 
     // Mark Hamburg as disrupted
     let hamburg_idx = 3;
-    store.set_node_property(
-        tenant,
-        port_ids[hamburg_idx],
-        "status",
-        PropertyValue::String("Strike - Closed".to_string()),
-    ).unwrap();
+    {
+        let mut store = client.store_write().await;
+        store.set_node_property(
+            tenant,
+            port_ids[hamburg_idx],
+            "status",
+            PropertyValue::String("Strike - Closed".to_string()),
+        ).unwrap();
+    }
 
     println!("  Hamburg port status changed to: Strike - Closed");
     println!();
@@ -842,19 +849,22 @@ async fn main() {
 
     // Check graph connectivity for routes to alternatives
     println!("  Route connectivity from Hamburg alternatives:");
-    for &pi in &alt_ports {
-        let edges = store.get_outgoing_edges(port_ids[pi]);
-        let connections: Vec<String> = edges.iter()
-            .filter(|e| e.edge_type.as_str() == "ROUTES_THROUGH")
-            .filter_map(|e| {
-                store.get_node(e.target)
-                    .and_then(|n| n.get_property("name"))
-                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-            })
-            .collect();
-        println!("    {} -> {} connected ports: {}",
-            ports[pi].name, connections.len(),
-            connections.iter().take(5).cloned().collect::<Vec<_>>().join(", "));
+    {
+        let store = client.store_read().await;
+        for &pi in &alt_ports {
+            let edges = store.get_outgoing_edges(port_ids[pi]);
+            let connections: Vec<String> = edges.iter()
+                .filter(|e| e.edge_type.as_str() == "ROUTES_THROUGH")
+                .filter_map(|e| {
+                    store.get_node(e.target)
+                        .and_then(|n| n.get_property("name"))
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                })
+                .collect();
+            println!("    {} -> {} connected ports: {}",
+                ports[pi].name, connections.len(),
+                connections.iter().take(5).cloned().collect::<Vec<_>>().join(", "));
+        }
     }
     println!();
 
@@ -924,12 +934,12 @@ async fn main() {
     let start = Instant::now();
 
     // PageRank on the full graph
-    let view = build_view(&store, None, None, None);
-    let pr_scores = page_rank(&view, PageRankConfig {
+    let view = client.build_view(None, None, None).await;
+    let pr_scores = client.page_rank(PageRankConfig {
         damping_factor: 0.85,
         iterations: 30,
         tolerance: 0.0001,
-    });
+    }, None, None).await;
     let pr_time = start.elapsed();
 
     println!("  PageRank computed in {:.2?} ({} nodes, {} edges in view)",
@@ -980,7 +990,7 @@ async fn main() {
     println!();
 
     // WCC analysis
-    let wcc = weakly_connected_components(&view);
+    let wcc = client.weakly_connected_components(None, None).await;
     println!("  Graph Connectivity (WCC):");
     println!("    Connected components: {}", wcc.components.len());
     let max_comp = wcc.components.values().map(|v| v.len()).max().unwrap_or(0);
@@ -1115,35 +1125,38 @@ async fn main() {
         println!("  Capabilities: \"{}...\"", &query_capabilities[..60.min(query_capabilities.len())]);
         println!();
 
-        let results = store.vector_search("Supplier", "capabilities_vec", &query_vec, 6).unwrap();
+        let results = client.vector_search("Supplier", "capabilities_vec", &query_vec, 6).await.unwrap();
 
         println!("  Top alternative suppliers by capability similarity:");
         println!("  +------+------------------------+--------------+----------+");
         println!("  | Rank | Supplier               | Country      | Score    |");
         println!("  +------+------------------------+--------------+----------+");
         let mut rank = 0;
-        for (nid, score) in &results {
-            if let Some(node) = store.get_node(*nid) {
-                let name = node.get_property("name")
-                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                // Skip the disrupted supplier itself
-                if name == *disrupted_name {
-                    continue;
-                }
-                rank += 1;
-                let country = node.get_property("country")
-                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let name_disp = if name.len() > 22 {
-                    format!("{}...", &name[..19])
-                } else {
-                    name
-                };
-                println!("  | {:>4} | {:<22} | {:<12} | {:>8.4} |",
-                    rank, name_disp, country, score);
-                if rank >= 5 {
-                    break;
+        {
+            let store = client.store_read().await;
+            for (nid, score) in &results {
+                if let Some(node) = store.get_node(*nid) {
+                    let name = node.get_property("name")
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    // Skip the disrupted supplier itself
+                    if name == *disrupted_name {
+                        continue;
+                    }
+                    rank += 1;
+                    let country = node.get_property("country")
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    let name_disp = if name.len() > 22 {
+                        format!("{}...", &name[..19])
+                    } else {
+                        name
+                    };
+                    println!("  | {:>4} | {:<22} | {:<12} | {:>8.4} |",
+                        rank, name_disp, country, score);
+                    if rank >= 5 {
+                        break;
+                    }
                 }
             }
         }
@@ -1190,7 +1203,7 @@ async fn main() {
             system_prompt: Some("You are a Cypher query expert for a pharmaceutical supply chain knowledge graph.".to_string()),
         };
 
-        let tenant_mgr = TenantManager::new();
+        let tenant_mgr = client.tenant_manager();
         tenant_mgr.create_tenant("supply_nlq".to_string(), "Supply Chain NLQ".to_string(), None).unwrap();
         tenant_mgr.update_nlq_config("supply_nlq", Some(nlq_config.clone())).unwrap();
 
@@ -1205,7 +1218,7 @@ async fn main() {
                               Notes: Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses. \
                               Use CONTAINS (not CARRIES) to go from Shipment to Product.";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config.clone()).unwrap();
 
         let nlq_questions = vec![
             "Which suppliers provide active pharmaceutical ingredients from India?",
@@ -1218,8 +1231,8 @@ async fn main() {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("  Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &store) {
-                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                    match client.query_readonly(tenant, &cypher).await {
+                        Ok(result) => println!("  Results: {} records", result.records.len()),
                         Err(e) => println!("  Execution error: {}", e),
                     }
                 }
@@ -1248,7 +1261,7 @@ async fn main() {
             policies,
         };
 
-        let runtime = AgentRuntime::new(agent_config);
+        let runtime = client.agent_runtime(agent_config);
         let enrichment_prompt = "Generate Cypher CREATE statements to add a new supplier to a pharmaceutical supply chain graph.\n\n\
                                  Create:\n\
                                  1. One Supplier node: name: 'Lonza Group', country: 'Switzerland', tier: 'Tier 1', capabilities: 'biologics manufacturing, cell therapy, API synthesis'\n\

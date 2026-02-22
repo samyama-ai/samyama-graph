@@ -19,7 +19,7 @@ use crate::models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 /// No network overhead — queries execute in the same process.
 /// Ideal for examples, tests, and embedded applications.
 pub struct EmbeddedClient {
-    store: Arc<RwLock<GraphStore>>,
+    pub(crate) store: Arc<RwLock<GraphStore>>,
     engine: QueryEngine,
 }
 
@@ -43,6 +43,49 @@ impl EmbeddedClient {
     /// Get a reference to the underlying store (for direct graph manipulation)
     pub fn store(&self) -> &Arc<RwLock<GraphStore>> {
         &self.store
+    }
+
+    /// Acquire a read lock on the store.
+    ///
+    /// Use for direct read-only access to graph data (node/edge lookups, iterations).
+    pub async fn store_read(&self) -> tokio::sync::RwLockReadGuard<'_, GraphStore> {
+        self.store.read().await
+    }
+
+    /// Acquire a write lock on the store.
+    ///
+    /// Use for direct mutation (create_node, set_property, etc.).
+    pub async fn store_write(&self) -> tokio::sync::RwLockWriteGuard<'_, GraphStore> {
+        self.store.write().await
+    }
+
+    /// Create an NLQ pipeline for natural language → Cypher translation.
+    pub fn nlq_pipeline(
+        &self,
+        config: samyama::persistence::tenant::NLQConfig,
+    ) -> Result<samyama::NLQPipeline, samyama::NLQError> {
+        samyama::NLQPipeline::new(config)
+    }
+
+    /// Create an agent runtime for agentic enrichment workflows.
+    pub fn agent_runtime(
+        &self,
+        config: samyama::persistence::tenant::AgentConfig,
+    ) -> samyama::agent::AgentRuntime {
+        samyama::agent::AgentRuntime::new(config)
+    }
+
+    /// Create a persistence manager for durable storage.
+    pub fn persistence_manager(
+        &self,
+        base_path: impl AsRef<std::path::Path>,
+    ) -> Result<samyama::PersistenceManager, samyama::PersistenceError> {
+        samyama::PersistenceManager::new(base_path)
+    }
+
+    /// Create a tenant manager for multi-tenancy.
+    pub fn tenant_manager(&self) -> samyama::TenantManager {
+        samyama::TenantManager::new()
     }
 }
 

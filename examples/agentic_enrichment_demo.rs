@@ -13,9 +13,10 @@
 //!
 //! Run: cargo run --release --example agentic_enrichment_demo
 
-use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
-use samyama::agent::AgentRuntime;
-use samyama::{GraphStore, NLQPipeline, PropertyValue, QueryEngine, TenantManager};
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient,
+    AgentConfig, LLMProvider, NLQConfig,
+};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -38,10 +39,11 @@ async fn main() {
     println!("[ok] Claude Code CLI detected");
     println!();
 
-    // ━━━ Setup: Tenant with ClaudeCode NLQ + Agent Config ━━━
+    // Setup: Tenant with ClaudeCode NLQ + Agent Config
     println!("--- Setup: Tenant with ClaudeCode NLQ + Agent Config ---");
 
-    let tenant_mgr = TenantManager::new();
+    let client = EmbeddedClient::new();
+    let tenant_mgr = client.tenant_manager();
     tenant_mgr
         .create_tenant(
             "pharma_research".to_string(),
@@ -96,21 +98,17 @@ async fn main() {
     println!("  Enrichment policy: Drug -> indications, manufacturer, trials");
     println!();
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
-
-    // ━━━ Phase 1: NLQ Translation + The Trigger ━━━
+    // Phase 1: NLQ Translation + The Trigger
     println!("--- Phase 1: NLQ Translation + The Trigger ---");
     let user_query = "What are the indications and clinical trials for Semaglutide?";
     println!("User query: \"{}\"", user_query);
     println!();
 
-    // Translate natural language to Cypher via NLQ pipeline
     let schema_summary = "Node labels: Drug, Indication, Manufacturer, ClinicalTrial\n\
                           Edge types: TREATS (Drug->Indication), MADE_BY (Drug->Manufacturer), STUDIED_IN (Drug->ClinicalTrial)\n\
                           Properties: Drug(name, mechanism, drugClass, approvalYear), Indication(name), Manufacturer(name, headquarters), ClinicalTrial(name, phase, year)";
 
-    let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+    let nlq_pipeline = client.nlq_pipeline(nlq_config).unwrap();
     println!("  NLQ pipeline: translating natural language to Cypher...");
 
     let cypher_query = match nlq_pipeline.text_to_cypher(user_query, schema_summary).await {
@@ -126,7 +124,7 @@ async fn main() {
     println!();
 
     // Execute the NLQ-generated Cypher
-    let result_count = match engine.execute(&cypher_query, &store) {
+    let result_count = match client.query_readonly("default", &cypher_query).await {
         Ok(result) => result.len(),
         Err(e) => {
             println!("  Query execution error: {} — treating as empty result", e);
@@ -142,17 +140,16 @@ async fn main() {
     }
     println!();
 
-    // ━━━ Phase 2: Agentic Enrichment via NLQ Pipeline ━━━
+    // Phase 2: Agentic Enrichment via NLQ Pipeline
     println!("--- Phase 2: Agentic Enrichment via NLQ Pipeline ---");
     println!("  Provider: ClaudeCode (claude -p CLI)");
     println!("  Pipeline: AgentRuntime -> NLQClient -> claude CLI");
     println!("  Waiting for Claude to generate knowledge subgraph...");
     println!();
 
-    // Look up tenant's agent config and create runtime
     let tenant = tenant_mgr.get_tenant("pharma_research").unwrap();
     let config = tenant.agent_config.unwrap();
-    let runtime = AgentRuntime::new(config);
+    let runtime = client.agent_runtime(config);
 
     let enrichment_prompt = build_enrichment_prompt("Semaglutide");
     let response = match runtime
@@ -193,7 +190,7 @@ async fn main() {
     println!("Parsed {} Cypher statements from response.", cypher_statements.len());
     println!();
 
-    // ━━━ Phase 3: Knowledge Ingestion ━━━
+    // Phase 3: Knowledge Ingestion
     println!("--- Phase 3: Knowledge Ingestion ---");
     println!(
         "Executing {} Cypher statements against the graph...",
@@ -204,13 +201,12 @@ async fn main() {
     let mut success = 0;
     let mut failed = 0;
 
-    // Execute CREATE statements first (nodes), then MATCH...CREATE (edges)
     let (creates, matches): (Vec<_>, Vec<_>) = cypher_statements
         .iter()
         .partition(|s| s.to_uppercase().starts_with("CREATE"));
 
     for stmt in creates.iter().chain(matches.iter()) {
-        match engine.execute_mut(stmt, &mut store, "default") {
+        match client.query("default", stmt).await {
             Ok(_) => {
                 success += 1;
                 println!("  [ok] {}", truncate(stmt, 78));
@@ -230,37 +226,41 @@ async fn main() {
     );
     println!();
 
-    // ━━━ Phase 4: Query the Enriched Graph ━━━
+    // Phase 4: Query the Enriched Graph
     println!("--- Phase 4: Query the Enriched Graph ---");
     println!();
 
     // Show drug info
     println!("Drug:");
-    if let Ok(result) = engine.execute(
+    if let Ok(result) = client.query_readonly("default",
         "MATCH (d:Drug) RETURN d.name, d.mechanism, d.drugClass, d.approvalYear",
-        &store,
-    ) {
-        for record in &result.records {
-            print_field(record, "d.name", "  Name");
-            print_field(record, "d.mechanism", "  Mechanism");
-            print_field(record, "d.drugClass", "  Class");
-            print_field(record, "d.approvalYear", "  Approved");
+    ).await {
+        for row in &result.records {
+            for (i, col) in result.columns.iter().enumerate() {
+                if let Some(val) = row.get(i) {
+                    if !val.is_null() {
+                        let label = col.split('.').last().unwrap_or(col);
+                        println!("  {}: {}", label, val);
+                    }
+                }
+            }
         }
     }
     println!();
 
     // Show indications
     println!("Indications:");
-    if let Ok(result) = engine.execute(
+    if let Ok(result) = client.query_readonly("default",
         "MATCH (d:Drug)-[:TREATS]->(i:Indication) RETURN i.name",
-        &store,
-    ) {
-        if result.len() == 0 {
+    ).await {
+        if result.is_empty() {
             println!("  (none found — edge type may differ)");
         }
-        for record in &result.records {
-            if let Some(name) = get_string(record, "i.name") {
-                println!("  - {}", name);
+        for row in &result.records {
+            if let Some(val) = row.first() {
+                if !val.is_null() {
+                    println!("  - {}", val);
+                }
             }
         }
     }
@@ -268,16 +268,15 @@ async fn main() {
 
     // Show manufacturer
     println!("Manufacturer:");
-    if let Ok(result) = engine.execute(
+    if let Ok(result) = client.query_readonly("default",
         "MATCH (d:Drug)-[:MADE_BY]->(m:Manufacturer) RETURN m.name, m.headquarters",
-        &store,
-    ) {
-        if result.len() == 0 {
+    ).await {
+        if result.is_empty() {
             println!("  (none found — edge type may differ)");
         }
-        for record in &result.records {
-            let name = get_string(record, "m.name").unwrap_or_default();
-            let hq = get_string(record, "m.headquarters").unwrap_or_default();
+        for row in &result.records {
+            let name = row.first().and_then(|v| v.as_str()).unwrap_or("");
+            let hq = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
             if !name.is_empty() {
                 println!("  - {} ({})", name, hq);
             }
@@ -287,17 +286,16 @@ async fn main() {
 
     // Show clinical trials
     println!("Clinical Trials:");
-    if let Ok(result) = engine.execute(
+    if let Ok(result) = client.query_readonly("default",
         "MATCH (d:Drug)-[:STUDIED_IN]->(t:ClinicalTrial) RETURN t.name, t.phase, t.year",
-        &store,
-    ) {
-        if result.len() == 0 {
+    ).await {
+        if result.is_empty() {
             println!("  (none found — edge type may differ)");
         }
-        for record in &result.records {
-            let name = get_string(record, "t.name").unwrap_or("Unknown".into());
-            let phase = get_string(record, "t.phase").unwrap_or_default();
-            let year = get_string(record, "t.year").unwrap_or_default();
+        for row in &result.records {
+            let name = row.first().map(|v| v.to_string()).unwrap_or("Unknown".into());
+            let phase = row.get(1).map(|v| v.to_string()).unwrap_or_default();
+            let year = row.get(2).map(|v| v.to_string()).unwrap_or_default();
             println!("  - {} (Phase {}, {})", name, phase, year);
         }
     }
@@ -305,8 +303,9 @@ async fn main() {
 
     // Graph stats
     println!("--- Graph Statistics ---");
-    println!("  Nodes: {}", store.node_count());
-    println!("  Edges: {}", store.edge_count());
+    let status = client.status().await.unwrap();
+    println!("  Nodes: {}", status.storage.nodes);
+    println!("  Edges: {}", status.storage.edges);
     println!();
 
     println!("The database actively built its own knowledge using the NLQ pipeline.");
@@ -353,25 +352,6 @@ MATCH (a:Drug {{name: 'Aspirin'}}), (b:Manufacturer {{name: 'Bayer'}}) CREATE (a
 MATCH (a:Drug {{name: 'Aspirin'}}), (b:ClinicalTrial {{name: 'ARRIVE'}}) CREATE (a)-[:STUDIED_IN]->(b)"#,
         drug_name = drug_name
     )
-}
-
-fn get_string(record: &samyama::query::executor::Record, key: &str) -> Option<String> {
-    let val = record.get(key)?;
-    let pv = val.as_property()?;
-    match pv {
-        PropertyValue::String(s) => Some(s.clone()),
-        PropertyValue::Integer(i) => Some(i.to_string()),
-        PropertyValue::Float(f) => Some(f.to_string()),
-        PropertyValue::Boolean(b) => Some(b.to_string()),
-        PropertyValue::Null => None,
-        _ => Some(format!("{:?}", pv)),
-    }
-}
-
-fn print_field(record: &samyama::query::executor::Record, key: &str, label: &str) {
-    if let Some(val) = get_string(record, key) {
-        println!("{}: {}", label, val);
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

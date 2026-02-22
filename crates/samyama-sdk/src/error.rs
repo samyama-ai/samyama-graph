@@ -28,6 +28,18 @@ pub enum SamyamaError {
     /// I/O error
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
+
+    /// Vector search error
+    #[error("Vector error: {0}")]
+    VectorError(String),
+
+    /// Graph algorithm error
+    #[error("Algorithm error: {0}")]
+    AlgorithmError(String),
+
+    /// Persistence error
+    #[error("Persistence error: {0}")]
+    PersistenceError(String),
 }
 
 pub type SamyamaResult<T> = Result<T, SamyamaError>;

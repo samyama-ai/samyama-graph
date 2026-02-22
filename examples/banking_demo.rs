@@ -34,10 +34,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::Instant;
 
-use samyama::{
-    PersistenceManager, ResourceQuotas, QueryEngine, NLQPipeline,
-    graph::{GraphStore, Label, NodeId},
-    persistence::tenant::{LLMProvider, NLQConfig},
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient,
+    PersistenceManager, ResourceQuotas,
+    GraphStore, Label, NodeId,
+    LLMProvider, NLQConfig,
 };
 
 // ============================================================================
@@ -659,18 +660,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("│ STEP 2: Loading Enterprise Banking Data                             │");
     println!("└──────────────────────────────────────────────────────────────────────┘");
 
-    let mut graph = GraphStore::new();
+    let client = EmbeddedClient::new();
     let data_dir = Path::new("docs/banking/data");
 
-    let stats = if data_dir.exists() {
-        load_all_data(&mut graph, data_dir)?
-    } else {
-        println!("  ⚠ Data directory not found: {}", data_dir.display());
-        println!("    Run the data generator first:");
-        println!("    cd docs/banking/generators && python generate_all.py --size small");
-        println!();
-        println!("  Creating sample data inline...");
-        create_sample_data(&mut graph)?
+    let stats = {
+        let mut graph = client.store_write().await;
+        if data_dir.exists() {
+            load_all_data(&mut graph, data_dir)?
+        } else {
+            println!("  ⚠ Data directory not found: {}", data_dir.display());
+            println!("    Run the data generator first:");
+            println!("    cd docs/banking/generators && python generate_all.py --size small");
+            println!();
+            println!("  Creating sample data inline...");
+            create_sample_data(&mut graph)?
+        }
     };
 
     let load_time = start_time.elapsed();
@@ -688,71 +692,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let persist_start = Instant::now();
 
     // Persist customers by type to appropriate tenants
-    let individual_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("Individual"))
-        .into_iter()
-        .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
-        .collect();
+    {
+        let graph = client.store_read().await;
 
-    for node in &individual_customers {
-        persist_mgr.persist_create_node("retail_banking", node)?;
-    }
-    println!("  ✓ Persisted {} individual customers to retail_banking", individual_customers.len());
+        let individual_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("Individual"))
+            .into_iter()
+            .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
+            .collect();
 
-    let corporate_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("Corporate"))
-        .into_iter()
-        .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
-        .collect();
+        for node in &individual_customers {
+            persist_mgr.persist_create_node("retail_banking", node)?;
+        }
+        println!("  ✓ Persisted {} individual customers to retail_banking", individual_customers.len());
 
-    for node in &corporate_customers {
-        persist_mgr.persist_create_node("corporate_banking", node)?;
-    }
-    println!("  ✓ Persisted {} corporate customers to corporate_banking", corporate_customers.len());
+        let corporate_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("Corporate"))
+            .into_iter()
+            .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
+            .collect();
 
-    let hnw_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("HighNetWorth"))
-        .into_iter()
-        .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
-        .collect();
+        for node in &corporate_customers {
+            persist_mgr.persist_create_node("corporate_banking", node)?;
+        }
+        println!("  ✓ Persisted {} corporate customers to corporate_banking", corporate_customers.len());
 
-    for node in &hnw_customers {
-        persist_mgr.persist_create_node("wealth_management", node)?;
-    }
-    println!("  ✓ Persisted {} HNW customers to wealth_management", hnw_customers.len());
+        let hnw_customers: Vec<_> = graph.get_nodes_by_label(&Label::new("HighNetWorth"))
+            .into_iter()
+            .filter(|n| n.labels.iter().any(|l| l.as_str() == "Customer"))
+            .collect();
 
-    // Persist edges (OWNS relationships) to appropriate tenants
-    // This ensures tenant edge counts are accurate
-    let mut retail_edges = 0;
-    let mut corporate_edges = 0;
-    let mut wealth_edges = 0;
+        for node in &hnw_customers {
+            persist_mgr.persist_create_node("wealth_management", node)?;
+        }
+        println!("  ✓ Persisted {} HNW customers to wealth_management", hnw_customers.len());
 
-    for node in &individual_customers {
-        for edge in graph.get_outgoing_edges(node.id) {
-            if edge.edge_type.as_str() == "OWNS" {
-                persist_mgr.persist_create_edge("retail_banking", edge)?;
-                retail_edges += 1;
+        let mut retail_edges = 0;
+        let mut corporate_edges = 0;
+        let mut wealth_edges = 0;
+
+        for node in &individual_customers {
+            for edge in graph.get_outgoing_edges(node.id) {
+                if edge.edge_type.as_str() == "OWNS" {
+                    persist_mgr.persist_create_edge("retail_banking", edge)?;
+                    retail_edges += 1;
+                }
             }
         }
-    }
-    println!("  ✓ Persisted {} edges to retail_banking", retail_edges);
+        println!("  ✓ Persisted {} edges to retail_banking", retail_edges);
 
-    for node in &corporate_customers {
-        for edge in graph.get_outgoing_edges(node.id) {
-            if edge.edge_type.as_str() == "OWNS" {
-                persist_mgr.persist_create_edge("corporate_banking", edge)?;
-                corporate_edges += 1;
+        for node in &corporate_customers {
+            for edge in graph.get_outgoing_edges(node.id) {
+                if edge.edge_type.as_str() == "OWNS" {
+                    persist_mgr.persist_create_edge("corporate_banking", edge)?;
+                    corporate_edges += 1;
+                }
             }
         }
-    }
-    println!("  ✓ Persisted {} edges to corporate_banking", corporate_edges);
+        println!("  ✓ Persisted {} edges to corporate_banking", corporate_edges);
 
-    for node in &hnw_customers {
-        for edge in graph.get_outgoing_edges(node.id) {
-            if edge.edge_type.as_str() == "OWNS" {
-                persist_mgr.persist_create_edge("wealth_management", edge)?;
-                wealth_edges += 1;
+        for node in &hnw_customers {
+            for edge in graph.get_outgoing_edges(node.id) {
+                if edge.edge_type.as_str() == "OWNS" {
+                    persist_mgr.persist_create_edge("wealth_management", edge)?;
+                    wealth_edges += 1;
+                }
             }
         }
+        println!("  ✓ Persisted {} edges to wealth_management", wealth_edges);
     }
-    println!("  ✓ Persisted {} edges to wealth_management", wealth_edges);
 
     persist_mgr.checkpoint()?;
     println!("  ✓ Checkpoint created ({:.2}s)", persist_start.elapsed().as_secs_f64());
@@ -765,47 +771,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("│ STEP 4: Running Cypher Queries                                      │");
     println!("└──────────────────────────────────────────────────────────────────────┘");
 
-    let engine = QueryEngine::new();
-
     // Query 1: All customers
     println!("\n  Query: MATCH (c:Customer) RETURN c LIMIT 5");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (c:Customer) RETURN c LIMIT 5", &graph)?;
+    let result = client.query_readonly("default", "MATCH (c:Customer) RETURN c LIMIT 5").await?;
     println!("  Found {} results ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
-    for record in &result.records {
-        if let Some(value) = record.get("c") {
-            println!("    {:?}", value);
-        }
+    for row in &result.records {
+        println!("    {:?}", row);
     }
 
     // Query 2: High-risk customers
     println!("\n  Query: MATCH (c:HighRisk) RETURN c LIMIT 10");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (c:HighRisk) RETURN c LIMIT 10", &graph)?;
+    let result = client.query_readonly("default", "MATCH (c:HighRisk) RETURN c LIMIT 10").await?;
     println!("  Found {} high-risk customers ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     // Query 3: Corporate customers
     println!("\n  Query: MATCH (c:Corporate) RETURN c LIMIT 5");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (c:Corporate) RETURN c LIMIT 5", &graph)?;
+    let result = client.query_readonly("default", "MATCH (c:Corporate) RETURN c LIMIT 5").await?;
     println!("  Found {} corporate customers ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     // Query 4: Flagged transactions
     println!("\n  Query: MATCH (t:Flagged) RETURN t LIMIT 10");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (t:Flagged) RETURN t LIMIT 10", &graph)?;
+    let result = client.query_readonly("default", "MATCH (t:Flagged) RETURN t LIMIT 10").await?;
     println!("  Found {} flagged transactions ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     // Query 5: Branches
     println!("\n  Query: MATCH (b:Branch) RETURN b LIMIT 5");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (b:Branch) RETURN b LIMIT 5", &graph)?;
+    let result = client.query_readonly("default", "MATCH (b:Branch) RETURN b LIMIT 5").await?;
     println!("  Found {} branches ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     // Query 6: Checking accounts
     println!("\n  Query: MATCH (a:Checking) RETURN a LIMIT 5");
     let q_start = Instant::now();
-    let result = engine.execute("MATCH (a:Checking) RETURN a LIMIT 5", &graph)?;
+    let result = client.query_readonly("default", "MATCH (a:Checking) RETURN a LIMIT 5").await?;
     println!("  Found {} checking accounts ({:.3}ms)", result.len(), q_start.elapsed().as_secs_f64() * 1000.0);
 
     println!();
@@ -819,6 +821,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // High-risk customer connections (KNOWS relationships from high-risk customers)
     println!("\n  Analyzing high-risk customer network...");
+    let graph = client.store_read().await;
     let high_risk = graph.get_nodes_by_label(&Label::new("HighRisk"));
     println!("    High-risk customers (risk_score >= 80): {}", high_risk.len());
     let mut risk_connections = 0;
@@ -1120,6 +1123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
 
+    // Drop graph read guard before NLQ section (needs client)
+    drop(graph);
+
     // =========================================================================
     // 7. TENANT USAGE REPORT
     // =========================================================================
@@ -1201,7 +1207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                               Use property comparisons (e.g. a.account_number <> b.account_number) rather than node variable comparisons (a <> b). \
                               Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses.";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config).unwrap();
 
         let nlq_questions = vec![
             "Show high-risk customers with flagged transactions over $10,000",
@@ -1213,8 +1219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("  Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &graph) {
-                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                    match client.query_readonly("default", &cypher).await {
+                        Ok(result) => println!("  Results: {} records", result.len()),
                         Err(e) => println!("  Execution error: {}", e),
                     }
                 }

@@ -8,13 +8,12 @@
 //!
 //! No API keys required. All data is hardcoded and deterministic.
 
-use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::vector::DistanceMetric;
-use samyama::query::QueryEngine;
-use samyama::algo::{build_view, page_rank, weakly_connected_components, PageRankConfig};
-use samyama::{NLQPipeline, TenantManager};
-use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
-use samyama::agent::AgentRuntime;
+use samyama_sdk::{
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    Label, PropertyValue, NodeId, EdgeType,
+    DistanceMetric, PageRankConfig,
+    LLMProvider, NLQConfig, AgentConfig,
+};
 use std::collections::HashMap;
 
 /// Generate a deterministic 128-dimensional mock embedding from a seed.
@@ -68,8 +67,7 @@ async fn main() {
     println!("╚══════════════════════════════════════════════════════════════════════════════════════════╝");
     println!();
 
-    let mut store = GraphStore::new();
-    let engine = QueryEngine::new();
+    let client = EmbeddedClient::new();
 
     // ════════════════════════════════════════════════════════════════════════════════════════
     // Step 1: Build the Enterprise Knowledge Graph
@@ -77,10 +75,21 @@ async fn main() {
     println!("Step 1: Building Enterprise Knowledge Graph");
     separator();
 
-    // -- Create vector index for document embeddings --
-    store
-        .create_vector_index("Document", "embedding", 128, DistanceMetric::Cosine)
-        .unwrap();
+    // -- Tracking variables (declared before the write-lock block) --
+    let mut doc_ids: Vec<u64> = Vec::new();
+    let mut doc_titles: HashMap<u64, String> = HashMap::new();
+    let mut emp_ids: Vec<u64> = Vec::new();
+    let mut emp_names: HashMap<u64, String> = HashMap::new();
+    let mut name_to_emp_id: HashMap<String, u64> = HashMap::new();
+    let mut proj_ids: Vec<u64> = Vec::new();
+    let mut proj_names: HashMap<u64, String> = HashMap::new();
+    let mut tech_ids: Vec<u64> = Vec::new();
+    let mut tech_names: HashMap<u64, String> = HashMap::new();
+    let mut name_to_tech_id: HashMap<String, u64> = HashMap::new();
+    let mut edge_count = 0u64;
+    let num_employees: usize;
+    let num_projects: usize;
+    let num_technologies: usize;
 
     // ── Documents ───────────────────────────────────────────────────────────────────────────
     // Each document: (title, department, author_name, date, content_summary)
@@ -305,9 +314,13 @@ async fn main() {
         ("AI Model Registry Specification", "Data Science", "Wei Zhang", "2025-07-08", "Centralized model registry with versioning, lineage tracking, and deployment approval workflows"),
     ];
 
-    // Track document NodeIds for later use
-    let mut doc_ids: Vec<u64> = Vec::new();
-    let mut doc_titles: HashMap<u64, String> = HashMap::new();
+    {
+    let mut store = client.store_write().await;
+
+    // -- Create vector index for document embeddings --
+    store
+        .create_vector_index("Document", "embedding", 128, DistanceMetric::Cosine)
+        .unwrap();
 
     for (i, (title, dept, _author, date, summary)) in documents.iter().enumerate() {
         let nid = store.create_node("Document");
@@ -387,10 +400,6 @@ async fn main() {
         ("Lucas Chen", "Research Scientist", "Data Science"),
     ];
 
-    let mut emp_ids: Vec<u64> = Vec::new();
-    let mut emp_names: HashMap<u64, String> = HashMap::new();
-    let mut name_to_emp_id: HashMap<String, u64> = HashMap::new();
-
     for (name, title, dept) in &employees {
         let nid = store.create_node("Employee");
         if let Some(node) = store.get_node_mut(nid) {
@@ -403,7 +412,8 @@ async fn main() {
         name_to_emp_id.insert(name.to_string(), nid.as_u64());
     }
 
-    println!("  Created {} employees across departments", employees.len());
+    num_employees = employees.len();
+    println!("  Created {} employees across departments", num_employees);
 
     // ── Projects ───────────────────────────────────────────────────────────────────────────
     let projects: Vec<(&str, &str, &str)> = vec![
@@ -440,9 +450,6 @@ async fn main() {
         ("Jade Documentation", "Active", "Engineering"),
     ];
 
-    let mut proj_ids: Vec<u64> = Vec::new();
-    let mut proj_names: HashMap<u64, String> = HashMap::new();
-
     let priority_cycle = ["high", "medium", "low", "high", "medium"];
     for (i, (name, status, dept)) in projects.iter().enumerate() {
         let nid = store.create_node("Project");
@@ -458,7 +465,8 @@ async fn main() {
         proj_names.insert(nid.as_u64(), name.to_string());
     }
 
-    println!("  Created {} projects", projects.len());
+    num_projects = projects.len();
+    println!("  Created {} projects", num_projects);
 
     // ── Technologies ───────────────────────────────────────────────────────────────────────
     let technologies: Vec<(&str, &str)> = vec![
@@ -489,10 +497,6 @@ async fn main() {
         ("Trivy", "Security Scan"),
     ];
 
-    let mut tech_ids: Vec<u64> = Vec::new();
-    let mut tech_names: HashMap<u64, String> = HashMap::new();
-    let mut name_to_tech_id: HashMap<String, u64> = HashMap::new();
-
     for (name, category) in &technologies {
         let nid = store.create_node("Technology");
         if let Some(node) = store.get_node_mut(nid) {
@@ -504,16 +508,15 @@ async fn main() {
         name_to_tech_id.insert(name.to_string(), nid.as_u64());
     }
 
-    println!("  Created {} technologies", technologies.len());
+    num_technologies = technologies.len();
+    println!("  Created {} technologies", num_technologies);
 
     // ── Relationships ──────────────────────────────────────────────────────────────────────
-    let mut edge_count = 0u64;
-
     // AUTHORED: Employee -> Document (based on author field in document data)
     for (i, (_title, _dept, author, _date, _summary)) in documents.iter().enumerate() {
         if let Some(&emp_raw) = name_to_emp_id.get(*author) {
-            let emp_nid = samyama::graph::NodeId::new(emp_raw);
-            let doc_nid = samyama::graph::NodeId::new(doc_ids[i]);
+            let emp_nid = NodeId::new(emp_raw);
+            let doc_nid = NodeId::new(doc_ids[i]);
             store.create_edge(emp_nid, doc_nid, "AUTHORED").unwrap();
             edge_count += 1;
         }
@@ -655,8 +658,8 @@ async fn main() {
     ];
 
     for (src_idx, tgt_idx) in &reference_pairs {
-        let src = samyama::graph::NodeId::new(doc_ids[*src_idx]);
-        let tgt = samyama::graph::NodeId::new(doc_ids[*tgt_idx]);
+        let src = NodeId::new(doc_ids[*src_idx]);
+        let tgt = NodeId::new(doc_ids[*tgt_idx]);
         store.create_edge(src, tgt, "REFERENCES").unwrap();
         edge_count += 1;
     }
@@ -688,8 +691,8 @@ async fn main() {
     ];
 
     for (src_idx, tgt_idx) in &project_deps {
-        let src = samyama::graph::NodeId::new(proj_ids[*src_idx]);
-        let tgt = samyama::graph::NodeId::new(proj_ids[*tgt_idx]);
+        let src = NodeId::new(proj_ids[*src_idx]);
+        let tgt = NodeId::new(proj_ids[*tgt_idx]);
         store.create_edge(src, tgt, "DEPENDS_ON").unwrap();
         edge_count += 1;
     }
@@ -739,8 +742,8 @@ async fn main() {
     ];
 
     for (emp_idx, proj_idx) in &works_on {
-        let emp = samyama::graph::NodeId::new(emp_ids[*emp_idx]);
-        let proj = samyama::graph::NodeId::new(proj_ids[*proj_idx]);
+        let emp = NodeId::new(emp_ids[*emp_idx]);
+        let proj = NodeId::new(proj_ids[*proj_idx]);
         store.create_edge(emp, proj, "WORKS_ON").unwrap();
         edge_count += 1;
     }
@@ -760,8 +763,8 @@ async fn main() {
     ];
 
     for (emp_idx, proj_idx) in &manages {
-        let emp = samyama::graph::NodeId::new(emp_ids[*emp_idx]);
-        let proj = samyama::graph::NodeId::new(proj_ids[*proj_idx]);
+        let emp = NodeId::new(emp_ids[*emp_idx]);
+        let proj = NodeId::new(proj_ids[*proj_idx]);
         store.create_edge(emp, proj, "MANAGES").unwrap();
         edge_count += 1;
     }
@@ -819,8 +822,8 @@ async fn main() {
     ];
 
     for (proj_idx, tech_idx) in &uses_tech {
-        let proj = samyama::graph::NodeId::new(proj_ids[*proj_idx]);
-        let tech = samyama::graph::NodeId::new(tech_ids[*tech_idx]);
+        let proj = NodeId::new(proj_ids[*proj_idx]);
+        let tech = NodeId::new(tech_ids[*tech_idx]);
         store.create_edge(proj, tech, "USES_TECH").unwrap();
         edge_count += 1;
     }
@@ -858,8 +861,8 @@ async fn main() {
     ];
 
     for (doc_idx, tech_idx) in &tagged_with {
-        let doc_nid = samyama::graph::NodeId::new(doc_ids[*doc_idx]);
-        let tech_nid = samyama::graph::NodeId::new(tech_ids[*tech_idx]);
+        let doc_nid = NodeId::new(doc_ids[*doc_idx]);
+        let tech_nid = NodeId::new(tech_ids[*tech_idx]);
         store.create_edge(doc_nid, tech_nid, "TAGGED_WITH").unwrap();
         edge_count += 1;
     }
@@ -897,11 +900,13 @@ async fn main() {
     ];
 
     for (emp_idx, tech_idx) in &expert_in {
-        let emp = samyama::graph::NodeId::new(emp_ids[*emp_idx]);
-        let tech = samyama::graph::NodeId::new(tech_ids[*tech_idx]);
+        let emp = NodeId::new(emp_ids[*emp_idx]);
+        let tech = NodeId::new(tech_ids[*tech_idx]);
         store.create_edge(emp, tech, "EXPERT_IN").unwrap();
         edge_count += 1;
     }
+
+    } // end of store_write block
 
     println!("  Created {} relationships (AUTHORED, REFERENCES, DEPENDS_ON,", edge_count);
     println!("    WORKS_ON, MANAGES, USES_TECH, EXPERT_IN)");
@@ -911,9 +916,9 @@ async fn main() {
     println!("  │ Entity Type          │ Count │");
     println!("  ├──────────────────────┼───────┤");
     println!("  │ Documents            │  {:>4} │", documents.len());
-    println!("  │ Employees            │  {:>4} │", employees.len());
-    println!("  │ Projects             │  {:>4} │", projects.len());
-    println!("  │ Technologies         │  {:>4} │", technologies.len());
+    println!("  │ Employees            │  {:>4} │", num_employees);
+    println!("  │ Projects             │  {:>4} │", num_projects);
+    println!("  │ Technologies         │  {:>4} │", num_technologies);
     println!("  │ Relationships        │  {:>4} │", edge_count);
     println!("  └──────────────────────┴───────┘");
     println!();
@@ -928,29 +933,30 @@ async fn main() {
 
     // Use a seed close to the GDPR/privacy docs (indices 50-59 in legal area)
     let query_vec = query_embedding(52);
-    let search_results = store
-        .vector_search("Document", "embedding", &query_vec, 8)
-        .unwrap();
+    let search_results = client.vector_search("Document", "embedding", &query_vec, 8).await.unwrap();
 
     println!("  ┌────┬────────────────────────────────────────────────────────┬────────────┬──────────┐");
     println!("  │ #  │ Document Title                                         │ Department │ Score    │");
     println!("  ├────┼────────────────────────────────────────────────────────┼────────────┼──────────┤");
-    for (rank, (nid, score)) in search_results.iter().enumerate() {
-        let node = store.get_node(*nid).unwrap();
-        let title = node.get_property("title").unwrap().as_string().unwrap();
-        let dept = node.get_property("department").unwrap().as_string().unwrap();
-        let truncated = if title.len() > 54 {
-            format!("{}...", &title[..51])
-        } else {
-            title.to_string()
-        };
-        println!(
-            "  │ {:>2} │ {:<54} │ {:<10} │ {:>8.4} │",
-            rank + 1,
-            truncated,
-            dept,
-            1.0 - score
-        );
+    {
+        let store = client.store_read().await;
+        for (rank, (nid, score)) in search_results.iter().enumerate() {
+            let node = store.get_node(*nid).unwrap();
+            let title = node.get_property("title").unwrap().as_string().unwrap();
+            let dept = node.get_property("department").unwrap().as_string().unwrap();
+            let truncated = if title.len() > 54 {
+                format!("{}...", &title[..51])
+            } else {
+                title.to_string()
+            };
+            println!(
+                "  │ {:>2} │ {:<54} │ {:<10} │ {:>8.4} │",
+                rank + 1,
+                truncated,
+                dept,
+                1.0 - score
+            );
+        }
     }
     println!("  └────┴────────────────────────────────────────────────────────┴────────────┴──────────┘");
     println!();
@@ -966,34 +972,35 @@ async fn main() {
 
     // Search for Kubernetes-related docs (use a seed close to K8s docs at index 6)
     let k8s_query = query_embedding(6);
-    let k8s_results = store
-        .vector_search("Document", "embedding", &k8s_query, 5)
-        .unwrap();
+    let k8s_results = client.vector_search("Document", "embedding", &k8s_query, 5).await.unwrap();
 
     // Collect authors of top matching documents
     let mut expert_scores: HashMap<String, (f64, Vec<String>)> = HashMap::new();
 
-    for (nid, score) in &k8s_results {
-        let doc_node = store.get_node(*nid).unwrap();
-        let doc_title = doc_node.get_property("title").unwrap().as_string().unwrap();
-        let relevance = (1.0 - *score) as f64;
+    {
+        let store = client.store_read().await;
+        for (nid, score) in &k8s_results {
+            let doc_node = store.get_node(*nid).unwrap();
+            let doc_title = doc_node.get_property("title").unwrap().as_string().unwrap();
+            let relevance = (1.0 - *score) as f64;
 
-        // Find who authored this doc: traverse incoming AUTHORED edges
-        let incoming = store.get_incoming_edges(*nid);
-        for edge in &incoming {
-            if edge.edge_type == samyama::graph::EdgeType::new("AUTHORED") {
-                if let Some(author_node) = store.get_node(edge.source) {
-                    let author_name = author_node
-                        .get_property("name")
-                        .unwrap()
-                        .as_string()
-                        .unwrap()
-                        .to_string();
-                    let entry = expert_scores
-                        .entry(author_name.clone())
-                        .or_insert((0.0, Vec::new()));
-                    entry.0 += relevance;
-                    entry.1.push(doc_title.to_string());
+            // Find who authored this doc: traverse incoming AUTHORED edges
+            let incoming = store.get_incoming_edges(*nid);
+            for edge in &incoming {
+                if edge.edge_type == EdgeType::new("AUTHORED") {
+                    if let Some(author_node) = store.get_node(edge.source) {
+                        let author_name = author_node
+                            .get_property("name")
+                            .unwrap()
+                            .as_string()
+                            .unwrap()
+                            .to_string();
+                        let entry = expert_scores
+                            .entry(author_name.clone())
+                            .or_insert((0.0, Vec::new()));
+                        entry.0 += relevance;
+                        entry.1.push(doc_title.to_string());
+                    }
                 }
             }
         }
@@ -1028,28 +1035,31 @@ async fn main() {
     println!("  └────┴──────────────────────┴──────────────┴──────────────────────────────────────────┘");
 
     // Check technology expertise for top expert
-    if let Some((top_expert, _, _)) = experts.first() {
-        if let Some(&emp_raw) = name_to_emp_id.get(top_expert) {
-            let emp_nid = samyama::graph::NodeId::new(emp_raw);
-            let outgoing = store.get_outgoing_edges(emp_nid);
-            let tech_skills: Vec<String> = outgoing
-                .iter()
-                .filter(|e| e.edge_type == samyama::graph::EdgeType::new("EXPERT_IN"))
-                .filter_map(|e| {
-                    store
-                        .get_node(e.target)
-                        .and_then(|n| n.get_property("name"))
-                        .and_then(|p| p.as_string())
-                        .map(|s| s.to_string())
-                })
-                .collect();
-            if !tech_skills.is_empty() {
-                println!();
-                println!(
-                    "  {} is also an expert in: {}",
-                    top_expert,
-                    tech_skills.join(", ")
-                );
+    {
+        let store = client.store_read().await;
+        if let Some((top_expert, _, _)) = experts.first() {
+            if let Some(&emp_raw) = name_to_emp_id.get(top_expert) {
+                let emp_nid = NodeId::new(emp_raw);
+                let outgoing = store.get_outgoing_edges(emp_nid);
+                let tech_skills: Vec<String> = outgoing
+                    .iter()
+                    .filter(|e| e.edge_type == EdgeType::new("EXPERT_IN"))
+                    .filter_map(|e| {
+                        store
+                            .get_node(e.target)
+                            .and_then(|n| n.get_property("name"))
+                            .and_then(|p| p.as_string())
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
+                if !tech_skills.is_empty() {
+                    println!();
+                    println!(
+                        "  {} is also an expert in: {}",
+                        top_expert,
+                        tech_skills.join(", ")
+                    );
+                }
             }
         }
     }
@@ -1063,137 +1073,143 @@ async fn main() {
 
     // Pick "Event-Driven Architecture Blueprint" (index 3) as the root document
     let root_doc_idx = 3;
-    let root_doc_nid = samyama::graph::NodeId::new(doc_ids[root_doc_idx]);
+    let root_doc_nid = NodeId::new(doc_ids[root_doc_idx]);
     let root_title = documents[root_doc_idx].0;
 
     println!("  Root Document: \"{}\"", root_title);
     println!();
 
-    // Find documents that REFERENCE this document (incoming REFERENCES edges)
-    let incoming_refs = store.get_incoming_edges(root_doc_nid);
-    let referencing_docs: Vec<(&str, &str)> = incoming_refs
-        .iter()
-        .filter(|e| e.edge_type == samyama::graph::EdgeType::new("REFERENCES"))
-        .filter_map(|e| {
-            store.get_node(e.source).map(|n| {
-                let t = n.get_property("title").unwrap().as_string().unwrap();
-                let d = n.get_property("department").unwrap().as_string().unwrap();
-                (t, d)
-            })
-        })
-        .collect();
-
-    println!("  Documents that REFERENCE this document ({} found):", referencing_docs.len());
-    println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
-    println!("  │ #  │ Referencing Document                                     │ Department   │");
-    println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
-    for (i, (title, dept)) in referencing_docs.iter().enumerate() {
-        let truncated = if title.len() > 56 {
-            format!("{}...", &title[..53])
-        } else {
-            title.to_string()
-        };
-        println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
-    }
-    println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
-
-    // Find documents this document REFERENCES (outgoing REFERENCES edges)
-    let outgoing_refs = store.get_outgoing_edges(root_doc_nid);
-    let referenced_docs: Vec<(&str, &str)> = outgoing_refs
-        .iter()
-        .filter(|e| e.edge_type == samyama::graph::EdgeType::new("REFERENCES"))
-        .filter_map(|e| {
-            store.get_node(e.target).map(|n| {
-                let t = n.get_property("title").unwrap().as_string().unwrap();
-                let d = n.get_property("department").unwrap().as_string().unwrap();
-                (t, d)
-            })
-        })
-        .collect();
-
-    println!();
-    println!("  Documents this document REFERENCES ({} found):", referenced_docs.len());
-    println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
-    println!("  │ #  │ Referenced Document                                      │ Department   │");
-    println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
-    for (i, (title, dept)) in referenced_docs.iter().enumerate() {
-        let truncated = if title.len() > 56 {
-            format!("{}...", &title[..53])
-        } else {
-            title.to_string()
-        };
-        println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
-    }
-    println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
-    println!();
-
-    // Cross-domain insight: use Cypher to find engineering docs referenced by legal docs
-    println!("  Cross-Domain Insight: Engineering docs referenced by Legal documents");
+    // Cross-domain query via SDK (best-effort)
     let cross_domain_query =
         "MATCH (legal:Document)-[:REFERENCES]->(eng:Document) WHERE legal.department = 'Legal' AND eng.department = 'Data Science' RETURN legal.title, eng.title";
-    // Note: The Cypher engine may not support all WHERE clause patterns for property
-    // comparisons. We use direct graph traversal for reliable cross-domain discovery.
-    let _ = engine.execute(cross_domain_query, &store); // Best-effort Cypher attempt
+    let _ = client.query_readonly("default", cross_domain_query).await; // Best-effort Cypher attempt
 
-    // Manual cross-domain discovery
-    let legal_docs: Vec<_> = store
-        .get_nodes_by_label(&Label::new("Document"))
-        .into_iter()
-        .filter(|n| {
-            n.get_property("department")
-                .and_then(|p| p.as_string())
-                .map(|s| s == "Legal")
-                .unwrap_or(false)
-        })
-        .collect();
+    {
+        let store = client.store_read().await;
 
-    let mut cross_domain_links: Vec<(String, String, String)> = Vec::new();
-    for legal_node in &legal_docs {
-        let outgoing = store.get_outgoing_edges(legal_node.id);
-        for edge in &outgoing {
-            if edge.edge_type == samyama::graph::EdgeType::new("REFERENCES") {
-                if let Some(target) = store.get_node(edge.target) {
-                    let target_dept = target
-                        .get_property("department")
-                        .and_then(|p| p.as_string())
-                        .unwrap_or("Unknown");
-                    if target_dept != "Legal" {
-                        let legal_title = legal_node
-                            .get_property("title")
-                            .unwrap()
-                            .as_string()
-                            .unwrap();
-                        let target_title =
-                            target.get_property("title").unwrap().as_string().unwrap();
-                        cross_domain_links.push((
-                            legal_title.to_string(),
-                            target_title.to_string(),
-                            target_dept.to_string(),
-                        ));
+        // Find documents that REFERENCE this document (incoming REFERENCES edges)
+        let incoming_refs = store.get_incoming_edges(root_doc_nid);
+        let referencing_docs: Vec<(&str, &str)> = incoming_refs
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::new("REFERENCES"))
+            .filter_map(|e| {
+                store.get_node(e.source).map(|n| {
+                    let t = n.get_property("title").unwrap().as_string().unwrap();
+                    let d = n.get_property("department").unwrap().as_string().unwrap();
+                    (t, d)
+                })
+            })
+            .collect();
+
+        println!("  Documents that REFERENCE this document ({} found):", referencing_docs.len());
+        println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
+        println!("  │ #  │ Referencing Document                                     │ Department   │");
+        println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
+        for (i, (title, dept)) in referencing_docs.iter().enumerate() {
+            let truncated = if title.len() > 56 {
+                format!("{}...", &title[..53])
+            } else {
+                title.to_string()
+            };
+            println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
+        }
+        println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
+
+        // Find documents this document REFERENCES (outgoing REFERENCES edges)
+        let outgoing_refs = store.get_outgoing_edges(root_doc_nid);
+        let referenced_docs: Vec<(&str, &str)> = outgoing_refs
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::new("REFERENCES"))
+            .filter_map(|e| {
+                store.get_node(e.target).map(|n| {
+                    let t = n.get_property("title").unwrap().as_string().unwrap();
+                    let d = n.get_property("department").unwrap().as_string().unwrap();
+                    (t, d)
+                })
+            })
+            .collect();
+
+        println!();
+        println!("  Documents this document REFERENCES ({} found):", referenced_docs.len());
+        println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
+        println!("  │ #  │ Referenced Document                                      │ Department   │");
+        println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
+        for (i, (title, dept)) in referenced_docs.iter().enumerate() {
+            let truncated = if title.len() > 56 {
+                format!("{}...", &title[..53])
+            } else {
+                title.to_string()
+            };
+            println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
+        }
+        println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
+        println!();
+
+        // Cross-domain insight: use Cypher to find engineering docs referenced by legal docs
+        println!("  Cross-Domain Insight: Engineering docs referenced by Legal documents");
+        // Note: The Cypher engine may not support all WHERE clause patterns for property
+        // comparisons. We use direct graph traversal for reliable cross-domain discovery.
+
+        // Manual cross-domain discovery
+        let legal_docs: Vec<_> = store
+            .get_nodes_by_label(&Label::new("Document"))
+            .into_iter()
+            .filter(|n| {
+                n.get_property("department")
+                    .and_then(|p| p.as_string())
+                    .map(|s| s == "Legal")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let mut cross_domain_links: Vec<(String, String, String)> = Vec::new();
+        for legal_node in &legal_docs {
+            let outgoing = store.get_outgoing_edges(legal_node.id);
+            for edge in &outgoing {
+                if edge.edge_type == EdgeType::new("REFERENCES") {
+                    if let Some(target) = store.get_node(edge.target) {
+                        let target_dept = target
+                            .get_property("department")
+                            .and_then(|p| p.as_string())
+                            .unwrap_or("Unknown");
+                        if target_dept != "Legal" {
+                            let legal_title = legal_node
+                                .get_property("title")
+                                .unwrap()
+                                .as_string()
+                                .unwrap();
+                            let target_title =
+                                target.get_property("title").unwrap().as_string().unwrap();
+                            cross_domain_links.push((
+                                legal_title.to_string(),
+                                target_title.to_string(),
+                                target_dept.to_string(),
+                            ));
+                        }
                     }
                 }
             }
         }
-    }
 
-    if !cross_domain_links.is_empty() {
-        println!("  ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────┐");
-        println!("  │ Legal Document                       │ References                           │ Target Dept  │");
-        println!("  ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────┤");
-        for (legal, target, dept) in &cross_domain_links {
-            let l = if legal.len() > 36 {
-                format!("{}...", &legal[..33])
-            } else {
-                legal.clone()
-            };
-            let t = if target.len() > 36 {
-                format!("{}...", &target[..33])
-            } else {
-                target.clone()
-            };
-            println!("  │ {:<36} │ {:<36} │ {:<12} │", l, t, dept);
+        if !cross_domain_links.is_empty() {
+            println!("  ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────┐");
+            println!("  │ Legal Document                       │ References                           │ Target Dept  │");
+            println!("  ├──────────────────────────────────────┼──────────────────────────────────────┼──────────────┤");
+            for (legal, target, dept) in &cross_domain_links {
+                let l = if legal.len() > 36 {
+                    format!("{}...", &legal[..33])
+                } else {
+                    legal.clone()
+                };
+                let t = if target.len() > 36 {
+                    format!("{}...", &target[..33])
+                } else {
+                    target.clone()
+                };
+                println!("  │ {:<36} │ {:<36} │ {:<12} │", l, t, dept);
+            }
+            println!("  └──────────────────────────────────────┴──────────────────────────────────────┴──────────────┘");
         }
-        println!("  └──────────────────────────────────────┴──────────────────────────────────────┴──────────────┘");
     }
     println!();
 
@@ -1205,9 +1221,8 @@ async fn main() {
     println!("  Analyzing document communities based on REFERENCES relationships...");
     println!();
 
-    // Build a view of just Document nodes with REFERENCES edges
-    let doc_view = build_view(&store, Some("Document"), Some("REFERENCES"), None);
-    let wcc_result = weakly_connected_components(&doc_view);
+    // Run WCC via SDK
+    let wcc_result = client.weakly_connected_components(Some("Document"), Some("REFERENCES")).await;
 
     println!(
         "  Found {} document communities (connected components)",
@@ -1217,24 +1232,27 @@ async fn main() {
 
     // Group documents by component
     let mut component_docs: HashMap<usize, Vec<(String, String)>> = HashMap::new();
-    for (&node_id, &comp_id) in &wcc_result.node_component {
-        // node_id is already the original NodeId (u64), not an index
-        let nid = samyama::graph::NodeId::new(node_id);
-        if let Some(node) = store.get_node(nid) {
-            let title = node
-                .get_property("title")
-                .and_then(|p| p.as_string())
-                .unwrap_or("Unknown")
-                .to_string();
-            let dept = node
-                .get_property("department")
-                .and_then(|p| p.as_string())
-                .unwrap_or("Unknown")
-                .to_string();
-            component_docs
-                .entry(comp_id)
-                .or_default()
-                .push((title, dept));
+    {
+        let store = client.store_read().await;
+        for (&node_id, &comp_id) in &wcc_result.node_component {
+            // node_id is already the original NodeId (u64), not an index
+            let nid = NodeId::new(node_id);
+            if let Some(node) = store.get_node(nid) {
+                let title = node
+                    .get_property("title")
+                    .and_then(|p| p.as_string())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let dept = node
+                    .get_property("department")
+                    .and_then(|p| p.as_string())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                component_docs
+                    .entry(comp_id)
+                    .or_default()
+                    .push((title, dept));
+            }
         }
     }
 
@@ -1289,29 +1307,32 @@ async fn main() {
     println!("  Finding the most referenced and influential documents...");
     println!();
 
-    let full_doc_view = build_view(&store, Some("Document"), Some("REFERENCES"), None);
-    let pr_scores = page_rank(&full_doc_view, PageRankConfig::default());
+    let pr_scores = client.page_rank(PageRankConfig::default(), Some("Document"), Some("REFERENCES")).await;
 
     // Map PageRank scores back to document info
-    let mut doc_pr: Vec<(String, String, f64)> = pr_scores
-        .iter()
-        .map(|(&node_id, &score)| {
-            // node_id is already the original NodeId (u64)
-            let nid = samyama::graph::NodeId::new(node_id);
-            let node = store.get_node(nid).unwrap();
-            let title = node
-                .get_property("title")
-                .and_then(|p| p.as_string())
-                .unwrap_or("Unknown")
-                .to_string();
-            let dept = node
-                .get_property("department")
-                .and_then(|p| p.as_string())
-                .unwrap_or("Unknown")
-                .to_string();
-            (title, dept, score)
-        })
-        .collect();
+    let mut doc_pr: Vec<(String, String, f64)>;
+    {
+        let store = client.store_read().await;
+        doc_pr = pr_scores
+            .iter()
+            .map(|(&node_id, &score)| {
+                // node_id is already the original NodeId (u64)
+                let nid = NodeId::new(node_id);
+                let node = store.get_node(nid).unwrap();
+                let title = node
+                    .get_property("title")
+                    .and_then(|p| p.as_string())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let dept = node
+                    .get_property("department")
+                    .and_then(|p| p.as_string())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                (title, dept, score)
+            })
+            .collect();
+    }
 
     doc_pr.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
@@ -1337,51 +1358,57 @@ async fn main() {
     println!();
 
     // Identify the top knowledge hub and show its influence
-    if let Some((hub_title, hub_dept, hub_score)) = doc_pr.first() {
-        println!("  Top Knowledge Hub: \"{}\"", hub_title);
-        println!("    Department: {}, PageRank: {:.6}", hub_dept, hub_score);
+    {
+        let store = client.store_read().await;
+        if let Some((hub_title, hub_dept, hub_score)) = doc_pr.first() {
+            println!("  Top Knowledge Hub: \"{}\"", hub_title);
+            println!("    Department: {}, PageRank: {:.6}", hub_dept, hub_score);
 
-        // Find the corresponding NodeId
-        let hub_nid_opt = store
-            .get_nodes_by_label(&Label::new("Document"))
-            .into_iter()
-            .find(|n| {
-                n.get_property("title")
-                    .and_then(|p| p.as_string())
-                    .map(|s| s == hub_title.as_str())
-                    .unwrap_or(false)
-            });
+            // Find the corresponding NodeId
+            let hub_nid_opt = store
+                .get_nodes_by_label(&Label::new("Document"))
+                .into_iter()
+                .find(|n| {
+                    n.get_property("title")
+                        .and_then(|p| p.as_string())
+                        .map(|s| s == hub_title.as_str())
+                        .unwrap_or(false)
+                });
 
-        if let Some(hub_node) = hub_nid_opt {
-            let incoming = store.get_incoming_edges(hub_node.id);
-            let ref_count = incoming
-                .iter()
-                .filter(|e| e.edge_type == samyama::graph::EdgeType::new("REFERENCES"))
-                .count();
-            println!("    Referenced by: {} other documents", ref_count);
+            if let Some(hub_node) = hub_nid_opt {
+                let incoming = store.get_incoming_edges(hub_node.id);
+                let ref_count = incoming
+                    .iter()
+                    .filter(|e| e.edge_type == EdgeType::new("REFERENCES"))
+                    .count();
+                println!("    Referenced by: {} other documents", ref_count);
+            }
         }
     }
     println!();
 
     // Also run PageRank on projects to find critical infrastructure
     println!("  Project Dependency Analysis (PageRank on DEPENDS_ON):");
-    let proj_view = build_view(&store, Some("Project"), Some("DEPENDS_ON"), None);
-    let proj_pr = page_rank(&proj_view, PageRankConfig::default());
+    let proj_pr = client.page_rank(PageRankConfig::default(), Some("Project"), Some("DEPENDS_ON")).await;
 
-    let mut proj_pr_sorted: Vec<(String, f64)> = proj_pr
-        .iter()
-        .map(|(&node_id, &score)| {
-            // node_id is already the original NodeId (u64)
-            let nid = samyama::graph::NodeId::new(node_id);
-            let node = store.get_node(nid).unwrap();
-            let name = node
-                .get_property("name")
-                .and_then(|p| p.as_string())
-                .unwrap_or("Unknown")
-                .to_string();
-            (name, score)
-        })
-        .collect();
+    let mut proj_pr_sorted: Vec<(String, f64)>;
+    {
+        let store = client.store_read().await;
+        proj_pr_sorted = proj_pr
+            .iter()
+            .map(|(&node_id, &score)| {
+                // node_id is already the original NodeId (u64)
+                let nid = NodeId::new(node_id);
+                let node = store.get_node(nid).unwrap();
+                let name = node
+                    .get_property("name")
+                    .and_then(|p| p.as_string())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                (name, score)
+            })
+            .collect();
+    }
     proj_pr_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     println!("  ┌────┬──────────────────────────────────┬───────────┐");
@@ -1419,7 +1446,7 @@ async fn main() {
             system_prompt: Some("You are a Cypher query expert for an enterprise knowledge graph.".to_string()),
         };
 
-        let tenant_mgr = TenantManager::new();
+        let tenant_mgr = client.tenant_manager();
         tenant_mgr.create_tenant("knowledge_nlq".to_string(), "Knowledge NLQ".to_string(), None).unwrap();
         tenant_mgr.update_nlq_config("knowledge_nlq", Some(nlq_config.clone())).unwrap();
 
@@ -1434,7 +1461,7 @@ async fn main() {
                               REFERENCES links Documents to other Documents, including cross-department. \
                               Multi-type edge patterns like [:TYPE1|TYPE2] are not supported; use separate MATCH clauses.";
 
-        let nlq_pipeline = NLQPipeline::new(nlq_config.clone()).unwrap();
+        let nlq_pipeline = client.nlq_pipeline(nlq_config.clone()).unwrap();
 
         let nlq_questions = vec![
             "Which employees authored documents related to Kubernetes?",
@@ -1447,8 +1474,8 @@ async fn main() {
             match nlq_pipeline.text_to_cypher(question, schema_summary).await {
                 Ok(cypher) => {
                     println!("  Generated Cypher: {}", cypher);
-                    match engine.execute(&cypher, &store) {
-                        Ok(batch) => println!("  Results: {} records", batch.len()),
+                    match client.query_readonly("default", &cypher).await {
+                        Ok(result) => println!("  Results: {} records", result.len()),
                         Err(e) => println!("  Execution error: {}", e),
                     }
                 }
@@ -1477,7 +1504,7 @@ async fn main() {
             policies,
         };
 
-        let runtime = AgentRuntime::new(agent_config);
+        let runtime = client.agent_runtime(agent_config);
         let enrichment_prompt = "Generate Cypher CREATE statements to add WebAssembly as a Technology node with related documents and projects.\n\n\
                                  Create:\n\
                                  1. One Technology node: name: 'WebAssembly', category: 'Runtime'\n\
@@ -1516,7 +1543,7 @@ async fn main() {
     // Summary
     // ════════════════════════════════════════════════════════════════════════════════════════
     let total_nodes =
-        documents.len() + employees.len() + projects.len() + technologies.len();
+        documents.len() + num_employees + num_projects + num_technologies;
 
     separator();
     println!("  Enterprise Knowledge Graph -- Summary");
@@ -1526,9 +1553,9 @@ async fn main() {
     println!(
         "    Nodes: {} documents + {} employees + {} projects + {} technologies = {} total",
         documents.len(),
-        employees.len(),
-        projects.len(),
-        technologies.len(),
+        num_employees,
+        num_projects,
+        num_technologies,
         total_nodes
     );
     println!(
