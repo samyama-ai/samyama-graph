@@ -232,10 +232,12 @@ fn is_write_query(cypher: &str) -> bool {
         || upper.starts_with("DELETE")
         || upper.starts_with("SET")
         || upper.starts_with("MERGE")
+        || upper.starts_with("CALL")
         || upper.contains(" CREATE ")
         || upper.contains(" DELETE ")
         || upper.contains(" SET ")
         || upper.contains(" MERGE ")
+        || upper.contains(" CALL ")
 }
 
 #[async_trait]
