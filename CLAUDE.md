@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Samyama is a high-performance distributed graph database written in Rust with ~90% OpenCypher query support, Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v0.5.4.
+Samyama is a high-performance distributed graph database written in Rust with ~90% OpenCypher query support, Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v0.5.8.
 
 ## Build & Development Commands
 
