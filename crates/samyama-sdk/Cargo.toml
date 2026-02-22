@@ -1,6 +1,6 @@
 [package]
 name = "samyama-sdk"
-version = "0.5.0-alpha.1"
+version = "0.5.8"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "Client SDK for Samyama Graph Database — embedded and remote modes"
@@ -25,13 +25,13 @@ reqwest = { version = "0.13.1", features = ["json"] }
 thiserror = "1.0"
 
 # Core graph database (for EmbeddedClient)
-samyama = { path = "../..", version = "0.5.0-alpha.1" }
+samyama = { path = "../..", version = "0.5.8" }
 
 # Graph algorithms (for AlgorithmClient)
-samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "0.5.0-alpha.1" }
+samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "0.5.8" }
 
 # Optimization engine (re-exported for examples)
-samyama-optimization = { path = "../samyama-optimization", version = "0.5.0-alpha.1" }
+samyama-optimization = { path = "../samyama-optimization", version = "0.5.8" }
 
 # Numeric arrays (re-exported for optimization problems)
 ndarray = "0.15"

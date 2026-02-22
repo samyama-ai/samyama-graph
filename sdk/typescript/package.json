@@ -1,6 +1,6 @@
 {
   "name": "samyama-sdk",
-  "version": "0.5.0-alpha.1",
+  "version": "0.5.8",
   "description": "TypeScript SDK for the Samyama Graph Database",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",

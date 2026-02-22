@@ -9,7 +9,7 @@ exclude = ["sdk/python"]
 
 [package]
 name = "samyama"
-version = "0.5.0-alpha.1"
+version = "0.5.8"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "High-performance distributed graph database with OpenCypher support"
@@ -68,15 +68,15 @@ rand = "0.8"
 regex = "1"
 
 # Optimization Engine (Phase 7)
-samyama-optimization = { path = "crates/samyama-optimization", version = "0.5.0-alpha.1" }
-samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "0.5.0-alpha.1" }
+samyama-optimization = { path = "crates/samyama-optimization", version = "0.5.8" }
+samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "0.5.8" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
-samyama-sdk = { path = "crates/samyama-sdk", version = "0.5.0-alpha.1" }
+samyama-sdk = { path = "crates/samyama-sdk", version = "0.5.8" }
 
 [[bench]]
 name = "graph_benchmarks"
