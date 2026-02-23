@@ -68,7 +68,7 @@ pub use samyama::graph::{
     PropertyValue, PropertyMap,
     GraphError, GraphResult,
 };
-pub use samyama::query::{QueryEngine, RecordBatch};
+pub use samyama::query::{QueryEngine, RecordBatch, CacheStats};
 
 // ============================================================
 // Algorithm types (re-exported from samyama-graph-algorithms)

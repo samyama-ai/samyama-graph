@@ -66,6 +66,7 @@ mime = "0.3"               # MIME types
 hnsw_rs = "0.2.1"
 rand = "0.8"
 regex = "1"
+lru = "0.12"
 
 # Optimization Engine (Phase 7)
 samyama-optimization = { path = "crates/samyama-optimization", version = "0.5.8" }

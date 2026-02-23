@@ -4,12 +4,10 @@ use axum::{
     extract::{State, Json},
     response::IntoResponse,
 };
-use crate::graph::GraphStore;
-use crate::query::{QueryEngine, Value};
+use crate::query::Value;
+use crate::http::server::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
 
 /// Request for executing a Cypher query
@@ -29,23 +27,21 @@ pub struct QueryResponse {
 
 /// Handler for Cypher queries
 pub async fn query_handler(
-    State(store): State<Arc<RwLock<GraphStore>>>,
+    State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
-    let engine = QueryEngine::new();
-    
     // Check if query is write or read
     let query_upper = payload.query.trim().to_uppercase();
-    let is_write = query_upper.starts_with("CREATE") || 
-                   query_upper.starts_with("SET") || 
+    let is_write = query_upper.starts_with("CREATE") ||
+                   query_upper.starts_with("SET") ||
                    query_upper.starts_with("DELETE");
 
     let result = if is_write {
-        let mut store_guard = store.write().await;
-        engine.execute_mut(&payload.query, &mut *store_guard, "default")
+        let mut store_guard = state.store.write().await;
+        state.engine.execute_mut(&payload.query, &mut *store_guard, "default")
     } else {
-        let store_guard = store.read().await;
-        engine.execute(&payload.query, &*store_guard)
+        let store_guard = state.store.read().await;
+        state.engine.execute(&payload.query, &*store_guard)
     };
 
     match result {
@@ -136,15 +132,21 @@ pub async fn query_handler(
 
 /// Handler for system status
 pub async fn status_handler(
-    State(store): State<Arc<RwLock<GraphStore>>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let store_guard = store.read().await;
+    let store_guard = state.store.read().await;
+    let stats = state.engine.cache_stats();
     Json(json!({
         "status": "healthy",
         "version": crate::VERSION,
         "storage": {
             "nodes": store_guard.node_count(),
             "edges": store_guard.edge_count(),
+        },
+        "cache": {
+            "hits": stats.hits(),
+            "misses": stats.misses(),
+            "size": state.engine.cache_len(),
         }
     }))
 }

@@ -87,6 +87,11 @@ impl EmbeddedClient {
     pub fn tenant_manager(&self) -> samyama::TenantManager {
         samyama::TenantManager::new()
     }
+
+    /// Return AST cache statistics (hits, misses).
+    pub fn cache_stats(&self) -> &samyama::query::CacheStats {
+        self.engine.cache_stats()
+    }
 }
 
 impl Default for EmbeddedClient {

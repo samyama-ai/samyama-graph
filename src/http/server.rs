@@ -6,6 +6,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use crate::graph::GraphStore;
+use crate::query::QueryEngine;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
@@ -27,6 +28,13 @@ async fn static_handler() -> impl IntoResponse {
     }
 }
 
+/// Shared application state for HTTP routes
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Arc<RwLock<GraphStore>>,
+    pub engine: Arc<QueryEngine>,
+}
+
 /// HTTP server managing the Visualizer API and static assets
 pub struct HttpServer {
     store: Arc<RwLock<GraphStore>>,
@@ -41,20 +49,25 @@ impl HttpServer {
 
     /// Start the HTTP server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState {
+            store: Arc::clone(&self.store),
+            engine: Arc::new(QueryEngine::new()),
+        };
+
         let app = Router::new()
             .route("/", get(static_handler))
             .route("/api/query", post(query_handler))
             .route("/api/status", get(status_handler))
             .layer(CorsLayer::permissive())
-            .with_state(Arc::clone(&self.store));
+            .with_state(state);
 
         let addr = format!("0.0.0.0:{}", self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        
+
         info!("Visualizer available at http://localhost:{}", self.port);
-        
+
         axum::serve(listener, app).await?;
-        
+
         Ok(())
     }
 }

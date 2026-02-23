@@ -14,8 +14,10 @@ pub mod ast;
 pub mod parser;
 pub mod executor;
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use lru::LruCache;
 
 // Re-export main types
 pub use ast::Query;
@@ -26,44 +28,99 @@ pub use executor::{
     MutQueryExecutor,  // Added for CREATE/DELETE/SET support
 };
 
+/// Default LRU cache capacity
+const DEFAULT_CACHE_CAPACITY: usize = 1024;
+
+/// Lock-free cache hit/miss counters.
+pub struct CacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl CacheStats {
+    fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    /// Total cache hits since engine creation.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Total cache misses since engine creation.
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+
+    fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Query engine - high-level interface for executing queries
 ///
-/// Includes an AST cache that eliminates repeated parsing overhead
+/// Includes an LRU AST cache that eliminates repeated parsing overhead
 /// for identical queries. The cache is keyed by whitespace-normalized
-/// query strings.
+/// query strings and evicts least-recently-used entries when full.
 pub struct QueryEngine {
     /// Parsed AST cache: normalized query string -> Query AST
-    ast_cache: Mutex<HashMap<String, Query>>,
+    ast_cache: Mutex<LruCache<String, Query>>,
+    /// Lock-free hit/miss counters
+    stats: CacheStats,
 }
 
 impl QueryEngine {
-    /// Create a new query engine
+    /// Create a new query engine with the default cache capacity (1024 entries)
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_CACHE_CAPACITY)
+    }
+
+    /// Create a new query engine with a specific cache capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap());
         Self {
-            ast_cache: Mutex::new(HashMap::new()),
+            ast_cache: Mutex::new(LruCache::new(cap)),
+            stats: CacheStats::new(),
         }
+    }
+
+    /// Return a reference to the cache statistics (hits/misses).
+    pub fn cache_stats(&self) -> &CacheStats {
+        &self.stats
+    }
+
+    /// Return the current number of entries in the cache.
+    pub fn cache_len(&self) -> usize {
+        self.ast_cache.lock().unwrap().len()
     }
 
     /// Parse with caching — normalizes whitespace for cache hits
     fn cached_parse(&self, query_str: &str) -> Result<Query, Box<dyn std::error::Error>> {
         let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        // Check cache
+        // Check cache (LruCache::get promotes to most-recently-used)
         {
-            let cache = self.ast_cache.lock().unwrap();
+            let mut cache = self.ast_cache.lock().unwrap();
             if let Some(cached) = cache.get(&normalized) {
+                self.stats.record_hit();
                 return Ok(cached.clone());
             }
         }
 
-        // Parse and cache
+        self.stats.record_miss();
+
+        // Parse and cache (LRU evicts automatically when full)
         let query = parse_query(query_str)?;
         {
             let mut cache = self.ast_cache.lock().unwrap();
-            if cache.len() > 1024 {
-                cache.clear();
-            }
-            cache.insert(normalized, query.clone());
+            cache.put(normalized, query.clone());
         }
         Ok(query)
     }
@@ -407,5 +464,54 @@ mod tests {
         );
         assert!(likes_result.is_ok());
         assert_eq!(likes_result.unwrap().len(), 1, "Should have 1 LIKES relationship");
+    }
+
+    #[test]
+    fn test_cache_hit_miss_tracking() {
+        let store = GraphStore::new();
+        let engine = QueryEngine::new();
+
+        // First execution — cache miss
+        let _ = engine.execute("MATCH (n:Person) RETURN n", &store);
+        assert_eq!(engine.cache_stats().hits(), 0);
+        assert_eq!(engine.cache_stats().misses(), 1);
+        assert_eq!(engine.cache_len(), 1);
+
+        // Second identical query — cache hit
+        let _ = engine.execute("MATCH (n:Person) RETURN n", &store);
+        assert_eq!(engine.cache_stats().hits(), 1);
+        assert_eq!(engine.cache_stats().misses(), 1);
+
+        // Different query — cache miss
+        let _ = engine.execute("MATCH (n:Movie) RETURN n", &store);
+        assert_eq!(engine.cache_stats().hits(), 1);
+        assert_eq!(engine.cache_stats().misses(), 2);
+        assert_eq!(engine.cache_len(), 2);
+
+        // Whitespace-normalized hit
+        let _ = engine.execute("MATCH  (n:Person)  RETURN  n", &store);
+        assert_eq!(engine.cache_stats().hits(), 2);
+        assert_eq!(engine.cache_stats().misses(), 2);
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let store = GraphStore::new();
+        let engine = QueryEngine::with_capacity(2);
+
+        // Fill cache to capacity
+        let _ = engine.execute("MATCH (a:Person) RETURN a", &store);
+        let _ = engine.execute("MATCH (b:Movie) RETURN b", &store);
+        assert_eq!(engine.cache_len(), 2);
+
+        // Third distinct query should evict the LRU entry
+        let _ = engine.execute("MATCH (c:Company) RETURN c", &store);
+        assert_eq!(engine.cache_len(), 2); // Still 2, not 3
+
+        // The first query should have been evicted (was LRU)
+        let _ = engine.execute("MATCH (a:Person) RETURN a", &store);
+        // If evicted: miss count goes up; if still cached: hit count goes up
+        // We had 3 misses so far, this should be a 4th miss
+        assert_eq!(engine.cache_stats().misses(), 4);
     }
 }
