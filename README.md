@@ -2,7 +2,7 @@
 
 **Samyama** is a high-performance, distributed, AI-native graph database written in **Rust**. It combines a **property graph engine**, **vector search**, **graph analytics**, and **natural language querying** in a single binary.
 
-![Samyama Analytics Visualization](./visualization.svg)
+![LDBC SNB Benchmark Results — 19/19 queries on SF1 (3.2M nodes, 17.3M edges)](./ldbc-benchmark-results.png)
 
 ## Key Features
 
