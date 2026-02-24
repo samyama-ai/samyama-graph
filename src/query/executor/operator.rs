@@ -6,7 +6,7 @@ use crate::graph::{GraphStore, Label, NodeId, EdgeType};
 use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
@@ -169,7 +169,7 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             let val = eval_expression(e, record, store)?;
             eval_unary_op(op, val)
         }
-        Expression::Function { name, args } => {
+        Expression::Function { name, args, .. } => {
             let arg_vals: Vec<Value> = args.iter()
                 .map(|a| eval_expression(a, record, store))
                 .collect::<Result<_, _>>()?;
@@ -822,9 +822,13 @@ fn format_expression(expr: &Expression) -> String {
                 _ => format!("{} {}", op_str, format_expression(expr)),
             }
         }
-        Expression::Function { name, args } => {
+        Expression::Function { name, args, distinct } => {
             let arg_strs: Vec<String> = args.iter().map(format_expression).collect();
-            format!("{}({})", name, arg_strs.join(", "))
+            if *distinct {
+                format!("{}(DISTINCT {})", name, arg_strs.join(", "))
+            } else {
+                format!("{}({})", name, arg_strs.join(", "))
+            }
         }
         _ => "...".to_string(),
     }
@@ -986,7 +990,7 @@ impl FilterOperator {
                 let right_val = self.evaluate_expression(right, record, store)?;
                 self.evaluate_binary_op(op, left_val, right_val)
             }
-            Expression::Function { name, args } => {
+            Expression::Function { name, args, .. } => {
                 self.evaluate_function(name, args, record, store)
             }
             Expression::Unary { op, expr } => {
@@ -1080,6 +1084,9 @@ impl FilterOperator {
             // Integer ↔ Float promotion
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => (*l as f64) == *r,
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => *l == (*r as f64),
+            // DateTime ↔ Integer coercion (DateTime stores epoch millis as i64)
+            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) |
+            (PropertyValue::Integer(r), PropertyValue::DateTime(l)) => l == r,
             // String ↔ Boolean coercion (LLMs often generate `prop = 'true'`)
             (PropertyValue::Boolean(b), PropertyValue::String(s)) |
             (PropertyValue::String(s), PropertyValue::Boolean(b)) => {
@@ -1102,6 +1109,9 @@ impl FilterOperator {
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) < *r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l < (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l < r)),
+            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l < r)),
+            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l < r)),
+            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l < r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
     }
@@ -1114,6 +1124,9 @@ impl FilterOperator {
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) <= *r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l <= (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l <= r)),
+            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l <= r)),
+            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l <= r)),
+            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l <= r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
     }
@@ -1126,6 +1139,9 @@ impl FilterOperator {
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) > *r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l > (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l > r)),
+            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l > r)),
+            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l > r)),
+            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l > r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
     }
@@ -1138,6 +1154,9 @@ impl FilterOperator {
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) >= *r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l >= (*r as f64))),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l >= r)),
+            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l >= r)),
+            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l >= r)),
+            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l >= r)),
             _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
         }
     }
@@ -1575,7 +1594,7 @@ impl ProjectOperator {
                 let val = self.evaluate_expression(expr, record, store)?;
                 eval_unary_op(op, val)
             }
-            Expression::Function { name, args } => {
+            Expression::Function { name, args, .. } => {
                 let arg_vals: Vec<Value> = args.iter()
                     .map(|a| self.evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
@@ -1672,12 +1691,14 @@ pub struct AggregateFunction {
     pub func: AggregateType,
     pub expr: Expression,
     pub alias: String,
+    pub distinct: bool,
 }
 
 /// Internal state for an aggregator
 #[derive(Debug, Clone)]
 enum AggregatorState {
     Count(i64),
+    CountDistinct(BTreeSet<PropertyValue>),
     Sum(f64),
     Avg { sum: f64, count: i64 },
     Min(Option<PropertyValue>),
@@ -1686,14 +1707,15 @@ enum AggregatorState {
 }
 
 impl AggregatorState {
-    fn new(func: &AggregateType) -> Self {
-        match func {
-            AggregateType::Count => AggregatorState::Count(0),
-            AggregateType::Sum => AggregatorState::Sum(0.0),
-            AggregateType::Avg => AggregatorState::Avg { sum: 0.0, count: 0 },
-            AggregateType::Min => AggregatorState::Min(None),
-            AggregateType::Max => AggregatorState::Max(None),
-            AggregateType::Collect => AggregatorState::Collect(Vec::new()),
+    fn new(func: &AggregateType, distinct: bool) -> Self {
+        match (func, distinct) {
+            (AggregateType::Count, true) => AggregatorState::CountDistinct(BTreeSet::new()),
+            (AggregateType::Count, false) => AggregatorState::Count(0),
+            (AggregateType::Sum, _) => AggregatorState::Sum(0.0),
+            (AggregateType::Avg, _) => AggregatorState::Avg { sum: 0.0, count: 0 },
+            (AggregateType::Min, _) => AggregatorState::Min(None),
+            (AggregateType::Max, _) => AggregatorState::Max(None),
+            (AggregateType::Collect, _) => AggregatorState::Collect(Vec::new()),
         }
     }
 
@@ -1702,6 +1724,22 @@ impl AggregatorState {
             AggregatorState::Count(c) => {
                 if !value.is_null() {
                     *c += 1;
+                }
+            }
+            AggregatorState::CountDistinct(set) => {
+                match value {
+                    Value::Property(prop) => {
+                        if !prop.is_null() {
+                            set.insert(prop.clone());
+                        }
+                    }
+                    Value::NodeRef(id) | Value::Node(id, _) => {
+                        set.insert(PropertyValue::Integer(id.0 as i64));
+                    }
+                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                        set.insert(PropertyValue::Integer(id.0 as i64));
+                    }
+                    Value::Null => {}
                 }
             }
             AggregatorState::Sum(s) => {
@@ -1741,6 +1779,7 @@ impl AggregatorState {
     fn result(&self) -> Value {
         match self {
             AggregatorState::Count(c) => Value::Property(PropertyValue::Integer(*c)),
+            AggregatorState::CountDistinct(set) => Value::Property(PropertyValue::Integer(set.len() as i64)),
             AggregatorState::Sum(s) => Value::Property(PropertyValue::Float(*s)),
             AggregatorState::Avg { sum, count } => {
                 if *count == 0 { Value::Null }
@@ -1797,7 +1836,7 @@ impl AggregateOperator {
                 let val = Self::evaluate_expression(expr, record, store)?;
                 eval_unary_op(op, val)
             }
-            Expression::Function { name, args } => {
+            Expression::Function { name, args, .. } => {
                 let arg_vals: Vec<Value> = args.iter()
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
@@ -1888,7 +1927,7 @@ impl AggregateOperator {
 
                 // Initialize state if new group
                 let states = groups.entry(key).or_insert_with(|| {
-                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func)).collect()
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
                 });
 
                 // Update state
@@ -2029,7 +2068,7 @@ impl SortOperator {
                 let val = Self::evaluate_expression(expr, record, store)?;
                 eval_unary_op(op, val)
             }
-            Expression::Function { name, args } => {
+            Expression::Function { name, args, .. } => {
                 let arg_vals: Vec<Value> = args.iter()
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
@@ -4572,10 +4611,11 @@ mod tests {
         let mut agg = AggregateOperator::new(
             Box::new(scan),
             vec![(Expression::Property { variable: "n".to_string(), property: "group".to_string() }, "group".to_string())],
-            vec![AggregateFunction { 
-                func: AggregateType::Count, 
-                expr: Expression::Variable("n".to_string()), 
-                alias: "count".to_string() 
+            vec![AggregateFunction {
+                func: AggregateType::Count,
+                expr: Expression::Variable("n".to_string()),
+                alias: "count".to_string(),
+                distinct: false,
             }]
         );
 

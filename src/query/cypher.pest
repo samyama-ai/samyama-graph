@@ -122,7 +122,7 @@ case_when = { ^"WHEN" ~ expression ~ ^"THEN" ~ expression }
 case_else = { ^"ELSE" ~ expression }
 
 property_access = { variable ~ "." ~ property_key }
-function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
+function_call = { function_name ~ "(" ~ distinct? ~ (expression ~ ("," ~ expression)*)? ~ ")" }
 function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Operators

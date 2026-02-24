@@ -973,6 +973,52 @@ mod tests {
     }
 
     #[test]
+    fn test_count_distinct() {
+        let mut store = GraphStore::new();
+
+        // Create people and posts with duplicate LIKES edges
+        let alice = store.create_node("Person");
+        if let Some(node) = store.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+        }
+
+        let post1 = store.create_node("Post");
+        if let Some(node) = store.get_node_mut(post1) {
+            node.set_property("title", "Post1");
+        }
+
+        let post2 = store.create_node("Post");
+        if let Some(node) = store.get_node_mut(post2) {
+            node.set_property("title", "Post2");
+        }
+
+        // Alice LIKES post1 twice (via two edges) and post2 once
+        store.create_edge(alice, post1, "LIKES").unwrap();
+        store.create_edge(alice, post1, "LIKES").unwrap();
+        store.create_edge(alice, post2, "LIKES").unwrap();
+
+        // count(b) should return 3 (all edges)
+        let query = parse_query(
+            "MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(b) AS cnt"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let cnt = result.records[0].get("cnt").unwrap();
+        assert_eq!(*cnt, Value::Property(PropertyValue::Integer(3)), "count(b) should be 3");
+
+        // count(DISTINCT b) should return 2 (unique posts)
+        let query = parse_query(
+            "MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(DISTINCT b) AS cnt"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let cnt = result.records[0].get("cnt").unwrap();
+        assert_eq!(*cnt, Value::Property(PropertyValue::Integer(2)), "count(DISTINCT b) should be 2");
+    }
+
+    #[test]
     fn test_null_comparison_filters_gracefully() {
         // When a property doesn't exist, comparison should return Null (falsy),
         // NOT a TypeError. This mirrors Neo4j's three-valued logic.

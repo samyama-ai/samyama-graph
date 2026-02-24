@@ -333,13 +333,17 @@ impl QueryPlanner {
                     match &item.expression {
                         Expression::Variable(var) => var.clone(),
                         Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                        Expression::Function { name, args } => {
+                        Expression::Function { name, args, distinct } => {
                             let arg_strs: Vec<String> = args.iter().map(|a| match a {
                                 Expression::Variable(v) => v.clone(),
                                 Expression::Property { variable, property } => format!("{}.{}", variable, property),
                                 _ => "?".to_string(),
                             }).collect();
-                            format!("{}({})", name, arg_strs.join(", "))
+                            if *distinct {
+                                format!("{}(DISTINCT {})", name, arg_strs.join(", "))
+                            } else {
+                                format!("{}({})", name, arg_strs.join(", "))
+                            }
                         },
                         _ => format!("col_{}", idx),
                     }
@@ -349,7 +353,7 @@ impl QueryPlanner {
 
                 // Detect Aggregation
                 let mut is_agg_func = false;
-                if let Expression::Function { name, args } = &item.expression {
+                if let Expression::Function { name, args, distinct } = &item.expression {
                     let func_type = match name.to_lowercase().as_str() {
                         "count" => Some(AggregateType::Count),
                         "sum" => Some(AggregateType::Sum),
@@ -368,6 +372,7 @@ impl QueryPlanner {
                             func,
                             expr: arg_expr,
                             alias: alias.clone(),
+                            distinct: *distinct,
                         });
                     }
                 }

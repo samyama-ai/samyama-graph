@@ -206,6 +206,8 @@ pub enum Expression {
         name: String,
         /// Function arguments
         args: Vec<Expression>,
+        /// Whether DISTINCT modifier is present (e.g., count(DISTINCT x))
+        distinct: bool,
     },
     /// Variable reference
     Variable(String),

@@ -1279,11 +1279,15 @@ fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
 fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     let mut name = String::new();
     let mut args = Vec::new();
+    let mut distinct = false;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::function_name => {
                 name = inner.as_str().to_string();
+            }
+            Rule::distinct => {
+                distinct = true;
             }
             Rule::expression => {
                 args.push(parse_expression(inner)?);
@@ -1292,7 +1296,7 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
         }
     }
 
-    Ok(Expression::Function { name, args })
+    Ok(Expression::Function { name, args, distinct })
 }
 
 
