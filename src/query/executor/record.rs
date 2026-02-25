@@ -26,6 +26,11 @@ pub enum Value {
     EdgeRef(EdgeId, NodeId, NodeId, EdgeType),
     /// A property value
     Property(PropertyValue),
+    /// A path (ordered sequence of node/edge IDs)
+    Path {
+        nodes: Vec<NodeId>,
+        edges: Vec<EdgeId>,
+    },
     /// Null
     Null,
 }
@@ -44,6 +49,8 @@ impl PartialEq for Value {
             (Value::Edge(id1, _), Value::EdgeRef(id2, ..)) | (Value::EdgeRef(id2, ..), Value::Edge(id1, _)) => id1 == id2,
             // Property and Null
             (Value::Property(p1), Value::Property(p2)) => p1 == p2,
+            // Path
+            (Value::Path { nodes: n1, edges: e1 }, Value::Path { nodes: n2, edges: e2 }) => n1 == n2 && e1 == e2,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -59,7 +66,8 @@ impl Hash for Value {
             Value::Node(id, _) | Value::NodeRef(id) => { 0u8.hash(state); id.hash(state); }
             Value::Edge(id, _) | Value::EdgeRef(id, ..) => { 1u8.hash(state); id.hash(state); }
             Value::Property(p) => { 2u8.hash(state); p.hash(state); }
-            Value::Null => { 3u8.hash(state); }
+            Value::Path { nodes, edges } => { 3u8.hash(state); nodes.hash(state); edges.hash(state); }
+            Value::Null => { 4u8.hash(state); }
         }
     }
 }

@@ -24,6 +24,8 @@ pub struct Query {
     pub skip: Option<usize>,
     /// CALL clause (optional)
     pub call_clause: Option<CallClause>,
+    /// CALL subquery (optional)
+    pub call_subquery: Option<Box<Query>>,
     /// DELETE clause (optional)
     pub delete_clause: Option<DeleteClause>,
     /// SET clauses
@@ -101,9 +103,21 @@ pub struct Pattern {
     pub paths: Vec<PathPattern>,
 }
 
+/// Path type for path patterns (normal, shortest, allShortest)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathType {
+    Normal,
+    Shortest,
+    AllShortest,
+}
+
 /// Path pattern: (n:Person)-[:KNOWS*1..3]->(m:Person)
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathPattern {
+    /// Named path variable (e.g., `p` in `p = (a)-[:KNOWS]->(b)`)
+    pub path_variable: Option<String>,
+    /// Path type (Normal, Shortest, AllShortest)
+    pub path_type: PathType,
     /// Start node
     pub start: NodePattern,
     /// Edges and nodes
@@ -245,6 +259,41 @@ pub enum Expression {
         /// Mapping expression
         map_expr: Box<Expression>,
     },
+    /// Predicate function: all(x IN list WHERE pred), any(...), none(...), single(...)
+    PredicateFunction {
+        /// Function name (all, any, none, single)
+        name: String,
+        /// Iterator variable
+        variable: String,
+        /// List expression
+        list_expr: Box<Expression>,
+        /// Predicate expression
+        predicate: Box<Expression>,
+    },
+    /// reduce(acc = init, x IN list | expr)
+    Reduce {
+        /// Accumulator variable name
+        accumulator: String,
+        /// Initial value expression
+        init: Box<Expression>,
+        /// Iterator variable name
+        variable: String,
+        /// List expression
+        list_expr: Box<Expression>,
+        /// Body expression
+        expression: Box<Expression>,
+    },
+    /// Pattern comprehension: [(a)-[:REL]->(b) WHERE cond | expr]
+    PatternComprehension {
+        /// Pattern to match
+        pattern: Pattern,
+        /// Optional filter predicate
+        filter: Option<Box<Expression>>,
+        /// Projection expression
+        projection: Box<Expression>,
+    },
+    /// Named path reference (for Value::Path)
+    PathVariable(String),
 }
 
 /// Binary operators
@@ -445,6 +494,7 @@ impl Query {
             limit: None,
             skip: None,
             call_clause: None,
+            call_subquery: None,
             delete_clause: None,
             set_clauses: Vec::new(),
             remove_clauses: Vec::new(),

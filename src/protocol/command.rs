@@ -325,6 +325,10 @@ impl CommandHandler {
                     _ => RespValue::BulkString(Some(format!("{:?}", prop).into_bytes())),
                 }
             }
+            Value::Path { nodes, edges } => {
+                let path_str = format!("Path(nodes: {:?}, edges: {:?})", nodes, edges);
+                RespValue::BulkString(Some(path_str.into_bytes()))
+            }
             Value::Null => RespValue::Null,
         }
     }

@@ -1,7 +1,7 @@
 //! LDBC SNB Interactive Query Benchmark — Samyama Graph Database
 //!
-//! Benchmarks Samyama's query engine against 19 LDBC SNB Interactive workload queries
-//! (IS1-IS7, IC1-IC12; IC13/IC14 skipped — require shortestPath).
+//! Benchmarks Samyama's query engine against all 21 LDBC SNB Interactive workload queries
+//! (IS1-IS7, IC1-IC14) plus 8 update operations (INS1-INS8) via --updates flag.
 //!
 //! Prerequisites:
 //!   Download and extract LDBC SF1 data to:
@@ -34,7 +34,7 @@ struct LdbcQuery {
     category: &'static str,
 }
 
-/// Build the list of 19 LDBC SNB Interactive queries adapted for Samyama.
+/// Build the list of 21 LDBC SNB Interactive queries adapted for Samyama.
 ///
 /// Parameter choices (from SF1 dataset):
 ///   personId    = 933              (Mahinda Perera)
@@ -297,6 +297,92 @@ RETURN friend.id, friend.firstName, friend.lastName, count(DISTINCT c) AS replyC
 ORDER BY replyCount DESC
 LIMIT 10",
         },
+
+        // IC13: Shortest path (uses shortestPath pattern)
+        LdbcQuery {
+            id: "IC13",
+            name: "Single Shortest Path",
+            category: "complex",
+            cypher: "\
+MATCH p = shortestPath((p1:Person {id: 933})-[:KNOWS*]-(p2:Person {id: 4139}))
+RETURN length(p) AS pathLength",
+        },
+
+        // IC14: Weighted paths (uses allShortestPaths)
+        LdbcQuery {
+            id: "IC14",
+            name: "Trusted Connection Paths",
+            category: "complex",
+            cypher: "\
+MATCH p = allShortestPaths((p1:Person {id: 933})-[:KNOWS*]-(p2:Person {id: 4139}))
+RETURN length(p) AS pathLength, nodes(p) AS pathNodes",
+        },
+    ]
+}
+
+/// Build the list of 8 LDBC SNB Interactive update operations
+fn ldbc_updates() -> Vec<LdbcQuery> {
+    vec![
+        LdbcQuery {
+            id: "INS1",
+            name: "Add Person",
+            category: "update",
+            cypher: "\
+CREATE (p:Person {id: 999999, firstName: \"TestUser\", lastName: \"Benchmark\", gender: \"male\", birthday: 631152000000, creationDate: 1709251200000, locationIP: \"1.2.3.4\", browserUsed: \"Firefox\"})",
+        },
+        LdbcQuery {
+            id: "INS2",
+            name: "Add Like to Post",
+            category: "update",
+            cypher: "\
+MATCH (p:Person {id: 999999}), (m:Post {id: 1236950581248})
+CREATE (p)-[:LIKES {creationDate: 1709251200000}]->(m)",
+        },
+        LdbcQuery {
+            id: "INS3",
+            name: "Add Like to Comment",
+            category: "update",
+            cypher: "\
+MATCH (p:Person {id: 999999}), (m:Comment {id: 1236950581249})
+CREATE (p)-[:LIKES {creationDate: 1709251200000}]->(m)",
+        },
+        LdbcQuery {
+            id: "INS4",
+            name: "Add Forum",
+            category: "update",
+            cypher: "\
+CREATE (f:Forum {id: 999998, title: \"Benchmark Forum\", creationDate: 1709251200000})",
+        },
+        LdbcQuery {
+            id: "INS5",
+            name: "Add Forum Member",
+            category: "update",
+            cypher: "\
+MATCH (f:Forum {id: 999998}), (p:Person {id: 933})
+CREATE (f)-[:HAS_MEMBER {joinDate: 1709251200000}]->(p)",
+        },
+        LdbcQuery {
+            id: "INS6",
+            name: "Add Post",
+            category: "update",
+            cypher: "\
+CREATE (m:Post {id: 999997, imageFile: \"\", creationDate: 1709251200000, locationIP: \"1.2.3.4\", browserUsed: \"Firefox\", language: \"en\", content: \"Benchmark post content\", length: 24})",
+        },
+        LdbcQuery {
+            id: "INS7",
+            name: "Add Comment",
+            category: "update",
+            cypher: "\
+CREATE (c:Comment {id: 999996, creationDate: 1709251200000, locationIP: \"1.2.3.4\", browserUsed: \"Firefox\", content: \"Benchmark comment\", length: 18})",
+        },
+        LdbcQuery {
+            id: "INS8",
+            name: "Add Friendship",
+            category: "update",
+            cypher: "\
+MATCH (p1:Person {id: 933}), (p2:Person {id: 999999})
+CREATE (p1)-[:KNOWS {creationDate: 1709251200000}]->(p2)",
+        },
     ]
 }
 
@@ -332,8 +418,13 @@ async fn run_benchmark(
     query: &LdbcQuery,
     runs: usize,
 ) -> BenchResult {
-    // Warm-up: 1 run, discard
-    let warmup = client.query_readonly("default", query.cypher).await;
+    let is_update = query.category == "update";
+    // Warm-up: 1 run, discard (skip for updates — they mutate state)
+    let warmup = if is_update {
+        client.query("default", query.cypher).await
+    } else {
+        client.query_readonly("default", query.cypher).await
+    };
     if let Err(e) = &warmup {
         return BenchResult {
             id: query.id,
@@ -350,9 +441,15 @@ async fn run_benchmark(
     let mut timings = Vec::with_capacity(runs);
     let mut row_count = 0;
 
-    for _ in 0..runs {
+    let actual_runs = if is_update { 1 } else { runs }; // updates run once
+    for _ in 0..actual_runs {
         let start = Instant::now();
-        match client.query_readonly("default", query.cypher).await {
+        let run_result = if is_update {
+            client.query("default", query.cypher).await
+        } else {
+            client.query_readonly("default", query.cypher).await
+        };
+        match run_result {
             Ok(result) => {
                 row_count = result.records.len();
                 timings.push(start.elapsed());
@@ -412,6 +509,8 @@ async fn main() -> Result<(), Error> {
         None
     };
 
+    let include_updates = args.iter().any(|a| a == "--updates");
+
     if !data_dir.exists() {
         eprintln!("ERROR: Data directory not found: {}", data_dir.display());
         eprintln!("Download LDBC SF1 data and extract to: {}", default_dir);
@@ -444,16 +543,19 @@ async fn main() -> Result<(), Error> {
     // ========================================================================
     // Run benchmarks
     // ========================================================================
-    let queries = ldbc_queries();
+    let mut all_queries = ldbc_queries();
+    if include_updates {
+        all_queries.extend(ldbc_updates());
+    }
     let queries: Vec<&LdbcQuery> = if let Some(ref filter) = filter_query {
-        queries.iter().filter(|q| q.id == filter.as_str()).collect()
+        all_queries.iter().filter(|q| q.id == filter.as_str()).collect()
     } else {
-        queries.iter().collect()
+        all_queries.iter().collect()
     };
 
     if queries.is_empty() {
         eprintln!("ERROR: No matching query found for filter '{}'", filter_query.unwrap_or_default());
-        eprintln!("Available: IS1-IS7, IC1-IC12");
+        eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates)");
         std::process::exit(1);
     }
 
@@ -475,6 +577,7 @@ async fn main() -> Result<(), Error> {
             let label = match query.category {
                 "short"   => "--- Short Reads ---",
                 "complex" => "--- Complex Reads ---",
+                "update"  => "--- Update Operations ---",
                 other     => other,
             };
             println!("{}", label);

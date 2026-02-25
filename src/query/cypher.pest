@@ -16,8 +16,11 @@ create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ propert
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 
 // CALL statement (Standalone or followed by MATCH)
-call_stmt = { call_clause ~ match_stmt_partial? ~ return_clause? }
+call_stmt = { (call_subquery | call_clause) ~ match_stmt_partial? ~ return_clause? }
 match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
+
+// CALL subquery: CALL { MATCH ... RETURN ... }
+call_subquery = { ^"CALL" ~ "{" ~ statement ~ "}" }
 
 // CALL clause
 call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
@@ -56,8 +59,12 @@ limit_clause = { ^"LIMIT" ~ integer }
 create_stmt = { ^"CREATE" ~ pattern }
 
 // Pattern matching
-pattern = { path ~ ("," ~ path)* }
+pattern = { named_path ~ ("," ~ named_path)* }
+named_path = { (variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path) | shortest_path_call | path }
 path = { node ~ (edge_pattern ~ node)* }
+
+// shortestPath / allShortestPaths wrapping a pattern
+shortest_path_call = { (^"allShortestPaths" | ^"shortestPath") ~ "(" ~ path ~ ")" }
 
 // Node pattern: (n:Person {name: "Alice"})
 node = { "(" ~ variable? ~ labels? ~ properties? ~ ")" }
@@ -101,6 +108,9 @@ index_op = { "[" ~ expression ~ "]" }
 primary = {
     case_expression |
     exists_subquery |
+    reduce_expression |
+    predicate_function |
+    pattern_comprehension |
     list_comprehension |
     function_call |
     property_access |
@@ -108,6 +118,16 @@ primary = {
     variable |
     "(" ~ expression ~ ")"
 }
+
+// Predicate functions: all(x IN list WHERE pred), any(...), none(...), single(...)
+predicate_function = { predicate_function_name ~ "(" ~ variable ~ in_op ~ expression ~ ^"WHERE" ~ expression ~ ")" }
+predicate_function_name = @{ (^"all" | ^"any" | ^"none" | ^"single") ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// reduce(acc = init, x IN list | expr)
+reduce_expression = { ^"reduce" ~ "(" ~ variable ~ "=" ~ expression ~ "," ~ variable ~ in_op ~ expression ~ "|" ~ expression ~ ")" }
+
+// Pattern comprehension: [(a)-[:REL]->(b) WHERE cond | expr]
+pattern_comprehension = { "[" ~ path ~ where_clause? ~ "|" ~ expression ~ "]" }
 
 // EXISTS { MATCH pattern WHERE condition }
 exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }

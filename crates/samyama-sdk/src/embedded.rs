@@ -215,6 +215,13 @@ fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> Quer
                 Value::Property(p) => {
                     row.push(p.to_json());
                 }
+                Value::Path { nodes: path_nodes, edges: path_edges } => {
+                    row.push(serde_json::json!({
+                        "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
+                        "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
+                        "length": path_edges.len(),
+                    }));
+                }
                 Value::Null => {
                     row.push(serde_json::Value::Null);
                 }

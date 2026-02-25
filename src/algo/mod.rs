@@ -13,10 +13,12 @@ pub use samyama_graph_algorithms::{
     page_rank, PageRankConfig,
     weakly_connected_components, WccResult,
     strongly_connected_components, SccResult,
-    bfs, dijkstra, PathResult,
+    bfs, dijkstra, bfs_all_shortest_paths, PathResult,
     edmonds_karp, FlowResult,
     prim_mst, MSTResult,
-    count_triangles
+    count_triangles,
+    cdlp, CdlpResult, CdlpConfig,
+    local_clustering_coefficient, LccResult,
 };
 
 /// Build a GraphView from the store for algorithm execution

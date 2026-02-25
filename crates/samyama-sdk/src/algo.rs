@@ -9,8 +9,10 @@ use std::collections::HashMap;
 
 use samyama::algo::{
     build_view, page_rank, weakly_connected_components, strongly_connected_components,
-    bfs, dijkstra, edmonds_karp, prim_mst, count_triangles,
+    bfs, dijkstra, bfs_all_shortest_paths, edmonds_karp, prim_mst, count_triangles,
+    cdlp, local_clustering_coefficient,
     PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
+    CdlpConfig, CdlpResult, LccResult,
 };
 use samyama_graph_algorithms::GraphView;
 
@@ -95,6 +97,30 @@ pub trait AlgorithmClient {
         label: Option<&str>,
         edge_type: Option<&str>,
     ) -> usize;
+
+    /// Find all shortest paths between source and target (BFS).
+    async fn bfs_all_shortest_paths(
+        &self,
+        source: u64,
+        target: u64,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> Vec<PathResult>;
+
+    /// Community Detection via Label Propagation (CDLP).
+    async fn cdlp(
+        &self,
+        config: CdlpConfig,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> CdlpResult;
+
+    /// Local Clustering Coefficient for all nodes.
+    async fn local_clustering_coefficient(
+        &self,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> LccResult;
 }
 
 #[async_trait]
@@ -196,6 +222,39 @@ impl AlgorithmClient for EmbeddedClient {
         let store = self.store.read().await;
         let view = build_view(&store, label, edge_type, None);
         count_triangles(&view)
+    }
+
+    async fn bfs_all_shortest_paths(
+        &self,
+        source: u64,
+        target: u64,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> Vec<PathResult> {
+        let store = self.store.read().await;
+        let view = build_view(&store, label, edge_type, None);
+        bfs_all_shortest_paths(&view, source, target)
+    }
+
+    async fn cdlp(
+        &self,
+        config: CdlpConfig,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> CdlpResult {
+        let store = self.store.read().await;
+        let view = build_view(&store, label, edge_type, None);
+        cdlp(&view, &config)
+    }
+
+    async fn local_clustering_coefficient(
+        &self,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> LccResult {
+        let store = self.store.read().await;
+        let view = build_view(&store, label, edge_type, None);
+        local_clustering_coefficient(&view)
     }
 }
 

@@ -183,6 +183,16 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
             Rule::call_clause => {
                 query.call_clause = Some(parse_call_clause(inner)?);
             }
+            Rule::call_subquery => {
+                // CALL { subquery }
+                for sub_inner in inner.into_inner() {
+                    if sub_inner.as_rule() == Rule::statement {
+                        let mut sub_query = Query::new();
+                        parse_statement(sub_inner, &mut sub_query)?;
+                        query.call_subquery = Some(Box::new(sub_query));
+                    }
+                }
+            }
             Rule::match_stmt_partial => {
                 parse_match_statement_partial(inner, query)?;
             }
@@ -631,12 +641,64 @@ fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Pattern> {
     let mut paths = Vec::new();
 
     for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::path {
-            paths.push(parse_path(inner)?);
+        match inner.as_rule() {
+            Rule::named_path => {
+                paths.push(parse_named_path(inner)?);
+            }
+            Rule::path => {
+                paths.push(parse_path(inner)?);
+            }
+            _ => {}
         }
     }
 
     Ok(Pattern { paths })
+}
+
+fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
+    let mut path_variable: Option<String> = None;
+    let mut path_pattern: Option<PathPattern> = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => {
+                if path_variable.is_none() {
+                    path_variable = Some(inner.as_str().to_string());
+                }
+            }
+            Rule::path => {
+                path_pattern = Some(parse_path(inner)?);
+            }
+            Rule::shortest_path_call => {
+                path_pattern = Some(parse_shortest_path_call(inner)?);
+            }
+            _ => {}
+        }
+    }
+
+    let mut pp = path_pattern.ok_or_else(|| ParseError::SemanticError("Named path missing path pattern".to_string()))?;
+    pp.path_variable = path_variable;
+    Ok(pp)
+}
+
+fn parse_shortest_path_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
+    let text = pair.as_str();
+    let path_type = if text.to_lowercase().starts_with("allshortestpaths") {
+        PathType::AllShortest
+    } else {
+        PathType::Shortest
+    };
+
+    let mut pp = None;
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::path {
+            pp = Some(parse_path(inner)?);
+        }
+    }
+
+    let mut path = pp.ok_or_else(|| ParseError::SemanticError("shortestPath() missing inner path".to_string()))?;
+    path.path_type = path_type;
+    Ok(path)
 }
 
 fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
@@ -666,7 +728,7 @@ fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
         segments.push(PathSegment { edge, node });
     }
 
-    Ok(PathPattern { start, segments })
+    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, start, segments })
 }
 
 fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
@@ -1112,6 +1174,15 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             Rule::exists_subquery => {
                 return parse_exists_subquery(inner);
             }
+            Rule::reduce_expression => {
+                return parse_reduce_expression(inner);
+            }
+            Rule::predicate_function => {
+                return parse_predicate_function(inner);
+            }
+            Rule::pattern_comprehension => {
+                return parse_pattern_comprehension(inner);
+            }
             Rule::list_comprehension => {
                 return parse_list_comprehension(inner);
             }
@@ -1229,6 +1300,94 @@ fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
         list_expr: Box::new(list_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing list expression".to_string()))?),
         filter: filter.map(Box::new),
         map_expr: Box::new(map_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing map expression".to_string()))?),
+    })
+}
+
+fn parse_predicate_function(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut name = String::new();
+    let mut variable = None;
+    let mut expressions = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::predicate_function_name => name = inner.as_str().to_lowercase(),
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::in_op => {}
+            Rule::expression => expressions.push(parse_expression(inner)?),
+            _ => {}
+        }
+    }
+
+    // expressions: [list_expr, predicate]
+    if expressions.len() < 2 {
+        return Err(ParseError::SemanticError("Predicate function requires list and predicate".to_string()));
+    }
+    let list_expr = expressions.remove(0);
+    let predicate = expressions.remove(0);
+
+    Ok(Expression::PredicateFunction {
+        name,
+        variable: variable.ok_or_else(|| ParseError::SemanticError("Predicate function missing variable".to_string()))?,
+        list_expr: Box::new(list_expr),
+        predicate: Box::new(predicate),
+    })
+}
+
+fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut pattern_path = None;
+    let mut filter = None;
+    let mut projection = None;
+    let mut expressions = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::path => pattern_path = Some(parse_path(inner)?),
+            Rule::where_clause => {
+                let wc = parse_where_clause(inner)?;
+                filter = Some(wc.predicate);
+            }
+            Rule::expression => expressions.push(parse_expression(inner)?),
+            _ => {}
+        }
+    }
+
+    // The last expression is the projection
+    projection = expressions.pop();
+
+    let path = pattern_path.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing pattern".to_string()))?;
+
+    Ok(Expression::PatternComprehension {
+        pattern: Pattern { paths: vec![path] },
+        filter: filter.map(Box::new),
+        projection: Box::new(projection.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing projection".to_string()))?),
+    })
+}
+
+fn parse_reduce_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut variables = Vec::new();
+    let mut expressions = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => variables.push(inner.as_str().to_string()),
+            Rule::in_op => {}
+            Rule::expression => expressions.push(parse_expression(inner)?),
+            _ => {}
+        }
+    }
+
+    // variables: [accumulator, iterator]
+    // expressions: [init, list, body]
+    if variables.len() < 2 || expressions.len() < 3 {
+        return Err(ParseError::SemanticError("reduce() requires (acc = init, x IN list | expr)".to_string()));
+    }
+
+    Ok(Expression::Reduce {
+        accumulator: variables[0].clone(),
+        init: Box::new(expressions[0].clone()),
+        variable: variables[1].clone(),
+        list_expr: Box::new(expressions[1].clone()),
+        expression: Box::new(expressions[2].clone()),
     })
 }
 

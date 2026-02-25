@@ -150,6 +150,108 @@ pub fn dijkstra(
     None
 }
 
+/// BFS that returns ALL shortest paths between source and target
+pub fn bfs_all_shortest_paths(
+    view: &GraphView,
+    source: NodeId,
+    target: NodeId,
+) -> Vec<PathResult> {
+    let source_idx = match view.node_to_index.get(&source) {
+        Some(&idx) => idx,
+        None => return vec![],
+    };
+    let target_idx = match view.node_to_index.get(&target) {
+        Some(&idx) => idx,
+        None => return vec![],
+    };
+
+    if source_idx == target_idx {
+        return vec![PathResult {
+            source,
+            target,
+            path: vec![source],
+            cost: 0.0,
+        }];
+    }
+
+    // BFS tracking all parents for each discovered node
+    let mut parents: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut distance: HashMap<usize, usize> = HashMap::new();
+    let mut queue = VecDeque::new();
+
+    queue.push_back(source_idx);
+    distance.insert(source_idx, 0);
+
+    let mut target_distance: Option<usize> = None;
+
+    while let Some(current) = queue.pop_front() {
+        let current_dist = distance[&current];
+
+        // Stop if we've gone past the target distance
+        if let Some(td) = target_distance {
+            if current_dist >= td {
+                continue;
+            }
+        }
+
+        for &next_idx in view.successors(current) {
+            let next_dist = current_dist + 1;
+
+            if let Some(&existing_dist) = distance.get(&next_idx) {
+                if next_dist == existing_dist {
+                    // Same distance — add as additional parent
+                    parents.entry(next_idx).or_default().push(current);
+                }
+                // Longer path — skip
+            } else {
+                // First time reaching this node
+                distance.insert(next_idx, next_dist);
+                parents.insert(next_idx, vec![current]);
+                queue.push_back(next_idx);
+
+                if next_idx == target_idx {
+                    target_distance = Some(next_dist);
+                }
+            }
+        }
+    }
+
+    // If target not reached, return empty
+    if !distance.contains_key(&target_idx) {
+        return vec![];
+    }
+
+    // Reconstruct all paths from target back to source
+    let mut all_paths = Vec::new();
+    let mut stack: Vec<(usize, Vec<usize>)> = vec![(target_idx, vec![target_idx])];
+
+    while let Some((node, partial_path)) = stack.pop() {
+        if node == source_idx {
+            let mut path: Vec<NodeId> = partial_path.iter()
+                .rev()
+                .map(|&idx| view.index_to_node[idx])
+                .collect();
+            all_paths.push(PathResult {
+                source,
+                target,
+                cost: (path.len() - 1) as f64,
+                path,
+            });
+            continue;
+        }
+
+        if let Some(parent_list) = parents.get(&node) {
+            for &parent in parent_list {
+                let mut new_path = partial_path.clone();
+                new_path.push(parent);
+                stack.push((parent, new_path));
+            }
+        }
+    }
+
+    all_paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +313,59 @@ mod tests {
         let result = dijkstra(&view, 1, 3).unwrap();
         assert_eq!(result.path, vec![1, 2, 3]);
         assert_eq!(result.cost, 15.0);
+    }
+
+    #[test]
+    fn test_bfs_all_shortest_paths() {
+        // Diamond: 1->2, 1->3, 2->4, 3->4
+        let index_to_node = vec![1, 2, 3, 4];
+        let mut node_to_index = HashMap::new();
+        node_to_index.insert(1, 0);
+        node_to_index.insert(2, 1);
+        node_to_index.insert(3, 2);
+        node_to_index.insert(4, 3);
+
+        let mut outgoing = vec![vec![]; 4];
+        outgoing[0] = vec![1, 2]; // 1->2, 1->3
+        outgoing[1] = vec![3];    // 2->4
+        outgoing[2] = vec![3];    // 3->4
+
+        let view = GraphView::from_adjacency_list(
+            4,
+            index_to_node,
+            node_to_index,
+            outgoing,
+            vec![vec![]; 4],
+            None,
+        );
+
+        let results = bfs_all_shortest_paths(&view, 1, 4);
+        assert_eq!(results.len(), 2, "Should find 2 shortest paths in diamond graph");
+        for r in &results {
+            assert_eq!(r.cost, 2.0);
+            assert_eq!(r.path.len(), 3);
+            assert_eq!(r.path[0], 1);
+            assert_eq!(r.path[2], 4);
+        }
+    }
+
+    #[test]
+    fn test_bfs_all_shortest_paths_no_path() {
+        let index_to_node = vec![1, 2];
+        let mut node_to_index = HashMap::new();
+        node_to_index.insert(1, 0);
+        node_to_index.insert(2, 1);
+
+        let view = GraphView::from_adjacency_list(
+            2,
+            index_to_node,
+            node_to_index,
+            vec![vec![], vec![]],
+            vec![vec![], vec![]],
+            None,
+        );
+
+        let results = bfs_all_shortest_paths(&view, 1, 2);
+        assert!(results.is_empty());
     }
 }

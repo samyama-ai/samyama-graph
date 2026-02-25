@@ -8,7 +8,7 @@ use crate::query::ast::*;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -570,43 +570,84 @@ impl QueryPlanner {
                 }
             }
 
-            // Add expand operators for each segment in this path
-            let mut current_var = start_var.clone();
-            for segment in &path.segments {
-                let target_var = segment.node.variable.as_ref()
-                    .ok_or_else(|| ExecutionError::PlanningError("Target node must have a variable".to_string()))?
+            // Check for shortestPath / allShortestPaths
+            if matches!(path.path_type, PathType::Shortest | PathType::AllShortest) && !path.segments.is_empty() {
+                // shortestPath: use BFS-based ShortestPathOperator
+                let last_segment = path.segments.last().unwrap();
+                let target_var = last_segment.node.variable.as_ref()
+                    .ok_or_else(|| ExecutionError::PlanningError("shortestPath target must have a variable".to_string()))?
                     .clone();
-
-                let edge_var = segment.edge.variable.clone();
-                let edge_types: Vec<String> = segment.edge.types.iter()
+                let edge_types: Vec<String> = last_segment.edge.types.iter()
                     .map(|t| t.as_str().to_string())
                     .collect();
+                let all_paths = matches!(path.path_type, PathType::AllShortest);
 
-                let expand = ExpandOperator::new(
-                    path_operator,
-                    current_var.clone(),
+                // We need the target node to be scanned too — create a CartesianProduct with target scan
+                let target_scan: OperatorBox = Box::new(NodeScanOperator::new(
                     target_var.clone(),
-                    edge_var,
-                    edge_types,
-                    segment.edge.direction.clone(),
-                );
-
-                // Add target label filter if labels specified on target node
-                path_operator = if !segment.node.labels.is_empty() {
-                    Box::new(expand.with_target_labels(segment.node.labels.clone()))
-                } else {
-                    Box::new(expand)
-                };
-
-                // Add property filter for target node if properties specified
-                if let Some(ref props) = segment.node.properties {
+                    last_segment.node.labels.clone(),
+                ));
+                // Add property filter for target node
+                let target_op = if let Some(ref props) = last_segment.node.properties {
                     if !props.is_empty() {
                         let filter_expr = self.build_property_filter(&target_var, props);
-                        path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                        Box::new(FilterOperator::new(target_scan, filter_expr)) as OperatorBox
+                    } else {
+                        target_scan
                     }
-                }
+                } else {
+                    target_scan
+                };
 
-                current_var = target_var;
+                let combined = Box::new(CartesianProductOperator::new(path_operator, target_op));
+                path_operator = Box::new(ShortestPathOperator::new(
+                    combined,
+                    start_var.clone(),
+                    target_var.clone(),
+                    path.path_variable.clone(),
+                    edge_types,
+                    last_segment.edge.direction.clone(),
+                    all_paths,
+                ));
+            } else {
+                // Normal path: use ExpandOperator for each segment
+                let mut current_var = start_var.clone();
+                for segment in &path.segments {
+                    let target_var = segment.node.variable.as_ref()
+                        .ok_or_else(|| ExecutionError::PlanningError("Target node must have a variable".to_string()))?
+                        .clone();
+
+                    let edge_var = segment.edge.variable.clone();
+                    let edge_types: Vec<String> = segment.edge.types.iter()
+                        .map(|t| t.as_str().to_string())
+                        .collect();
+
+                    let expand = ExpandOperator::new(
+                        path_operator,
+                        current_var.clone(),
+                        target_var.clone(),
+                        edge_var,
+                        edge_types,
+                        segment.edge.direction.clone(),
+                    );
+
+                    // Add target label filter if labels specified on target node
+                    path_operator = if !segment.node.labels.is_empty() {
+                        Box::new(expand.with_target_labels(segment.node.labels.clone()))
+                    } else {
+                        Box::new(expand)
+                    };
+
+                    // Add property filter for target node if properties specified
+                    if let Some(ref props) = segment.node.properties {
+                        if !props.is_empty() {
+                            let filter_expr = self.build_property_filter(&target_var, props);
+                            path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                        }
+                    }
+
+                    current_var = target_var;
+                }
             }
 
             // Collect variables used in this path for join detection

@@ -29,6 +29,13 @@ pub enum PropertyValue {
     Array(Vec<PropertyValue>),
     Map(HashMap<String, PropertyValue>),
     Vector(Vec<f32>),
+    /// Duration with months, days, seconds, nanos components (ISO 8601)
+    Duration {
+        months: i64,
+        days: i64,
+        seconds: i64,
+        nanos: i32,
+    },
     Null,
 }
 
@@ -119,6 +126,16 @@ impl Ord for PropertyValue {
                 }
                 a.len().cmp(&b.len())
             }
+            (Vector(_), _) => Ordering::Less,
+            (_, Vector(_)) => Ordering::Greater,
+
+            (Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
+             Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
+                m1.cmp(m2)
+                    .then(d1.cmp(d2))
+                    .then(s1.cmp(s2))
+                    .then(n1.cmp(n2))
+            }
         }
     }
 }
@@ -167,8 +184,15 @@ impl std::hash::Hash for PropertyValue {
                     val.to_bits().hash(state);
                 }
             }
-            PropertyValue::Null => {
+            PropertyValue::Duration { months, days, seconds, nanos } => {
                 8.hash(state);
+                months.hash(state);
+                days.hash(state);
+                seconds.hash(state);
+                nanos.hash(state);
+            }
+            PropertyValue::Null => {
+                9.hash(state);
             }
         }
     }
@@ -255,6 +279,7 @@ impl PropertyValue {
             PropertyValue::Array(_) => "Array",
             PropertyValue::Map(_) => "Map",
             PropertyValue::Vector(_) => "Vector",
+            PropertyValue::Duration { .. } => "Duration",
             PropertyValue::Null => "Null",
         }
     }
@@ -279,6 +304,14 @@ impl PropertyValue {
                 serde_json::Value::Object(json_map)
             }
             PropertyValue::Vector(v) => json!(v),
+            PropertyValue::Duration { months, days, seconds, nanos } => {
+                json!({
+                    "months": months,
+                    "days": days,
+                    "seconds": seconds,
+                    "nanos": nanos
+                })
+            }
             PropertyValue::Null => serde_json::Value::Null,
         }
     }
@@ -321,6 +354,26 @@ impl fmt::Display for PropertyValue {
                     write!(f, "{}", val)?;
                 }
                 write!(f, "])")
+            }
+            PropertyValue::Duration { months, days, seconds, nanos } => {
+                write!(f, "P")?;
+                if *months > 0 {
+                    let years = months / 12;
+                    let rem_months = months % 12;
+                    if years > 0 { write!(f, "{}Y", years)?; }
+                    if rem_months > 0 { write!(f, "{}M", rem_months)?; }
+                }
+                if *days > 0 { write!(f, "{}D", days)?; }
+                if *seconds > 0 || *nanos > 0 {
+                    write!(f, "T")?;
+                    let h = seconds / 3600;
+                    let m = (seconds % 3600) / 60;
+                    let s = seconds % 60;
+                    if h > 0 { write!(f, "{}H", h)?; }
+                    if m > 0 { write!(f, "{}M", m)?; }
+                    if s > 0 || *nanos > 0 { write!(f, "{}S", s)?; }
+                }
+                Ok(())
             }
             PropertyValue::Null => write!(f, "null"),
         }

@@ -51,6 +51,16 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            // DateTime + Duration
+            (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) |
+            (PropertyValue::Duration { months, days, seconds, .. }, PropertyValue::DateTime(dt)) => {
+                add_duration_to_datetime(*dt, *months, *days, *seconds)
+            }
+            // Duration + Duration
+            (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
+             PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
+                PropertyValue::Duration { months: m1 + m2, days: d1 + d2, seconds: s1 + s2, nanos: n1 + n2 }
+            }
             _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
@@ -58,6 +68,21 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
+            // DateTime - Duration
+            (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) => {
+                add_duration_to_datetime(*dt, -*months, -*days, -*seconds)
+            }
+            // DateTime - DateTime = Duration
+            (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => {
+                let diff_ms = a - b;
+                let total_seconds = diff_ms / 1000;
+                PropertyValue::Duration { months: 0, days: total_seconds / 86400, seconds: total_seconds % 86400, nanos: ((diff_ms % 1000) * 1_000_000) as i32 }
+            }
+            // Duration - Duration
+            (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
+             PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
+                PropertyValue::Duration { months: m1 - m2, days: d1 - d2, seconds: s1 - s2, nanos: n1 - n2 }
+            }
             _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
         },
         BinaryOp::Mul => match (&left_prop, &right_prop) {
@@ -188,6 +213,19 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
             eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+        }
+        Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+            eval_predicate_function(name, variable, list_expr, predicate, record, store)
+        }
+        Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+            eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
+        }
+        Expression::PatternComprehension { pattern, filter, projection } => {
+            eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
+        }
+        Expression::PathVariable(var) => {
+            record.get(var).cloned()
+                .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
         }
     }
 }
@@ -321,6 +359,174 @@ fn eval_list_comprehension(
     Ok(Value::Property(PropertyValue::Array(result)))
 }
 
+/// Evaluate predicate functions: all(x IN list WHERE pred), any(...), none(...), single(...)
+fn eval_predicate_function(
+    name: &str,
+    variable: &str,
+    list_expr: &Expression,
+    predicate: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    let list_val = eval_expression(list_expr, record, store)?;
+    let items = match list_val {
+        Value::Property(PropertyValue::Array(arr)) => arr,
+        _ => return Ok(Value::Property(PropertyValue::Boolean(false))),
+    };
+
+    let mut true_count = 0usize;
+    for item in &items {
+        let mut inner_record = record.clone();
+        inner_record.bind(variable.to_string(), Value::Property(item.clone()));
+        let result = eval_expression(predicate, &inner_record, store)?;
+        if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
+            true_count += 1;
+        }
+    }
+
+    let result = match name {
+        "all" => true_count == items.len(),
+        "any" => true_count > 0,
+        "none" => true_count == 0,
+        "single" => true_count == 1,
+        _ => false,
+    };
+    Ok(Value::Property(PropertyValue::Boolean(result)))
+}
+
+/// Evaluate reduce(acc = init, x IN list | expr)
+fn eval_reduce(
+    accumulator: &str,
+    init: &Expression,
+    variable: &str,
+    list_expr: &Expression,
+    expression: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    let init_val = eval_expression(init, record, store)?;
+    let list_val = eval_expression(list_expr, record, store)?;
+    let items = match list_val {
+        Value::Property(PropertyValue::Array(arr)) => arr,
+        _ => return Ok(init_val),
+    };
+
+    let mut acc = init_val;
+    for item in items {
+        let mut inner_record = record.clone();
+        inner_record.bind(accumulator.to_string(), acc);
+        inner_record.bind(variable.to_string(), Value::Property(item));
+        acc = eval_expression(expression, &inner_record, store)?;
+    }
+    Ok(acc)
+}
+
+/// Evaluate pattern comprehension: [(a)-[:REL]->(b) | expr]
+fn eval_pattern_comprehension(
+    pattern: &Pattern,
+    filter: Option<&Expression>,
+    projection: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
+    let mut results = Vec::new();
+
+    for path in &pattern.paths {
+        let start_var = path.start.variable.as_deref();
+        let start_labels = &path.start.labels;
+
+        // Get candidate start nodes
+        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
+            if let Some(val) = record.get(var) {
+                match val {
+                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
+                    _ => vec![],
+                }
+            } else if let Some(first_label) = start_labels.first() {
+                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+            } else {
+                store.all_nodes().iter().map(|n| n.id).collect()
+            }
+        } else if let Some(first_label) = start_labels.first() {
+            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
+        } else {
+            store.all_nodes().iter().map(|n| n.id).collect()
+        };
+
+        for node_id in &start_node_ids {
+            let node = match store.get_node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
+            if !has_all_labels { continue; }
+
+            if path.segments.is_empty() {
+                let mut temp_record = record.clone();
+                if let Some(var) = start_var {
+                    temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
+                }
+                if let Some(f) = filter {
+                    let cond = eval_expression(f, &temp_record, store)?;
+                    if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
+                }
+                let val = eval_expression(projection, &temp_record, store)?;
+                match val {
+                    Value::Property(pv) => results.push(pv),
+                    _ => results.push(PropertyValue::Null),
+                }
+            } else {
+                // One-hop traversal for pattern comprehension
+                for segment in &path.segments {
+                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
+                    let edges = match segment.edge.direction {
+                        Direction::Outgoing => store.get_outgoing_edges(*node_id),
+                        Direction::Incoming => store.get_incoming_edges(*node_id),
+                        Direction::Both => {
+                            let mut all = store.get_outgoing_edges(*node_id);
+                            all.extend(store.get_incoming_edges(*node_id));
+                            all
+                        }
+                    };
+                    for edge in &edges {
+                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
+                            continue;
+                        }
+                        let target_id = if edge.source == *node_id { edge.target } else { edge.source };
+                        if !segment.node.labels.is_empty() {
+                            if let Some(target) = store.get_node(target_id) {
+                                let matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
+                                if !matches { continue; }
+                            } else { continue; }
+                        }
+                        let mut temp_record = record.clone();
+                        if let Some(var) = start_var {
+                            temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
+                        }
+                        if let Some(ref var) = segment.node.variable {
+                            temp_record.bind(var.clone(), Value::NodeRef(target_id));
+                        }
+                        if let Some(ref var) = segment.edge.variable {
+                            temp_record.bind(var.clone(), Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()));
+                        }
+                        if let Some(f) = filter {
+                            let cond = eval_expression(f, &temp_record, store)?;
+                            if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
+                        }
+                        let val = eval_expression(projection, &temp_record, store)?;
+                        match val {
+                            Value::Property(pv) => results.push(pv),
+                            _ => results.push(PropertyValue::Null),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Value::Property(PropertyValue::Array(results)))
+}
+
 /// Shared function evaluation for scalar functions (not aggregates)
 fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
     match name.to_lowercase().as_str() {
@@ -423,7 +629,31 @@ fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
                 Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Integer(a.len() as i64))),
-                _ => Err(ExecutionError::TypeError("size() requires string or list".to_string())),
+                Value::Path { edges, .. } => Ok(Value::Property(PropertyValue::Integer(edges.len() as i64))),
+                _ => Err(ExecutionError::TypeError("size() requires string, list, or path".to_string())),
+            }
+        }
+        // Path functions
+        "nodes" => {
+            match &args[0] {
+                Value::Path { nodes, .. } => {
+                    let arr: Vec<PropertyValue> = nodes.iter()
+                        .map(|id| PropertyValue::Integer(id.as_u64() as i64))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(arr)))
+                }
+                _ => Err(ExecutionError::TypeError("nodes() requires a path".to_string())),
+            }
+        }
+        "relationships" | "rels" => {
+            match &args[0] {
+                Value::Path { edges, .. } => {
+                    let arr: Vec<PropertyValue> = edges.iter()
+                        .map(|id| PropertyValue::Integer(id.as_u64() as i64))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(arr)))
+                }
+                _ => Err(ExecutionError::TypeError("relationships() requires a path".to_string())),
             }
         }
         // Math functions
@@ -551,6 +781,139 @@ fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
             let is_null = matches!(&args[0], Value::Null | Value::Property(PropertyValue::Null));
             Ok(Value::Property(PropertyValue::Boolean(!is_null)))
         }
+        // startNode/endNode — return source/target node of an edge
+        "startnode" => {
+            match &args[0] {
+                Value::Edge(_, edge) => Ok(Value::NodeRef(edge.source)),
+                Value::EdgeRef(_, src, _, _) => Ok(Value::NodeRef(*src)),
+                _ => Err(ExecutionError::TypeError("startNode() requires an edge".to_string())),
+            }
+        }
+        "endnode" => {
+            match &args[0] {
+                Value::Edge(_, edge) => Ok(Value::NodeRef(edge.target)),
+                Value::EdgeRef(_, _, tgt, _) => Ok(Value::NodeRef(*tgt)),
+                _ => Err(ExecutionError::TypeError("endNode() requires an edge".to_string())),
+            }
+        }
+        // range() — generate integer list
+        "range" => {
+            if args.len() < 2 { return Err(ExecutionError::RuntimeError("range() requires at least 2 arguments".to_string())); }
+            let start = extract_int(&args[0])?;
+            let end = extract_int(&args[1])?;
+            let step = if args.len() >= 3 { extract_int(&args[2])? } else { 1 };
+            if step == 0 { return Err(ExecutionError::RuntimeError("range() step cannot be 0".to_string())); }
+            let mut result = Vec::new();
+            let mut i = start;
+            if step > 0 {
+                while i <= end {
+                    result.push(PropertyValue::Integer(i));
+                    i += step;
+                }
+            } else {
+                while i >= end {
+                    result.push(PropertyValue::Integer(i));
+                    i += step;
+                }
+            }
+            Ok(Value::Property(PropertyValue::Array(result)))
+        }
+        // date/datetime/duration constructors
+        "date" => {
+            if args.is_empty() {
+                // date() — current date as DateTime
+                let now = chrono::Utc::now().timestamp_millis();
+                Ok(Value::Property(PropertyValue::DateTime(now)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::String(s)) => {
+                        // Parse ISO date string
+                        if let Ok(dt) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                            let millis = dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                            Ok(Value::Property(PropertyValue::DateTime(millis)))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Cannot parse date: {}", s)))
+                        }
+                    }
+                    Value::Property(PropertyValue::Map(map)) => {
+                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
+                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        if let Some(dt) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                            let millis = dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                            Ok(Value::Property(PropertyValue::DateTime(millis)))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Invalid date: {}-{}-{}", year, month, day)))
+                        }
+                    }
+                    _ => Err(ExecutionError::TypeError("date() requires string or map argument".to_string())),
+                }
+            }
+        }
+        "datetime" => {
+            if args.is_empty() {
+                let now = chrono::Utc::now().timestamp_millis();
+                Ok(Value::Property(PropertyValue::DateTime(now)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::String(s)) => {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
+                        } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Cannot parse datetime: {}", s)))
+                        }
+                    }
+                    _ => Err(ExecutionError::TypeError("datetime() requires string argument".to_string())),
+                }
+            }
+        }
+        "duration" => {
+            if args.is_empty() {
+                return Err(ExecutionError::RuntimeError("duration() requires an argument".to_string()));
+            }
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    parse_iso_duration(s)
+                }
+                Value::Property(PropertyValue::Map(map)) => {
+                    let months = map.get("months").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let days = map.get("days").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let hours = map.get("hours").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let minutes = map.get("minutes").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let seconds = map.get("seconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let years = map.get("years").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let total_months = years * 12 + months;
+                    let total_seconds = hours * 3600 + minutes * 60 + seconds;
+                    Ok(Value::Property(PropertyValue::Duration {
+                        months: total_months,
+                        days,
+                        seconds: total_seconds,
+                        nanos: 0,
+                    }))
+                }
+                _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
+            }
+        }
+        // duration component accessors
+        "duration_between" | "duration.between" => {
+            if args.len() < 2 { return Err(ExecutionError::RuntimeError("duration.between() requires 2 arguments".to_string())); }
+            match (&args[0], &args[1]) {
+                (Value::Property(PropertyValue::DateTime(a)), Value::Property(PropertyValue::DateTime(b))) => {
+                    let diff_ms = b - a;
+                    let total_seconds = diff_ms / 1000;
+                    let remaining_days = total_seconds / 86400;
+                    Ok(Value::Property(PropertyValue::Duration {
+                        months: 0,
+                        days: remaining_days,
+                        seconds: total_seconds % 86400,
+                        nanos: ((diff_ms % 1000) * 1_000_000) as i32,
+                    }))
+                }
+                _ => Err(ExecutionError::TypeError("duration.between() requires two datetime arguments".to_string())),
+            }
+        }
         _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
     }
 }
@@ -569,6 +932,93 @@ fn extract_int(val: &Value) -> ExecutionResult<i64> {
         Value::Property(PropertyValue::Integer(i)) => Ok(*i),
         _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
     }
+}
+
+/// Add duration components to a DateTime (millis timestamp)
+fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64) -> PropertyValue {
+    use chrono::{Datelike, Months, Duration, TimeZone};
+    let dt = chrono::Utc.timestamp_millis_opt(dt_millis).single();
+    match dt {
+        Some(mut datetime) => {
+            // Add months
+            if months > 0 {
+                if let Some(d) = datetime.checked_add_months(Months::new(months as u32)) {
+                    datetime = d;
+                }
+            } else if months < 0 {
+                if let Some(d) = datetime.checked_sub_months(Months::new((-months) as u32)) {
+                    datetime = d;
+                }
+            }
+            // Add days and seconds
+            let total_secs = days * 86400 + seconds;
+            if let Some(d) = datetime.checked_add_signed(Duration::seconds(total_secs)) {
+                datetime = d;
+            }
+            PropertyValue::DateTime(datetime.timestamp_millis())
+        }
+        None => PropertyValue::Null,
+    }
+}
+
+/// Parse ISO 8601 duration string (e.g. "P1Y2M3DT4H5M6S")
+fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
+    let s = s.trim();
+    if !s.starts_with('P') && !s.starts_with('p') {
+        return Err(ExecutionError::RuntimeError(format!("Invalid duration format: {}", s)));
+    }
+    let rest = &s[1..];
+    let mut months: i64 = 0;
+    let mut days: i64 = 0;
+    let mut seconds: i64 = 0;
+    let mut nanos: i32 = 0;
+    let _ = nanos; // suppress warning
+
+    let (date_part, time_part) = if let Some(idx) = rest.find(|c: char| c == 'T' || c == 't') {
+        (&rest[..idx], &rest[idx + 1..])
+    } else {
+        (rest, "")
+    };
+
+    // Parse date part: Y, M, D
+    let mut num_buf = String::new();
+    for ch in date_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num_buf.push(ch);
+        } else {
+            let val: f64 = num_buf.parse().unwrap_or(0.0);
+            num_buf.clear();
+            match ch {
+                'Y' | 'y' => months += (val * 12.0) as i64,
+                'M' | 'm' => months += val as i64,
+                'W' | 'w' => days += (val * 7.0) as i64,
+                'D' | 'd' => days += val as i64,
+                _ => {}
+            }
+        }
+    }
+
+    // Parse time part: H, M, S
+    num_buf.clear();
+    for ch in time_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num_buf.push(ch);
+        } else {
+            let val: f64 = num_buf.parse().unwrap_or(0.0);
+            num_buf.clear();
+            match ch {
+                'H' | 'h' => seconds += (val * 3600.0) as i64,
+                'M' | 'm' => seconds += (val * 60.0) as i64,
+                'S' | 's' => {
+                    seconds += val as i64;
+                    nanos = ((val - val.floor()) * 1_000_000_000.0) as i32;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(Value::Property(PropertyValue::Duration { months, days, seconds, nanos }))
 }
 
 /// Shared CASE expression evaluation
@@ -1033,6 +1483,19 @@ impl FilterOperator {
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
+            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+                eval_predicate_function(name, variable, list_expr, predicate, record, store)
+            }
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
+            }
+            Expression::PatternComprehension { pattern, filter, projection } => {
+                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
+            }
+            Expression::PathVariable(var) => {
+                record.get(var).cloned()
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
         }
     }
@@ -1614,6 +2077,19 @@ impl ProjectOperator {
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
             }
+            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+                eval_predicate_function(name, variable, list_expr, predicate, record, store)
+            }
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
+            }
+            Expression::PatternComprehension { pattern, filter, projection } => {
+                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
+            }
+            Expression::PathVariable(var) => {
+                record.get(var).cloned()
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
         }
     }
 }
@@ -1739,6 +2215,9 @@ impl AggregatorState {
                     Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
                         set.insert(PropertyValue::Integer(id.0 as i64));
                     }
+                    Value::Path { .. } => {
+                        // Paths are not countable as distinct — ignore
+                    }
                     Value::Null => {}
                 }
             }
@@ -1855,6 +2334,19 @@ impl AggregateOperator {
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
+            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+                eval_predicate_function(name, variable, list_expr, predicate, record, store)
+            }
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
+            }
+            Expression::PatternComprehension { pattern, filter, projection } => {
+                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
+            }
+            Expression::PathVariable(var) => {
+                record.get(var).cloned()
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
         }
     }
@@ -2087,6 +2579,19 @@ impl SortOperator {
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
+            }
+            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+                eval_predicate_function(name, variable, list_expr, predicate, record, store)
+            }
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
+            }
+            Expression::PatternComprehension { pattern, filter, projection } => {
+                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
+            }
+            Expression::PathVariable(var) => {
+                record.get(var).cloned()
+                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
         }
     }
@@ -4450,6 +4955,185 @@ impl PhysicalOperator for ForeachOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+    }
+}
+
+/// ShortestPathOperator - finds shortest path(s) between two nodes using BFS
+pub struct ShortestPathOperator {
+    input: OperatorBox,
+    source_var: String,
+    target_var: String,
+    path_var: Option<String>,
+    edge_types: Vec<String>,
+    direction: Direction,
+    all_paths: bool,  // false = shortestPath, true = allShortestPaths
+    results: std::vec::IntoIter<Record>,
+    executed: bool,
+}
+
+impl ShortestPathOperator {
+    pub fn new(
+        input: OperatorBox,
+        source_var: String,
+        target_var: String,
+        path_var: Option<String>,
+        edge_types: Vec<String>,
+        direction: Direction,
+        all_paths: bool,
+    ) -> Self {
+        Self {
+            input,
+            source_var,
+            target_var,
+            path_var,
+            edge_types,
+            direction,
+            all_paths,
+            results: Vec::new().into_iter(),
+            executed: false,
+        }
+    }
+
+    fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut all_results = Vec::new();
+
+        while let Some(record) = self.input.next(store)? {
+            let source_id = record.get(&self.source_var)
+                .and_then(|v| v.node_id())
+                .ok_or_else(|| ExecutionError::RuntimeError("shortestPath source not a node".to_string()))?;
+            let target_id = record.get(&self.target_var)
+                .and_then(|v| v.node_id())
+                .ok_or_else(|| ExecutionError::RuntimeError("shortestPath target not a node".to_string()))?;
+
+            // BFS to find shortest path(s)
+            let paths = self.bfs_shortest(store, source_id, target_id);
+
+            if self.all_paths {
+                for path in paths {
+                    let mut new_record = record.clone();
+                    if let Some(ref pv) = self.path_var {
+                        new_record.bind(pv.clone(), Value::Path {
+                            nodes: path.0,
+                            edges: path.1,
+                        });
+                    }
+                    all_results.push(new_record);
+                }
+            } else if let Some(path) = paths.into_iter().next() {
+                let mut new_record = record.clone();
+                if let Some(ref pv) = self.path_var {
+                    new_record.bind(pv.clone(), Value::Path {
+                        nodes: path.0,
+                        edges: path.1,
+                    });
+                }
+                all_results.push(new_record);
+            }
+        }
+
+        self.results = all_results.into_iter();
+        self.executed = true;
+        Ok(())
+    }
+
+    fn bfs_shortest(&self, store: &GraphStore, source: NodeId, target: NodeId) -> Vec<(Vec<NodeId>, Vec<crate::graph::EdgeId>)> {
+        use std::collections::VecDeque;
+
+        if source == target {
+            return vec![(vec![source], vec![])];
+        }
+
+        let mut queue: VecDeque<(NodeId, Vec<NodeId>, Vec<crate::graph::EdgeId>)> = VecDeque::new();
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut results = Vec::new();
+        let mut found_distance: Option<usize> = None;
+
+        queue.push_back((source, vec![source], vec![]));
+        visited.insert(source);
+
+        while let Some((current, path_nodes, path_edges)) = queue.pop_front() {
+            if let Some(max_dist) = found_distance {
+                if path_nodes.len() > max_dist {
+                    break;
+                }
+            }
+
+            let edges = match self.direction {
+                Direction::Outgoing => store.get_outgoing_edges(current),
+                Direction::Incoming => store.get_incoming_edges(current),
+                Direction::Both => {
+                    let mut all = store.get_outgoing_edges(current);
+                    all.extend(store.get_incoming_edges(current));
+                    all
+                }
+            };
+
+            for edge in &edges {
+                if !self.edge_types.is_empty() && !self.edge_types.iter().any(|t| t == edge.edge_type.as_str()) {
+                    continue;
+                }
+                let next_node = if edge.source == current { edge.target } else { edge.source };
+
+                if next_node == target {
+                    let mut new_nodes = path_nodes.clone();
+                    new_nodes.push(target);
+                    let mut new_edges = path_edges.clone();
+                    new_edges.push(edge.id);
+
+                    if found_distance.is_none() {
+                        found_distance = Some(new_nodes.len());
+                    }
+                    results.push((new_nodes, new_edges));
+
+                    if !self.all_paths {
+                        return results;
+                    }
+                    continue;
+                }
+
+                if !visited.contains(&next_node) || self.all_paths {
+                    if !self.all_paths {
+                        visited.insert(next_node);
+                    }
+                    let mut new_nodes = path_nodes.clone();
+                    new_nodes.push(next_node);
+                    let mut new_edges = path_edges.clone();
+                    new_edges.push(edge.id);
+                    queue.push_back((next_node, new_nodes, new_edges));
+                }
+            }
+        }
+
+        results
+    }
+}
+
+impl PhysicalOperator for ShortestPathOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            self.execute_all(store)?;
+        }
+        Ok(self.results.next())
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if !self.executed {
+            self.execute_all(store)?;
+        }
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.results.next() {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.executed = false;
+        self.results = Vec::new().into_iter();
     }
 }
 
