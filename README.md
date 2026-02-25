@@ -2,7 +2,16 @@
 
 **Samyama** is a high-performance, distributed, AI-native graph database written in **Rust**. It combines a **property graph engine**, **vector search**, **graph analytics**, and **natural language querying** in a single binary.
 
-![LDBC SNB Benchmark Results — 19/19 queries on SF1 (3.2M nodes, 17.3M edges)](./ldbc-benchmark-results.png)
+### LDBC Benchmark Results (v0.5.8, Mac Mini M2 Pro)
+
+| Benchmark | Queries | Pass Rate | Dataset |
+|-----------|---------|-----------|---------|
+| **SNB Interactive** | 21 reads + 8 updates | **21/21 (100%)** | SF1: 3.18M nodes, 17.26M edges |
+| **SNB Business Intelligence** | 20 analytical | **5/6 run** (BI-7+ timeout) | SF1 (same dataset) |
+| **Graphalytics** | 6 algorithms x 2 datasets | **9/12 (75%)** | LDBC XS reference graphs |
+| **FinBench** | 12 CR + 6 SR + 3 RW | **21/21 (100%)** | Synthetic: 7.7K nodes, 42.2K edges |
+
+See [docs/ldbc/](docs/ldbc/) for detailed per-query results, latency tables, and analysis.
 
 ## Key Features
 
@@ -10,7 +19,7 @@
 - **RESP Protocol**: Drop-in compatibility with any Redis client (`redis-cli`, Jedis, ioredis).
 - **Vector Search**: Built-in HNSW indexing for millisecond semantic search and Graph RAG.
 - **NLQ (Natural Language Queries)**: Ask questions in plain English — the LLM translates to Cypher automatically.
-- **Graph Algorithms**: Native PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, Triangle Counting.
+- **Graph Algorithms**: Native PageRank, BFS, Dijkstra, WCC, SCC, CDLP, LCC, MaxFlow, MST, SSSP, Triangle Counting.
 - **Optimization Solvers**: 15+ metaheuristic algorithms (Jaya, Rao, GWO, PSO, Firefly, Cuckoo, ABC, NSGA-II) for in-database optimization.
 - **Multi-Tenancy**: Tenant-level isolation with per-tenant quotas via RocksDB column families.
 - **High Availability**: Raft consensus (via `openraft`) for cluster replication and automatic failover.
@@ -138,6 +147,7 @@ Run with `cargo bench`. See [docs/performance/](docs/performance/) for detailed 
 
 ## Documentation
 
+- [LDBC Benchmark Results](docs/ldbc/) — SNB Interactive, SNB BI, Graphalytics, FinBench
 - [Architecture](docs/ARCHITECTURE.md)
 - [Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)
 - [ACID Guarantees](docs/ACID_GUARANTEES.md)
