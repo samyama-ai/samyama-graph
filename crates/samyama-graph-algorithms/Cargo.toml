@@ -1,6 +1,6 @@
 [package]
 name = "samyama-graph-algorithms"
-version = "0.5.8"
+version = "0.5.10"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "Graph algorithms (PageRank, WCC, BFS, Dijkstra) for Samyama Graph Database"

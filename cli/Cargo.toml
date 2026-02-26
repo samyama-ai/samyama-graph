@@ -1,6 +1,6 @@
 [package]
 name = "samyama-cli"
-version = "0.5.8"
+version = "0.5.10"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "CLI for Samyama Graph Database"
@@ -12,7 +12,7 @@ name = "samyama-cli"
 path = "src/main.rs"
 
 [dependencies]
-samyama-sdk = { path = "../crates/samyama-sdk", version = "0.5.8" }
+samyama-sdk = { path = "../crates/samyama-sdk", version = "0.5.10" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1.35", features = ["full"] }
 serde_json = "1.0"

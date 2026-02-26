@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "samyama"
-version = "0.5.8"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-cli"
-version = "0.5.8"
+version = "0.5.10"
 dependencies = [
  "clap",
  "comfy-table",
@@ -2660,14 +2660,14 @@ dependencies = [
 
 [[package]]
 name = "samyama-graph-algorithms"
-version = "0.5.8"
+version = "0.5.10"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "samyama-optimization"
-version = "0.5.8"
+version = "0.5.10"
 dependencies = [
  "criterion",
  "ndarray",
@@ -2680,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-sdk"
-version = "0.5.8"
+version = "0.5.10"
 dependencies = [
  "async-trait",
  "ndarray",
