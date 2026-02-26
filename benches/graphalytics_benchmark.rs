@@ -421,12 +421,12 @@ fn run_algorithm(
 
         "PR" | "PAGERANK" => {
             let damping = props.pr_damping.unwrap_or(0.85);
-            let iterations = props.pr_iterations.unwrap_or(20).max(100);
+            let iterations = props.pr_iterations.unwrap_or(20);
 
             let config = PageRankConfig {
                 damping_factor: damping,
                 iterations,
-                tolerance: 1e-7, // Tolerance-based convergence for validation accuracy
+                tolerance: 0.0, // LDBC spec: fixed iteration count, no early exit
             };
 
             let start = Instant::now();

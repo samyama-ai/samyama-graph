@@ -37,14 +37,15 @@ pub fn page_rank(
     }
 
     // 2. Initialize scores
-    // Initial score is 1.0 for all nodes
-    let initial_score = 1.0;
+    // LDBC Graphalytics spec: initial score is 1/N
+    let initial_score = 1.0 / n as f64;
     let mut scores = vec![initial_score; n];
     let mut next_scores = vec![0.0; n];
 
     // 3. Iteration
+    // LDBC Graphalytics spec: PR(v) = (1-d)/N + d * sum(PR(u)/out_degree(u))
     let d = config.damping_factor;
-    let base_score = 1.0 - d;
+    let base_score = (1.0 - d) / n as f64;
 
     for _ in 0..config.iterations {
         let mut total_diff = 0.0;

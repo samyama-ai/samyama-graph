@@ -37,7 +37,8 @@ fn test_pagerank_procedure() {
     assert_eq!(first.get("node.name").unwrap().as_property().unwrap().as_string(), Some("Alice"));
     
     let score = first.get("score").unwrap().as_property().unwrap().as_float().unwrap();
-    assert!(score > 1.0);
+    // With 1/N normalization (3 nodes), Alice's score should be highest but < 1.0
+    assert!(score > 0.0 && score < 1.0, "PageRank score should be in (0,1) with 1/N normalization, got {}", score);
 }
 
 #[test]
