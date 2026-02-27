@@ -427,7 +427,7 @@ fn run_algorithm(
                 damping_factor: damping,
                 iterations, // Use exact iteration count from LDBC properties
                 tolerance: 0.0, // No early termination — run exactly num-iterations
-                dangling_redistribution: false, // LDBC Graphalytics spec: no dangling redistribution
+                dangling_redistribution: true, // LDBC reference outputs include dangling mass redistribution
             };
 
             let start = Instant::now();
