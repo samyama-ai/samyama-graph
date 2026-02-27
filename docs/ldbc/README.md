@@ -2,7 +2,7 @@
 
 Samyama's query engine benchmarked against all four [LDBC Council](https://ldbcouncil.org/) benchmark suites.
 
-**Test Environment:** Mac Mini M4 (24GB RAM), macOS Sequoia, Rust 1.83 release build
+**Test Environment:** Mac Mini M4 (10-core, 16GB RAM), macOS Tahoe 26.2, Rust 1.83 release build
 
 **Date:** 2026-02-27
 
