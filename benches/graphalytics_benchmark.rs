@@ -427,6 +427,7 @@ fn run_algorithm(
                 damping_factor: damping,
                 iterations: iterations.max(1000), // Ensure enough iterations for convergence on large graphs
                 tolerance: 1e-7, // Converge to match LDBC reference outputs
+                dangling_redistribution: false, // LDBC Graphalytics reference outputs use no dangling redistribution
             };
 
             let start = Instant::now();

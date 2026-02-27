@@ -11,8 +11,12 @@ pub struct PageRankConfig {
     pub damping_factor: f64,
     /// Number of iterations
     pub iterations: usize,
-    /// Tolerance for convergence (optional - not used in fixed iteration version)
+    /// Tolerance for convergence (0.0 = run all iterations)
     pub tolerance: f64,
+    /// Whether to redistribute dangling node mass.
+    /// Set to false for LDBC Graphalytics compatibility (reference outputs
+    /// are generated without dangling redistribution).
+    pub dangling_redistribution: bool,
 }
 
 impl Default for PageRankConfig {
@@ -21,6 +25,7 @@ impl Default for PageRankConfig {
             damping_factor: 0.85,
             iterations: 20,
             tolerance: 0.0001,
+            dangling_redistribution: true,
         }
     }
 }
@@ -50,12 +55,16 @@ pub fn page_rank(
     for _ in 0..config.iterations {
         let mut total_diff = 0.0;
 
-        // Compute dangling node mass: sum of scores for nodes with out_degree == 0
-        let dangling_sum: f64 = (0..n)
-            .filter(|&i| view.out_degree(i) == 0)
-            .map(|i| scores[i])
-            .sum();
-        let dangling_contrib = dangling_sum / n as f64;
+        // Compute dangling node mass if enabled
+        let dangling_contrib = if config.dangling_redistribution {
+            let dangling_sum: f64 = (0..n)
+                .filter(|&i| view.out_degree(i) == 0)
+                .map(|i| scores[i])
+                .sum();
+            dangling_sum / n as f64
+        } else {
+            0.0
+        };
 
         for i in 0..n {
             let mut sum_incoming = 0.0;

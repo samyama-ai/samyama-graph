@@ -710,6 +710,7 @@ async fn main() {
         damping_factor: 0.85,
         iterations: 30,
         tolerance: 0.0001,
+        ..Default::default()
     }, None, None).await;
     let pr_time = start.elapsed();
 
