@@ -1,17 +1,19 @@
-# LDBC Graphalytics Benchmark — Samyama v0.5.8
+# LDBC Graphalytics Benchmark — Samyama v0.5.10
 
 ## Overview
 
 [LDBC Graphalytics](https://ldbcouncil.org/benchmarks/graphalytics/) is a benchmark for graph analysis platforms. It defines 6 standard graph algorithms that must be implemented and validated against reference outputs on standard datasets.
 
-**Result: 12/12 validations passed (100%), all 6 algorithms execute correctly**
+**Result: 28/28 validations passed (100%) — XS 12/12, S-size 16/16**
+
+All 6 algorithms execute correctly across 5 datasets (2 XS + 3 S-size).
 
 ## Test Environment
 
-- **Hardware:** Mac Mini M2 Pro, 16GB RAM
-- **OS:** macOS Sonoma
+- **Hardware:** Mac Mini M4, 24GB RAM
+- **OS:** macOS Sequoia
 - **Build:** `cargo build --release` (Rust 1.83, LTO enabled)
-- **Date:** 2026-02-26
+- **Date:** 2026-02-27
 
 ## Algorithms
 
@@ -39,7 +41,7 @@
 |---------|----------|-------|----------|--------|
 | wiki-Talk | ~2.4M | ~5.0M | Yes | LDBC Graphalytics S |
 | cit-Patents | ~3.8M | ~16.5M | Yes | LDBC Graphalytics S |
-| datagen-7_5-fb | ~633K | ~34.2M | No | LDBC Graphalytics S |
+| datagen-7_5-fb | ~633K | ~68.4M (34.2M bidirectional) | No | LDBC Graphalytics S |
 
 ## Results (XS-size)
 
@@ -77,28 +79,92 @@
 | SSSP | PASS | PASS | 2/2 |
 | **Total** | **6/6** | **6/6** | **12/12** |
 
-## Fixes Applied (v0.5.8)
+## Results (S-size)
 
-### PageRank Convergence (previously FAIL)
+### cit-Patents (3,774,768 vertices, 16,518,947 edges, directed)
+
+Load time: 8.1s
+
+| Algorithm | Time | Result | Validation |
+|-----------|------|--------|------------|
+| BFS | 71ms | source=6009541, reachable=298,159, max_depth=20 | **PASS** |
+| PR | 791ms | iters=10, d=0.85, min=0.000000, max=0.000087 | **PASS** |
+| WCC | 376ms | components=3,627, largest=3,764,117 | **PASS** |
+| CDLP | 9.5s | communities=337,986, largest=8,698, iters=10 | **PASS** |
+| LCC | 9.6s | avg_cc=0.037831, non_zero=1,962,968 | **PASS** |
+| SSSP | 214ms | source=1, reachable=1 | N/A (no reference) |
+
+### datagen-7_5-fb (633,432 vertices, 68,371,494 edges, undirected)
+
+Load time: 8.6s
+
+| Algorithm | Time | Result | Validation |
+|-----------|------|--------|------------|
+| BFS | 170ms | source=6, reachable=633,432, max_depth=5 | **PASS** |
+| PR | 879ms | iters=10, d=0.85, min=0.000000, max=0.000053 | **PASS** |
+| WCC | 285ms | components=1, largest=633,432 | **PASS** |
+| CDLP | 15.5s | communities=218, largest=94,574, iters=10 | **PASS** |
+| LCC | 167s | avg_cc=0.087608, non_zero=596,316 | **PASS** |
+| SSSP | 304ms | source=6, reachable=633,432, max_dist=5.4445 | **PASS** |
+
+### wiki-Talk (2,394,385 vertices, 5,021,410 edges, directed)
+
+Load time: 1.4s
+
+| Algorithm | Time | Result | Validation |
+|-----------|------|--------|------------|
+| BFS | 148ms | source=2, reachable=2,354,316, max_depth=6 | **PASS** |
+| PR | 280ms | iters=10, d=0.85, min=0.000000, max=0.000255 | **PASS** |
+| WCC | 265ms | components=2,555, largest=2,388,953 | **PASS** |
+| CDLP | 2.5s | communities=10,914, largest=1,312,545, iters=10 | **PASS** |
+| LCC | 41.5s | avg_cc=0.039099, non_zero=259,136 | **PASS** |
+| SSSP | 167ms | source=0, reachable=2 | N/A (no reference) |
+
+### S-size Summary
+
+| Algorithm | cit-Patents | datagen-7_5-fb | wiki-Talk | Overall |
+|-----------|-------------|----------------|-----------|---------|
+| BFS | PASS | PASS | PASS | 3/3 |
+| PR | PASS | PASS | PASS | 3/3 |
+| WCC | PASS | PASS | PASS | 3/3 |
+| CDLP | PASS | PASS | PASS | 3/3 |
+| LCC | PASS | PASS | PASS | 3/3 |
+| SSSP | N/A | PASS | N/A | 1/1 |
+| **Total** | **5/5** | **6/6** | **5/5** | **16/16** |
+
+> SSSP requires weighted edges. cit-Patents and wiki-Talk are unweighted — no LDBC reference output available.
+
+### Overall Summary (XS + S-size)
+
+| Size | Datasets | Validations | Passed | Rate |
+|------|----------|-------------|--------|------|
+| XS | 2 | 12 | 12 | 100% |
+| S | 3 | 16 | 16 | 100% |
+| **Total** | **5** | **28** | **28** | **100%** |
+
+## Fixes Applied
+
+### PageRank Convergence (v0.5.8)
 
 **Previous issue:** Benchmark used `tolerance: 0.0` with only `max_iterations` from the properties file (typically 2), so PageRank never converged.
 
 **Fix:** Changed to `tolerance: 1e-7` with `iterations: max(props, 100)`. PageRank now runs to convergence, matching LDBC reference outputs.
 
-### Directed LCC (previously FAIL on directed datasets)
+### Directed LCC (v0.5.8)
 
 **Previous issue:** The LCC algorithm treated all edges as undirected, using `d*(d-1)/2` as the divisor. LDBC expects directed triangle semantics for directed graphs.
 
 **Fix:** Added `local_clustering_coefficient_directed(view, directed)` which counts directed edges among neighbors and uses `d*(d-1)` divisor when `directed=true`. The benchmark auto-detects directedness from the dataset properties file.
 
-## GPU Acceleration (Enterprise)
+### PageRank Exact Iterations + Dangling Redistribution (v0.5.10)
 
-The enterprise edition supports GPU-accelerated PageRank and LCC via wgpu compute shaders:
+**Previous issue:** PageRank used convergence-based iteration with `max(props, 1000)` iterations, which ran more iterations than LDBC expects and shifted absolute scores.
 
-- **PageRank:** GPU iterations with periodic CPU-side convergence checking (tolerance-based)
-- **LCC:** GPU kernel with directed/undirected mode, binary search in sorted CSR adjacency
-- **Auto-dispatch:** Graphs with >1000 nodes automatically use GPU when available
-- GPU path is taken for S-size datasets (633K+ vertices)
+**Fix:** Use exact iteration count from LDBC properties (`tolerance: 0.0`, no early termination). Enabled dangling node mass redistribution (`dangling_redistribution: true` in `PageRankConfig`) to match LDBC reference semantics.
+
+## GPU Acceleration
+
+GPU-accelerated graph algorithms (PageRank, LCC, CDLP, WCC, BFS) are available in the Enterprise edition via wgpu compute shaders. All results above are CPU-only.
 
 ## Algorithm Details
 

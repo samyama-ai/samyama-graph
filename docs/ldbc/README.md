@@ -1,10 +1,10 @@
-# LDBC Benchmark Results — Samyama v0.5.8
+# LDBC Benchmark Results — Samyama v0.5.10
 
 Samyama's query engine benchmarked against all four [LDBC Council](https://ldbcouncil.org/) benchmark suites.
 
-**Test Environment:** Mac Mini M2 Pro (16GB RAM), macOS Sonoma, Rust 1.83 release build
+**Test Environment:** Mac Mini M4 (24GB RAM), macOS Sequoia, Rust 1.83 release build
 
-**Date:** 2026-02-26
+**Date:** 2026-02-27
 
 ## Summary
 
@@ -12,17 +12,17 @@ Samyama's query engine benchmarked against all four [LDBC Council](https://ldbco
 |-----------|---------|--------|-----------|---------|------------|
 | [SNB Interactive](./SNB_INTERACTIVE.md) | 21 reads + 8 inserts + 8 deletes | 21/21 reads | **100%** | SF1 (3.18M nodes, 17.26M edges) | 108.1s |
 | [SNB Business Intelligence](./SNB_BI.md) | 20 | All 20 attempted (120s timeout guard) | **Improved** | SF1 (same dataset) | varies |
-| [Graphalytics](./GRAPHALYTICS.md) | 12 (6 algos x 2 datasets) | 12/12 | **100%** | XS + S-size datasets | <1ms (XS) |
+| [Graphalytics](./GRAPHALYTICS.md) | 28 (6 algos x 5 datasets) | 28/28 | **100%** | XS (2) + S-size (3) datasets | <1ms (XS), 0.1–167s (S) |
 | [FinBench](./FINBENCH.md) | 21 (12 CR + 6 SR + 3 RW) | 21/21 | **100%** | Synthetic (7.7K nodes, 42.2K edges) | 371ms |
 
 ### Overall Coverage
 
 - **4 LDBC benchmark suites** implemented
 - **82 unique query/algorithm implementations** across all suites (including 8 deletes)
-- **Graphalytics 12/12 passing** (PageRank convergence fix + directed LCC)
+- **Graphalytics 28/28 passing** — XS 12/12 + S-size 16/16 (PageRank exact iterations, dangling redistribution, directed LCC)
+- **S-size datasets validated**: wiki-Talk (2.4M V), cit-Patents (3.8M V), datagen-7_5-fb (633K V, 68M E)
 - **WITH projection barrier** implemented for BI query support
-- **S-size dataset support** (wiki-Talk, cit-Patents, datagen-7_5-fb)
-- **GPU acceleration** (Enterprise) for PageRank and LCC
+- **GPU acceleration** (Enterprise) for PageRank, LCC, CDLP, WCC, BFS
 
 ## Quick Start
 
