@@ -425,7 +425,7 @@ fn run_algorithm(
 
             let config = PageRankConfig {
                 damping_factor: damping,
-                iterations: iterations.max(100), // Ensure enough iterations for convergence on large graphs
+                iterations: iterations.max(1000), // Ensure enough iterations for convergence on large graphs
                 tolerance: 1e-7, // Converge to match LDBC reference outputs
             };
 
