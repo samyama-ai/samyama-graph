@@ -10,8 +10,8 @@ All 6 algorithms execute correctly across 5 datasets (2 XS + 3 S-size).
 
 ## Test Environment
 
-- **Hardware:** Mac Mini M4, 24GB RAM
-- **OS:** macOS Sequoia
+- **Hardware:** Mac Mini M4 (10-core: 4P+6E), 16GB RAM
+- **OS:** macOS Tahoe 26.2
 - **Build:** `cargo build --release` (Rust 1.83, LTO enabled)
 - **Date:** 2026-02-27
 
