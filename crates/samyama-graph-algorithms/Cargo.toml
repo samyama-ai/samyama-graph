@@ -1,6 +1,6 @@
 [package]
 name = "samyama-graph-algorithms"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "Graph algorithms (PageRank, WCC, BFS, Dijkstra) for Samyama Graph Database"
@@ -13,3 +13,4 @@ readme = "README.md"
 [dependencies]
 # No heavy dependencies needed for pure topology
 serde = { version = "1.0", features = ["derive"], optional = true }
+ndarray = "0.15"

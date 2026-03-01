@@ -19,6 +19,7 @@ pub use samyama_graph_algorithms::{
     count_triangles,
     cdlp, CdlpResult, CdlpConfig,
     local_clustering_coefficient, local_clustering_coefficient_directed, LccResult,
+    pca, PcaConfig, PcaResult,
 };
 
 /// Build a GraphView from the store for algorithm execution

@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use samyama::algo::{
     build_view, page_rank, weakly_connected_components, strongly_connected_components,
     bfs, dijkstra, bfs_all_shortest_paths, edmonds_karp, prim_mst, count_triangles,
-    cdlp, local_clustering_coefficient,
+    cdlp, local_clustering_coefficient, pca,
     PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
-    CdlpConfig, CdlpResult, LccResult,
+    CdlpConfig, CdlpResult, LccResult, PcaConfig, PcaResult,
 };
 use samyama_graph_algorithms::GraphView;
 
@@ -121,6 +121,17 @@ pub trait AlgorithmClient {
         label: Option<&str>,
         edge_type: Option<&str>,
     ) -> LccResult;
+
+    /// Principal Component Analysis on node numeric properties.
+    ///
+    /// Extracts the specified numeric properties from nodes matching `label`,
+    /// builds a feature matrix, and runs PCA with the given config.
+    async fn pca(
+        &self,
+        label: Option<&str>,
+        properties: &[&str],
+        config: PcaConfig,
+    ) -> PcaResult;
 }
 
 #[async_trait]
@@ -255,6 +266,54 @@ impl AlgorithmClient for EmbeddedClient {
         let store = self.store.read().await;
         let view = build_view(&store, label, edge_type, None);
         local_clustering_coefficient(&view)
+    }
+
+    async fn pca(
+        &self,
+        label: Option<&str>,
+        properties: &[&str],
+        config: PcaConfig,
+    ) -> PcaResult {
+        let store = self.store.read().await;
+        use samyama::graph::{Label, PropertyValue};
+
+        // Collect nodes matching the label filter
+        let nodes: Vec<_> = if let Some(label_str) = label {
+            let l = Label::new(label_str);
+            store.get_nodes_by_label(&l).into_iter().collect()
+        } else {
+            store.all_nodes().into_iter().collect()
+        };
+
+        // Build feature matrix: extract numeric properties from each node
+        let mut data: Vec<Vec<f64>> = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            let mut row = Vec::with_capacity(properties.len());
+            for &prop in properties {
+                let val = match node.get_property(prop) {
+                    Some(PropertyValue::Integer(i)) => *i as f64,
+                    Some(PropertyValue::Float(f)) => *f,
+                    _ => 0.0,
+                };
+                row.push(val);
+            }
+            data.push(row);
+        }
+
+        if data.is_empty() {
+            return PcaResult {
+                components: vec![],
+                explained_variance: vec![],
+                explained_variance_ratio: vec![],
+                mean: vec![0.0; properties.len()],
+                std_dev: vec![1.0; properties.len()],
+                n_samples: 0,
+                n_features: properties.len(),
+                iterations_used: 0,
+            };
+        }
+
+        pca(&data, config)
     }
 }
 

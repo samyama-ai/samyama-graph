@@ -7,6 +7,7 @@ pub mod mst;
 pub mod topology;
 pub mod cdlp;
 pub mod lcc;
+pub mod pca;
 
 pub use common::{GraphView, NodeId};
 pub use pagerank::{page_rank, PageRankConfig};
@@ -17,3 +18,4 @@ pub use mst::{prim_mst, MSTResult};
 pub use topology::count_triangles;
 pub use cdlp::{cdlp, CdlpResult, CdlpConfig};
 pub use lcc::{local_clustering_coefficient, local_clustering_coefficient_directed, LccResult};
+pub use pca::{pca, PcaConfig, PcaResult};

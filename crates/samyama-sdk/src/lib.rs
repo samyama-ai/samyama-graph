@@ -76,8 +76,9 @@ pub use samyama::query::{QueryEngine, RecordBatch, CacheStats};
 
 pub use samyama::algo::{
     build_view, page_rank, weakly_connected_components, strongly_connected_components,
-    bfs, dijkstra, edmonds_karp, prim_mst, count_triangles,
+    bfs, dijkstra, edmonds_karp, prim_mst, count_triangles, pca,
     PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
+    PcaConfig, PcaResult,
 };
 pub use samyama_graph_algorithms::GraphView;
 
