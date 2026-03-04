@@ -1,7 +1,7 @@
 # Cypher Compatibility Matrix
 
-**Last Updated:** 2026-02-16
-**Version:** Samyama v0.5.4
+**Last Updated:** 2026-03-04
+**Version:** Samyama v0.5.12
 
 This document tracks the compatibility of Samyama's OpenCypher implementation against the industry standard (Neo4j) and modern competitors (FalkorDB).
 
@@ -10,7 +10,7 @@ This document tracks the compatibility of Samyama's OpenCypher implementation ag
 Samyama provides **~90% OpenCypher coverage** with pattern matching, CRUD operations, aggregations, subqueries, and extensive function support. Features unique to Samyama include native vector search, graph algorithms, and optimization solvers accessible via Cypher.
 
 - **Supported:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE (with ON CREATE/ON MATCH SET), WITH, UNWIND, UNION/UNION ALL, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries, aggregations (COUNT/SUM/AVG/MIN/MAX/COLLECT), 30+ built-in functions, cross-type coercion, Null propagation.
-- **Remaining gaps:** WITH projection barrier (partial), list slicing, pattern comprehensions, named paths, CASE expressions.
+- **Remaining gaps:** list slicing, pattern comprehensions, named paths, `collect(DISTINCT x)`.
 
 ## Feature Matrix
 
@@ -34,7 +34,7 @@ Samyama provides **~90% OpenCypher coverage** with pattern matching, CRUD operat
 | | `min()` / `max()` | ✅ | ✅ | ✅ | Comparable types |
 | | `collect()` | ✅ | ✅ | ✅ | List aggregation |
 | | Implicit `GROUP BY` | ✅ | ✅ | ✅ | Non-aggregated return items become grouping keys |
-| **Structure** | `WITH` | ⚠️ | ✅ | ✅ | Parsed; projection barrier not fully enforced |
+| **Structure** | `WITH` | ✅ | ✅ | ✅ | Full projection barrier (v0.5.10) |
 | | `UNWIND` | ✅ | ✅ | ✅ | List expansion |
 | | `UNION` / `UNION ALL` | ✅ | ✅ | ✅ | Combining result sets |
 | | `EXISTS` subquery | ✅ | ✅ | ✅ | Existence check in WHERE |
@@ -55,6 +55,7 @@ Samyama provides **~90% OpenCypher coverage** with pattern matching, CRUD operat
 | **Graph Functions** | `id()` | ✅ | ✅ | ✅ | |
 | | `labels()`, `type()` | ✅ | ✅ | ✅ | |
 | | `exists()`, `coalesce()` | ✅ | ✅ | ✅ | |
+| **Expressions** | `CASE WHEN ... THEN ... END` | ✅ | ✅ | ✅ | Simple and searched forms |
 | **Predicates** | `STARTS WITH`, `ENDS WITH`, `CONTAINS` | ✅ | ✅ | ✅ | |
 | | `=~` (regex) | ✅ | ✅ | ✅ | |
 | | `IN` (list membership) | ✅ | ✅ | ✅ | |
@@ -75,10 +76,13 @@ Samyama provides **~90% OpenCypher coverage** with pattern matching, CRUD operat
 
 ## Remaining Gaps
 
-1. **WITH projection barrier**: `WITH` is parsed and can carry aliases, but does not fully isolate scope between query stages.
-2. **List slicing**: `list[0..3]` syntax not yet supported.
-3. **Pattern comprehensions**: `[(a)-[:KNOWS]->(b) | b.name]` not yet supported.
-4. **Named paths**: `p = (a)-[:KNOWS]->(b)` path assignment not yet supported.
-5. **CASE expressions**: `CASE WHEN ... THEN ... ELSE ... END` not yet supported.
-6. **Some functions**: `split`, `rand`, `log`, `exp`, `nodes()`, `relationships()`, `timestamp()`.
-7. **`collect(DISTINCT x)`**: DISTINCT modifier inside aggregate functions not yet supported.
+1. **List slicing**: `list[0..3]` syntax not yet supported.
+2. **Pattern comprehensions**: `[(a)-[:KNOWS]->(b) | b.name]` not yet supported.
+3. **Named paths**: `p = (a)-[:KNOWS]->(b)` path assignment not yet supported.
+4. **Some functions**: `split`, `rand`, `log`, `exp`, `nodes()`, `relationships()`, `timestamp()`.
+5. **`collect(DISTINCT x)`**: DISTINCT modifier inside aggregate functions not yet supported.
+
+## Recently Resolved (formerly listed as gaps)
+
+- ~~**CASE expressions**~~: Fully supported as of v0.5.5 (simple and searched forms).
+- ~~**WITH projection barrier**~~: Fully enforced as of v0.5.10.

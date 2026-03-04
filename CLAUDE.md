@@ -126,7 +126,7 @@ src/
 
 **Supported functions (30+):** toUpper, toLower, trim, replace, substring, left, right, reverse, toString, toInteger, toFloat, abs, ceil, floor, round, sqrt, sign, count, sum, avg, min, max, collect, size, length, head, last, tail, keys, id, labels, type, exists, coalesce.
 
-**Remaining gaps:** WITH projection barrier (partial), list slicing, pattern comprehensions, named paths, CASE expressions, collect(DISTINCT x).
+**Remaining gaps:** list slicing, pattern comprehensions, named paths, collect(DISTINCT x).
 
 ## API Patterns
 

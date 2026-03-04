@@ -66,7 +66,7 @@ This document outlines the development journey of Samyama, from its inception as
 **Goal**: Maximize write throughput.
 *   **Features**:
     *   **Decoupled Architecture**: Writes are acked immediately; indexing happens in background.
-    *   **Performance**: Restored ingestion to **>800k nodes/sec**.
+    *   **Performance**: Restored ingestion to **~870k nodes/sec** (async benchmark); synchronous ingestion benchmarks at ~230K–360K nodes/sec depending on workload.
 
 ### Phase 10: Tenant Sharding
 **Goal**: Horizontal scalability.
@@ -114,3 +114,7 @@ This document outlines the development journey of Samyama, from its inception as
 ### 3. Graph-Level Sharding
 **Goal**: Massive scale for single graphs.
 *   **Plan**: Partition *single* large graphs across nodes using Min-Cut algorithms (Metis), enabling trillion-edge scale (complexity: High).
+
+---
+
+> **Detailed Backlog**: For a comprehensive, prioritized list of all planned work (~100 items across 13 categories), see [`samyama-cloud/docs/BACKLOG.md`](https://git.samyama.ai/samyama-ai/samyama-cloud/src/branch/main/docs/BACKLOG.md).
