@@ -227,6 +227,12 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             record.get(var).cloned()
                 .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
         }
+        Expression::Parameter(name) => {
+            // Parameters are resolved by substituting them with bound variables prefixed with `$`
+            // The executor is responsible for binding params to `$name` before execution
+            record.get(&format!("${}", name)).cloned()
+                .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
+        }
     }
 }
 
@@ -865,7 +871,24 @@ fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
                             Err(ExecutionError::RuntimeError(format!("Cannot parse datetime: {}", s)))
                         }
                     }
-                    _ => Err(ExecutionError::TypeError("datetime() requires string argument".to_string())),
+                    Value::Property(PropertyValue::Map(map)) => {
+                        use chrono::TimeZone;
+                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
+                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        if let Some(dt) = chrono::Utc.with_ymd_and_hms(year, month, day, hour, minute, second).single() {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!(
+                                "Invalid datetime components: year={}, month={}, day={}, hour={}, minute={}, second={}",
+                                year, month, day, hour, minute, second
+                            )))
+                        }
+                    }
+                    _ => Err(ExecutionError::TypeError("datetime() requires string or map argument".to_string())),
                 }
             }
         }
@@ -1280,6 +1303,8 @@ fn format_expression(expr: &Expression) -> String {
                 format!("{}({})", name, arg_strs.join(", "))
             }
         }
+        Expression::PathVariable(v) => format!("path({})", v),
+        Expression::Parameter(p) => format!("${}", p),
         _ => "...".to_string(),
     }
 }
@@ -1297,6 +1322,10 @@ pub struct NodeScanOperator {
     node_ids: Vec<NodeId>,
     /// Current index
     current: usize,
+    /// Early limit: stop producing after this many rows (for LIMIT pushdown)
+    early_limit: Option<usize>,
+    /// Count of rows produced (for early limit tracking)
+    produced: usize,
 }
 
 impl NodeScanOperator {
@@ -1307,7 +1336,15 @@ impl NodeScanOperator {
             labels,
             node_ids: Vec::new(),
             current: 0,
+            early_limit: None,
+            produced: 0,
         }
+    }
+
+    /// Set early limit for LIMIT pushdown optimization
+    pub fn with_early_limit(mut self, limit: usize) -> Self {
+        self.early_limit = Some(limit);
+        self
     }
 
     fn initialize(&mut self, store: &GraphStore) {
@@ -1345,8 +1382,16 @@ impl PhysicalOperator for NodeScanOperator {
             return Ok(None);
         }
 
+        // Check early limit
+        if let Some(limit) = self.early_limit {
+            if self.produced >= limit {
+                return Ok(None);
+            }
+        }
+
         let node_id = self.node_ids[self.current];
         self.current += 1;
+        self.produced += 1;
 
         let mut record = Record::new();
         record.bind(self.variable.clone(), Value::NodeRef(node_id));
@@ -1361,7 +1406,16 @@ impl PhysicalOperator for NodeScanOperator {
             return Ok(None);
         }
 
-        let end = (self.current + batch_size).min(self.node_ids.len());
+        // Apply early limit to batch size
+        let effective_batch = if let Some(limit) = self.early_limit {
+            let remaining = limit.saturating_sub(self.produced);
+            if remaining == 0 { return Ok(None); }
+            batch_size.min(remaining)
+        } else {
+            batch_size
+        };
+
+        let end = (self.current + effective_batch).min(self.node_ids.len());
         let range = self.current..end;
         self.current = end;
 
@@ -1371,6 +1425,7 @@ impl PhysicalOperator for NodeScanOperator {
             record.bind(self.variable.clone(), Value::NodeRef(*node_id));
             records.push(record);
         }
+        self.produced += records.len();
 
         Ok(Some(RecordBatch {
             records,
@@ -1380,6 +1435,7 @@ impl PhysicalOperator for NodeScanOperator {
 
     fn reset(&mut self) {
         self.current = 0;
+        self.produced = 0;
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -1496,6 +1552,10 @@ impl FilterOperator {
             Expression::PathVariable(var) => {
                 record.get(var).cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
+            Expression::Parameter(name) => {
+                record.get(&format!("${}", name)).cloned()
+                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
             }
         }
     }
@@ -1810,6 +1870,8 @@ pub struct ExpandOperator {
     current_edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)>,
     /// Current edge index
     edge_index: usize,
+    /// Path variable name for named paths (CY-04)
+    path_variable: Option<String>,
 }
 
 impl ExpandOperator {
@@ -1833,7 +1895,14 @@ impl ExpandOperator {
             current_record: None,
             current_edges: Vec::new(),
             edge_index: 0,
+            path_variable: None,
         }
+    }
+
+    /// Set path variable for named path materialization (CY-04)
+    pub fn with_path_variable(mut self, var: String) -> Self {
+        self.path_variable = Some(var);
+        self
     }
 
     /// Set target node labels to filter during expansion
@@ -1921,6 +1990,17 @@ impl PhysicalOperator for ExpandOperator {
                     new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
                 }
 
+                // CY-04: Materialize named path variable
+                if let Some(ref path_var) = self.path_variable {
+                    let source_id = new_record.get(&self.source_var)
+                        .and_then(|v| v.node_id())
+                        .unwrap_or(src);
+                    new_record.bind(path_var.clone(), Value::Path {
+                        nodes: vec![source_id, target_id],
+                        edges: vec![edge_id],
+                    });
+                }
+
                 return Ok(Some(new_record));
             }
 
@@ -1959,6 +2039,16 @@ impl PhysicalOperator for ExpandOperator {
                     new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
                     if let Some(edge_var) = &self.edge_var {
                         new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
+                    }
+                    // CY-04: Materialize named path variable in batch mode
+                    if let Some(ref path_var) = self.path_variable {
+                        let source_id = new_record.get(&self.source_var)
+                            .and_then(|v| v.node_id())
+                            .unwrap_or(src);
+                        new_record.bind(path_var.clone(), Value::Path {
+                            nodes: vec![source_id, target_id],
+                            edges: vec![edge_id],
+                        });
                     }
                     expanded_records.push(new_record);
                 }
@@ -2090,6 +2180,10 @@ impl ProjectOperator {
                 record.get(var).cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
+            Expression::Parameter(name) => {
+                record.get(&format!("${}", name)).cloned()
+                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
+            }
         }
     }
 }
@@ -2180,6 +2274,7 @@ enum AggregatorState {
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
     Collect(Vec<PropertyValue>),
+    CollectDistinct(BTreeSet<PropertyValue>),
 }
 
 impl AggregatorState {
@@ -2191,7 +2286,8 @@ impl AggregatorState {
             (AggregateType::Avg, _) => AggregatorState::Avg { sum: 0.0, count: 0 },
             (AggregateType::Min, _) => AggregatorState::Min(None),
             (AggregateType::Max, _) => AggregatorState::Max(None),
-            (AggregateType::Collect, _) => AggregatorState::Collect(Vec::new()),
+            (AggregateType::Collect, true) => AggregatorState::CollectDistinct(BTreeSet::new()),
+            (AggregateType::Collect, false) => AggregatorState::Collect(Vec::new()),
         }
     }
 
@@ -2252,6 +2348,13 @@ impl AggregatorState {
                     items.push(prop.clone());
                 }
             }
+            AggregatorState::CollectDistinct(set) => {
+                if let Some(prop) = value.as_property() {
+                    if !prop.is_null() {
+                        set.insert(prop.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -2267,6 +2370,7 @@ impl AggregatorState {
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Collect(items) => Value::Property(PropertyValue::Array(items.clone())),
+            AggregatorState::CollectDistinct(set) => Value::Property(PropertyValue::Array(set.iter().cloned().collect())),
         }
     }
 }
@@ -2347,6 +2451,10 @@ impl AggregateOperator {
             Expression::PathVariable(var) => {
                 record.get(var).cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
+            Expression::Parameter(name) => {
+                record.get(&format!("${}", name)).cloned()
+                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
             }
         }
     }
@@ -2592,6 +2700,10 @@ impl SortOperator {
             Expression::PathVariable(var) => {
                 record.get(var).cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
+            Expression::Parameter(name) => {
+                record.get(&format!("${}", name)).cloned()
+                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
             }
         }
     }
@@ -3497,6 +3609,281 @@ impl PhysicalOperator for CreateVectorIndexOperator {
 
     fn is_mutating(&self) -> bool {
         true
+    }
+}
+
+/// Composite create index operator: CREATE INDEX ON :Label(prop1, prop2, ...)
+pub struct CompositeCreateIndexOperator {
+    label: Label,
+    properties: Vec<String>,
+    executed: bool,
+}
+
+impl CompositeCreateIndexOperator {
+    pub fn new(label: Label, properties: Vec<String>) -> Self {
+        Self { label, properties, executed: false }
+    }
+}
+
+impl PhysicalOperator for CompositeCreateIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CompositeCreateIndexOperator requires mutable store access.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        // Create individual indexes for each property
+        for property in &self.properties {
+            store.property_index.create_index(self.label.clone(), property.clone());
+
+            // Backfill each index
+            let mut entries = Vec::new();
+            let nodes = store.get_nodes_by_label(&self.label);
+            for node in nodes {
+                if let Some(val) = node.get_property(property) {
+                    entries.push((node.id, val.clone()));
+                }
+            }
+            for (node_id, val) in entries {
+                store.property_index.index_insert(&self.label, property, val, node_id);
+            }
+        }
+
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CreateCompositeIndex".to_string(),
+            details: format!(":{}({})", self.label.as_str(), self.properties.join(", ")),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Create unique constraint operator
+pub struct CreateConstraintOperator {
+    label: Label,
+    property: String,
+    executed: bool,
+}
+
+impl CreateConstraintOperator {
+    pub fn new(label: Label, property: String) -> Self {
+        Self { label, property, executed: false }
+    }
+}
+
+impl PhysicalOperator for CreateConstraintOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CreateConstraintOperator requires mutable store access.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        // Check existing data for uniqueness violations
+        let nodes = store.get_nodes_by_label(&self.label);
+        let mut seen_values: std::collections::HashSet<PropertyValue> = std::collections::HashSet::new();
+        for node in nodes {
+            if let Some(val) = node.get_property(&self.property) {
+                if !val.is_null() && !seen_values.insert(val.clone()) {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "Cannot create unique constraint: duplicate value {:?} for :{}({})",
+                        val, self.label.as_str(), self.property
+                    )));
+                }
+            }
+        }
+
+        // Create the constraint
+        store.property_index.create_unique_constraint(self.label.clone(), self.property.clone());
+
+        // Backfill constraint index
+        let mut entries = Vec::new();
+        let nodes = store.get_nodes_by_label(&self.label);
+        for node in nodes {
+            if let Some(val) = node.get_property(&self.property) {
+                entries.push((node.id, val.clone()));
+            }
+        }
+        for (node_id, val) in entries {
+            store.property_index.constraint_insert(&self.label, &self.property, val, node_id);
+        }
+
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CreateConstraint".to_string(),
+            details: format!("UNIQUE :{}({})", self.label.as_str(), self.property),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Drop index operator: DROP INDEX ON :Label(property)
+pub struct DropIndexOperator {
+    label: Label,
+    property: String,
+    executed: bool,
+}
+
+impl DropIndexOperator {
+    pub fn new(label: Label, property: String) -> Self {
+        Self { label, property, executed: false }
+    }
+}
+
+impl PhysicalOperator for DropIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "DropIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+
+        if !store.property_index.has_index(&self.label, &self.property) {
+            return Err(ExecutionError::RuntimeError(
+                format!("Index on :{}({}) does not exist", self.label.as_str(), self.property)
+            ));
+        }
+
+        store.property_index.drop_index(&self.label, &self.property);
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "DropIndex".to_string(),
+            details: format!(":{}({})", self.label.as_str(), self.property),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Show indexes operator: SHOW INDEXES
+pub struct ShowIndexesOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl ShowIndexesOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for ShowIndexesOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let indexes = store.property_index.list_indexes();
+            let mut records = Vec::new();
+            for (label, property) in indexes {
+                let mut record = Record::new();
+                record.bind("label".to_string(), Value::Property(PropertyValue::String(label.as_str().to_string())));
+                record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
+                record.bind("type".to_string(), Value::Property(PropertyValue::String("BTREE".to_string())));
+                records.push(record);
+            }
+            self.results = Some(records.into_iter());
+        }
+
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "ShowIndexes".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Show constraints operator: SHOW CONSTRAINTS
+pub struct ShowConstraintsOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl ShowConstraintsOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for ShowConstraintsOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let constraints = store.property_index.list_constraints();
+            let mut records = Vec::new();
+            for (label, property) in constraints {
+                let mut record = Record::new();
+                record.bind("label".to_string(), Value::Property(PropertyValue::String(label.as_str().to_string())));
+                record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
+                record.bind("type".to_string(), Value::Property(PropertyValue::String("UNIQUE".to_string())));
+                records.push(record);
+            }
+            self.results = Some(records.into_iter());
+        }
+
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "ShowConstraints".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
     }
 }
 
@@ -5243,6 +5630,10 @@ impl WithBarrierOperator {
             Expression::PathVariable(var) => {
                 record.get(var).cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            }
+            Expression::Parameter(name) => {
+                record.get(&format!("${}", name)).cloned()
+                    .ok_or_else(|| ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)))
             }
         }
     }

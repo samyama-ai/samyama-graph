@@ -56,7 +56,12 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
                 for inner in pair.into_inner() {
                     match inner.as_rule() {
                         Rule::explain_clause => {
-                            query.explain = true;
+                            let text = inner.as_str().to_uppercase();
+                            if text.starts_with("PROFILE") {
+                                query.profile = true;
+                            } else {
+                                query.explain = true;
+                            }
                         }
                         Rule::union_clause => {
                             // Check if UNION ALL (inner has "ALL" text)
@@ -90,6 +95,18 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
 fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::show_indexes_stmt => {
+                query.show_indexes = true;
+            }
+            Rule::show_constraints_stmt => {
+                query.show_constraints = true;
+            }
+            Rule::drop_index_stmt => {
+                parse_drop_index_statement(inner, query)?;
+            }
+            Rule::create_constraint_stmt => {
+                parse_create_constraint_statement(inner, query)?;
+            }
             Rule::create_vector_index_stmt => {
                 parse_create_vector_index_statement(inner, query)?;
             }
@@ -116,6 +133,31 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
 
 fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     let mut label = None;
+    let mut properties: Vec<String> = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::property_key => properties.push(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+
+    let first_property = properties.first()
+        .ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?
+        .clone();
+    let additional_properties = properties.into_iter().skip(1).collect();
+
+    query.create_index_clause = Some(CreateIndexClause {
+        label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
+        property: first_property,
+        additional_properties,
+    });
+    Ok(())
+}
+
+fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    let mut label = None;
     let mut property = None;
 
     for inner in pair.into_inner() {
@@ -126,7 +168,40 @@ fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Q
         }
     }
 
-    query.create_index_clause = Some(CreateIndexClause {
+    query.drop_index_clause = Some(DropIndexClause {
+        label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
+        property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
+    });
+    Ok(())
+}
+
+fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    let mut variable = None;
+    let mut label = None;
+    let mut property = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => {
+                if variable.is_none() {
+                    variable = Some(inner.as_str().to_string());
+                }
+            }
+            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::property_access => {
+                // Extract property from property_access (variable.property)
+                for pa in inner.into_inner() {
+                    if pa.as_rule() == Rule::property_key {
+                        property = Some(pa.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    query.create_constraint_clause = Some(CreateConstraintClause {
+        variable: variable.ok_or_else(|| ParseError::SemanticError("Missing variable".to_string()))?,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
         property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
     });
@@ -1193,6 +1268,11 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             }
             Rule::function_call => {
                 return parse_function_call(inner);
+            }
+            Rule::parameter => {
+                // Strip leading '$' from parameter name
+                let name = inner.as_str()[1..].to_string();
+                return Ok(Expression::Parameter(name));
             }
             Rule::variable => {
                 return Ok(Expression::Variable(inner.as_str().to_string()));

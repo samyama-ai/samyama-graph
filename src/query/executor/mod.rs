@@ -13,6 +13,7 @@ pub use record::{Record, RecordBatch, Value};
 
 use crate::graph::GraphStore;
 use crate::query::ast::Query;
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Execution errors
@@ -45,6 +46,7 @@ pub type ExecutionResult<T> = Result<T, ExecutionError>;
 pub struct QueryExecutor<'a> {
     store: &'a GraphStore,
     planner: QueryPlanner,
+    params: HashMap<String, crate::graph::PropertyValue>,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -53,11 +55,30 @@ impl<'a> QueryExecutor<'a> {
         Self {
             store,
             planner: QueryPlanner::new(),
+            params: HashMap::new(),
         }
+    }
+
+    /// Set query parameters
+    pub fn with_params(mut self, params: HashMap<String, crate::graph::PropertyValue>) -> Self {
+        self.params = params;
+        self
     }
 
     /// Execute a read-only query and return results
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
+        // Substitute parameters if any
+        let query = if !self.params.is_empty() || !query.params.is_empty() {
+            let mut q = query.clone();
+            let mut merged_params = query.params.clone();
+            merged_params.extend(self.params.clone());
+            substitute_params(&mut q, &merged_params)?;
+            q
+        } else {
+            query.clone()
+        };
+        let query = &query;
+
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
 
@@ -71,6 +92,31 @@ impl<'a> QueryExecutor<'a> {
             return Err(ExecutionError::RuntimeError(
                 "Cannot execute write query with read-only executor. Use MutQueryExecutor instead.".to_string()
             ));
+        }
+
+        // Handle PROFILE - execute query and append plan + timing info
+        if query.profile {
+            let start = std::time::Instant::now();
+            let result = self.execute_plan(plan)?;
+            let elapsed = start.elapsed();
+
+            // Add profile info as additional records
+            let mut profile_record = Record::new();
+            let profile_text = format!(
+                "Rows: {}, Execution time: {:.3}ms",
+                result.records.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            profile_record.bind("profile".to_string(),
+                Value::Property(crate::graph::PropertyValue::String(profile_text)));
+
+            let mut records = result.records;
+            records.push(profile_record);
+            let mut columns = result.columns;
+            if !columns.contains(&"profile".to_string()) {
+                columns.push("profile".to_string());
+            }
+            return Ok(RecordBatch { records, columns });
         }
 
         // Execute the plan
@@ -126,6 +172,7 @@ pub struct MutQueryExecutor<'a> {
     store: &'a mut GraphStore,
     planner: QueryPlanner,
     tenant_id: String,
+    params: HashMap<String, crate::graph::PropertyValue>,
 }
 
 impl<'a> MutQueryExecutor<'a> {
@@ -135,12 +182,31 @@ impl<'a> MutQueryExecutor<'a> {
             store,
             planner: QueryPlanner::new(),
             tenant_id,
+            params: HashMap::new(),
         }
+    }
+
+    /// Set query parameters
+    pub fn with_params(mut self, params: HashMap<String, crate::graph::PropertyValue>) -> Self {
+        self.params = params;
+        self
     }
 
     /// Execute a query (read or write) and return results
     /// For CREATE queries, nodes/edges are created in the graph store
     pub fn execute(&mut self, query: &Query) -> ExecutionResult<RecordBatch> {
+        // Substitute parameters if any
+        let query = if !self.params.is_empty() || !query.params.is_empty() {
+            let mut q = query.clone();
+            let mut merged_params = query.params.clone();
+            merged_params.extend(self.params.clone());
+            substitute_params(&mut q, &merged_params)?;
+            q
+        } else {
+            query.clone()
+        };
+        let query = &query;
+
         // Plan the query (need immutable borrow temporarily)
         let plan = {
             let store_ref: &GraphStore = self.store;
@@ -172,6 +238,109 @@ impl<'a> MutQueryExecutor<'a> {
             columns: plan.output_columns,
         })
     }
+}
+
+/// Substitute Expression::Parameter references with Expression::Literal values from the params map.
+fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
+    // Recursively substitute in WHERE clause
+    if let Some(wc) = &mut query.where_clause {
+        substitute_expr(&mut wc.predicate, params)?;
+    }
+    // Substitute in RETURN clause
+    if let Some(rc) = &mut query.return_clause {
+        for item in &mut rc.items {
+            substitute_expr(&mut item.expression, params)?;
+        }
+    }
+    // Substitute in WITH clause
+    if let Some(wc) = &mut query.with_clause {
+        for item in &mut wc.items {
+            substitute_expr(&mut item.expression, params)?;
+        }
+        if let Some(where_clause) = &mut wc.where_clause {
+            substitute_expr(&mut where_clause.predicate, params)?;
+        }
+    }
+    // Substitute in ORDER BY
+    if let Some(ob) = &mut query.order_by {
+        for item in &mut ob.items {
+            substitute_expr(&mut item.expression, params)?;
+        }
+    }
+    // Substitute in SET clauses
+    for sc in &mut query.set_clauses {
+        for item in &mut sc.items {
+            substitute_expr(&mut item.value, params)?;
+        }
+    }
+    Ok(())
+}
+
+fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
+    use crate::query::ast::Expression;
+    match expr {
+        Expression::Parameter(name) => {
+            if let Some(val) = params.get(name.as_str()) {
+                *expr = Expression::Literal(val.clone());
+            } else {
+                return Err(ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)));
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            substitute_expr(left, params)?;
+            substitute_expr(right, params)?;
+        }
+        Expression::Unary { expr: e, .. } => {
+            substitute_expr(e, params)?;
+        }
+        Expression::Function { args, .. } => {
+            for arg in args {
+                substitute_expr(arg, params)?;
+            }
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            if let Some(op) = operand {
+                substitute_expr(op, params)?;
+            }
+            for (cond, result) in when_clauses {
+                substitute_expr(cond, params)?;
+                substitute_expr(result, params)?;
+            }
+            if let Some(er) = else_result {
+                substitute_expr(er, params)?;
+            }
+        }
+        Expression::Index { expr: e, index } => {
+            substitute_expr(e, params)?;
+            substitute_expr(index, params)?;
+        }
+        Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
+            substitute_expr(list_expr, params)?;
+            if let Some(f) = filter {
+                substitute_expr(f, params)?;
+            }
+            substitute_expr(map_expr, params)?;
+        }
+        Expression::PredicateFunction { list_expr, predicate, .. } => {
+            substitute_expr(list_expr, params)?;
+            substitute_expr(predicate, params)?;
+        }
+        Expression::Reduce { init, list_expr, expression, .. } => {
+            substitute_expr(init, params)?;
+            substitute_expr(list_expr, params)?;
+            substitute_expr(expression, params)?;
+        }
+        Expression::PatternComprehension { filter, projection, .. } => {
+            if let Some(f) = filter {
+                substitute_expr(f, params)?;
+            }
+            substitute_expr(projection, params)?;
+        }
+        // Leaf expressions — no substitution needed
+        Expression::Variable(_) | Expression::Property { .. } | Expression::Literal(_)
+        | Expression::PathVariable(_) | Expression::ExistsSubquery { .. } => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]

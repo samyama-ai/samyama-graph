@@ -5,10 +5,11 @@
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
+use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -24,10 +25,22 @@ pub struct ExecutionPlan {
     pub is_write: bool,
 }
 
+/// Simple plan cache entry storing planning metadata
+struct PlanCacheEntry {
+    /// Timestamp when entry was created
+    created_at: std::time::Instant,
+    /// Which index to use (if any): (label, property, op)
+    index_hint: Option<(Label, String)>,
+}
+
 /// Query planner
 pub struct QueryPlanner {
-    /// Enable optimization (future)
+    /// Enable optimization
     _optimize: bool,
+    /// Plan cache: query string hash → planning metadata
+    plan_cache: Mutex<HashMap<u64, PlanCacheEntry>>,
+    /// Cache generation counter (incremented on schema changes)
+    cache_generation: std::sync::atomic::AtomicU64,
 }
 
 impl QueryPlanner {
@@ -35,11 +48,61 @@ impl QueryPlanner {
     pub fn new() -> Self {
         Self {
             _optimize: true,
+            plan_cache: Mutex::new(HashMap::new()),
+            cache_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Invalidate the plan cache (e.g., after CREATE INDEX or schema change)
+    pub fn invalidate_cache(&self) {
+        self.cache_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.plan_cache.lock().unwrap().clear();
     }
 
     /// Plan a query
     pub fn plan(&self, query: &Query, _store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        // Handle SHOW INDEXES
+        if query.show_indexes {
+            return Ok(ExecutionPlan {
+                root: Box::new(ShowIndexesOperator::new()),
+                output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
+                is_write: false,
+            });
+        }
+
+        // Handle SHOW CONSTRAINTS
+        if query.show_constraints {
+            return Ok(ExecutionPlan {
+                root: Box::new(ShowConstraintsOperator::new()),
+                output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
+                is_write: false,
+            });
+        }
+
+        // Handle CREATE CONSTRAINT
+        if let Some(clause) = &query.create_constraint_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(CreateConstraintOperator::new(
+                    clause.label.clone(),
+                    clause.property.clone(),
+                )),
+                output_columns: vec![],
+                is_write: true,
+            });
+        }
+
+        // Handle DROP INDEX
+        if let Some(clause) = &query.drop_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(DropIndexOperator::new(
+                    clause.label.clone(),
+                    clause.property.clone(),
+                )),
+                output_columns: vec![],
+                is_write: true,
+            });
+        }
+
         // Handle CREATE VECTOR INDEX
         if let Some(clause) = &query.create_vector_index_clause {
             return Ok(ExecutionPlan {
@@ -54,16 +117,34 @@ impl QueryPlanner {
             });
         }
 
-        // Handle CREATE INDEX
+        // Handle CREATE INDEX (supports composite indexes)
         if let Some(clause) = &query.create_index_clause {
-            return Ok(ExecutionPlan {
-                root: Box::new(CreateIndexOperator::new(
-                    clause.label.clone(),
-                    clause.property.clone(),
-                )),
-                output_columns: vec![],
-                is_write: true,
-            });
+            // For composite indexes, create individual indexes for each property
+            // The first property gets a dedicated CreateIndexOperator
+            // Additional properties are also indexed
+            if clause.additional_properties.is_empty() {
+                return Ok(ExecutionPlan {
+                    root: Box::new(CreateIndexOperator::new(
+                        clause.label.clone(),
+                        clause.property.clone(),
+                    )),
+                    output_columns: vec![],
+                    is_write: true,
+                });
+            } else {
+                // Composite index: create operator for first property
+                // Additional properties are created in sequence
+                return Ok(ExecutionPlan {
+                    root: Box::new(CompositeCreateIndexOperator::new(
+                        clause.label.clone(),
+                        std::iter::once(clause.property.clone())
+                            .chain(clause.additional_properties.iter().cloned())
+                            .collect(),
+                    )),
+                    output_columns: vec![],
+                    is_write: true,
+                });
+            }
         }
 
         // Handle MERGE-only statement (no MATCH needed)
@@ -567,6 +648,10 @@ impl QueryPlanner {
             operator = Box::new(LimitOperator::new(operator, limit));
         }
 
+        // QP-01: Predicate pushdown is handled inline during plan_match() via AND-chain decomposition
+        // QP-02: Cost-based plan selection uses GraphStatistics to pick indexes over scans
+        // QP-04: Early LIMIT propagation — done when NodeScanOperator gets early_limit set
+
         // Return execution plan
         Ok(ExecutionPlan {
             root: operator,
@@ -640,46 +725,70 @@ impl QueryPlanner {
             return Err(ExecutionError::PlanningError("Match pattern has no paths".to_string()));
         }
 
+        // QP-02/QP-03: Cost-based optimization — reorder paths by estimated cardinality (smallest first)
+        let stats = store.compute_statistics();
+        let mut paths_with_cost: Vec<(usize, f64)> = pattern.paths.iter().enumerate().map(|(i, path)| {
+            let cost = if let Some(label) = path.start.labels.first() {
+                stats.estimate_label_scan(label) as f64
+            } else {
+                f64::MAX // All-nodes scan is most expensive
+            };
+            (i, cost)
+        }).collect();
+        paths_with_cost.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
         // Handle multiple paths — use JoinOperator when paths share variables,
         // CartesianProductOperator otherwise.
         let mut operators: Vec<OperatorBox> = Vec::new();
         let mut path_vars: Vec<HashSet<String>> = Vec::new();
 
-        for path in &pattern.paths {
+        for &(path_idx, _) in &paths_with_cost {
+            let path = &pattern.paths[path_idx];
             // Start with node scan for this path
             let start_var = path.start.variable.as_ref()
                 .ok_or_else(|| ExecutionError::PlanningError("Start node must have a variable".to_string()))?
                 .clone();
 
-            // Optimization: Check for index usage
+            // Optimization: Check for index usage (supports AND-chain predicates)
             let mut index_op: Option<OperatorBox> = None;
+            let mut remaining_predicates: Vec<Expression> = Vec::new();
             if let Some(wc) = where_clause {
-                // Simple case: WHERE n.prop OP literal
-                // TODO: Handle AND chains
-                if let Expression::Binary { left, op, right } = &wc.predicate {
-                    if let (Expression::Property { variable, property }, Expression::Literal(val)) = (left.as_ref(), right.as_ref()) {
-                        if variable == &start_var {
-                            // Check if any label has an index on this property
-                            for label in &path.start.labels {
-                                if store.property_index.has_index(label, property) {
-                                    // Found index!
-                                    // Only support =, >, >=, <, <=
-                                    match op {
-                                        BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
-                                            index_op = Some(Box::new(IndexScanOperator::new(
-                                                start_var.clone(),
-                                                label.clone(),
-                                                property.clone(),
-                                                op.clone(),
-                                                val.clone()
-                                            )));
-                                        },
-                                        _ => {}
+                // Flatten AND-chain into individual predicates
+                let predicates = flatten_and_predicates(&wc.predicate);
+                let mut used_index = false;
+
+                for pred in &predicates {
+                    if used_index {
+                        // Already found an index — push remaining predicates to filter
+                        remaining_predicates.push(pred.clone());
+                        continue;
+                    }
+                    if let Expression::Binary { left, op, right } = pred {
+                        if let (Expression::Property { variable, property }, Expression::Literal(val)) = (left.as_ref(), right.as_ref()) {
+                            if variable == &start_var {
+                                for label in &path.start.labels {
+                                    if store.property_index.has_index(label, property) {
+                                        match op {
+                                            BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
+                                                index_op = Some(Box::new(IndexScanOperator::new(
+                                                    start_var.clone(),
+                                                    label.clone(),
+                                                    property.clone(),
+                                                    op.clone(),
+                                                    val.clone()
+                                                )));
+                                                used_index = true;
+                                            },
+                                            _ => {}
+                                        }
+                                        if used_index { break; }
                                     }
-                                    if index_op.is_some() { break; }
                                 }
                             }
                         }
+                    }
+                    if !used_index {
+                        remaining_predicates.push(pred.clone());
                     }
                 }
             }
@@ -697,6 +806,18 @@ impl QueryPlanner {
                     let filter_expr = self.build_property_filter(&start_var, props);
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
+            }
+
+            // Add remaining non-indexed predicates from AND-chain decomposition
+            if !remaining_predicates.is_empty() {
+                let filter_expr = remaining_predicates.into_iter().reduce(|acc, pred| {
+                    Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    }
+                }).unwrap();
+                path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
             }
 
             // Check for shortestPath / allShortestPaths
@@ -751,7 +872,7 @@ impl QueryPlanner {
                         .map(|t| t.as_str().to_string())
                         .collect();
 
-                    let expand = ExpandOperator::new(
+                    let mut expand = ExpandOperator::new(
                         path_operator,
                         current_var.clone(),
                         target_var.clone(),
@@ -759,6 +880,11 @@ impl QueryPlanner {
                         edge_types,
                         segment.edge.direction.clone(),
                     );
+
+                    // CY-04: Set path variable for named path materialization
+                    if let Some(ref pv) = path.path_variable {
+                        expand = expand.with_path_variable(pv.clone());
+                    }
 
                     // Add target label filter if labels specified on target node
                     path_operator = if !segment.node.labels.is_empty() {
@@ -837,6 +963,23 @@ impl QueryPlanner {
                 };
             }
             result
+        }
+    }
+
+    /// Collect variables referenced by an expression
+    fn collect_expression_variables(expr: &Expression, vars: &mut HashSet<String>) {
+        match expr {
+            Expression::Variable(v) => { vars.insert(v.clone()); }
+            Expression::Property { variable, .. } => { vars.insert(variable.clone()); }
+            Expression::Binary { left, right, .. } => {
+                Self::collect_expression_variables(left, vars);
+                Self::collect_expression_variables(right, vars);
+            }
+            Expression::Unary { expr: e, .. } => { Self::collect_expression_variables(e, vars); }
+            Expression::Function { args, .. } => {
+                for arg in args { Self::collect_expression_variables(arg, vars); }
+            }
+            _ => {}
         }
     }
 
@@ -937,6 +1080,19 @@ impl QueryPlanner {
 impl Default for QueryPlanner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Flatten an AND-chain expression into a list of individual predicates.
+/// E.g., `a AND b AND c` → `[a, b, c]`
+fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
+    match expr {
+        Expression::Binary { left, op: BinaryOp::And, right } => {
+            let mut result = flatten_and_predicates(left);
+            result.extend(flatten_and_predicates(right));
+            result
+        }
+        _ => vec![expr.clone()],
     }
 }
 

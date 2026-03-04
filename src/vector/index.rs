@@ -81,6 +81,13 @@ impl Distance<f32> for InnerProductDistance {
     }
 }
 
+/// Stored vector entry for persistence
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct StoredVector {
+    pub node_id: u64,
+    pub vector: Vec<f32>,
+}
+
 /// Wrapper around HNSW index
 pub struct VectorIndex {
     /// Number of dimensions
@@ -89,6 +96,8 @@ pub struct VectorIndex {
     metric: DistanceMetric,
     /// The actual HNSW index
     hnsw: Hnsw<'static, f32, CosineDistance>,
+    /// All inserted vectors (for persistence — HNSW doesn't expose iteration)
+    stored_vectors: Vec<StoredVector>,
 }
 
 // Implement Debug manually because Hnsw doesn't implement it
@@ -108,13 +117,14 @@ impl VectorIndex {
         let max_elements = 100_000;
         let m = 16;
         let ef_construction = 200;
-        
+
         let hnsw = Hnsw::new(m, max_elements, 16, ef_construction, CosineDistance);
-        
+
         Self {
             dimensions,
             metric,
             hnsw,
+            stored_vectors: Vec::new(),
         }
     }
 
@@ -128,7 +138,13 @@ impl VectorIndex {
         }
         
         self.hnsw.insert((vector, node_id.0 as usize));
-        
+
+        // Store vector for persistence
+        self.stored_vectors.push(StoredVector {
+            node_id: node_id.0,
+            vector: vector.clone(),
+        });
+
         Ok(())
     }
 
@@ -162,21 +178,56 @@ impl VectorIndex {
         self.metric
     }
 
-    /// Save index to disk
-    pub fn dump(&self, _path: &std::path::Path) -> VectorResult<()> {
-        // TODO: Implement actual serialization. 
-        // hnsw_rs 0.2.1 Hnsw does not implement dump/load directly without specialized setup.
+    /// Get count of stored vectors
+    pub fn len(&self) -> usize {
+        self.stored_vectors.len()
+    }
+
+    /// Check if index is empty
+    pub fn is_empty(&self) -> bool {
+        self.stored_vectors.is_empty()
+    }
+
+    /// Save index to disk by serializing stored vectors via bincode.
+    /// On load, vectors are re-inserted into a fresh HNSW index.
+    pub fn dump(&self, path: &std::path::Path) -> VectorResult<()> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        bincode::serialize_into(writer, &self.stored_vectors)
+            .map_err(|e| VectorError::IndexError(format!("serialization error: {}", e)))?;
         Ok(())
     }
 
-    /// Load index from disk
+    /// Load index from disk: deserialize stored vectors and re-insert into HNSW.
     pub fn load(
-        _path: &std::path::Path,
+        path: &std::path::Path,
         dimensions: usize,
         metric: DistanceMetric,
     ) -> VectorResult<Self> {
-        // TODO: Implement actual deserialization
-        Ok(Self::new(dimensions, metric))
+        if !path.exists() {
+            return Ok(Self::new(dimensions, metric));
+        }
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let stored_vectors: Vec<StoredVector> = bincode::deserialize_from(reader)
+            .map_err(|e| VectorError::IndexError(format!("deserialization error: {}", e)))?;
+
+        let max_elements = (stored_vectors.len() + 10_000).max(100_000);
+        let m = 16;
+        let ef_construction = 200;
+        let mut hnsw = Hnsw::new(m, max_elements, 16, ef_construction, CosineDistance);
+
+        // Re-insert all vectors
+        for sv in &stored_vectors {
+            hnsw.insert((&sv.vector, sv.node_id as usize));
+        }
+
+        Ok(Self {
+            dimensions,
+            metric,
+            hnsw,
+            stored_vectors,
+        })
     }
 }
 
@@ -195,6 +246,32 @@ mod tests {
         
         // Search
         let results = index.search(&[1.0, 0.1, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, NodeId::new(1));
+    }
+
+    #[test]
+    fn test_vector_index_persistence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dump_path = dir.path().join("test_vectors.bin");
+
+        // Create and populate index
+        let mut index = VectorIndex::new(3, DistanceMetric::Cosine);
+        index.add(NodeId::new(1), &vec![1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2), &vec![0.0, 1.0, 0.0]).unwrap();
+        index.add(NodeId::new(3), &vec![0.0, 0.1, 0.9]).unwrap();
+        assert_eq!(index.len(), 3);
+
+        // Dump to disk
+        index.dump(&dump_path).unwrap();
+
+        // Load from disk
+        let loaded = VectorIndex::load(&dump_path, 3, DistanceMetric::Cosine).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.dimensions(), 3);
+
+        // Verify search still works after reload
+        let results = loaded.search(&[1.0, 0.1, 0.0], 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, NodeId::new(1));
     }

@@ -38,6 +38,18 @@ pub struct Query {
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
+    /// DROP INDEX clause (optional)
+    pub drop_index_clause: Option<DropIndexClause>,
+    /// CREATE CONSTRAINT clause (optional)
+    pub create_constraint_clause: Option<CreateConstraintClause>,
+    /// SHOW INDEXES flag
+    pub show_indexes: bool,
+    /// SHOW CONSTRAINTS flag
+    pub show_constraints: bool,
+    /// PROFILE flag
+    pub profile: bool,
+    /// Query parameters
+    pub params: HashMap<String, PropertyValue>,
     /// FOREACH clause (optional)
     pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
@@ -66,6 +78,23 @@ pub struct CreateVectorIndexClause {
 /// CREATE INDEX clause
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateIndexClause {
+    pub label: Label,
+    pub property: String,
+    /// Additional properties for composite indexes
+    pub additional_properties: Vec<String>,
+}
+
+/// DROP INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndexClause {
+    pub label: Label,
+    pub property: String,
+}
+
+/// Unique constraint clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateConstraintClause {
+    pub variable: String,
     pub label: Label,
     pub property: String,
 }
@@ -297,6 +326,8 @@ pub enum Expression {
     },
     /// Named path reference (for Value::Path)
     PathVariable(String),
+    /// Query parameter reference ($name)
+    Parameter(String),
 }
 
 /// Binary operators
@@ -504,6 +535,12 @@ impl Query {
             with_clause: None,
             create_vector_index_clause: None,
             create_index_clause: None,
+            drop_index_clause: None,
+            create_constraint_clause: None,
+            show_indexes: false,
+            show_constraints: false,
+            profile: false,
+            params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
             merge_clause: None,

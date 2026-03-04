@@ -18,12 +18,15 @@ pub struct PropertyIndexKey {
 #[derive(Debug)]
 pub struct IndexManager {
     indices: RwLock<HashMap<PropertyIndexKey, Arc<RwLock<PropertyIndex>>>>,
+    /// Unique constraints (label, property) pairs
+    unique_constraints: RwLock<HashMap<PropertyIndexKey, Arc<RwLock<PropertyIndex>>>>,
 }
 
 impl IndexManager {
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            unique_constraints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -84,6 +87,85 @@ impl IndexManager {
             property: property.to_string(),
         };
         self.indices.read().unwrap().get(&key).cloned()
+    }
+
+    /// List all indexes
+    pub fn list_indexes(&self) -> Vec<(Label, String)> {
+        self.indices.read().unwrap().keys()
+            .map(|k| (k.label.clone(), k.property.clone()))
+            .collect()
+    }
+
+    /// Create a unique constraint (also creates an index)
+    pub fn create_unique_constraint(&self, label: Label, property: String) {
+        let key = PropertyIndexKey { label: label.clone(), property: property.clone() };
+        let mut constraints = self.unique_constraints.write().unwrap();
+        constraints.entry(key).or_insert_with(|| Arc::new(RwLock::new(PropertyIndex::new())));
+        // Also create a regular index for query performance
+        self.create_index(label, property);
+    }
+
+    /// Check if a unique constraint exists
+    pub fn has_unique_constraint(&self, label: &Label, property: &str) -> bool {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        self.unique_constraints.read().unwrap().contains_key(&key)
+    }
+
+    /// Check unique constraint before insert. Returns Ok if unique or no constraint.
+    pub fn check_unique_constraint(&self, label: &Label, property: &str, value: &PropertyValue) -> Result<(), String> {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        let constraints = self.unique_constraints.read().unwrap();
+        if let Some(index) = constraints.get(&key) {
+            let idx = index.read().unwrap();
+            let existing = idx.get(value);
+            if !existing.is_empty() {
+                return Err(format!(
+                    "Unique constraint violation: :{}({}) already has value {:?}",
+                    label.as_str(), property, value
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert into unique constraint index
+    pub fn constraint_insert(&self, label: &Label, property: &str, value: PropertyValue, node_id: NodeId) {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        let constraints = self.unique_constraints.read().unwrap();
+        if let Some(index) = constraints.get(&key) {
+            index.write().unwrap().insert(value, node_id);
+        }
+    }
+
+    /// List all constraints
+    pub fn list_constraints(&self) -> Vec<(Label, String)> {
+        self.unique_constraints.read().unwrap().keys()
+            .map(|k| (k.label.clone(), k.property.clone()))
+            .collect()
+    }
+
+    /// Create a composite index on multiple properties (creates individual indexes for each)
+    pub fn create_composite_index(&self, label: Label, properties: Vec<String>) {
+        for prop in &properties {
+            self.create_index(label.clone(), prop.clone());
+        }
+    }
+
+    /// Get all indexed properties for a label
+    pub fn get_indexed_properties(&self, label: &Label) -> Vec<String> {
+        self.indices.read().unwrap().keys()
+            .filter(|k| &k.label == label)
+            .map(|k| k.property.clone())
+            .collect()
     }
 }
 

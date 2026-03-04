@@ -352,6 +352,34 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_index_persistence() {
+        use crate::vector::{VectorIndexManager, DistanceMetric};
+        use crate::graph::NodeId;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PersistenceManager::new(temp_dir.path()).unwrap();
+
+        // Create and populate a vector index
+        let vim = VectorIndexManager::new();
+        vim.create_index("Person", "embedding", 3, DistanceMetric::Cosine).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(1), &vec![1.0, 0.0, 0.0]).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(2), &vec![0.0, 1.0, 0.0]).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(3), &vec![0.0, 0.0, 1.0]).unwrap();
+
+        // Checkpoint vectors to disk
+        manager.checkpoint_vectors(&vim).unwrap();
+
+        // Load vectors into a fresh manager
+        let vim2 = VectorIndexManager::new();
+        manager.recover_vectors(&vim2).unwrap();
+
+        // Verify search works after recovery
+        let results = vim2.search("Person", "embedding", &[1.0, 0.1, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, NodeId::new(1));
+    }
+
+    #[test]
     fn test_quota_enforcement() {
         let temp_dir = TempDir::new().unwrap();
         let manager = PersistenceManager::new(temp_dir.path()).unwrap();

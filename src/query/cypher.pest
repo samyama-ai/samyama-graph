@@ -6,13 +6,17 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
 query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
-explain_clause = { ^"EXPLAIN" }
+explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt }
+statement = { show_indexes_stmt | show_constraints_stmt | drop_index_stmt | create_constraint_stmt | create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt }
 
 // CREATE VECTOR INDEX statement
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
-create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
+create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
+drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
+show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
+show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
+create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ ^"ON" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ASSERT" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 
 // CALL statement (Standalone or followed by MATCH)
@@ -114,10 +118,14 @@ primary = {
     list_comprehension |
     function_call |
     property_access |
+    parameter |
     value |
     variable |
     "(" ~ expression ~ ")"
 }
+
+// Query parameter: $name
+parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
 
 // Predicate functions: all(x IN list WHERE pred), any(...), none(...), single(...)
 predicate_function = { predicate_function_name ~ "(" ~ variable ~ in_op ~ expression ~ ^"WHERE" ~ expression ~ ")" }

@@ -8,7 +8,9 @@ use pyo3::types::PyDict;
 use samyama_sdk::{
     EmbeddedClient, RemoteClient, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
+    AlgorithmClient, PageRankConfig, PcaConfig,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -157,6 +159,17 @@ struct SamyamaClient {
     inner: Arc<ClientInner>,
 }
 
+impl SamyamaClient {
+    fn require_embedded(&self) -> PyResult<&EmbeddedClient> {
+        match &*self.inner {
+            ClientInner::Embedded(c) => Ok(c),
+            ClientInner::Remote(_) => Err(PyRuntimeError::new_err(
+                "Algorithm methods are only available in embedded mode. Use SamyamaClient.embedded()."
+            )),
+        }
+    }
+}
+
 #[pymethods]
 impl SamyamaClient {
     /// Create an in-process embedded client (no server needed)
@@ -250,6 +263,165 @@ impl SamyamaClient {
             ClientInner::Remote(c) => rt.block_on(c.list_graphs()),
         };
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    // ========================================================================
+    // Algorithm methods (embedded mode only)
+    // ========================================================================
+
+    /// Run PageRank on the graph.
+    /// Returns dict mapping node_id -> score.
+    #[pyo3(signature = (label=None, edge_type=None, damping=0.85, iterations=20, tolerance=1e-6))]
+    fn page_rank(
+        &self,
+        py: Python<'_>,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+        damping: f64,
+        iterations: usize,
+        tolerance: f64,
+    ) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let config = PageRankConfig {
+            damping_factor: damping,
+            iterations,
+            tolerance,
+            ..Default::default()
+        };
+        let scores: HashMap<u64, f64> = rt.block_on(client.page_rank(config, label, edge_type));
+        let dict = PyDict::new_bound(py);
+        for (k, v) in &scores {
+            dict.set_item(k, v)?;
+        }
+        Ok(dict.to_object(py))
+    }
+
+    /// Detect weakly connected components.
+    /// Returns dict with 'components' (dict of component_id -> list of node IDs) and 'component_count'.
+    #[pyo3(signature = (label=None, edge_type=None))]
+    fn wcc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let result = rt.block_on(client.weakly_connected_components(label, edge_type));
+        let dict = PyDict::new_bound(py);
+        let component_count = result.components.len();
+        let components_dict = PyDict::new_bound(py);
+        for (k, v) in &result.components {
+            components_dict.set_item(k, v.to_object(py))?;
+        }
+        dict.set_item("components", components_dict)?;
+        dict.set_item("component_count", component_count)?;
+        Ok(dict.to_object(py))
+    }
+
+    /// Detect strongly connected components.
+    /// Returns dict with 'components' and 'component_count'.
+    #[pyo3(signature = (label=None, edge_type=None))]
+    fn scc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let result = rt.block_on(client.strongly_connected_components(label, edge_type));
+        let dict = PyDict::new_bound(py);
+        let component_count = result.components.len();
+        let components_dict = PyDict::new_bound(py);
+        for (k, v) in &result.components {
+            components_dict.set_item(k, v.to_object(py))?;
+        }
+        dict.set_item("components", components_dict)?;
+        dict.set_item("component_count", component_count)?;
+        Ok(dict.to_object(py))
+    }
+
+    /// Breadth-first search from source to target.
+    /// Returns dict with 'path' (list of node IDs) and 'distance', or None if no path.
+    #[pyo3(signature = (source, target, label=None, edge_type=None))]
+    fn bfs(
+        &self,
+        py: Python<'_>,
+        source: u64,
+        target: u64,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let result = rt.block_on(client.bfs(source, target, label, edge_type));
+        match result {
+            Some(path) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("path", path.path.to_object(py))?;
+                dict.set_item("cost", path.cost)?;
+                Ok(dict.to_object(py))
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Dijkstra's shortest path from source to target (weighted).
+    /// Returns dict with 'path' and 'distance', or None if no path.
+    #[pyo3(signature = (source, target, label=None, edge_type=None, weight_property=None))]
+    fn dijkstra(
+        &self,
+        py: Python<'_>,
+        source: u64,
+        target: u64,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+        weight_property: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let result = rt.block_on(client.dijkstra(source, target, label, edge_type, weight_property));
+        match result {
+            Some(path) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("path", path.path.to_object(py))?;
+                dict.set_item("cost", path.cost)?;
+                Ok(dict.to_object(py))
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Run PCA on node numeric properties.
+    /// Returns dict with 'components', 'explained_variance', 'explained_variance_ratio',
+    /// 'mean', 'std_dev', 'n_samples', 'n_features'.
+    #[pyo3(signature = (properties, label=None, n_components=2))]
+    fn pca(
+        &self,
+        py: Python<'_>,
+        properties: Vec<String>,
+        label: Option<&str>,
+        n_components: usize,
+    ) -> PyResult<PyObject> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let config = PcaConfig {
+            n_components,
+            ..PcaConfig::default()
+        };
+        let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+        let result = rt.block_on(client.pca(label, &props_refs, config));
+        let dict = PyDict::new_bound(py);
+        // Convert components (Vec<Vec<f64>>) to list of lists
+        let components: Vec<Vec<f64>> = result.components;
+        dict.set_item("components", components.to_object(py))?;
+        dict.set_item("explained_variance", result.explained_variance.to_object(py))?;
+        dict.set_item("explained_variance_ratio", result.explained_variance_ratio.to_object(py))?;
+        dict.set_item("mean", result.mean.to_object(py))?;
+        dict.set_item("std_dev", result.std_dev.to_object(py))?;
+        dict.set_item("n_samples", result.n_samples)?;
+        dict.set_item("n_features", result.n_features)?;
+        Ok(dict.to_object(py))
+    }
+
+    /// Count triangles in the graph.
+    #[pyo3(signature = (label=None, edge_type=None))]
+    fn triangle_count(&self, label: Option<&str>, edge_type: Option<&str>) -> PyResult<usize> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        Ok(rt.block_on(client.count_triangles(label, edge_type)))
     }
 
     fn __repr__(&self) -> String {
