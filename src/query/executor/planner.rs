@@ -808,9 +808,24 @@ impl QueryPlanner {
                 }
             }
 
-            // Add remaining non-indexed predicates from AND-chain decomposition
-            if !remaining_predicates.is_empty() {
-                let filter_expr = remaining_predicates.into_iter().reduce(|acc, pred| {
+            // Split remaining predicates: those referencing only start_var can be pushed
+            // down now; those referencing later-path variables must be deferred until
+            // after all ExpandOperators have materialized those variables.
+            let mut early_predicates: Vec<Expression> = Vec::new();
+            let mut deferred_predicates: Vec<Expression> = Vec::new();
+            for pred in remaining_predicates {
+                let mut pred_vars = HashSet::new();
+                Self::collect_expression_variables(&pred, &mut pred_vars);
+                // Push down only if predicate references exclusively the start variable
+                // (or no variables at all, e.g., literal expressions)
+                if pred_vars.is_empty() || pred_vars.iter().all(|v| v == &start_var) {
+                    early_predicates.push(pred);
+                } else {
+                    deferred_predicates.push(pred);
+                }
+            }
+            if !early_predicates.is_empty() {
+                let filter_expr = early_predicates.into_iter().reduce(|acc, pred| {
                     Expression::Binary {
                         left: Box::new(acc),
                         op: BinaryOp::And,
@@ -903,6 +918,18 @@ impl QueryPlanner {
 
                     current_var = target_var;
                 }
+            }
+
+            // Apply deferred WHERE predicates after all path expansions
+            if !deferred_predicates.is_empty() {
+                let filter_expr = deferred_predicates.into_iter().reduce(|acc, pred| {
+                    Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    }
+                }).unwrap();
+                path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
             }
 
             // Collect variables used in this path for join detection
