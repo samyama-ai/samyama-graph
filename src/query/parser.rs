@@ -1213,17 +1213,45 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 };
             }
 
-            // Apply index operator [expr]
+            // Apply index operator [expr] or slice operator [start..end]
             if let Some(index) = index_pair {
+                let mut handled = false;
                 for idx_inner in index.into_inner() {
-                    if idx_inner.as_rule() == Rule::expression {
+                    if idx_inner.as_rule() == Rule::slice_op {
+                        // List slicing: [start..end]
+                        let mut start_expr = None;
+                        let mut end_expr = None;
+                        for slice_inner in idx_inner.into_inner() {
+                            match slice_inner.as_rule() {
+                                Rule::slice_start => {
+                                    let expr_inner = slice_inner.into_inner().next().unwrap();
+                                    start_expr = Some(Box::new(parse_expression(expr_inner)?));
+                                }
+                                Rule::slice_end => {
+                                    let expr_inner = slice_inner.into_inner().next().unwrap();
+                                    end_expr = Some(Box::new(parse_expression(expr_inner)?));
+                                }
+                                _ => {}
+                            }
+                        }
+                        expr = Expression::ListSlice {
+                            expr: Box::new(expr),
+                            start: start_expr,
+                            end: end_expr,
+                        };
+                        handled = true;
+                        break;
+                    } else if idx_inner.as_rule() == Rule::expression {
                         let index_expr = parse_expression(idx_inner)?;
                         expr = Expression::Index {
                             expr: Box::new(expr),
                             index: Box::new(index_expr),
                         };
+                        handled = true;
+                        break;
                     }
                 }
+                let _ = handled;
             }
 
             // Apply prefix operators in reverse order (innermost first)
@@ -1848,6 +1876,28 @@ mod tests {
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
         assert!(matches!(&item.expression, Expression::Index { .. }));
+    }
+
+    #[test]
+    fn test_parse_list_slice() {
+        // Test [1..3]
+        let query = "MATCH (n:Person) RETURN n.tags[1..3]";
+        let result = parse_query(query);
+        assert!(result.is_ok(), "Failed to parse list slice [1..3]: {:?}", result.err());
+        let ast = result.unwrap();
+        let item = &ast.return_clause.unwrap().items[0];
+        assert!(matches!(&item.expression, Expression::ListSlice { .. }),
+            "Expected ListSlice, got: {:?}", item.expression);
+
+        // Test [..2]
+        let query2 = "MATCH (n:Person) RETURN n.tags[..2]";
+        let result2 = parse_query(query2);
+        assert!(result2.is_ok(), "Failed to parse list slice [..2]: {:?}", result2.err());
+
+        // Test [1..]
+        let query3 = "MATCH (n:Person) RETURN n.tags[1..]";
+        let result3 = parse_query(query3);
+        assert!(result3.is_ok(), "Failed to parse list slice [1..]: {:?}", result3.err());
     }
 
     #[test]

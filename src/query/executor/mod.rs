@@ -314,6 +314,15 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
             substitute_expr(e, params)?;
             substitute_expr(index, params)?;
         }
+        Expression::ListSlice { expr: e, start, end } => {
+            substitute_expr(e, params)?;
+            if let Some(s) = start {
+                substitute_expr(s, params)?;
+            }
+            if let Some(en) = end {
+                substitute_expr(en, params)?;
+            }
+        }
         Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
             substitute_expr(list_expr, params)?;
             if let Some(f) = filter {
@@ -1307,5 +1316,130 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         // Machine0=80.0, Machine2=100.0, Machine4=120.0 — only Machine2 and Machine4 > 90
         assert_eq!(result.records.len(), 2, "Expected 2 machines with utilization > 90");
+    }
+
+    #[test]
+    fn test_log_exp_functions() {
+        let mut store = GraphStore::new();
+        let id = store.create_node("Val");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("x", PropertyValue::Float(1.0));
+        }
+        let executor = QueryExecutor::new(&store);
+        // log(exp(1.0)) should be ~1.0 (natural log)
+        let query = parse_query("MATCH (v:Val) RETURN log(exp(v.x)) AS val").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Some(Value::Property(PropertyValue::Float(v))) = result.records[0].get("val") {
+            assert!((v - 1.0).abs() < 1e-10, "log(exp(1.0)) should be ~1.0, got {}", v);
+        } else {
+            panic!("Expected float from log(exp())");
+        }
+        // exp(0) = 1.0
+        let id2 = store.create_node("Val2");
+        if let Some(node) = store.get_node_mut(id2) {
+            node.set_property("x", PropertyValue::Float(0.0));
+        }
+        let executor = QueryExecutor::new(&store);
+        let query = parse_query("MATCH (v:Val2) RETURN exp(v.x) AS val").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Some(Value::Property(PropertyValue::Float(v))) = result.records[0].get("val") {
+            assert!((v - 1.0).abs() < 1e-10, "exp(0) should be 1.0, got {}", v);
+        } else {
+            panic!("Expected float from exp()");
+        }
+    }
+
+    #[test]
+    fn test_rand_function() {
+        let mut store = GraphStore::new();
+        store.create_node("Dummy");
+        let executor = QueryExecutor::new(&store);
+        let query = parse_query("MATCH (d:Dummy) RETURN rand() AS val").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Some(Value::Property(PropertyValue::Float(v))) = result.records[0].get("val") {
+            assert!(*v >= 0.0 && *v < 1.0, "rand() should be in [0,1), got {}", v);
+        } else {
+            panic!("Expected float from rand()");
+        }
+    }
+
+    #[test]
+    fn test_timestamp_function() {
+        let mut store = GraphStore::new();
+        store.create_node("Dummy");
+        let executor = QueryExecutor::new(&store);
+        let query = parse_query("MATCH (d:Dummy) RETURN timestamp() AS ts").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Some(Value::Property(PropertyValue::Integer(ts))) = result.records[0].get("ts") {
+            // Should be a reasonable timestamp (after 2025-01-01)
+            assert!(*ts > 1_735_689_600_000, "timestamp() should be after 2025, got {}", ts);
+        } else {
+            panic!("Expected integer from timestamp()");
+        }
+    }
+
+    #[test]
+    fn test_list_slicing() {
+        let mut store = GraphStore::new();
+        let id = store.create_node("Data");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("items", PropertyValue::Array(vec![
+                PropertyValue::Integer(1),
+                PropertyValue::Integer(2),
+                PropertyValue::Integer(3),
+                PropertyValue::Integer(4),
+                PropertyValue::Integer(5),
+            ]));
+        }
+        let executor = QueryExecutor::new(&store);
+
+        // [1..3] → [2, 3] (start inclusive, end exclusive)
+        let query = parse_query("MATCH (d:Data) RETURN d.items[1..3] AS sliced").unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], PropertyValue::Integer(2));
+            assert_eq!(arr[1], PropertyValue::Integer(3));
+        } else {
+            panic!("Expected array from list slice");
+        }
+
+        // [..2] → [1, 2]
+        let query = parse_query("MATCH (d:Data) RETURN d.items[..2] AS sliced").unwrap();
+        let result = executor.execute(&query).unwrap();
+        if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], PropertyValue::Integer(1));
+            assert_eq!(arr[1], PropertyValue::Integer(2));
+        } else {
+            panic!("Expected array from list slice [..2]");
+        }
+
+        // [3..] → [4, 5]
+        let query = parse_query("MATCH (d:Data) RETURN d.items[3..] AS sliced").unwrap();
+        let result = executor.execute(&query).unwrap();
+        if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], PropertyValue::Integer(4));
+            assert_eq!(arr[1], PropertyValue::Integer(5));
+        } else {
+            panic!("Expected array from list slice [3..]");
+        }
+
+        // Negative index: [-2..] → [4, 5]
+        let query = parse_query("MATCH (d:Data) RETURN d.items[-2..] AS sliced").unwrap();
+        let result = executor.execute(&query).unwrap();
+        if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], PropertyValue::Integer(4));
+            assert_eq!(arr[1], PropertyValue::Integer(5));
+        } else {
+            panic!("Expected array from list slice [-2..]");
+        }
     }
 }

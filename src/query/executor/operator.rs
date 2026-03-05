@@ -172,6 +172,33 @@ fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
     }
 }
 
+fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) -> ExecutionResult<Value> {
+    match &collection {
+        Value::Property(PropertyValue::Array(arr)) => {
+            let len = arr.len() as i64;
+            let resolve_idx = |idx: i64| -> usize {
+                let resolved = if idx < 0 { (len + idx).max(0) } else { idx.min(len) };
+                resolved as usize
+            };
+            let s = match start {
+                Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
+                _ => 0,
+            };
+            let e = match end {
+                Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
+                _ => len as usize,
+            };
+            if s >= e || s >= arr.len() {
+                Ok(Value::Property(PropertyValue::Array(vec![])))
+            } else {
+                let sliced: Vec<PropertyValue> = arr[s..e.min(arr.len())].to_vec();
+                Ok(Value::Property(PropertyValue::Array(sliced)))
+            }
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
 /// Standalone expression evaluator usable from any operator
 fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
     match expr {
@@ -207,6 +234,12 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             let collection = eval_expression(e, record, store)?;
             let idx = eval_expression(index, record, store)?;
             eval_index(collection, idx)
+        }
+        Expression::ListSlice { expr: e, start, end } => {
+            let collection = eval_expression(e, record, store)?;
+            let s = match start { Some(s) => Some(eval_expression(s, record, store)?), None => None };
+            let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
+            eval_list_slice(collection, s, en)
         }
         Expression::ExistsSubquery { pattern, where_clause } => {
             eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
@@ -704,6 +737,29 @@ fn eval_function(name: &str, args: &[Value]) -> ExecutionResult<Value> {
                 Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 }))),
                 _ => Err(ExecutionError::TypeError("sign() requires numeric".to_string())),
             }
+        }
+        "log" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.ln()))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).ln()))),
+                _ => Err(ExecutionError::TypeError("log() requires numeric".to_string())),
+            }
+        }
+        "exp" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.exp()))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).exp()))),
+                _ => Err(ExecutionError::TypeError("exp() requires numeric".to_string())),
+            }
+        }
+        "rand" => {
+            use rand::Rng;
+            let val = rand::thread_rng().gen::<f64>();
+            Ok(Value::Property(PropertyValue::Float(val)))
+        }
+        "timestamp" => {
+            let ts = chrono::Utc::now().timestamp_millis();
+            Ok(Value::Property(PropertyValue::Integer(ts)))
         }
         // Type/meta functions
         "coalesce" => {
@@ -1534,6 +1590,12 @@ impl FilterOperator {
                 let idx = self.evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ListSlice { expr, start, end } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let s = match start { Some(s) => Some(self.evaluate_expression(s, record, store)?), None => None };
+                let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
+                eval_list_slice(collection, s, en)
+            }
             Expression::ExistsSubquery { pattern, where_clause } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
@@ -2161,6 +2223,12 @@ impl ProjectOperator {
                 let idx = self.evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ListSlice { expr, start, end } => {
+                let collection = self.evaluate_expression(expr, record, store)?;
+                let s = match start { Some(s) => Some(self.evaluate_expression(s, record, store)?), None => None };
+                let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
+                eval_list_slice(collection, s, en)
+            }
             Expression::ExistsSubquery { pattern, where_clause } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
@@ -2433,6 +2501,12 @@ impl AggregateOperator {
                 let idx = Self::evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
             }
+            Expression::ListSlice { expr, start, end } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
+                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                eval_list_slice(collection, s, en)
+            }
             Expression::ExistsSubquery { pattern, where_clause } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
@@ -2681,6 +2755,12 @@ impl SortOperator {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
+            }
+            Expression::ListSlice { expr, start, end } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
+                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                eval_list_slice(collection, s, en)
             }
             Expression::ExistsSubquery { pattern, where_clause } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
@@ -5611,6 +5691,12 @@ impl WithBarrierOperator {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
                 eval_index(collection, idx)
+            }
+            Expression::ListSlice { expr, start, end } => {
+                let collection = Self::evaluate_expression(expr, record, store)?;
+                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
+                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                eval_list_slice(collection, s, en)
             }
             Expression::ExistsSubquery { pattern, where_clause } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)

@@ -108,7 +108,10 @@ order_direction = { ^"ASC" | ^"DESC" }
 expression = { term ~ (binary_op ~ term)* }
 term = { unary_op* ~ primary ~ postfix_op? ~ index_op? }
 postfix_op = { ^"IS" ~ ^"NOT" ~ ^"NULL" | ^"IS" ~ ^"NULL" }
-index_op = { "[" ~ expression ~ "]" }
+index_op = { "[" ~ (slice_op | expression) ~ "]" }
+slice_op = { slice_start ~ ".." ~ slice_end | slice_start ~ ".." | ".." ~ slice_end | ".." }
+slice_start = { expression }
+slice_end = { expression }
 primary = {
     case_expression |
     exists_subquery |

@@ -275,6 +275,15 @@ pub enum Expression {
         /// Index expression
         index: Box<Expression>,
     },
+    /// List slicing: expr[start..end]
+    ListSlice {
+        /// Expression being sliced
+        expr: Box<Expression>,
+        /// Optional start index (inclusive)
+        start: Option<Box<Expression>>,
+        /// Optional end index (exclusive)
+        end: Option<Box<Expression>>,
+    },
     /// EXISTS { MATCH pattern WHERE condition }
     ExistsSubquery {
         /// Pattern to match
