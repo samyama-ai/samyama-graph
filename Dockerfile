@@ -10,10 +10,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy all source files
+# Copy all workspace source files
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY crates ./crates
+COPY cli ./cli
 COPY benches ./benches
 COPY examples ./examples
 
