@@ -157,7 +157,7 @@ impl NSGA2Solver {
 
         for m in 0..num_objectives {
             let mut sorted_indices = indices.to_vec();
-            sorted_indices.sort_by(|&a, &b| population[a].fitness[m].partial_cmp(&population[b].fitness[m]).unwrap());
+            sorted_indices.sort_by(|&a, &b| population[a].fitness[m].partial_cmp(&population[b].fitness[m]).unwrap_or(std::cmp::Ordering::Equal));
             
             let min_val = population[*sorted_indices.first().unwrap()].fitness[m];
             let max_val = population[*sorted_indices.last().unwrap()].fitness[m];

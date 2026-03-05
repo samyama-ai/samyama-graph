@@ -98,11 +98,133 @@ Return ONLY the Cypher query, no markdown, no explanations.",
 
     fn is_safe_query(&self, query: &str) -> bool {
         let q = query.to_uppercase();
-        !q.contains("CREATE") && 
-        !q.contains("DELETE") && 
-        !q.contains("SET") && 
+        !q.contains("CREATE") &&
+        !q.contains("DELETE") &&
+        !q.contains("SET") &&
         !q.contains("MERGE") &&
         !q.contains("DROP") &&
         !q.contains("REMOVE")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- extract_cypher tests ---
+
+    #[test]
+    fn test_extract_cypher_plain_query() {
+        let input = "MATCH (n:Person) RETURN n.name";
+        let result = NLQPipeline::extract_cypher(input);
+        assert_eq!(result, "MATCH (n:Person) RETURN n.name");
+    }
+
+    #[test]
+    fn test_extract_cypher_markdown_fenced() {
+        let input = "Here is the query:\n```cypher\nMATCH (n:Person) RETURN n.name\n```\nHope this helps!";
+        let result = NLQPipeline::extract_cypher(input);
+        assert_eq!(result, "MATCH (n:Person) RETURN n.name");
+    }
+
+    #[test]
+    fn test_extract_cypher_markdown_no_language_tag() {
+        let input = "```\nMATCH (n) RETURN n\n```";
+        let result = NLQPipeline::extract_cypher(input);
+        assert_eq!(result, "MATCH (n) RETURN n");
+    }
+
+    #[test]
+    fn test_extract_cypher_mixed_with_explanation() {
+        let input = "To find all people, use this:\nMATCH (n:Person)\nWHERE n.age > 30\nRETURN n.name\nThis returns names of people over 30.";
+        let result = NLQPipeline::extract_cypher(input);
+        // Should extract only the Cypher lines
+        assert!(result.contains("MATCH (n:Person)"));
+        assert!(result.contains("WHERE n.age > 30"));
+        assert!(result.contains("RETURN n.name"));
+        assert!(!result.contains("To find all people"));
+    }
+
+    #[test]
+    fn test_extract_cypher_with_optional_match() {
+        let input = "OPTIONAL MATCH (n:Person)-[:KNOWS]->(m)\nRETURN n, m";
+        let result = NLQPipeline::extract_cypher(input);
+        assert!(result.contains("OPTIONAL MATCH"));
+        assert!(result.contains("RETURN"));
+    }
+
+    #[test]
+    fn test_extract_cypher_with_order_and_limit() {
+        let input = "MATCH (n:Person)\nRETURN n.name\nORDER BY n.name\nLIMIT 10";
+        let result = NLQPipeline::extract_cypher(input);
+        assert!(result.contains("MATCH"));
+        assert!(result.contains("ORDER BY"));
+        assert!(result.contains("LIMIT 10"));
+    }
+
+    #[test]
+    fn test_extract_cypher_whitespace_trimming() {
+        let input = "  \n  MATCH (n) RETURN n  \n  ";
+        let result = NLQPipeline::extract_cypher(input);
+        assert_eq!(result, "MATCH (n) RETURN n");
+    }
+
+    // --- is_safe_query tests (need a pipeline instance, use a helper) ---
+
+    // We can't easily create NLQPipeline without an API key, so test the logic directly
+    fn is_safe(query: &str) -> bool {
+        let q = query.to_uppercase();
+        !q.contains("CREATE") &&
+        !q.contains("DELETE") &&
+        !q.contains("SET") &&
+        !q.contains("MERGE") &&
+        !q.contains("DROP") &&
+        !q.contains("REMOVE")
+    }
+
+    #[test]
+    fn test_safe_read_query() {
+        assert!(is_safe("MATCH (n:Person) RETURN n.name"));
+        assert!(is_safe("MATCH (a)-[:KNOWS]->(b) RETURN a, b"));
+        assert!(is_safe("MATCH (n) WHERE n.age > 30 RETURN count(n)"));
+    }
+
+    #[test]
+    fn test_unsafe_create_query() {
+        assert!(!is_safe("CREATE (n:Person {name: 'Alice'})"));
+        assert!(!is_safe("MATCH (n) CREATE (m:Copy) RETURN m"));
+    }
+
+    #[test]
+    fn test_unsafe_delete_query() {
+        assert!(!is_safe("MATCH (n) DELETE n"));
+        assert!(!is_safe("MATCH (n) DETACH DELETE n"));
+    }
+
+    #[test]
+    fn test_unsafe_set_query() {
+        assert!(!is_safe("MATCH (n) SET n.name = 'Bob'"));
+    }
+
+    #[test]
+    fn test_unsafe_merge_query() {
+        assert!(!is_safe("MERGE (n:Person {name: 'Alice'})"));
+    }
+
+    #[test]
+    fn test_unsafe_drop_query() {
+        assert!(!is_safe("DROP INDEX my_index"));
+    }
+
+    #[test]
+    fn test_unsafe_remove_query() {
+        assert!(!is_safe("MATCH (n) REMOVE n.age"));
+    }
+
+    #[test]
+    fn test_safe_query_case_insensitive() {
+        // Even lowercase write keywords should be caught
+        assert!(!is_safe("match (n) set n.x = 1"));
+        assert!(!is_safe("match (n) delete n"));
     }
 }
