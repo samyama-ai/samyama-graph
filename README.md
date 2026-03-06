@@ -2,13 +2,13 @@
 
 ![Version](https://img.shields.io/badge/version-0.6.0-blue)
 ![Rust](https://img.shields.io/badge/rust-1.85-orange)
-![Tests](https://img.shields.io/badge/tests-333_passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-72.1%25-yellow)
+![Tests](https://img.shields.io/badge/tests-1671_passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-90.8%25-brightgreen)
 ![Bugs](https://img.shields.io/badge/bugs-0-brightgreen)
 ![Vulnerabilities](https://img.shields.io/badge/vulnerabilities-0-brightgreen)
 ![Quality Gate](https://img.shields.io/badge/quality_gate-passed-brightgreen)
 ![Maintainability](https://img.shields.io/badge/maintainability-A-brightgreen)
-![LOC](https://img.shields.io/badge/LOC-25.2K-informational)
+![LOC](https://img.shields.io/badge/LOC-44K-informational)
 ![License](https://img.shields.io/badge/license-Apache_2.0-blue)
 
 **Samyama** is a high-performance, distributed, AI-native graph database written in **Rust**. It combines a **property graph engine**, **vector search**, **graph analytics**, and **natural language querying** in a single binary.

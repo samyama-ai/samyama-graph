@@ -13,7 +13,7 @@ Samyama is a high-performance distributed graph database written in Rust with ~9
 cargo build                    # Debug build
 cargo build --release          # Release build (optimized)
 
-# Run tests (248 unit tests)
+# Run tests (1671 unit tests)
 cargo test                     # All tests
 cargo test graph::node         # Specific module tests
 cargo test -- --nocapture      # Tests with output
@@ -161,7 +161,7 @@ graph.create_edge(source_id, target_id, "KNOWS")?;
 
 ## Testing
 
-- **251 unit tests** across all modules
+- **1671 unit tests** across all modules (90.8% coverage)
 - **10 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Python scripts in `tests/integration/`
 - **8 domain-specific example demos** with NLQ integration
