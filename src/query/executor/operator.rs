@@ -5891,6 +5891,174 @@ impl PhysicalOperator for WithBarrierOperator {
     }
 }
 
+/// ExpandInto operator: checks whether an edge exists between two already-bound endpoints.
+///
+/// Unlike ExpandOperator (which fans out from one bound node to discover new neighbors),
+/// ExpandInto takes a record where BOTH source and target are already bound, and checks
+/// whether a connecting edge exists. If it does, the record passes through (with the edge
+/// optionally bound); if not, the record is filtered out.
+///
+/// This is semantically a filter (fan-in), not an expansion (fan-out).
+pub struct ExpandIntoOperator {
+    input: OperatorBox,
+    source_binding: String,
+    target_binding: String,
+    edge_type: Option<String>,
+    edge_binding: Option<String>,
+}
+
+impl ExpandIntoOperator {
+    pub fn new(
+        input: OperatorBox,
+        source_binding: String,
+        target_binding: String,
+        edge_type: Option<String>,
+        edge_binding: Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            source_binding,
+            target_binding,
+            edge_type,
+            edge_binding,
+        }
+    }
+}
+
+impl PhysicalOperator for ExpandIntoOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            let record = match self.input.next(store)? {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+
+            let source_id = record.get(&self.source_binding)
+                .and_then(|v| v.node_id())
+                .ok_or_else(|| ExecutionError::VariableNotFound(self.source_binding.clone()))?;
+
+            let target_id = record.get(&self.target_binding)
+                .and_then(|v| v.node_id())
+                .ok_or_else(|| ExecutionError::VariableNotFound(self.target_binding.clone()))?;
+
+            let et = self.edge_type.as_ref().map(|t| EdgeType::new(t.as_str()));
+            let et_ref = et.as_ref();
+
+            if let Some(edge_id) = store.edge_between(source_id, target_id, et_ref) {
+                let mut new_record = record;
+                if let Some(ref edge_var) = self.edge_binding {
+                    if let Some(edge) = store.get_edge(edge_id) {
+                        new_record.bind(
+                            edge_var.clone(),
+                            Value::EdgeRef(edge_id, edge.source, edge.target, edge.edge_type.clone()),
+                        );
+                    }
+                }
+                return Ok(Some(new_record));
+            }
+            // No edge found — skip this record, try next
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: Vec::new(),
+            }))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let type_str = self.edge_type.as_deref().unwrap_or("*");
+        OperatorDescription {
+            name: "ExpandInto".to_string(),
+            details: format!("({})--[:{}]-->({})", self.source_binding, type_str, self.target_binding),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
+/// NodeById operator: start from a specific set of node IDs.
+///
+/// Useful when the planner knows the exact starting nodes (e.g., from an index lookup
+/// or from a previous query stage).
+pub struct NodeByIdOperator {
+    node_ids: Vec<NodeId>,
+    position: usize,
+    variable: String,
+}
+
+impl NodeByIdOperator {
+    pub fn new(node_ids: Vec<NodeId>, variable: String) -> Self {
+        Self {
+            node_ids,
+            position: 0,
+            variable,
+        }
+    }
+}
+
+impl PhysicalOperator for NodeByIdOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        while self.position < self.node_ids.len() {
+            let node_id = self.node_ids[self.position];
+            self.position += 1;
+
+            // Verify node still exists
+            if store.has_node(node_id) {
+                let mut record = Record::new();
+                record.bind(self.variable.clone(), Value::NodeRef(node_id));
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::new();
+        for _ in 0..batch_size {
+            match self.next(store)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![self.variable.clone()],
+            }))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.position = 0;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "NodeById".to_string(),
+            details: format!("var={}, ids={:?}", self.variable, self.node_ids.iter().map(|id| id.as_u64()).collect::<Vec<_>>()),
+            children: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7794,5 +7962,207 @@ mod tests {
     fn test_eval_function_id_type_error() {
         let result = eval_function("id", &[Value::Property(PropertyValue::Integer(1))]);
         assert!(result.is_err());
+    }
+
+    // ---- ExpandIntoOperator tests (TDD) ----
+
+    #[test]
+    fn test_expand_into_basic() {
+        use crate::graph::types::NodeId;
+
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let _eid = store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        // Create input that provides both source and target
+        let mut records = Vec::new();
+        let mut r = Record::new();
+        r.bind("a".to_string(), Value::NodeRef(n1));
+        r.bind("b".to_string(), Value::NodeRef(n2));
+        records.push(r);
+
+        // Use CartesianProductOperator isn't suitable here, so we build a simple mock
+        // by using a NodeByIdOperator for `a` and manually creating input records.
+        // Instead, let's just test with a WithBarrier-like approach: produce a batch
+        // Actually, simplest: use a custom input that yields our records
+        let input = Box::new(StaticInputOperator { records, index: 0 });
+
+        let mut op = ExpandIntoOperator::new(
+            input,
+            "a".to_string(),
+            "b".to_string(),
+            Some("KNOWS".to_string()),
+            None,
+        );
+
+        let result = op.next(&store).unwrap();
+        assert!(result.is_some());
+
+        // No more records
+        let result2 = op.next(&store).unwrap();
+        assert!(result2.is_none());
+    }
+
+    #[test]
+    fn test_expand_into_no_edge() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        // No edge between n1 and n2
+
+        let mut records = Vec::new();
+        let mut r = Record::new();
+        r.bind("a".to_string(), Value::NodeRef(n1));
+        r.bind("b".to_string(), Value::NodeRef(n2));
+        records.push(r);
+
+        let input = Box::new(StaticInputOperator { records, index: 0 });
+        let mut op = ExpandIntoOperator::new(
+            input,
+            "a".to_string(),
+            "b".to_string(),
+            Some("KNOWS".to_string()),
+            None,
+        );
+
+        let result = op.next(&store).unwrap();
+        assert!(result.is_none()); // Record filtered out
+    }
+
+    #[test]
+    fn test_expand_into_with_edge_binding() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let eid = store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        let mut records = Vec::new();
+        let mut r = Record::new();
+        r.bind("a".to_string(), Value::NodeRef(n1));
+        r.bind("b".to_string(), Value::NodeRef(n2));
+        records.push(r);
+
+        let input = Box::new(StaticInputOperator { records, index: 0 });
+        let mut op = ExpandIntoOperator::new(
+            input,
+            "a".to_string(),
+            "b".to_string(),
+            Some("KNOWS".to_string()),
+            Some("r".to_string()),
+        );
+
+        let result = op.next(&store).unwrap().unwrap();
+        // Edge should be bound
+        let edge_val = result.get("r").unwrap();
+        assert_eq!(edge_val.edge_id(), Some(eid));
+    }
+
+    #[test]
+    fn test_expand_into_describe() {
+        let input = Box::new(StaticInputOperator { records: Vec::new(), index: 0 });
+        let op = ExpandIntoOperator::new(
+            input,
+            "a".to_string(),
+            "b".to_string(),
+            Some("KNOWS".to_string()),
+            None,
+        );
+        let desc = op.describe();
+        assert_eq!(desc.name, "ExpandInto");
+        assert!(desc.details.contains("KNOWS"));
+    }
+
+    // ---- NodeByIdOperator tests (TDD) ----
+
+    #[test]
+    fn test_node_by_id_operator() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let n3 = store.create_node("Company");
+
+        let mut op = NodeByIdOperator::new(vec![n1, n3], "n".to_string());
+
+        let r1 = op.next(&store).unwrap().unwrap();
+        assert_eq!(r1.get("n").unwrap().node_id(), Some(n1));
+
+        let r2 = op.next(&store).unwrap().unwrap();
+        assert_eq!(r2.get("n").unwrap().node_id(), Some(n3));
+
+        let r3 = op.next(&store).unwrap();
+        assert!(r3.is_none());
+    }
+
+    #[test]
+    fn test_node_by_id_operator_deleted_node() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        store.delete_node("default", n1).unwrap();
+
+        let mut op = NodeByIdOperator::new(vec![n1, n2], "n".to_string());
+
+        // n1 is deleted, should skip it
+        let r1 = op.next(&store).unwrap().unwrap();
+        assert_eq!(r1.get("n").unwrap().node_id(), Some(n2));
+
+        let r2 = op.next(&store).unwrap();
+        assert!(r2.is_none());
+    }
+
+    #[test]
+    fn test_node_by_id_operator_reset() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+
+        let mut op = NodeByIdOperator::new(vec![n1], "n".to_string());
+        let _ = op.next(&store).unwrap();
+        assert!(op.next(&store).unwrap().is_none());
+
+        op.reset();
+        let r = op.next(&store).unwrap();
+        assert!(r.is_some());
+    }
+
+    /// Helper: a simple operator that yields pre-built records (for testing downstream operators)
+    struct StaticInputOperator {
+        records: Vec<Record>,
+        index: usize,
+    }
+
+    impl PhysicalOperator for StaticInputOperator {
+        fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+            if self.index < self.records.len() {
+                let r = self.records[self.index].clone();
+                self.index += 1;
+                Ok(Some(r))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+            let mut records = Vec::new();
+            for _ in 0..batch_size {
+                match self.next(store)? {
+                    Some(r) => records.push(r),
+                    None => break,
+                }
+            }
+            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new() })) }
+        }
+
+        fn reset(&mut self) {
+            self.index = 0;
+        }
+
+        fn describe(&self) -> OperatorDescription {
+            OperatorDescription {
+                name: "StaticInput".to_string(),
+                details: format!("{} records", self.records.len()),
+                children: Vec::new(),
+            }
+        }
     }
 }

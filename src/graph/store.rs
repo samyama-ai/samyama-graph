@@ -5,6 +5,7 @@
 //! - REQ-MEM-001: In-memory storage
 //! - REQ-MEM-003: Memory-optimized data structures
 
+use super::catalog::GraphCatalog;
 use super::edge::Edge;
 use super::node::Node;
 use super::property::{PropertyMap, PropertyValue};
@@ -151,11 +152,11 @@ pub struct GraphStore {
     /// Edge storage (Arena with versioning: EdgeId -> [Versions])
     edges: Vec<Vec<Edge>>,
 
-    /// Outgoing edges for each node (adjacency list)
-    outgoing: Vec<Vec<EdgeId>>,
+    /// Outgoing edges for each node, sorted by target NodeId: (target_NodeId, EdgeId)
+    outgoing: Vec<Vec<(NodeId, EdgeId)>>,
 
-    /// Incoming edges for each node (adjacency list)
-    incoming: Vec<Vec<EdgeId>>,
+    /// Incoming edges for each node, sorted by source NodeId: (source_NodeId, EdgeId)
+    incoming: Vec<Vec<(NodeId, EdgeId)>>,
 
     /// Current global version for MVCC
     pub current_version: u64,
@@ -192,6 +193,9 @@ pub struct GraphStore {
 
     /// Next edge ID
     next_edge_id: u64,
+
+    /// Triple-level statistics catalog for graph-native query planning (ADR-015)
+    catalog: GraphCatalog,
 }
 
 impl GraphStore {
@@ -214,6 +218,7 @@ impl GraphStore {
             index_sender: None,
             next_node_id: 1,
             next_edge_id: 1,
+            catalog: GraphCatalog::new(),
         }
     }
 
@@ -446,9 +451,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Add to label index
         self.label_index
-            .entry(label)
+            .entry(label.clone())
             .or_insert_with(HashSet::new)
             .insert(node_id);
+
+        // Update catalog label count
+        self.catalog.on_label_added(&label);
 
         // Ensure storage capacity
         if idx >= self.nodes.len() {
@@ -505,6 +513,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 .entry(label.clone())
                 .or_insert_with(HashSet::new)
                 .insert(node_id);
+            // Update catalog label count
+            self.catalog.on_label_added(label);
         }
 
         // Ensure storage capacity
@@ -630,11 +640,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Actually, let's keep it simple: removal from the latest version effectively deletes it.
         // But to keep history, we should NOT remove from the Vec.
         
-        // Remove from label indices
+        // Remove from label indices and update catalog
         for label in &latest_node.labels {
             if let Some(node_set) = self.label_index.get_mut(label) {
                 node_set.remove(&id);
             }
+            self.catalog.on_label_removed(label);
         }
 
         let event = crate::graph::event::IndexEvent::NodeDeleted {
@@ -655,8 +666,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let node = self.nodes[idx].pop().unwrap();
 
         // Remove all connected edges
-        let outgoing_edges = std::mem::take(&mut self.outgoing[idx]);
-        let incoming_edges = std::mem::take(&mut self.incoming[idx]);
+        let outgoing_edges: Vec<EdgeId> = std::mem::take(&mut self.outgoing[idx])
+            .into_iter().map(|(_, eid)| eid).collect();
+        let incoming_edges: Vec<EdgeId> = std::mem::take(&mut self.incoming[idx])
+            .into_iter().map(|(_, eid)| eid).collect();
 
         for edge_id in outgoing_edges.iter().chain(incoming_edges.iter()) {
             let _ = self.delete_edge(*edge_id);
@@ -688,6 +701,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             .entry(label.clone())
             .or_insert_with(HashSet::new)
             .insert(node_id);
+
+        // Update catalog label count
+        self.catalog.on_label_added(&label);
 
         let event = crate::graph::event::IndexEvent::LabelAdded {
             tenant_id: tenant_id.to_string(),
@@ -734,9 +750,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let mut edge = Edge::new(edge_id, source, target, edge_type.clone());
         edge.version = self.current_version;
 
-        // Update adjacency lists
-        self.outgoing[source.as_u64() as usize].push(edge_id);
-        self.incoming[target.as_u64() as usize].push(edge_id);
+        // Update adjacency lists (sorted insert by target/source NodeId)
+        {
+            let out_list = &mut self.outgoing[source.as_u64() as usize];
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            out_list.insert(pos, (target, edge_id));
+        }
+        {
+            let in_list = &mut self.incoming[target.as_u64() as usize];
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            in_list.insert(pos, (source, edge_id));
+        }
 
         // Ensure storage capacity
         if idx >= self.edges.len() {
@@ -745,9 +771,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Update edge type index
         self.edge_type_index
-            .entry(edge_type)
+            .entry(edge_type.clone())
             .or_insert_with(HashSet::new)
             .insert(edge_id);
+
+        // Update catalog triple stats
+        let src_labels: Vec<Label> = self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
 
         self.edges[idx].push(edge);
         Ok(edge_id)
@@ -788,9 +819,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let mut edge = Edge::new_with_properties(edge_id, source, target, edge_type.clone(), properties);
         edge.version = self.current_version;
 
-        // Update adjacency lists
-        self.outgoing[source.as_u64() as usize].push(edge_id);
-        self.incoming[target.as_u64() as usize].push(edge_id);
+        // Update adjacency lists (sorted insert by target/source NodeId)
+        {
+            let out_list = &mut self.outgoing[source.as_u64() as usize];
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            out_list.insert(pos, (target, edge_id));
+        }
+        {
+            let in_list = &mut self.incoming[target.as_u64() as usize];
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            in_list.insert(pos, (source, edge_id));
+        }
 
         // Ensure storage capacity
         if idx >= self.edges.len() {
@@ -799,9 +840,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Update edge type index
         self.edge_type_index
-            .entry(edge_type)
+            .entry(edge_type.clone())
             .or_insert_with(HashSet::new)
             .insert(edge_id);
+
+        // Update catalog triple stats
+        let src_labels: Vec<Label> = self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
 
         self.edges[idx].push(edge);
         Ok(edge_id)
@@ -836,6 +882,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Delete an edge
     pub fn delete_edge(&mut self, id: EdgeId) -> GraphResult<Edge> {
         let idx = id.as_u64() as usize;
+
+        // Collect catalog info before removal
+        let (src_labels, tgt_labels, source_id, target_id, edge_type_clone) = {
+            let edge = self.edges.get(idx).and_then(|v| v.last()).ok_or(GraphError::EdgeNotFound(id))?;
+            let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            let tgt_labels: Vec<Label> = self.get_node(edge.target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            (src_labels, tgt_labels, edge.source, edge.target, edge.edge_type.clone())
+        };
+
         let edge = self.edges.get_mut(idx).and_then(|v| v.pop()).ok_or(GraphError::EdgeNotFound(id))?;
 
         // Add to free list
@@ -848,11 +903,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Remove from adjacency lists
         if let Some(adj) = self.outgoing.get_mut(edge.source.as_u64() as usize) {
-            adj.retain(|&eid| eid != id);
+            adj.retain(|&(_, eid)| eid != id);
         }
         if let Some(adj) = self.incoming.get_mut(edge.target.as_u64() as usize) {
-            adj.retain(|&eid| eid != id);
+            adj.retain(|&(_, eid)| eid != id);
         }
+
+        // Update catalog triple stats
+        self.catalog.on_edge_deleted(source_id, &src_labels, &edge_type_clone, target_id, &tgt_labels);
 
         Ok(edge)
     }
@@ -861,10 +919,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
         self.outgoing
             .get(node_id.as_u64() as usize)
-            .map(|edge_ids| {
-                edge_ids
+            .map(|entries| {
+                entries
                     .iter()
-                    .filter_map(|&id| self.get_edge(id))
+                    .filter_map(|&(_, eid)| self.get_edge(eid))
                     .collect()
             })
             .unwrap_or_default()
@@ -874,24 +932,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
         self.incoming
             .get(node_id.as_u64() as usize)
-            .map(|edge_ids| {
-                edge_ids
+            .map(|entries| {
+                entries
                     .iter()
-                    .filter_map(|&id| self.get_edge(id))
+                    .filter_map(|&(_, eid)| self.get_edge(eid))
                     .collect()
             })
             .unwrap_or_default()
     }
 
     /// Get outgoing edge targets as lightweight tuples (no Edge clone)
-    /// Returns (EdgeId, target NodeId, &EdgeType) for each outgoing edge
+    /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each outgoing edge
     pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
         self.outgoing
             .get(node_id.as_u64() as usize)
-            .map(|edge_ids| {
-                edge_ids
+            .map(|entries| {
+                entries
                     .iter()
-                    .filter_map(|&eid| {
+                    .filter_map(|&(_, eid)| {
                         self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
                     })
                     .collect()
@@ -904,15 +962,99 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
         self.incoming
             .get(node_id.as_u64() as usize)
-            .map(|edge_ids| {
-                edge_ids
+            .map(|entries| {
+                entries
                     .iter()
-                    .filter_map(|&eid| {
+                    .filter_map(|&(_, eid)| {
                         self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Check if an edge exists between source and target, optionally filtered by edge type.
+    /// Uses binary search on sorted adjacency lists for O(log d) lookup.
+    /// Returns the first matching EdgeId, or None.
+    pub fn edge_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Option<EdgeId> {
+        let out_len = self.outgoing.get(source.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
+        let in_len = self.incoming.get(target.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
+
+        // Use outgoing from source (search for target) or incoming to target (search for source)
+        let (entries, search_key) = if out_len <= in_len {
+            (self.outgoing.get(source.as_u64() as usize)?, target)
+        } else {
+            (self.incoming.get(target.as_u64() as usize)?, source)
+        };
+
+        // Binary search to find the neighborhood of matching entries
+        let start = match entries.binary_search_by_key(&search_key, |(nid, _)| *nid) {
+            Ok(pos) => {
+                // Walk back to find the first entry with this key
+                let mut p = pos;
+                while p > 0 && entries[p - 1].0 == search_key { p -= 1; }
+                p
+            }
+            Err(_) => return None,
+        };
+
+        // Scan forward through entries with the matching key
+        for i in start..entries.len() {
+            let (nid, eid) = entries[i];
+            if nid != search_key { break; }
+            if let Some(e) = self.get_edge(eid) {
+                if e.source == source && e.target == target {
+                    match edge_type {
+                        Some(et) if &e.edge_type != et => continue,
+                        _ => return Some(eid),
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get all edges between source and target, optionally filtered by edge type.
+    /// Uses binary search on sorted adjacency lists.
+    pub fn edges_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Vec<EdgeId> {
+        let out_len = self.outgoing.get(source.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
+        let in_len = self.incoming.get(target.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
+
+        let (entries, search_key) = if out_len <= in_len {
+            match self.outgoing.get(source.as_u64() as usize) {
+                Some(e) => (e, target),
+                None => return Vec::new(),
+            }
+        } else {
+            match self.incoming.get(target.as_u64() as usize) {
+                Some(e) => (e, source),
+                None => return Vec::new(),
+            }
+        };
+
+        let start = match entries.binary_search_by_key(&search_key, |(nid, _)| *nid) {
+            Ok(pos) => {
+                let mut p = pos;
+                while p > 0 && entries[p - 1].0 == search_key { p -= 1; }
+                p
+            }
+            Err(_) => return Vec::new(),
+        };
+
+        let mut result = Vec::new();
+        for i in start..entries.len() {
+            let (nid, eid) = entries[i];
+            if nid != search_key { break; }
+            if let Some(e) = self.get_edge(eid) {
+                if e.source == source && e.target == target {
+                    match edge_type {
+                        Some(et) if &e.edge_type != et => {}
+                        _ => result.push(eid),
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Get all nodes with a specific label
@@ -1027,6 +1169,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// Get the triple-level statistics catalog (for graph-native query planning)
+    pub fn catalog(&self) -> &GraphCatalog {
+        &self.catalog
+    }
+
     /// Get node count for a specific label (fast, O(1))
     pub fn label_node_count(&self, label: &Label) -> usize {
         self.label_index.get(label).map(|s| s.len()).unwrap_or(0)
@@ -1063,6 +1210,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
         self.next_edge_id = 1;
+        self.catalog.clear();
     }
 
     // ============================================================
@@ -1199,9 +1347,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
 
-        // Update adjacency lists
-        self.outgoing[source.as_u64() as usize].push(edge_id);
-        self.incoming[target.as_u64() as usize].push(edge_id);
+        // Update adjacency lists (sorted insert)
+        {
+            let out_list = &mut self.outgoing[source.as_u64() as usize];
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            out_list.insert(pos, (target, edge_id));
+        }
+        {
+            let in_list = &mut self.incoming[target.as_u64() as usize];
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            in_list.insert(pos, (source, edge_id));
+        }
 
         // Update edge type index
         self.edge_type_index
@@ -2489,5 +2647,165 @@ mod tests {
         let store = GraphStore::new();
         let edges = store.get_edges_by_type(&EdgeType::new("NoSuch"));
         assert!(edges.is_empty());
+    }
+
+    // ---- edge_between / edges_between tests (TDD) ----
+
+    #[test]
+    fn test_edge_between_exists() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let eid = store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))), Some(eid));
+    }
+
+    #[test]
+    fn test_edge_between_not_exists() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))), None);
+    }
+
+    #[test]
+    fn test_edge_between_wrong_type() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS"))), None);
+    }
+
+    #[test]
+    fn test_edge_between_any_type() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let eid = store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        // None edge_type means any type
+        assert_eq!(store.edge_between(n1, n2, None), Some(eid));
+    }
+
+    #[test]
+    fn test_edge_between_reverse_direction() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        // Reverse direction should NOT find the edge
+        assert_eq!(store.edge_between(n2, n1, Some(&EdgeType::new("KNOWS"))), None);
+    }
+
+    #[test]
+    fn test_edges_between_multi() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let eid1 = store.create_edge(n1, n2, "KNOWS").unwrap();
+        let eid2 = store.create_edge(n1, n2, "FOLLOWS").unwrap();
+        let eid3 = store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        // All edges between n1 and n2 (any type)
+        let all = store.edges_between(n1, n2, None);
+        assert_eq!(all.len(), 3);
+
+        // Only KNOWS edges
+        let knows = store.edges_between(n1, n2, Some(&EdgeType::new("KNOWS")));
+        assert_eq!(knows.len(), 2);
+        assert!(knows.contains(&eid1));
+        assert!(knows.contains(&eid3));
+
+        // Only FOLLOWS edges
+        let follows = store.edges_between(n1, n2, Some(&EdgeType::new("FOLLOWS")));
+        assert_eq!(follows.len(), 1);
+        assert!(follows.contains(&eid2));
+    }
+
+    // ---- Sorted adjacency list tests (Phase 1B TDD) ----
+
+    #[test]
+    fn test_sorted_adjacency_insert_order() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n3 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+
+        // Insert edges to n3 first, then n2 — adjacency should still be sorted by target NodeId
+        store.create_edge(n1, n3, "KNOWS").unwrap();
+        store.create_edge(n1, n2, "KNOWS").unwrap();
+
+        // Outgoing from n1 should be sorted by target: n2 before n3
+        let out = &store.outgoing[n1.as_u64() as usize];
+        assert_eq!(out.len(), 2);
+        assert!(out[0].0 <= out[1].0, "outgoing adjacency should be sorted by target NodeId");
+    }
+
+    #[test]
+    fn test_sorted_adjacency_delete() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+        let n3 = store.create_node("Person");
+
+        let e1 = store.create_edge(n1, n2, "KNOWS").unwrap();
+        let _e2 = store.create_edge(n1, n3, "KNOWS").unwrap();
+
+        store.delete_edge(e1).unwrap();
+
+        let out = &store.outgoing[n1.as_u64() as usize];
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, n3); // only n3 remains
+    }
+
+    #[test]
+    fn test_sorted_adjacency_multiple_edges_same_target() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Person");
+
+        let e1 = store.create_edge(n1, n2, "KNOWS").unwrap();
+        let e2 = store.create_edge(n1, n2, "FOLLOWS").unwrap();
+
+        // Both edges should be to the same target
+        let out = &store.outgoing[n1.as_u64() as usize];
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, n2);
+        assert_eq!(out[1].0, n2);
+
+        // edge_between with binary search should find the right one
+        assert!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))).is_some());
+        assert!(store.edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS"))).is_some());
+    }
+
+    #[test]
+    fn test_edge_between_binary_search_high_degree() {
+        let mut store = GraphStore::new();
+        let hub = store.create_node("Hub");
+
+        // Create 100 target nodes and edges from hub
+        let mut targets = Vec::new();
+        for _ in 0..100 {
+            let t = store.create_node("Target");
+            store.create_edge(hub, t, "LINKS").unwrap();
+            targets.push(t);
+        }
+
+        // Binary search should find any of them
+        for &t in &targets {
+            assert!(
+                store.edge_between(hub, t, Some(&EdgeType::new("LINKS"))).is_some(),
+                "edge_between should find edge to target {:?}", t
+            );
+        }
+
+        // Non-existent target
+        let fake = NodeId::new(9999);
+        assert!(store.edge_between(hub, fake, Some(&EdgeType::new("LINKS"))).is_none());
     }
 }

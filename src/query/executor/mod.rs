@@ -2,13 +2,18 @@
 //!
 //! Implements REQ-CYPHER-009 (query optimization) and ADR-007
 
+pub mod cost_model;
+pub mod logical_optimizer;
+pub mod logical_plan;
 pub mod operator;
+pub mod physical_planner;
+pub mod plan_enumerator;
 pub mod planner;
 pub mod record;
 
 // Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
 pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
-pub use planner::{QueryPlanner, ExecutionPlan};
+pub use planner::{QueryPlanner, ExecutionPlan, PlannerConfig};
 pub use record::{Record, RecordBatch, Value};
 
 use crate::graph::GraphStore;
