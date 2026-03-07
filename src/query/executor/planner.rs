@@ -2337,7 +2337,7 @@ mod tests {
 
     #[test]
     fn test_ab_correctness_expand() {
-        // A/B: expand pattern with data
+        // A/B: ALL candidate plans must produce identical results to legacy
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
         store.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
@@ -2350,12 +2350,9 @@ mod tests {
 
         let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
 
+        // Legacy planner results
         let legacy = QueryPlanner::new();
-        let native = QueryPlanner::with_config(PlannerConfig { graph_native: true, max_candidate_plans: 64 });
-
         let legacy_plan = legacy.plan(&query, &store).unwrap();
-        let native_plan = native.plan(&query, &store).unwrap();
-
         let mut legacy_results: Vec<String> = Vec::new();
         let mut op = legacy_plan.root;
         while let Some(record) = op.next(&store).unwrap() {
@@ -2365,17 +2362,38 @@ mod tests {
         }
         legacy_results.sort();
 
-        let mut native_results: Vec<String> = Vec::new();
-        let mut op = native_plan.root;
-        while let Some(record) = op.next(&store).unwrap() {
-            let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
-            let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
-            native_results.push(format!("{}->{}", a_name, b_name));
-        }
-        native_results.sort();
+        // Graph-native planner — verify ALL candidate plans produce correct results
+        use super::super::logical_plan::PatternGraph;
+        use super::super::plan_enumerator::{enumerate_plans, EnumerationConfig};
+        use super::super::physical_planner::logical_to_physical;
 
-        assert_eq!(legacy_results, native_results,
-            "Expand results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
+        let match_clause = &query.match_clauses[0];
+        let pg = PatternGraph::from_match_clause(match_clause);
+        let catalog = store.catalog();
+        let config = EnumerationConfig { max_candidate_plans: 64 };
+        let candidates = enumerate_plans(&pg, query.where_clause.as_ref(), catalog, &config);
+        assert!(candidates.len() >= 2, "Should have at least 2 candidate plans");
+
+        for (plan_idx, (logical_plan, cost)) in candidates.iter().enumerate() {
+            let physical = logical_to_physical(logical_plan);
+            let projections = vec![
+                (Expression::Property { variable: "a".to_string(), property: "name".to_string() }, "a.name".to_string()),
+                (Expression::Property { variable: "b".to_string(), property: "name".to_string() }, "b.name".to_string()),
+            ];
+            let mut op: OperatorBox = Box::new(super::super::operator::ProjectOperator::new(physical, projections));
+
+            let mut native_results: Vec<String> = Vec::new();
+            while let Some(record) = op.next(&store).unwrap() {
+                let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+                let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+                native_results.push(format!("{}->{}", a_name, b_name));
+            }
+            native_results.sort();
+
+            assert_eq!(legacy_results, native_results,
+                "Plan candidate #{} (cost={}) produces different results.\nLegacy: {:?}\nNative: {:?}",
+                plan_idx, cost, legacy_results, native_results);
+        }
     }
 
     #[test]

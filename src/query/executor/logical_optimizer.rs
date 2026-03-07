@@ -115,12 +115,12 @@ fn push_filters_down(plan: LogicalPlanNode) -> LogicalPlanNode {
 /// convert Expand to ExpandInto.
 fn insert_expand_into(plan: LogicalPlanNode) -> LogicalPlanNode {
     match plan {
-        LogicalPlanNode::Expand { input, source_var, target_var, edge_var, edge_types, direction: _ } => {
+        LogicalPlanNode::Expand { input, source_var, target_var, edge_var, edge_types, direction } => {
             let optimized_input = insert_expand_into(*input);
             let input_vars = optimized_input.bound_variables();
 
             if input_vars.contains(&source_var) && input_vars.contains(&target_var) {
-                // Both endpoints bound → use ExpandInto
+                // Both endpoints bound → use ExpandInto (direction not needed)
                 LogicalPlanNode::ExpandInto {
                     input: Box::new(optimized_input),
                     source_var,
@@ -129,14 +129,14 @@ fn insert_expand_into(plan: LogicalPlanNode) -> LogicalPlanNode {
                     edge_var,
                 }
             } else {
+                // Preserve original direction
                 LogicalPlanNode::Expand {
                     input: Box::new(optimized_input),
                     source_var,
                     target_var,
                     edge_var,
                     edge_types,
-                    // Direction doesn't matter for ExpandInto, keep Forward for Expand
-                    direction: ExpandDirection::Forward,
+                    direction,
                 }
             }
         }

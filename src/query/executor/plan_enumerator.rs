@@ -44,8 +44,12 @@ pub fn enumerate_plans(
         .map(|wc| flatten_and_predicates(&wc.predicate))
         .unwrap_or_default();
 
+    // Collect node names in deterministic order for reproducible plan enumeration
+    let mut node_names: Vec<&String> = pattern.nodes.keys().collect();
+    node_names.sort();
+
     // For each node as a potential starting point
-    for (var_name, node) in &pattern.nodes {
+    for var_name in node_names {
         if candidates.len() >= config.max_candidate_plans {
             break;
         }
