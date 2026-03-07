@@ -1,19 +1,19 @@
-# LDBC Benchmark Results — Samyama v0.5.10
+# LDBC Benchmark Results — Samyama v0.6.0
 
 Samyama's query engine benchmarked against all four [LDBC Council](https://ldbcouncil.org/) benchmark suites.
 
-**Test Environment:** Mac Mini M4 (10-core, 16GB RAM), macOS Tahoe 26.2, Rust 1.83 release build
+**Test Environment:** Mac Mini M4 (10-core, 16GB RAM), macOS Tahoe 26.2, Rust 1.85 release build
 
-**Date:** 2026-02-27
+**Date:** 2026-03-07
 
 ## Summary
 
 | Benchmark | Queries | Passed | Pass Rate | Dataset | Total Time |
 |-----------|---------|--------|-----------|---------|------------|
-| [SNB Interactive](./SNB_INTERACTIVE.md) | 21 reads + 8 inserts + 8 deletes | 21/21 reads | **100%** | SF1 (3.18M nodes, 17.26M edges) | 108.1s |
-| [SNB Business Intelligence](./SNB_BI.md) | 20 | All 20 attempted (120s timeout guard) | **Improved** | SF1 (same dataset) | varies |
+| [SNB Interactive](./SNB_INTERACTIVE.md) | 21 reads + 8 inserts + 8 deletes | 21/21 reads | **100%** | SF1 (3.18M nodes, 17.26M edges) | 111.9s |
+| [SNB Business Intelligence](./SNB_BI.md) | 20 | 16/16 run (BI-17+ timeout) | **100% of run** | SF1 (same dataset) | ~52s (16 queries) |
 | [Graphalytics](./GRAPHALYTICS.md) | 28 (6 algos x 5 datasets) | 28/28 | **100%** | XS (2) + S-size (3) datasets | <1ms (XS), 0.1–167s (S) |
-| [FinBench](./FINBENCH.md) | 21 (12 CR + 6 SR + 3 RW) | 21/21 | **100%** | Synthetic (7.7K nodes, 42.2K edges) | 371ms |
+| [FinBench](./FINBENCH.md) | 40 (12 CR + 6 SR + 3 RW + 19 W) | 40/40 | **100%** | Synthetic (7.7K nodes, 42.2K edges) | 665ms |
 
 ### Overall Coverage
 

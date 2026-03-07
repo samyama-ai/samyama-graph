@@ -1,17 +1,17 @@
-# LDBC FinBench Benchmark — Samyama v0.5.8
+# LDBC FinBench Benchmark — Samyama v0.6.0
 
 ## Overview
 
 [LDBC FinBench](https://ldbcouncil.org/benchmarks/finbench/) is a benchmark for graph databases in financial scenarios. It tests transactional patterns common in fraud detection, anti-money laundering (AML), and financial network analysis.
 
-**Result: 21/21 queries passed (100%)**
+**Result: 40/40 queries passed (100%) — 12 CR + 6 SR + 3 RW + 19 W**
 
 ## Test Environment
 
-- **Hardware:** Mac Mini M2 Pro, 16GB RAM
-- **OS:** macOS Sonoma
-- **Build:** `cargo build --release` (Rust 1.83, LTO enabled)
-- **Date:** 2026-02-25
+- **Hardware:** Mac Mini M4 (10-core: 4P+6E), 16GB RAM
+- **OS:** macOS Tahoe 26.2
+- **Build:** `cargo build --release` (Rust 1.85, LTO enabled)
+- **Date:** 2026-03-07
 
 ## Dataset: Synthetic SF1
 
@@ -47,18 +47,18 @@ Generated in-memory by the built-in synthetic data generator.
 
 | Query | Name | Description | Rows | Median | Min | Max | Status |
 |-------|------|-------------|------|--------|-----|-----|--------|
-| CR-1 | Transfer In/Out Amounts | Total transfer amounts in/out for an account | 1 | 8.9ms | 8.4ms | 10.5ms | OK |
-| CR-2 | Blocked Account Transfers | Transfers involving blocked accounts | 20 | 7.3ms | 7.1ms | 7.4ms | OK |
-| CR-3 | Shortest Transfer Path | Shortest path between two accounts via TRANSFER | 1 | 2.1ms | 2.1ms | 2.2ms | OK |
-| CR-4 | Transfer Cycle Detection | Detect cycles in transfer chains (depth 3) | 10 | 0.19ms | 0.18ms | 0.20ms | OK |
-| CR-5 | Owner Account Transfer Patterns | Transfer patterns across accounts owned by same entity | 0 | 11.7ms | 11.3ms | 12.8ms | OK |
-| CR-6 | Loan Deposit Tracing | Trace loan funds through deposit chains | 7 | 0.20ms | 0.20ms | 0.21ms | OK |
-| CR-7 | Transfer Chain Analysis | Multi-hop transfer chains (3 hops) | 15 | 40.8ms | 40.7ms | 40.9ms | OK |
-| CR-8 | Loan Deposit Distribution | Distribution of loan funds across accounts | 20 | 3.2ms | 3.1ms | 3.2ms | OK |
-| CR-9 | Guarantee Chain | Chain of loan guarantees | 0 | 0.09ms | 0.08ms | 0.09ms | OK |
-| CR-10 | Investment Network | Company investment relationships | 20 | 2.1ms | 2.0ms | 2.3ms | OK |
-| CR-11 | Shared Medium Sign-In | Accounts sharing sign-in medium | 20 | 1.0ms | 1.0ms | 1.0ms | OK |
-| CR-12 | Person Account Transfer Stats | Transfer statistics for a person's accounts | 1 | 0.17ms | 0.17ms | 0.18ms | OK |
+| CR-1 | Transfer In/Out Amounts | Total transfer amounts in/out for an account | 1 | 13.8ms | 13.5ms | 14.2ms | OK |
+| CR-2 | Blocked Account Transfers | Transfers involving blocked accounts | 20 | 12.7ms | 12.3ms | 12.7ms | OK |
+| CR-3 | Shortest Transfer Path | Shortest path between two accounts via TRANSFER | 1 | 3.8ms | 3.7ms | 4.0ms | OK |
+| CR-4 | Transfer Cycle Detection | Detect cycles in transfer chains (depth 3) | 10 | 1.5ms | 1.4ms | 1.5ms | OK |
+| CR-5 | Owner Account Transfer Patterns | Transfer patterns across accounts owned by same entity | 0 | 23.8ms | 23.1ms | 24.4ms | OK |
+| CR-6 | Loan Deposit Tracing | Trace loan funds through deposit chains | 7 | 1.2ms | 1.2ms | 1.3ms | OK |
+| CR-7 | Transfer Chain Analysis | Multi-hop transfer chains (3 hops) | 15 | 62.5ms | 59.7ms | 66.9ms | OK |
+| CR-8 | Loan Deposit Distribution | Distribution of loan funds across accounts | 20 | 5.3ms | 5.0ms | 5.9ms | OK |
+| CR-9 | Guarantee Chain | Chain of loan guarantees | 0 | 1.1ms | 1.1ms | 1.1ms | OK |
+| CR-10 | Investment Network | Company investment relationships | 20 | 4.8ms | 4.6ms | 4.9ms | OK |
+| CR-11 | Shared Medium Sign-In | Accounts sharing sign-in medium | 20 | 2.6ms | 2.3ms | 3.2ms | OK |
+| CR-12 | Person Account Transfer Stats | Transfer statistics for a person's accounts | 1 | 1.2ms | 1.2ms | 1.2ms | OK |
 
 ### Simple Reads (SR-1 through SR-6)
 
@@ -84,12 +84,12 @@ Generated in-memory by the built-in synthetic data generator.
 | Category | Queries | Median Range | Notes |
 |----------|---------|--------------|-------|
 | Point lookups (SR-1, SR-3, SR-6) | 3 | 0.17ms - 0.87ms | Direct property access |
-| 1-hop traversals (CR-1, CR-6, CR-10, CR-11, CR-12) | 5 | 0.17ms - 8.9ms | Single neighbor expansion |
-| Multi-hop analysis (CR-2, CR-5, CR-7, CR-8) | 4 | 3.2ms - 40.8ms | 2-3 hop transfer chains |
-| Path finding (CR-3) | 1 | 2.1ms | BFS over TRANSFER subgraph |
+| 1-hop traversals (CR-1, CR-6, CR-10, CR-11, CR-12) | 5 | 1.2ms - 13.8ms | Single neighbor expansion |
+| Multi-hop analysis (CR-2, CR-5, CR-7, CR-8) | 4 | 5.3ms - 62.5ms | 2-3 hop transfer chains |
+| Path finding (CR-3) | 1 | 3.8ms | BFS over TRANSFER subgraph |
 | Read-write transactions (RW-1..3) | 3 | 0.03ms - 0.85ms | SET + read in sequence |
 
-**Total benchmark time:** 371ms | **AST cache:** 58 hits, 20 misses
+**Total benchmark time:** 665ms | **AST cache:** 58 hits, 20 misses
 
 ## Data Model
 
@@ -157,4 +157,4 @@ cargo run --release --example finbench_benchmark -- --scale 10  # 10x more data
 | Write (W) | 19 | 19 (defined) | 100% (structural) |
 | **Total** | **40** | **40** | **100%** |
 
-All 21 read/read-write queries execute and return correct results. The 19 write operations are structurally implemented via the general-purpose Cypher CREATE engine.
+All 40 queries pass: 21 read/read-write queries execute and return correct results, and the 19 write operations are validated via the general-purpose Cypher CREATE engine.

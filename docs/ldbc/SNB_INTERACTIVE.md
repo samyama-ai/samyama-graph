@@ -1,4 +1,4 @@
-# LDBC SNB Interactive Benchmark — Samyama v0.5.8
+# LDBC SNB Interactive Benchmark — Samyama v0.6.0
 
 ## Overview
 
@@ -8,10 +8,10 @@ The [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/ben
 
 ## Test Environment
 
-- **Hardware:** Mac Mini M2 Pro, 16GB RAM
-- **OS:** macOS Sonoma
-- **Build:** `cargo build --release` (Rust 1.83, LTO enabled)
-- **Date:** 2026-02-25
+- **Hardware:** Mac Mini M4 (10-core: 4P+6E), 16GB RAM
+- **OS:** macOS Tahoe 26.2
+- **Build:** `cargo build --release` (Rust 1.85, LTO enabled)
+- **Date:** 2026-03-07
 
 ## Dataset: Scale Factor 1 (SF1)
 
@@ -36,44 +36,44 @@ The [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/ben
 
 | Query | Name | Description | Rows | Median | Min | Max | Status |
 |-------|------|-------------|------|--------|-----|-----|--------|
-| IS1 | Person Profile | Fetch person attributes by ID | 1 | 1.8ms | 1.8ms | 1.9ms | OK |
-| IS2 | Recent Posts by Person | 10 most recent posts by a person | 10 | 2.2ms | 2.2ms | 2.2ms | OK |
-| IS3 | Friends of Person | Bidirectional KNOWS traversal | 5 | 1.8ms | 1.8ms | 1.9ms | OK |
-| IS4 | Post Content | Fetch post with coalesce(imageFile, content) | 1 | 293ms | 292ms | 295ms | OK |
-| IS5 | Post Creator | 1-hop Post → Person via HAS_CREATOR | 1 | 284ms | 282ms | 284ms | OK |
-| IS6 | Forum of Post | Multi-hop: Post ← CONTAINER_OF ← Forum → HAS_MODERATOR → Person | 1 | 284ms | 283ms | 291ms | OK |
-| IS7 | Replies to Post | Comment replies with author info, knows check | 2 | 6.2s | 5.9s | 6.2s | OK |
+| IS1 | Person Profile | Fetch person attributes by ID | 1 | 17.8ms | 17.2ms | 18.0ms | OK |
+| IS2 | Recent Posts by Person | 10 most recent posts by a person | 10 | 18.0ms | 18.0ms | 18.1ms | OK |
+| IS3 | Friends of Person | Bidirectional KNOWS traversal | 5 | 17.6ms | 17.2ms | 17.8ms | OK |
+| IS4 | Post Content | Fetch post with coalesce(imageFile, content) | 1 | 336ms | 326ms | 339ms | OK |
+| IS5 | Post Creator | 1-hop Post → Person via HAS_CREATOR | 1 | 316ms | 316ms | 450ms | OK |
+| IS6 | Forum of Post | Multi-hop: Post ← CONTAINER_OF ← Forum → HAS_MODERATOR → Person | 1 | 314ms | 313ms | 314ms | OK |
+| IS7 | Replies to Post | Comment replies with author info, knows check | 2 | 5.8s | 5.7s | 5.8s | OK |
 
 ### Complex Reads (IC1-IC14)
 
 | Query | Name | Description | Rows | Median | Min | Max | Status |
 |-------|------|-------------|------|--------|-----|-----|--------|
-| IC1 | Transitive Friends by Name | KNOWS*1..3 + firstName filter | 0 | 1.8ms | 1.8ms | 1.9ms | OK |
-| IC2 | Recent Friend Posts | Friends' posts before a date | 20 | 8.9ms | 8.7ms | 10.6ms | OK |
-| IC3 | Friends in Countries | FoF posts in two countries within date range | 0 | 5.4s | 4.7s | 5.5s | OK |
-| IC4 | Popular Tags in Period | Tag frequency on friends' posts in date window | 10 | 10.1ms | 10.0ms | 12.3ms | OK |
-| IC5 | New Forum Members | Forums joined by FoF after a date | 20 | 4.6s | 4.5s | 4.9s | OK |
-| IC6 | Tag Co-occurrence | Tags co-occurring with a given tag on FoF posts | 0 | 6.3s | 6.2s | 6.6s | OK |
-| IC7 | Recent Likers | People who liked a person's messages | 20 | 2.1ms | 2.0ms | 2.1ms | OK |
-| IC8 | Recent Replies | Reply comments to a person's messages | 20 | 1.9ms | 1.9ms | 1.9ms | OK |
-| IC9 | Recent FoF Posts | FoF posts with coalesce + ordering | 20 | 9.3ms | 8.9ms | 10.0ms | OK |
-| IC10 | Friend Recommendation | FoF ranked by shared interests | 0 | 4.2s | 4.1s | 4.3s | OK |
-| IC11 | Job Referral | FoF who worked at a company before a year | 0 | 2.1ms | 1.9ms | 2.4ms | OK |
-| IC12 | Expert Reply | Friends replying to posts tagged with a TagClass | 5 | 49.7ms | 49.5ms | 52.1ms | OK |
-| IC13 | Single Shortest Path | Shortest KNOWS path between two persons (BFS) | 1 | 3.6ms | 3.5ms | 3.6ms | OK |
-| IC14 | Trusted Connection Paths | All shortest paths with interaction weights | 3 | 4.5ms | 4.4ms | 4.6ms | OK |
+| IC1 | Transitive Friends by Name | KNOWS*1..3 + firstName filter | 0 | 17.0ms | 16.8ms | 17.5ms | OK |
+| IC2 | Recent Friend Posts | Friends' posts before a date | 20 | 24.4ms | 24.1ms | 25.8ms | OK |
+| IC3 | Friends in Countries | FoF posts in two countries within date range | 0 | 5.5s | 5.2s | 5.5s | OK |
+| IC4 | Popular Tags in Period | Tag frequency on friends' posts in date window | 10 | 24.2ms | 24.2ms | 25.7ms | OK |
+| IC5 | New Forum Members | Forums joined by FoF after a date | 20 | 4.4s | 4.2s | 4.4s | OK |
+| IC6 | Tag Co-occurrence | Tags co-occurring with a given tag on FoF posts | 0 | 6.6s | 6.5s | 6.8s | OK |
+| IC7 | Recent Likers | People who liked a person's messages | 20 | 17.6ms | 17.5ms | 19.1ms | OK |
+| IC8 | Recent Replies | Reply comments to a person's messages | 20 | 17.7ms | 17.7ms | 17.9ms | OK |
+| IC9 | Recent FoF Posts | FoF posts with coalesce + ordering | 20 | 26.9ms | 26.6ms | 28.3ms | OK |
+| IC10 | Friend Recommendation | FoF ranked by shared interests | 0 | 4.2s | 4.1s | 4.2s | OK |
+| IC11 | Job Referral | FoF who worked at a company before a year | 0 | 21.1ms | 19.4ms | 23.3ms | OK |
+| IC12 | Expert Reply | Friends replying to posts tagged with a TagClass | 5 | 64.9ms | 64.8ms | 67.2ms | OK |
+| IC13 | Single Shortest Path | Shortest KNOWS path between two persons (BFS) | 1 | 18.2ms | 18.1ms | 18.3ms | OK |
+| IC14 | Trusted Connection Paths | All shortest paths with interaction weights | 3 | 19.4ms | 19.4ms | 19.6ms | OK |
 
 ### Performance Summary
 
 | Category | Queries | Median Range | Notes |
 |----------|---------|--------------|-------|
-| Point lookups (IS1-IS3, IC7, IC8, IC11) | 6 | 1.8ms - 2.2ms | Sub-millisecond after cache warm-up |
-| 1-hop with filters (IC2, IC4, IC9, IC12) | 4 | 8.9ms - 49.7ms | Scales with neighbor count |
-| Multi-hop (IC3, IC5, IC6, IC10) | 4 | 4.2s - 6.3s | Full FoF expansion on 180K KNOWS edges |
-| Full-graph scan (IS4-IS7) | 4 | 284ms - 6.2s | Scanning 1M+ Post/Comment nodes |
-| Path finding (IC13, IC14) | 2 | 3.6ms - 4.5ms | BFS over KNOWS subgraph |
+| Point lookups (IS1-IS3, IC7, IC8, IC11) | 6 | 17.0ms - 21.1ms | Index + property lookup |
+| 1-hop with filters (IC2, IC4, IC9, IC12) | 4 | 24.2ms - 64.9ms | Scales with neighbor count |
+| Multi-hop (IC3, IC5, IC6, IC10) | 4 | 4.2s - 6.6s | Full FoF expansion on 180K KNOWS edges |
+| Full-graph scan (IS4-IS7) | 4 | 314ms - 5.8s | Scanning 1M+ Post/Comment nodes |
+| Path finding (IC13, IC14) | 2 | 18.2ms - 19.4ms | BFS over KNOWS subgraph |
 
-**Total benchmark time:** 108.1s | **AST cache:** 63 hits, 21 misses
+**Total benchmark time:** 111.9s
 
 ## Update Operations (INS1-INS8)
 
