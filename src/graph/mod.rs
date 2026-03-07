@@ -6,6 +6,7 @@
 //! - Multiple edges between same nodes (REQ-GRAPH-008)
 //! - In-memory storage with hash-based indices (REQ-MEM-001, REQ-MEM-003)
 
+pub mod catalog;
 pub mod edge;
 pub mod node;
 pub mod property;
@@ -20,5 +21,6 @@ pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
 pub use store::{GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats};
 pub use types::{EdgeId, EdgeType, Label, NodeId};
+pub use catalog::GraphCatalog;
 pub use event::IndexEvent;
 pub use storage::{Column, ColumnStore};

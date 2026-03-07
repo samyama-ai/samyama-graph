@@ -33,6 +33,24 @@ struct PlanCacheEntry {
     index_hint: Option<(Label, String)>,
 }
 
+/// Configuration for the query planner (ADR-015)
+#[derive(Debug, Clone)]
+pub struct PlannerConfig {
+    /// Enable the graph-native planner (default: false, uses legacy planner)
+    pub graph_native: bool,
+    /// Maximum number of candidate plans to evaluate (default: 64)
+    pub max_candidate_plans: usize,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            graph_native: false,
+            max_candidate_plans: 64,
+        }
+    }
+}
+
 /// Query planner
 pub struct QueryPlanner {
     /// Enable optimization
@@ -41,6 +59,8 @@ pub struct QueryPlanner {
     plan_cache: Mutex<HashMap<u64, PlanCacheEntry>>,
     /// Cache generation counter (incremented on schema changes)
     cache_generation: std::sync::atomic::AtomicU64,
+    /// Planner configuration (ADR-015)
+    config: PlannerConfig,
 }
 
 impl QueryPlanner {
@@ -50,7 +70,23 @@ impl QueryPlanner {
             _optimize: true,
             plan_cache: Mutex::new(HashMap::new()),
             cache_generation: std::sync::atomic::AtomicU64::new(0),
+            config: PlannerConfig::default(),
         }
+    }
+
+    /// Create a new query planner with configuration
+    pub fn with_config(config: PlannerConfig) -> Self {
+        Self {
+            _optimize: true,
+            plan_cache: Mutex::new(HashMap::new()),
+            cache_generation: std::sync::atomic::AtomicU64::new(0),
+            config,
+        }
+    }
+
+    /// Get the current planner configuration
+    pub fn config(&self) -> &PlannerConfig {
+        &self.config
     }
 
     /// Invalidate the plan cache (e.g., after CREATE INDEX or schema change)
@@ -250,7 +286,7 @@ impl QueryPlanner {
 
         // 1a. Handle pre-WITH MATCH clauses
         for (match_idx, match_clause) in pre_with_clauses.iter().enumerate() {
-            let match_op = self.plan_match(match_clause, per_match_where[match_idx].as_ref(), _store)?;
+            let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), _store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
 
@@ -427,7 +463,7 @@ impl QueryPlanner {
         }
 
         for (match_idx, match_clause) in post_with_clauses.iter().enumerate() {
-            let match_op = self.plan_match(match_clause, post_per_match_where[match_idx].as_ref(), _store)?;
+            let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), _store)?;
 
             let clause_vars = post_match_var_sets[match_idx].clone();
 
@@ -819,6 +855,44 @@ impl QueryPlanner {
         } else {
             Err(ExecutionError::PlanningError(format!("Unknown procedure: {}", call_clause.procedure_name)))
         }
+    }
+
+    /// Dispatch to graph-native or legacy planner based on configuration
+    fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        if self.config.graph_native {
+            self.plan_match_native(match_clause, where_clause, store)
+        } else {
+            self.plan_match(match_clause, where_clause, store)
+        }
+    }
+
+    /// Graph-native planner (ADR-015): enumerate candidate plans, choose cheapest
+    fn plan_match_native(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        use super::logical_plan::PatternGraph;
+        use super::plan_enumerator::{enumerate_plans, EnumerationConfig};
+        use super::physical_planner::logical_to_physical;
+
+        let pattern = &match_clause.pattern;
+        if pattern.paths.is_empty() {
+            return Err(ExecutionError::PlanningError("Match pattern has no paths".to_string()));
+        }
+
+        let pg = PatternGraph::from_match_clause(match_clause);
+        let catalog = store.catalog();
+        let config = EnumerationConfig {
+            max_candidate_plans: self.config.max_candidate_plans,
+        };
+
+        let candidates = enumerate_plans(&pg, where_clause, catalog, &config);
+        if candidates.is_empty() {
+            return Err(ExecutionError::PlanningError("No valid plans enumerated".to_string()));
+        }
+
+        // Pick the cheapest plan (first one — already sorted)
+        let (best_plan, _best_cost) = candidates.into_iter().next().unwrap();
+        let physical = logical_to_physical(&best_plan);
+
+        Ok(physical)
     }
 
     fn plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
@@ -2163,5 +2237,188 @@ mod tests {
         let query = parse_query("MATCH (n:Person) WITH n.city AS city, count(n) AS cnt, collect(n.name) AS names RETURN city, cnt, names").unwrap();
         let result = planner.plan(&query, &store);
         assert!(result.is_ok(), "WITH multiple aggregations should plan: {:?}", result.err());
+    }
+
+    // ============================
+    // ADR-015: Graph-native planner integration tests
+    // ============================
+
+    #[test]
+    fn test_planner_config_default() {
+        let config = PlannerConfig::default();
+        assert!(!config.graph_native);
+        assert_eq!(config.max_candidate_plans, 64);
+    }
+
+    #[test]
+    fn test_planner_with_config() {
+        let config = PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 32,
+        };
+        let planner = QueryPlanner::with_config(config);
+        assert!(planner.config().graph_native);
+        assert_eq!(planner.config().max_candidate_plans, 32);
+    }
+
+    #[test]
+    fn test_plan_match_native_simple() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
+
+        let planner = QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        });
+        let query = parse_query("MATCH (n:Person) RETURN n").unwrap();
+        let result = planner.plan(&query, &store);
+        assert!(result.is_ok(), "Graph-native planner should handle simple MATCH: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_plan_match_native_with_expand() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        store.create_edge(a, b, "KNOWS").unwrap();
+
+        let planner = QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        });
+        let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b").unwrap();
+        let result = planner.plan(&query, &store);
+        assert!(result.is_ok(), "Graph-native planner should handle expand: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_ab_correctness_simple_scan() {
+        // A/B test: both planners should produce identical results
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
+        let n2 = store.create_node("Person");
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
+        store.create_node("Company"); // should not appear
+
+        let query = parse_query("MATCH (n:Person) RETURN n.name").unwrap();
+
+        // Legacy planner
+        let legacy = QueryPlanner::new();
+        let legacy_plan = legacy.plan(&query, &store).unwrap();
+        let mut legacy_op = legacy_plan.root;
+        let mut legacy_results = Vec::new();
+        while let Some(record) = legacy_op.next(&store).unwrap() {
+            if let Some(val) = record.get("n.name") {
+                legacy_results.push(format!("{:?}", val));
+            }
+        }
+        legacy_results.sort();
+
+        // Graph-native planner
+        let native = QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        });
+        let native_plan = native.plan(&query, &store).unwrap();
+        let mut native_op = native_plan.root;
+        let mut native_results = Vec::new();
+        while let Some(record) = native_op.next(&store).unwrap() {
+            if let Some(val) = record.get("n.name") {
+                native_results.push(format!("{:?}", val));
+            }
+        }
+        native_results.sort();
+
+        assert_eq!(legacy_results, native_results,
+            "Legacy and native planners must produce identical results.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
+    }
+
+    #[test]
+    fn test_ab_correctness_expand() {
+        // A/B: expand pattern with data
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        store.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
+        let b = store.create_node("Person");
+        store.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
+        let c = store.create_node("Person");
+        store.get_node_mut(c).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, c, "KNOWS").unwrap();
+
+        let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
+
+        let legacy = QueryPlanner::new();
+        let native = QueryPlanner::with_config(PlannerConfig { graph_native: true, max_candidate_plans: 64 });
+
+        let legacy_plan = legacy.plan(&query, &store).unwrap();
+        let native_plan = native.plan(&query, &store).unwrap();
+
+        let mut legacy_results: Vec<String> = Vec::new();
+        let mut op = legacy_plan.root;
+        while let Some(record) = op.next(&store).unwrap() {
+            let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+            let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+            legacy_results.push(format!("{}->{}", a_name, b_name));
+        }
+        legacy_results.sort();
+
+        let mut native_results: Vec<String> = Vec::new();
+        let mut op = native_plan.root;
+        while let Some(record) = op.next(&store).unwrap() {
+            let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+            let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+            native_results.push(format!("{}->{}", a_name, b_name));
+        }
+        native_results.sort();
+
+        assert_eq!(legacy_results, native_results,
+            "Expand results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
+    }
+
+    #[test]
+    fn test_ab_correctness_with_where() {
+        // A/B: MATCH with WHERE filter
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        store.get_node_mut(n1).unwrap().set_property("age", PropertyValue::Integer(25));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
+        let n2 = store.create_node("Person");
+        store.get_node_mut(n2).unwrap().set_property("age", PropertyValue::Integer(35));
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
+        let n3 = store.create_node("Person");
+        store.get_node_mut(n3).unwrap().set_property("age", PropertyValue::Integer(45));
+        store.get_node_mut(n3).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
+
+        let query = parse_query("MATCH (n:Person) WHERE n.age > 30 RETURN n.name").unwrap();
+
+        let legacy = QueryPlanner::new();
+        let native = QueryPlanner::with_config(PlannerConfig { graph_native: true, max_candidate_plans: 64 });
+
+        let legacy_plan = legacy.plan(&query, &store).unwrap();
+        let native_plan = native.plan(&query, &store).unwrap();
+
+        let mut legacy_results: Vec<String> = Vec::new();
+        let mut op = legacy_plan.root;
+        while let Some(record) = op.next(&store).unwrap() {
+            if let Some(val) = record.get("n.name") {
+                legacy_results.push(format!("{:?}", val));
+            }
+        }
+        legacy_results.sort();
+
+        let mut native_results: Vec<String> = Vec::new();
+        let mut op = native_plan.root;
+        while let Some(record) = op.next(&store).unwrap() {
+            if let Some(val) = record.get("n.name") {
+                native_results.push(format!("{:?}", val));
+            }
+        }
+        native_results.sort();
+
+        assert_eq!(legacy_results, native_results,
+            "WHERE filter results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
     }
 }
