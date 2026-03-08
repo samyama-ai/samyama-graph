@@ -4,6 +4,10 @@
   "description": "TypeScript SDK for the Samyama Graph Database",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "node --test dist/tests/*.test.js",
