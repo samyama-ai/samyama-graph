@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -857,6 +857,14 @@ impl QueryPlanner {
                 node_var,
                 score_var,
             )))
+        } else if call_clause.procedure_name == "db.labels" {
+            Ok(Box::new(ShowLabelsOperator::new()))
+        } else if call_clause.procedure_name == "db.relationshipTypes" {
+            Ok(Box::new(ShowRelationshipTypesOperator::new()))
+        } else if call_clause.procedure_name == "db.propertyKeys" {
+            Ok(Box::new(ShowPropertyKeysOperator::new()))
+        } else if call_clause.procedure_name == "db.schema.visualization" {
+            Ok(Box::new(SchemaVisualizationOperator::new()))
         } else if call_clause.procedure_name.starts_with("algo.") {
             Ok(Box::new(AlgorithmOperator::new(
                 call_clause.procedure_name.clone(),

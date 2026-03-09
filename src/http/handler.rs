@@ -1,14 +1,15 @@
 //! HTTP handlers for the Visualizer API
 
 use axum::{
-    extract::{State, Json},
+    extract::{State, Json, Multipart},
     response::IntoResponse,
 };
 use crate::query::Value;
+use crate::graph::PropertyValue;
 use crate::http::server::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap, BTreeSet};
 
 /// Request for executing a Cypher query
 #[derive(Deserialize)]
@@ -157,6 +158,272 @@ pub async fn status_handler(
             "size": state.engine.cache_len(),
         }
     }))
+}
+
+/// Handler for graph schema introspection
+pub async fn schema_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let store_guard = state.store.read().await;
+
+    let stats = store_guard.compute_statistics();
+    let mut node_types = Vec::new();
+    for label in store_guard.all_labels() {
+        let count = store_guard.label_node_count(label);
+        let mut properties = BTreeMap::new();
+        for ((l, prop), _pstats) in &stats.property_stats {
+            if l == label {
+                let nodes = store_guard.get_nodes_by_label(label);
+                let mut prop_type = "Unknown".to_string();
+                for node in nodes.iter().take(1) {
+                    if let Some(val) = node.properties.get(prop) {
+                        prop_type = match val {
+                            PropertyValue::String(_) => "String",
+                            PropertyValue::Integer(_) => "Integer",
+                            PropertyValue::Float(_) => "Float",
+                            PropertyValue::Boolean(_) => "Boolean",
+                            PropertyValue::Vector(_) => "Vector",
+                            _ => "Unknown",
+                        }.to_string();
+                    }
+                }
+                properties.insert(prop.clone(), prop_type);
+            }
+        }
+        node_types.push(json!({
+            "label": label.as_str(),
+            "count": count,
+            "properties": properties,
+        }));
+    }
+
+    let mut edge_types = Vec::new();
+    for edge_type in store_guard.all_edge_types() {
+        let count = store_guard.edge_type_count(edge_type);
+        let edges = store_guard.get_edges_by_type(edge_type);
+        let mut source_labels = BTreeSet::new();
+        let mut target_labels = BTreeSet::new();
+        let mut edge_props = BTreeMap::new();
+
+        for edge in edges.iter().take(1000) {
+            if let Some(src) = store_guard.get_node(edge.source) {
+                for l in &src.labels {
+                    source_labels.insert(l.as_str().to_string());
+                }
+            }
+            if let Some(tgt) = store_guard.get_node(edge.target) {
+                for l in &tgt.labels {
+                    target_labels.insert(l.as_str().to_string());
+                }
+            }
+            for (k, v) in &edge.properties {
+                edge_props.entry(k.clone()).or_insert_with(|| {
+                    match v {
+                        PropertyValue::String(_) => "String".to_string(),
+                        PropertyValue::Integer(_) => "Integer".to_string(),
+                        PropertyValue::Float(_) => "Float".to_string(),
+                        PropertyValue::Boolean(_) => "Boolean".to_string(),
+                        _ => "Unknown".to_string(),
+                    }
+                });
+            }
+        }
+
+        edge_types.push(json!({
+            "type": edge_type.as_str(),
+            "count": count,
+            "source_labels": source_labels.into_iter().collect::<Vec<_>>(),
+            "target_labels": target_labels.into_iter().collect::<Vec<_>>(),
+            "properties": edge_props,
+        }));
+    }
+
+    let index_list = store_guard.property_index.list_indexes();
+    let indexes: Vec<_> = index_list.iter().map(|(l, p)| {
+        json!({ "label": l.as_str(), "property": p, "type": "BTREE" })
+    }).collect();
+
+    let constraint_list = store_guard.property_index.list_constraints();
+    let constraints: Vec<_> = constraint_list.iter().map(|(l, p)| {
+        json!({ "label": l.as_str(), "property": p, "type": "UNIQUE" })
+    }).collect();
+
+    Json(json!({
+        "node_types": node_types,
+        "edge_types": edge_types,
+        "indexes": indexes,
+        "constraints": constraints,
+        "statistics": {
+            "total_nodes": stats.total_nodes,
+            "total_edges": stats.total_edges,
+            "avg_out_degree": stats.avg_out_degree,
+        }
+    }))
+}
+
+/// Handler for CSV file upload and import
+pub async fn import_csv_handler(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut csv_data: Option<String> = None;
+    let mut label = String::new();
+    let mut id_column: Option<String> = None;
+    let mut delimiter = b',';
+
+    loop {
+        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> = multipart.next_field().await;
+        match field_result {
+            Ok(Some(field)) => {
+                let name = field.name().unwrap_or("").to_string();
+                match name.as_str() {
+                    "file" => {
+                        match field.text().await {
+                            Ok(text) => csv_data = Some(text),
+                            Err(e) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Failed to read file: {}", e) }))).into_response(),
+                        }
+                    }
+                    "label" => {
+                        if let Ok(text) = field.text().await {
+                            label = text;
+                        }
+                    }
+                    "id_column" => {
+                        if let Ok(text) = field.text().await {
+                            id_column = Some(text);
+                        }
+                    }
+                    "delimiter" => {
+                        if let Ok(text) = field.text().await {
+                            if let Some(&ch) = text.as_bytes().first() {
+                                delimiter = ch;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    let csv_text = match csv_data {
+        Some(data) => data,
+        None => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "No file field in multipart request" }))).into_response(),
+    };
+
+    if label.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
+    }
+
+    let mut lines = csv_text.lines();
+    let header_line = match lines.next() {
+        Some(h) => h,
+        None => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Empty CSV file" }))).into_response(),
+    };
+
+    let headers: Vec<&str> = header_line.split(delimiter as char).collect();
+    let id_col_idx = id_column.as_ref().and_then(|id_col| headers.iter().position(|h| h.trim() == id_col.as_str()));
+
+    let mut store_guard = state.store.write().await;
+    let mut count = 0usize;
+    let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
+
+    for line in lines {
+        if line.trim().is_empty() { continue; }
+        let fields: Vec<&str> = line.split(delimiter as char).collect();
+
+        let node_id = store_guard.create_node(label.as_str());
+
+        if let Some(idx) = id_col_idx {
+            if let Some(val) = fields.get(idx) {
+                id_map.insert(val.trim().to_string(), node_id);
+            }
+        }
+
+        if let Some(node) = store_guard.get_node_mut(node_id) {
+            for (i, header) in headers.iter().enumerate() {
+                if let Some(value) = fields.get(i) {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() { continue; }
+
+                    let prop_val = if let Ok(int_val) = trimmed.parse::<i64>() {
+                        PropertyValue::Integer(int_val)
+                    } else if let Ok(float_val) = trimmed.parse::<f64>() {
+                        PropertyValue::Float(float_val)
+                    } else if trimmed.eq_ignore_ascii_case("true") {
+                        PropertyValue::Boolean(true)
+                    } else if trimmed.eq_ignore_ascii_case("false") {
+                        PropertyValue::Boolean(false)
+                    } else {
+                        PropertyValue::String(trimmed.to_string())
+                    };
+
+                    node.set_property(header.trim(), prop_val);
+                }
+            }
+        }
+        count += 1;
+    }
+
+    Json(json!({
+        "status": "ok",
+        "nodes_created": count,
+        "label": label,
+        "columns": headers.iter().map(|h| h.trim()).collect::<Vec<_>>(),
+    })).into_response()
+}
+
+/// Request for JSON import
+#[derive(Deserialize)]
+pub struct JsonImportRequest {
+    pub label: String,
+    pub nodes: Vec<serde_json::Value>,
+}
+
+/// Handler for JSON node import
+pub async fn import_json_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<JsonImportRequest>,
+) -> impl IntoResponse {
+    if payload.label.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
+    }
+
+    let mut store_guard = state.store.write().await;
+    let mut count = 0usize;
+
+    for node_json in &payload.nodes {
+        let node_id = store_guard.create_node(payload.label.as_str());
+
+        if let (Some(node), Some(obj)) = (store_guard.get_node_mut(node_id), node_json.as_object()) {
+            for (key, val) in obj {
+                let prop_val = match val {
+                    serde_json::Value::String(s) => PropertyValue::String(s.clone()),
+                    serde_json::Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            PropertyValue::Integer(i)
+                        } else if let Some(f) = n.as_f64() {
+                            PropertyValue::Float(f)
+                        } else {
+                            continue;
+                        }
+                    }
+                    serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
+                    _ => continue,
+                };
+                node.set_property(key, prop_val);
+            }
+        }
+        count += 1;
+    }
+
+    Json(json!({
+        "status": "ok",
+        "nodes_created": count,
+        "label": payload.label,
+    })).into_response()
 }
 
 #[cfg(test)]

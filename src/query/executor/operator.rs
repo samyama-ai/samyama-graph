@@ -3994,6 +3994,190 @@ impl PhysicalOperator for ShowConstraintsOperator {
     }
 }
 
+/// Show labels operator: CALL db.labels()
+pub struct ShowLabelsOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl ShowLabelsOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for ShowLabelsOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let mut labels: Vec<String> = store.all_labels().iter().map(|l| l.as_str().to_string()).collect();
+            labels.sort();
+            let mut records = Vec::new();
+            for label in labels {
+                let mut record = Record::new();
+                record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
+                records.push(record);
+            }
+            self.results = Some(records.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "ShowLabels".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Show relationship types operator: CALL db.relationshipTypes()
+pub struct ShowRelationshipTypesOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl ShowRelationshipTypesOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for ShowRelationshipTypesOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let mut types: Vec<String> = store.all_edge_types().iter().map(|t| t.as_str().to_string()).collect();
+            types.sort();
+            let mut records = Vec::new();
+            for edge_type in types {
+                let mut record = Record::new();
+                record.bind("relationshipType".to_string(), Value::Property(PropertyValue::String(edge_type)));
+                records.push(record);
+            }
+            self.results = Some(records.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "ShowRelationshipTypes".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Show property keys operator: CALL db.propertyKeys()
+pub struct ShowPropertyKeysOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl ShowPropertyKeysOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for ShowPropertyKeysOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let mut keys = std::collections::BTreeSet::new();
+            let stats = store.compute_statistics();
+            for ((_, prop), _) in &stats.property_stats {
+                keys.insert(prop.clone());
+            }
+            for edge_type in store.all_edge_types() {
+                let edges = store.get_edges_by_type(edge_type);
+                for edge in edges.iter().take(1000) {
+                    for key in edge.properties.keys() {
+                        keys.insert(key.clone());
+                    }
+                }
+            }
+            let mut records = Vec::new();
+            for key in keys {
+                let mut record = Record::new();
+                record.bind("propertyKey".to_string(), Value::Property(PropertyValue::String(key)));
+                records.push(record);
+            }
+            self.results = Some(records.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "ShowPropertyKeys".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Schema visualization operator: CALL db.schema.visualization()
+pub struct SchemaVisualizationOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl SchemaVisualizationOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl PhysicalOperator for SchemaVisualizationOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let mut seen = std::collections::HashSet::new();
+            let mut records = Vec::new();
+            for edge_type in store.all_edge_types() {
+                let edges = store.get_edges_by_type(edge_type);
+                for edge in edges.iter().take(1000) {
+                    if let (Some(src_node), Some(tgt_node)) = (store.get_node(edge.source), store.get_node(edge.target)) {
+                        for src_label in &src_node.labels {
+                            for tgt_label in &tgt_node.labels {
+                                let key = format!("{}|{}|{}", src_label.as_str(), edge_type.as_str(), tgt_label.as_str());
+                                if seen.insert(key) {
+                                    let mut record = Record::new();
+                                    record.bind("source_label".to_string(), Value::Property(PropertyValue::String(src_label.as_str().to_string())));
+                                    record.bind("relationship_type".to_string(), Value::Property(PropertyValue::String(edge_type.as_str().to_string())));
+                                    record.bind("target_label".to_string(), Value::Property(PropertyValue::String(tgt_label.as_str().to_string())));
+                                    records.push(record);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.results = Some(records.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "SchemaVisualization".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Create edge operator: CREATE (a)-[:KNOWS]->(b)
 pub struct CreateEdgeOperator {
     /// Input operator (provides source/target nodes from MATCH)

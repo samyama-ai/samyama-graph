@@ -55,7 +55,7 @@ rio_xml = "0.8"            # RDF/XML parser/serializer
 spargebra = "0.3"          # SPARQL 1.1 parser
 sparesults = "0.2"         # SPARQL results formats
 # HTTP server (for SPARQL endpoint and Visualizer)
-axum = "0.7"               # HTTP framework for SPARQL endpoint
+axum = { version = "0.7", features = ["multipart"] }  # HTTP framework
 tower = { version = "0.5", features = ["util"] }  # Middleware
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 http-body-util = "0.1"     # Body utilities for HTTP testing

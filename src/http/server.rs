@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use super::handler::{query_handler, status_handler};
+use super::handler::{query_handler, status_handler, schema_handler, import_csv_handler, import_json_handler};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -58,6 +58,9 @@ impl HttpServer {
             .route("/", get(static_handler))
             .route("/api/query", post(query_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/schema", get(schema_handler))
+            .route("/api/import/csv", post(import_csv_handler))
+            .route("/api/import/json", post(import_json_handler))
             .layer(CorsLayer::permissive())
             .with_state(state);
 
