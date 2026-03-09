@@ -1,4 +1,11 @@
-import type { QueryResult, ServerStatus, ClientOptions } from "./types";
+import type {
+  QueryResult,
+  ServerStatus,
+  ClientOptions,
+  GraphSchema,
+  CsvImportResult,
+  JsonImportResult,
+} from "./types";
 import { HttpTransport } from "./http-client";
 
 const DEFAULT_URL = "http://localhost:8080";
@@ -16,6 +23,14 @@ const DEFAULT_URL = "http://localhost:8080";
  * // Query data
  * const result = await client.queryReadonly("MATCH (n:Person) RETURN n.name");
  * console.log(result.records);
+ *
+ * // Schema introspection
+ * const schema = await client.schema();
+ * console.log(schema.node_types);
+ *
+ * // EXPLAIN / PROFILE
+ * const plan = await client.explain("MATCH (n:Person) RETURN n");
+ * const profile = await client.profile("MATCH (n:Person) RETURN n");
  * ```
  */
 export class SamyamaClient {
@@ -44,6 +59,28 @@ export class SamyamaClient {
     return this.http.query(cypher);
   }
 
+  /**
+   * Return the EXPLAIN plan for a Cypher query without executing it.
+   * Returns the plan as text rows in the QueryResult records.
+   */
+  async explain(cypher: string): Promise<QueryResult> {
+    const prefixed = cypher.trimStart().toUpperCase().startsWith("EXPLAIN")
+      ? cypher
+      : `EXPLAIN ${cypher}`;
+    return this.http.query(prefixed);
+  }
+
+  /**
+   * Execute a Cypher query with PROFILE instrumentation.
+   * Returns plan text with actual row counts and timing per operator.
+   */
+  async profile(cypher: string): Promise<QueryResult> {
+    const prefixed = cypher.trimStart().toUpperCase().startsWith("PROFILE")
+      ? cypher
+      : `PROFILE ${cypher}`;
+    return this.http.query(prefixed);
+  }
+
   /** Delete a graph (executes MATCH (n) DELETE n) */
   async deleteGraph(_graph: string = "default"): Promise<void> {
     await this.http.query("MATCH (n) DELETE n");
@@ -57,6 +94,37 @@ export class SamyamaClient {
   /** Get server status */
   async status(): Promise<ServerStatus> {
     return this.http.status();
+  }
+
+  /** Get graph schema (node types, edge types, indexes, constraints, statistics) */
+  async schema(): Promise<GraphSchema> {
+    return this.http.schema();
+  }
+
+  /**
+   * Import nodes from CSV content.
+   * @param csvContent - Raw CSV string (first row = headers)
+   * @param label - Node label to assign
+   * @param options - Optional: idColumn, delimiter
+   */
+  async importCsv(
+    csvContent: string,
+    label: string,
+    options?: { idColumn?: string; delimiter?: string },
+  ): Promise<CsvImportResult> {
+    return this.http.importCsv(csvContent, label, options);
+  }
+
+  /**
+   * Import nodes from JSON objects.
+   * @param label - Node label to assign
+   * @param nodes - Array of objects, each becoming a node
+   */
+  async importJson(
+    label: string,
+    nodes: Record<string, unknown>[],
+  ): Promise<JsonImportResult> {
+    return this.http.importJson(label, nodes);
   }
 
   /** Ping the server */

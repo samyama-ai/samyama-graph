@@ -7,4 +7,11 @@ export type {
   ServerStatus,
   ErrorResponse,
   ClientOptions,
+  GraphSchema,
+  NodeType,
+  EdgeType,
+  IndexInfo,
+  ConstraintInfo,
+  CsvImportResult,
+  JsonImportResult,
 } from "./types";
