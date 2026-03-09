@@ -58,6 +58,101 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/schema:
+    get:
+      operationId: getSchema
+      summary: Get graph schema
+      description: |
+        Returns the full schema of the graph database including node types with
+        property keys/types, edge types with source/target labels, indexes,
+        constraints, and basic statistics.
+      responses:
+        '200':
+          description: Graph schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaResponse'
+
+  /api/import/csv:
+    post:
+      operationId: importCsv
+      summary: Import nodes from CSV
+      description: |
+        Upload a CSV file to create nodes. The first row is treated as column headers
+        (property names). Each subsequent row creates one node with the specified label.
+        Property types are auto-detected (integer → float → boolean → string).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+                - label
+              properties:
+                file:
+                  type: string
+                  description: CSV file content
+                label:
+                  type: string
+                  description: Node label to assign to all created nodes
+                id_column:
+                  type: string
+                  description: Column to use as node ID mapping (optional)
+                delimiter:
+                  type: string
+                  description: "CSV delimiter character (default: ',')"
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsvImportResponse'
+        '400':
+          description: Import error (missing fields, parse error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/import/json:
+    post:
+      operationId: importJson
+      summary: Import nodes from JSON
+      description: |
+        Create nodes from an array of JSON objects. Each object becomes one node
+        with the specified label. Object keys become property names; values must be
+        string, number, or boolean (other types are silently skipped).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonImportRequest'
+            example:
+              label: Person
+              nodes:
+                - name: Alice
+                  age: 30
+                - name: Bob
+                  age: 25
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonImportResponse'
+        '400':
+          description: Import error (missing label, invalid data)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/status:
     get:
       operationId: getStatus
@@ -173,6 +268,120 @@ components:
             edges:
               type: integer
               description: Number of edges in the graph
+
+    SchemaResponse:
+      type: object
+      properties:
+        node_types:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              count:
+                type: integer
+              properties:
+                type: object
+                additionalProperties:
+                  type: string
+                  description: "Property type: String, Integer, Float, Boolean, Vector, Unknown"
+        edge_types:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              count:
+                type: integer
+              source_labels:
+                type: array
+                items:
+                  type: string
+              target_labels:
+                type: array
+                items:
+                  type: string
+              properties:
+                type: object
+                additionalProperties:
+                  type: string
+        indexes:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              property:
+                type: string
+              type:
+                type: string
+        constraints:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              property:
+                type: string
+              type:
+                type: string
+        statistics:
+          type: object
+          properties:
+            total_nodes:
+              type: integer
+            total_edges:
+              type: integer
+            avg_out_degree:
+              type: number
+
+    JsonImportRequest:
+      type: object
+      required:
+        - label
+        - nodes
+      properties:
+        label:
+          type: string
+          description: Node label to assign to all created nodes
+        nodes:
+          type: array
+          description: Array of JSON objects, each becoming a node
+          items:
+            type: object
+            additionalProperties: true
+
+    CsvImportResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          examples:
+            - ok
+        nodes_created:
+          type: integer
+        label:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
+
+    JsonImportResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          examples:
+            - ok
+        nodes_created:
+          type: integer
+        label:
+          type: string
 
     ErrorResponse:
       type: object
