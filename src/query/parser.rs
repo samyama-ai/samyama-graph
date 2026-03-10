@@ -1,6 +1,61 @@
-//! OpenCypher query parser using Pest
+//! # OpenCypher Parser: PEG Grammar + Pratt Precedence
 //!
-//! Implements REQ-CYPHER-001, REQ-CYPHER-002
+//! This module transforms a Cypher query string into an `ast::Query` tree. It combines
+//! two parsing techniques:
+//!
+//! ## PEG (Parsing Expression Grammar)
+//!
+//! Unlike context-free grammars (CFGs) used by traditional parser generators (yacc, bison,
+//! ANTLR), **PEGs** use an **ordered choice** operator (`/`). When a PEG rule offers
+//! alternatives `A / B / C`, the parser tries `A` first; if `A` matches, `B` and `C` are
+//! never attempted. This makes PEGs **inherently unambiguous** -- there is always exactly
+//! one parse tree for any input. CFGs, by contrast, can be ambiguous (the classic
+//! "dangling else" problem), requiring precedence annotations or grammar refactoring.
+//!
+//! ## Pest: Rust's PEG Parser Generator
+//!
+//! [Pest](https://pest.rs) reads a `.pest` grammar file ([`cypher.pest`](cypher.pest)) and
+//! generates a parser at compile time using a proc macro (`#[derive(Parser)]`). The grammar
+//! defines rules like `match_clause`, `expression`, `variable`, etc. Pest produces a
+//! `Pairs` iterator of matched spans, which this module walks to construct AST nodes.
+//!
+//! ## Atomic Rules and Keyword Boundaries (ADR-013)
+//!
+//! In Pest, non-atomic rules (`rule = { ... }`) insert **implicit whitespace** between
+//! sequence elements. This is convenient for most grammar rules but dangerous for keyword
+//! detection. Consider: `rule = { ^"AND" ~ !(ASCII_ALPHA) }`. The implicit whitespace
+//! rule consumes the space after "AND", and then the negative lookahead sees the next
+//! identifier character and *fails* -- the keyword is not recognized.
+//!
+//! The fix is **atomic rules** (`rule = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }`).
+//! The `@` prefix disables implicit whitespace, so the lookahead fires immediately after
+//! the keyword text, before any space is consumed. This is critical for operators like
+//! `AND`, `OR`, `NOT`, `IN`, `CONTAINS`, and `STARTS WITH`.
+//!
+//! ## Pratt Parsing for Operator Precedence
+//!
+//! Expressions like `1 + 2 * 3` require **operator precedence** to parse correctly (the
+//! multiplication binds tighter than addition). This module uses Pest's built-in
+//! **Pratt parser**, an algorithm invented by Vaughan Pratt in 1973. Each operator is
+//! assigned a **binding power** (precedence level). The parser recursively consumes tokens,
+//! comparing binding powers to decide whether to "shift" (absorb the next operator) or
+//! "reduce" (close the current sub-expression). The result is correct associativity and
+//! precedence without rewriting the grammar into layers of precedence rules.
+//!
+//! The precedence levels (lowest to highest) are:
+//! 1. `OR`
+//! 2. `AND`
+//! 3. `IN`, comparisons (`=`, `<>`, `<`, `>`, `<=`, `>=`)
+//! 4. Addition/subtraction (`+`, `-`)
+//! 5. Multiplication/division/modulo (`*`, `/`, `%`)
+//!
+//! ## `LazyLock`: Thread-Safe One-Time Initialization
+//!
+//! The `PRATT_PARSER` static is initialized using [`std::sync::LazyLock`], Rust's
+//! built-in "once cell" pattern (stabilized in Rust 1.80). `LazyLock` guarantees that
+//! the closure runs **exactly once**, even under concurrent access from multiple threads.
+//! This avoids rebuilding the Pratt parser on every query while remaining thread-safe
+//! without explicit locking.
 
 use crate::graph::{EdgeType, Label, PropertyValue};
 use crate::query::ast::*;

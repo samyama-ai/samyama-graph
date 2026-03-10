@@ -269,7 +269,7 @@ pub struct AutoEmbedConfig {
     pub chunk_overlap: usize,
     /// Vector dimension size
     pub vector_dimension: usize,
-    /// Embedding policies: Label -> Vec<PropertyKey>
+    /// Embedding policies: Label -> `Vec<PropertyKey>`
     pub embedding_policies: HashMap<String, Vec<String>>,
 }
 

@@ -1,6 +1,78 @@
-//! In-memory graph storage implementation
+//! # In-Memory Graph Storage -- Adjacency Lists, Indices, and Statistics
 //!
-//! Implements:
+//! [`GraphStore`] is the central data structure of the Samyama graph engine. It
+//! holds all nodes, edges, indices, and metadata in memory, optimized for the
+//! access patterns of a graph query engine.
+//!
+//! ## Why adjacency lists, not adjacency matrices?
+//!
+//! An adjacency matrix for V vertices requires O(V^2) space and O(V) time to
+//! find a node's neighbors. Real-world graphs are overwhelmingly **sparse** --
+//! a social network with 1 million users might have 100 million edges, but a
+//! matrix would need 10^12 cells. Adjacency lists use O(V + E) space and give
+//! O(degree) neighbor iteration -- a far better fit.
+//!
+//! ## Arena allocation with MVCC versioning
+//!
+//! Nodes and edges are stored in `Vec<Vec<T>>` structures (arena allocation).
+//! The outer `Vec` is indexed by entity ID (acting as a dense array), and the
+//! inner `Vec` holds successive **MVCC versions** of that entity. This layout
+//! gives O(1) lookup by ID (direct indexing, no hash computation), excellent
+//! cache locality for sequential scans, and natural support for snapshot reads
+//! at any historical version. This is similar to how PostgreSQL stores tuple
+//! versions in heap pages, but without the overhead of disk I/O.
+//!
+//! ## Sorted adjacency lists and `edge_between()`
+//!
+//! The `outgoing` and `incoming` adjacency lists store `Vec<(NodeId, EdgeId)>`
+//! tuples **sorted by NodeId**. This enables `edge_between(a, b)` to use
+//! **binary search** with O(log d) complexity (where d = degree of the node),
+//! which is critical for the `ExpandIntoOperator` that checks edge existence
+//! between two already-bound nodes in triangle-pattern queries.
+//!
+//! ## Secondary indices: label and edge-type
+//!
+//! `label_index: HashMap<Label, HashSet<NodeId>>` and
+//! `edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>` act as secondary
+//! indices, analogous to B-tree indices in an RDBMS. When a Cypher query
+//! specifies `MATCH (n:Person)`, the engine looks up the `Person` entry in
+//! `label_index` and scans only matching nodes, avoiding a full table scan.
+//! We use `HashMap` (not `BTreeMap`) because we only need equality lookups
+//! on labels, not range scans.
+//!
+//! ## ColumnStore integration (late materialization)
+//!
+//! `node_columns` and `edge_columns` provide **columnar storage** for
+//! frequently accessed properties. In the traditional row store (`PropertyMap`
+//! on each node), reading one property from 1000 nodes touches 1000 scattered
+//! `HashMap`s. The columnar store groups all values of the same property
+//! contiguously, enabling vectorized reads and better CPU cache utilization.
+//! The query engine uses **late materialization**: scan operators produce
+//! lightweight `Value::NodeRef(id)` references instead of cloning full nodes,
+//! and properties are resolved on demand from the column store.
+//!
+//! ## GraphStatistics for cost-based optimization
+//!
+//! The query planner uses [`GraphStatistics`] to estimate the cardinality
+//! (number of rows) at each stage of a query plan, choosing the plan with
+//! the lowest estimated cost. See the struct documentation for details.
+//!
+//! ## Key Rust patterns
+//!
+//! - **`Vec<Vec<T>>` arena**: dense ID-indexed storage avoids HashMap overhead;
+//!   inner Vec holds MVCC versions.
+//! - **`HashMap` vs `BTreeMap`**: `HashMap` is used for indices because we need
+//!   O(1) point lookups (label equality), not ordered iteration. `BTreeMap`
+//!   would add an unnecessary O(log n) factor.
+//! - **`Arc`**: `vector_index` and `property_index` are wrapped in `Arc`
+//!   (atomic reference counting) for shared ownership across the query engine
+//!   and background index-maintenance tasks.
+//! - **`thiserror`**: the [`GraphError`] enum uses the `thiserror` crate's
+//!   derive macro to auto-generate `Display` and `Error` implementations,
+//!   reducing boilerplate for error types.
+//!
+//! ## Requirements coverage
+//!
 //! - REQ-GRAPH-001: Property graph data model
 //! - REQ-MEM-001: In-memory storage
 //! - REQ-MEM-003: Memory-optimized data structures
@@ -63,7 +135,35 @@ pub enum GraphError {
 
 pub type GraphResult<T> = Result<T, GraphError>;
 
-/// Statistics about graph contents for cost-based query optimization
+/// Statistics about graph contents for **cost-based query optimization**.
+///
+/// # What is cardinality estimation?
+///
+/// Every query plan is a tree of operators (scan, filter, join, sort, ...).
+/// The query planner must choose among many possible orderings of these
+/// operators. To compare plans, it estimates the **cardinality** (number of
+/// rows) flowing through each operator. For example, if `:Person` has 10,000
+/// nodes and `:Company` has 500, the planner should scan `:Company` first in
+/// a join -- fewer rows means less work at every subsequent stage.
+///
+/// # How selectivity works
+///
+/// **Selectivity** is the probability that a predicate evaluates to `true`
+/// for a randomly chosen row. A selectivity of 0.01 on a 10,000-row scan
+/// means the filter will pass approximately 100 rows. Selectivity is
+/// estimated as `1 / distinct_count` for equality predicates (assuming a
+/// uniform distribution). The `null_fraction` is subtracted before
+/// estimation because NULL values never match equality predicates.
+///
+/// # Sampling approach for property stats
+///
+/// Computing exact statistics for every property on every label would be
+/// expensive in a large graph. Instead, `compute_statistics()` samples the
+/// first 1,000 nodes per label and extrapolates `distinct_count`,
+/// `null_fraction`, and `selectivity`. This is similar to PostgreSQL's
+/// `ANALYZE` command, which samples a configurable fraction of each table.
+/// The trade-off is speed vs. accuracy -- sampling may miss rare values,
+/// but is sufficient for plan selection in practice.
 #[derive(Debug, Clone)]
 pub struct GraphStatistics {
     /// Total number of nodes
@@ -136,14 +236,29 @@ impl GraphStatistics {
     }
 }
 
-/// In-memory graph storage
+/// In-memory graph storage engine.
 ///
-/// Uses hash maps for O(1) lookup performance:
-/// - nodes: NodeId -> Node
-/// - edges: EdgeId -> Edge
-/// - outgoing: NodeId -> Vec<EdgeId> (adjacency list for outgoing edges)
-/// - incoming: NodeId -> Vec<EdgeId> (adjacency list for incoming edges)
-/// - label_index: Label -> Vec<NodeId> (index for fast label lookups)
+/// `GraphStore` is the authoritative source of truth for all graph data.
+/// Its data structure layout is designed for the access patterns of a
+/// Cypher query engine:
+///
+/// | Field | Type | Purpose | Lookup cost |
+/// |---|---|---|---|
+/// | `nodes` | `Vec<Vec<Node>>` | Arena-allocated node versions, indexed by `NodeId` | O(1) |
+/// | `edges` | `Vec<Vec<Edge>>` | Arena-allocated edge versions, indexed by `EdgeId` | O(1) |
+/// | `outgoing` | `Vec<Vec<(NodeId, EdgeId)>>` | Sorted adjacency list per node (outgoing) | O(log d) binary search |
+/// | `incoming` | `Vec<Vec<(NodeId, EdgeId)>>` | Sorted adjacency list per node (incoming) | O(log d) binary search |
+/// | `label_index` | `HashMap<Label, HashSet<NodeId>>` | Secondary index: label -> node set | O(1) lookup, O(n) scan |
+/// | `edge_type_index` | `HashMap<EdgeType, HashSet<EdgeId>>` | Secondary index: type -> edge set | O(1) lookup, O(n) scan |
+/// | `node_columns` | `ColumnStore` | Columnar property storage for late materialization | O(1) per cell |
+/// | `catalog` | `GraphCatalog` | Triple-level statistics for graph-native planning (ADR-015) | O(1) |
+///
+/// The `free_node_ids` / `free_edge_ids` vectors enable **ID reuse** after
+/// deletions, avoiding unbounded growth of the arena vectors.
+///
+/// Thread safety: `GraphStore` is not `Sync` by itself. Concurrent access
+/// is managed by the server layer, which wraps it in `Arc<RwLock<GraphStore>>`
+/// for shared-nothing read parallelism with exclusive write access.
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])

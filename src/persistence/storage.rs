@@ -1,7 +1,38 @@
-//! RocksDB storage layer implementation
+//! # RocksDB Storage Layer
 //!
-//! Implements REQ-PERSIST-001 (Persistence to disk) using RocksDB
-//! Implements REQ-TENANT-002 (Data isolation) using column families
+//! ## Column families
+//!
+//! RocksDB column families are like separate "namespaces" within one database instance.
+//! Each column family has its own memtable, SSTable files, and compaction settings. In
+//! Samyama, each tenant gets a dedicated column family, providing data isolation without
+//! the overhead of separate database instances.
+//!
+//! ## Key encoding
+//!
+//! Keys are tenant-prefixed (e.g., `tenant:node:123`, `tenant:edge:456`) so that even
+//! within a column family, data is logically partitioned. This encoding ensures tenants
+//! cannot accidentally read each other's data and enables efficient prefix scans for
+//! tenant-specific queries.
+//!
+//! ## Serialization
+//!
+//! Rust structs (nodes, edges, properties) are serialized to bytes using `bincode` — a
+//! compact binary format that is significantly faster and smaller than JSON. The trade-off
+//! is that bincode is not human-readable, but for internal storage this is the right choice.
+//!
+//! ## Write buffer tuning
+//!
+//! RocksDB's write buffer (memtable) accumulates writes in memory before flushing to disk
+//! as sorted SSTable files. Larger write buffers batch more writes per flush, improving
+//! throughput but using more memory. The default is typically 64MB per column family.
+//!
+//! ## Rust concept: `Arc<T>`
+//!
+//! `Arc` (Atomic Reference Counting) enables shared ownership across threads. Multiple
+//! parts of the system (server, query executor, persistence manager) hold `Arc` references
+//! to the same storage instance. The reference count is updated atomically, and the storage
+//! is dropped only when the last reference goes away. This is Rust's safe alternative to
+//! shared pointers in C++.
 
 use crate::graph::{Edge, EdgeId, Node, NodeId, PropertyMap};
 use rocksdb::{ColumnFamilyDescriptor, Options, DB};

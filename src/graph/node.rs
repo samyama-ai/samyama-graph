@@ -1,6 +1,38 @@
-//! Node implementation for property graph
+//! # Node Implementation -- Multi-Label Vertices with MVCC Versioning
 //!
-//! Implements:
+//! A [`Node`] is the fundamental entity in the property graph. Unlike a row in a
+//! relational database -- which belongs to exactly one table -- a graph node can
+//! carry **multiple labels** simultaneously (e.g., a node can be both `:Person`
+//! and `:Employee`). This is stored as a `HashSet<Label>`, giving O(1)
+//! membership checks when the query engine filters by label.
+//!
+//! ## Schema-free properties
+//!
+//! Each node owns a [`PropertyMap`] (`HashMap<String, PropertyValue>`) that acts
+//! as a schema-free attribute store. Any node can have any set of properties
+//! regardless of its labels -- there is no rigid column schema to satisfy. This
+//! flexibility is one of the key advantages of graph databases over RDBMS for
+//! heterogeneous, evolving data models.
+//!
+//! ## MVCC (Multi-Version Concurrency Control)
+//!
+//! Each node carries a `version: u64` field that is incremented on mutation.
+//! In the storage layer ([`GraphStore`](super::store::GraphStore)), nodes are
+//! stored in a `Vec<Vec<Node>>` arena where the inner `Vec` holds successive
+//! versions of the same node. This enables **snapshot isolation**: a reader
+//! operating at version V sees only node versions <= V, and is never blocked by
+//! a concurrent writer creating version V+1. MVCC is the same concurrency
+//! strategy used by PostgreSQL, Oracle, and most modern databases.
+//!
+//! ## Identity semantics
+//!
+//! `PartialEq` and `Hash` are implemented on `id` alone (not properties or
+//! labels). Two `Node` values with the same `NodeId` are considered equal
+//! regardless of their other fields -- this is consistent with graph database
+//! semantics where identity is determined by the node's unique identifier.
+//!
+//! ## Requirements coverage
+//!
 //! - REQ-GRAPH-002: Nodes with labels
 //! - REQ-GRAPH-004: Properties on nodes
 //! - REQ-GRAPH-006: Multiple labels per node

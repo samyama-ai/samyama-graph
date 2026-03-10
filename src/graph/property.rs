@@ -1,4 +1,63 @@
-//! Property value types for graph nodes and edges
+//! # Property Value Types -- Schema-Free, Dynamically Typed Properties
+//!
+//! This module defines [`PropertyValue`], the dynamic type system that allows
+//! nodes and edges to carry arbitrary key-value properties without a fixed schema.
+//!
+//! ## Type systems in databases
+//!
+//! Relational databases enforce a rigid schema: every row in a table must have
+//! the same columns with the same types. Graph databases take a **schema-free**
+//! (or schema-optional) approach -- any node can have any set of properties,
+//! and two nodes with the same label may have entirely different property keys.
+//! This flexibility is modeled in Rust via an `enum` (algebraic data type) where
+//! each variant represents a different value type.
+//!
+//! ## Algebraic data types (tagged unions)
+//!
+//! Rust's `enum` is a **tagged union** (also called a *sum type* or *discriminated
+//! union*). Unlike C's `union`, which is unsafe because the programmer must track
+//! which variant is active, Rust's enum carries a hidden discriminant tag and the
+//! compiler enforces exhaustive `match` -- you cannot forget to handle a variant.
+//! This makes `PropertyValue` both type-safe and extensible: adding a new variant
+//! (e.g., `Duration`) causes a compiler error at every unhandled `match` site.
+//!
+//! ## Three-valued logic (3VL) and NULL semantics
+//!
+//! The `Null` variant follows SQL/Cypher NULL semantics, which implement
+//! **three-valued logic**: NULL represents an *unknown* value, not an *empty* one.
+//! Under 3VL, `NULL = NULL` evaluates to NULL (not `true`), `NULL <> 5` evaluates
+//! to NULL (not `true`), and `NULL AND true` evaluates to NULL. This propagation
+//! of unknowns through expressions is critical for correct query evaluation and
+//! is one of the most common sources of bugs in database applications.
+//!
+//! ## Type coercion
+//!
+//! The query engine performs **implicit type coercion** (widening) when comparing
+//! values of different numeric types: an `Integer(i64)` is promoted to `Float(f64)`
+//! for comparison with a `Float`. String-to-number and boolean conversions are
+//! also supported via explicit functions (`toInteger()`, `toFloat()`, `toString()`).
+//! This mirrors the behavior of OpenCypher and SQL CAST operations.
+//!
+//! ## `PartialOrd` vs `Ord`
+//!
+//! IEEE 754 floating-point numbers are only `PartialOrd` because `NaN != NaN`
+//! and `NaN` is incomparable with every value. However, databases need a **total
+//! ordering** for `ORDER BY` and indexing. This module implements `Ord` by using
+//! `f64::total_cmp()`, which defines a total order where `-0.0 < +0.0` and `NaN`
+//! sorts after all other values. `PartialOrd` delegates to `Ord` so the two are
+//! always consistent.
+//!
+//! ## Hashing floats (`Hash` for `f64`)
+//!
+//! Hashing floating-point values is notoriously tricky because IEEE 754 has
+//! multiple bit representations for the same logical value (`+0.0` and `-0.0`
+//! compare equal but have different bits, while `NaN != NaN` but may have
+//! identical bits). The `to_bits()` approach used here converts the `f64` to
+//! its raw `u64` bit pattern and hashes that. This is correct for use with our
+//! `Eq` implementation (derived `PartialEq` compares variant-by-variant) because
+//! we treat each bit pattern as distinct. The discriminant tag (0, 1, 2, ...)
+//! hashed before each value prevents cross-type collisions (e.g., `Integer(42)`
+//! vs `String("42")`).
 //!
 //! Implements REQ-GRAPH-005: Support for multiple property data types
 
@@ -16,9 +75,9 @@ use std::cmp::Ordering;
 /// - Float (f64)
 /// - Boolean
 /// - DateTime (as i64 timestamp)
-/// - Array (Vec<PropertyValue>)
+/// - Array (`Vec<PropertyValue>`)
 /// - Map (HashMap<String, PropertyValue>)
-/// - Vector (Vec<f32>) for AI/Vector search
+/// - Vector (`Vec<f32>`) for AI/Vector search
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PropertyValue {
     String(String),

@@ -1,9 +1,40 @@
-//! Persistence layer for Samyama Graph Database
+//! # Persistence Layer
 //!
-//! Implements Phase 3 requirements:
-//! - REQ-PERSIST-001: Persistence to disk using RocksDB
-//! - REQ-PERSIST-002: Write-Ahead Logging (WAL) for durability
-//! - REQ-TENANT-001 through REQ-TENANT-008: Multi-tenancy with resource isolation
+//! ## ACID guarantees
+//!
+//! Database persistence is built around the ACID properties:
+//! - **Atomicity**: operations either fully complete or fully roll back — no partial writes
+//! - **Consistency**: the database always moves from one valid state to another
+//! - **Isolation**: concurrent transactions don't interfere with each other
+//! - **Durability**: once a write is committed, it survives crashes and power loss
+//!
+//! ## Write-Ahead Log (WAL)
+//!
+//! The WAL is the standard technique for durability. The idea: write the operation to a
+//! sequential log file BEFORE modifying the actual data. If the process crashes mid-write,
+//! the log can be replayed on recovery to reconstruct the correct state. This same pattern
+//! is used by PostgreSQL, SQLite, and RocksDB internally.
+//!
+//! ## RocksDB
+//!
+//! RocksDB is Facebook's embedded key-value store, evolved from Google's LevelDB. It uses
+//! an LSM-tree (Log-Structured Merge-tree) architecture optimized for write-heavy workloads:
+//! writes go to an in-memory buffer (memtable), which periodically flushes to sorted disk
+//! files (SSTables) that are compacted in the background. Column families provide logical
+//! separation within a single database instance — each is an independent LSM-tree.
+//!
+//! ## Multi-tenancy
+//!
+//! Multiple isolated "tenants" share one database process. Each tenant gets its own RocksDB
+//! column family (like a namespace), ensuring data isolation. Resource quotas (max nodes,
+//! max edges, storage limits) prevent any single tenant from monopolizing shared resources.
+//!
+//! ## PersistenceManager
+//!
+//! The `PersistenceManager` orchestrates WAL + RocksDB + TenantManager. All writes flow
+//! through the WAL first (for durability), then to RocksDB (for indexed storage). On
+//! startup, any WAL entries written after the last checkpoint are replayed to bring the
+//! in-memory graph state up to date.
 
 pub mod storage;
 pub mod tenant;

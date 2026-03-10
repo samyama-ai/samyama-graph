@@ -1,6 +1,37 @@
-//! Edge implementation for property graph
+//! # Edge Implementation -- Directed, Typed Relationships in a Multigraph
 //!
-//! Implements:
+//! An [`Edge`] represents a **directed relationship** between two nodes. In graph
+//! theory, a directed edge (also called an *arc*) `(u, v)` is distinct from `(v, u)` --
+//! the edge has a source and a target, establishing an asymmetric relationship.
+//! For example, `(Alice)-[:FOLLOWS]->(Bob)` does not imply `(Bob)-[:FOLLOWS]->(Alice)`.
+//!
+//! ## Edge types as first-class citizens
+//!
+//! Every edge carries an [`EdgeType`] (e.g., `"KNOWS"`,
+//! `"WORKS_AT"`, `"PURCHASED"`) that classifies the relationship. This is analogous
+//! to labels on nodes but for relationships. The type is used by the query engine
+//! to filter traversals: `MATCH (a)-[:KNOWS]->(b)` only follows edges of type `KNOWS`.
+//! Edge types are indexed in [`GraphStore`](super::store::GraphStore) via a secondary
+//! `HashMap<EdgeType, HashSet<EdgeId>>` for fast type-filtered scans.
+//!
+//! ## Multigraph semantics
+//!
+//! Samyama supports **multigraphs**: multiple edges can exist between the same pair
+//! of nodes, even with the same type. This contrasts with a **simple graph**, which
+//! allows at most one edge between any pair. Multigraph support is essential for
+//! real-world modeling -- for instance, a person may have multiple financial
+//! transactions with the same counterparty, or multiple flights between the same
+//! airports. Each edge has a unique [`EdgeId`], so they remain
+//! individually addressable.
+//!
+//! ## MVCC and identity
+//!
+//! Like nodes, edges carry a `version: u64` for MVCC concurrency control, and
+//! `PartialEq`/`Hash` are defined on `id` alone -- two edges with the same ID
+//! are considered equal regardless of other fields.
+//!
+//! ## Requirements coverage
+//!
 //! - REQ-GRAPH-003: Edges with types
 //! - REQ-GRAPH-004: Properties on edges
 //! - REQ-GRAPH-007: Directed edges

@@ -1,68 +1,89 @@
-//! Samyama Graph Database
+//! # Samyama Graph Database
 //!
-//! A high-performance, distributed graph database with OpenCypher query support,
-//! Redis protocol compatibility, and multi-tenancy.
+//! A high-performance graph database written in Rust with ~90% OpenCypher query support,
+//! RESP (Redis protocol) compatibility, multi-tenancy, HNSW vector search, natural language
+//! queries, and graph algorithms. Currently at v0.6.0.
 //!
-//! # Architecture
+//! ## How a Graph Database Works
 //!
-//! This implementation follows the Architecture Decision Records (ADRs):
-//! - ADR-001: Rust for memory safety and performance
-//! - ADR-002: RocksDB for persistence (future)
-//! - ADR-003: RESP protocol for Redis compatibility (future)
-//! - ADR-005: Cap'n Proto for serialization (future)
-//! - ADR-006: Tokio for async runtime (future)
+//! Unlike relational databases (PostgreSQL, MySQL) that store data in tables with rows and
+//! columns, a graph database stores data as **nodes** (entities) and **edges** (relationships).
+//! This model is natural for connected data: social networks, knowledge graphs, fraud detection.
 //!
-//! # Requirements Implemented
+//! ```text
+//! Relational:                          Graph:
+//! ┌──────────┐  ┌──────────────┐       (Alice)──KNOWS──>(Bob)
+//! │ persons  │  │ friendships  │          │                │
+//! │──────────│  │──────────────│       WORKS_AT        WORKS_AT
+//! │ id│ name │  │ from │ to   │          │                │
+//! │ 1 │Alice │  │  1   │  2   │       (Acme)           (Globex)
+//! │ 2 │ Bob  │  │  2   │  3   │
+//! └──────────┘  └──────────────┘
+//! ```
 //!
-//! ## Phase 1 - Core Features (Current)
+//! The key advantage: traversing relationships is O(1) per hop (follow a pointer) instead of
+//! O(n log n) per JOIN in SQL. This is called **index-free adjacency**.
 //!
-//! - ✅ REQ-GRAPH-001: Property graph data model
-//! - ✅ REQ-GRAPH-002: Nodes with labels
-//! - ✅ REQ-GRAPH-003: Edges with types
-//! - ✅ REQ-GRAPH-004: Properties on nodes and edges
-//! - ✅ REQ-GRAPH-005: Multiple property data types
-//! - ✅ REQ-GRAPH-006: Multiple labels per node
-//! - ✅ REQ-GRAPH-007: Directed edges
-//! - ✅ REQ-GRAPH-008: Multiple edges between nodes
-//! - ✅ REQ-MEM-001: In-memory storage
-//! - ✅ REQ-MEM-003: Memory-optimized data structures
+//! ## Architecture Overview
 //!
-//! ## Phase 2 - Query Engine & RESP Protocol (Current)
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                    Client Layer                         │
+//! │   RESP (Redis)         HTTP/REST         SDK (Rust/TS)  │
+//! ├─────────────────────────────────────────────────────────┤
+//! │                  Query Pipeline                         │
+//! │   Cypher Text ──> PEG Parser ──> AST ──> Planner ──>   │
+//! │   ──> Physical Operators (Volcano Model) ──> Results   │
+//! ├─────────────────────────────────────────────────────────┤
+//! │                  Storage Layer                          │
+//! │   In-Memory GraphStore    RocksDB Persistence    WAL   │
+//! │   Vec<Vec<Node>> arena    Column families        fsync  │
+//! │   Adjacency lists         Tenant isolation       CRC32  │
+//! ├─────────────────────────────────────────────────────────┤
+//! │                  Extensions                             │
+//! │   HNSW Vector Search   Graph Algorithms   NLQ (LLM)    │
+//! │   Raft Consensus       Multi-Tenancy      Agentic AI   │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
 //!
-//! - ✅ REQ-CYPHER-001: OpenCypher query language
-//! - ✅ REQ-CYPHER-002: Pattern matching
-//! - ✅ REQ-CYPHER-007: WHERE clauses
-//! - ✅ REQ-CYPHER-008: ORDER BY and LIMIT
-//! - ✅ REQ-CYPHER-009: Query optimization
-//! - ✅ REQ-REDIS-001: RESP protocol implementation
-//! - ✅ REQ-REDIS-002: Redis client connections
-//! - ✅ REQ-REDIS-004: Redis-compatible graph commands
-//! - ✅ REQ-REDIS-006: Redis client library compatibility
+//! ## Key Design Decisions (ADRs)
 //!
-//! ## Phase 3 - Persistence & Multi-Tenancy (Complete)
+//! - **ADR-007 Volcano Iterator Model**: query operators are lazy, pull-based iterators.
+//!   Each operator's `next()` pulls one record at a time from its child — composable and
+//!   memory-efficient (no intermediate materialization).
+//! - **ADR-012 Late Materialization**: scan operators produce `NodeRef(id)` (8 bytes) instead
+//!   of cloning full nodes. Properties are resolved on-demand. This reduces memory bandwidth
+//!   during traversals by ~60%.
+//! - **ADR-013 Atomic Keyword Rules**: PEG grammar uses atomic rules (`@{}`) for keywords
+//!   to prevent implicit whitespace consumption before word-boundary checks.
+//! - **ADR-015 Graph-Native Planning**: cost-based query optimizer using triple-level statistics
+//!   for cardinality estimation and join ordering.
 //!
-//! - ✅ REQ-PERSIST-001: RocksDB persistence
-//! - ✅ REQ-PERSIST-002: Write-Ahead Logging
-//! - ✅ REQ-TENANT-001 through REQ-TENANT-008: Multi-tenancy with resource quotas
+//! ## Modules
 //!
-//! ## Phase 4 - High Availability (Complete)
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`graph`] | Property graph data model (nodes, edges, properties, adjacency lists) |
+//! | [`query`] | OpenCypher parser, AST, planner, and Volcano execution engine |
+//! | [`protocol`] | RESP (Redis) wire protocol for client compatibility |
+//! | [`persistence`] | RocksDB storage, WAL, and multi-tenant isolation |
+//! | [`raft`] | Raft consensus for high availability (leader election, log replication) |
+//! | [`vector`] | HNSW approximate nearest neighbor search for vector embeddings |
+//! | [`algo`] | Graph algorithms (PageRank, WCC, SCC, BFS, Dijkstra, etc.) |
+//! | [`nlq`] | Natural language to Cypher translation via LLM providers |
+//! | [`agent`] | Agentic AI enrichment (GAK: Generation-Augmented Knowledge) |
+//! | [`rdf`] | RDF triple store (foundation for SPARQL support) |
 //!
-//! - ✅ REQ-HA-001: Raft consensus protocol
-//! - ✅ REQ-HA-002: Leader election and automatic failover
-//! - ✅ REQ-HA-003: Log replication across cluster nodes
-//! - ✅ REQ-HA-004: Cluster membership management
+//! ## Rust Concepts Used Throughout
 //!
-//! ## Phase 5 - RDF/SPARQL Support (Foundation)
-//!
-//! - ✅ REQ-RDF-001: RDF data model (triples/quads)
-//! - ✅ REQ-RDF-002: RDF triple store with indexing
-//! - ✅ REQ-RDF-004: Named graphs support
-//! - 🚧 REQ-RDF-003: RDF serialization formats (Turtle, RDF/XML, N-Triples, JSON-LD)
-//! - 🚧 REQ-RDF-005: RDFS reasoning
-//! - 🚧 REQ-RDF-006: Property graph ↔ RDF mapping
-//! - 🚧 REQ-SPARQL-001: SPARQL 1.1 query language
-//! - 🚧 REQ-SPARQL-002: SPARQL HTTP protocol
-//! - 🚧 REQ-SPARQL-003: Query forms (SELECT, CONSTRUCT, ASK, DESCRIBE)
+//! - **Ownership & Borrowing**: `QueryExecutor<'a>` borrows `&'a GraphStore` — the compiler
+//!   guarantees no data races without runtime locks for read-only queries.
+//! - **Algebraic Data Types**: `PropertyValue` enum (tagged union) with exhaustive `match` —
+//!   the compiler ensures every variant is handled.
+//! - **Trait Objects**: `Box<dyn PhysicalOperator>` for runtime polymorphism in the operator tree.
+//! - **Zero-Cost Abstractions**: newtype wrappers (`NodeId(u64)`) provide type safety with no
+//!   runtime overhead.
+//! - **Error Handling**: `thiserror` for library errors, `Result<T, E>` instead of exceptions.
 //!
 //! ## Example Usage
 //!

@@ -1,11 +1,70 @@
-//! Abstract Syntax Tree for OpenCypher queries
+//! # Abstract Syntax Tree (AST) for OpenCypher Queries
 //!
-//! Implements REQ-CYPHER-001 through REQ-CYPHER-009
+//! An **Abstract Syntax Tree** is a tree-shaped data structure that represents the
+//! *semantic structure* of source code. It is "abstract" because it discards syntactic
+//! noise that matters to the parser but not to the compiler -- parentheses for grouping,
+//! semicolons, whitespace, and comments are all gone. What remains is a clean hierarchy
+//! of *language constructs*: clauses, patterns, expressions, and literals.
+//!
+//! ## Cypher AST and Graph Patterns
+//!
+//! Cypher's pattern syntax maps naturally to a tree:
+//!
+//! ```text
+//!   (a:Person)-[:KNOWS]->(b:Person)
+//!        |          |          |
+//!   PatternNode  PatternEdge  PatternNode
+//!        \__________|__________/
+//!              PatternPath
+//!                   |
+//!              MatchClause
+//!                   |
+//!                 Query   (root of the tree)
+//! ```
+//!
+//! The [`Query`] struct is the **root node** of every AST. Its fields are all optional
+//! because Cypher allows many clause combinations: `CREATE` without `MATCH`, `MATCH`
+//! without `RETURN`, standalone `MERGE`, and so on. The planner inspects which fields
+//! are populated to decide what execution plan to build.
+//!
+//! ## Recursive Types and `Box<T>` in Rust
+//!
+//! ASTs are inherently recursive -- an `Expression` can contain sub-expressions
+//! (`1 + (2 * 3)`), and a `Query` can contain sub-queries (`CALL { ... }`). Rust
+//! requires every type to have a known size at compile time, but a recursive type like
+//! `Expression { left: Expression, right: Expression }` would be infinitely large.
+//!
+//! The solution is **`Box<T>`** -- a heap-allocated pointer with a fixed size (8 bytes
+//! on 64-bit systems). By writing `Box<Expression>` instead of `Expression`, we break
+//! the infinite-size cycle. The AST nodes in this module use `Box` extensively:
+//! `Box<Expression>` in binary operations, `Box<Query>` in CALL subqueries, and
+//! `Box<WhereClause>` in EXISTS subqueries (the `Option<Box<WhereClause>>` pattern
+//! also breaks a recursive type cycle between `Expression` and `WhereClause`).
 
 use crate::graph::{EdgeType, Label, PropertyValue};
 use std::collections::HashMap;
 
-/// Complete Cypher query representation
+/// The root AST node representing a complete Cypher query.
+///
+/// Every parsed Cypher statement produces exactly one `Query`. Its fields are grouped
+/// into four logical categories:
+///
+/// 1. **Pattern matching**: `match_clauses`, `where_clause`, `post_with_where_clause` --
+///    these define *what* to find in the graph (nodes, edges, paths, filters).
+///
+/// 2. **Mutations**: `create_clause`, `delete_clause`, `set_clauses`, `remove_clauses`,
+///    `merge_clause`, `foreach_clause` -- these modify graph state. When any of these
+///    are present, the planner sets `ExecutionPlan::is_write = true`, which routes
+///    execution through `MutQueryExecutor` (requiring `&mut GraphStore`).
+///
+/// 3. **Projection and ordering**: `return_clause`, `order_by`, `skip`, `limit`,
+///    `with_clause` -- these shape the output (column selection, sorting, pagination).
+///    `WITH` acts as a pipeline barrier: it materializes intermediate results and
+///    introduces a new scope, similar to a subquery in SQL.
+///
+/// 4. **Schema and introspection**: `create_index_clause`, `drop_index_clause`,
+///    `create_constraint_clause`, `show_indexes`, `show_constraints`, `explain`,
+///    `profile` -- these are DDL/DML operations and diagnostic flags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     /// MATCH clauses
@@ -121,7 +180,7 @@ pub struct YieldItem {
     pub alias: Option<String>,
 }
 
-/// MATCH clause: MATCH (n:Person)-[:KNOWS]->(m)
+/// MATCH clause: `MATCH (n:Person)-[:KNOWS]->(m)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchClause {
     /// Pattern to match
@@ -145,10 +204,10 @@ pub enum PathType {
     AllShortest,
 }
 
-/// Path pattern: (n:Person)-[:KNOWS*1..3]->(m:Person)
+/// Path pattern: `(n:Person)-[:KNOWS*1..3]->(m:Person)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathPattern {
-    /// Named path variable (e.g., `p` in `p = (a)-[:KNOWS]->(b)`)
+    /// Named path variable (e.g., `p` in `p = (a)-\[:KNOWS\]->(b)`)
     pub path_variable: Option<String>,
     /// Path type (Normal, Shortest, AllShortest)
     pub path_type: PathType,
@@ -268,7 +327,7 @@ pub enum Expression {
         /// ELSE default
         else_result: Option<Box<Expression>>,
     },
-    /// List/map indexing: expr[index]
+    /// List/map indexing: `expr[index]`
     Index {
         /// Expression being indexed
         expr: Box<Expression>,
@@ -326,7 +385,7 @@ pub enum Expression {
         /// Body expression
         expression: Box<Expression>,
     },
-    /// Pattern comprehension: [(a)-[:REL]->(b) WHERE cond | expr]
+    /// Pattern comprehension: `[(a)-[:REL]->(b) WHERE cond | expr]`
     PatternComprehension {
         /// Pattern to match
         pattern: Pattern,
@@ -474,7 +533,7 @@ pub struct ForeachClause {
     pub create_clauses: Vec<CreateClause>,
 }
 
-/// UNWIND clause: UNWIND [1,2,3] AS x
+/// UNWIND clause: `UNWIND [1,2,3] AS x`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnwindClause {
     /// Expression to unwind (must evaluate to a list)

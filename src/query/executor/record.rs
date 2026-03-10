@@ -1,6 +1,42 @@
-//! Record structures for query execution
+//! # Records: The Data Unit of Query Execution
 //!
-//! Records flow through the Volcano iterator pipeline
+//! A [`Record`] is a set of **variable bindings** -- a mapping from variable names (like
+//! `n`, `r`, `m` in `MATCH (n)-[r]->(m)`) to [`Value`]s. It is the graph-database analog
+//! of a "row" in a relational database, except that columns are named variables rather
+//! than positional indices. Records flow through the Volcano iterator pipeline one at a
+//! time, accumulating bindings as they pass through operators (e.g., `ExpandOperator` adds
+//! the target node binding to an existing record that already contains the source node).
+//!
+//! ## Late Materialization (ADR-012)
+//!
+//! The most important optimization in this module is **late materialization**. Instead of
+//! cloning an entire `Node` (with all its properties, labels, and metadata) when a scan
+//! produces a result, we store only a `Value::NodeRef(id)` -- a 64-bit integer. The full
+//! node data is resolved **on demand** via [`Value::resolve_property(prop, store)`] only
+//! when a property is actually needed (e.g., in a WHERE filter or RETURN projection).
+//!
+//! This matters enormously for traversal queries. Consider `MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)`:
+//! the ExpandOperator traverses through `b` nodes, but if the query only returns `c.name`,
+//! the `b` nodes never need their properties loaded. Late materialization turns what would
+//! be O(n * avg_properties) memory into O(n * 8 bytes).
+//!
+//! ## Semantic Equality: `NodeRef(id) == Node(id, _)`
+//!
+//! The [`Value`] enum has both lazy (`NodeRef`) and materialized (`Node`) variants for the
+//! same logical entity. This creates a subtle correctness requirement: the `JoinOperator`
+//! uses hash-based lookups to match records from two sides of a join. If the left side
+//! produces `NodeRef(42)` and the right side produces `Node(42, <data>)`, they must be
+//! considered **equal** and must produce the **same hash** -- otherwise the join silently
+//! drops valid matches.
+//!
+//! This is why [`PartialEq`] and [`Hash`] are implemented **manually** instead of derived.
+//! The derive macro would compare all fields (including the `Node` data), breaking the
+//! semantic equivalence. The manual implementation compares only the identity (the `NodeId`),
+//! and the hash function uses a discriminant tag (0 for nodes, 1 for edges) plus the ID,
+//! ensuring the **hash consistency invariant**: if `a == b`, then `hash(a) == hash(b)`.
+//!
+//! [`RecordBatch`] is the final output container -- a vector of [`Record`]s plus column
+//! names, returned to the caller after query execution completes.
 
 use crate::graph::{Edge, Node, NodeId, EdgeId, EdgeType, PropertyValue, GraphStore};
 use std::collections::HashMap;
@@ -13,7 +49,27 @@ pub struct Record {
     bindings: HashMap<String, Value>,
 }
 
-/// Value types that can be bound to variables
+/// Value types that can be bound to variables in a query record.
+///
+/// The key design choice here is the **late materialization hierarchy**:
+///
+/// - **`NodeRef(id)`** -- a lazy reference. Stores only the 64-bit `NodeId`. Produced by
+///   scan and expand operators. Extremely cheap to create (no heap allocation, no cloning).
+///   Properties are resolved on demand via `resolve_property(prop, store)`.
+///
+/// - **`Node(id, node)`** -- a fully materialized node. Contains a clone of the `Node`
+///   struct with all labels and properties. Produced by `ProjectOperator` when the RETURN
+///   clause requests `RETURN n` (the entire node), triggering full materialization.
+///
+/// The same lazy/eager split exists for edges: `EdgeRef(id, src, tgt, type)` carries the
+/// structural data (endpoints and type) without property clones, while `Edge(id, edge)`
+/// is fully materialized.
+///
+/// `Property(PropertyValue)` wraps scalar values (strings, integers, floats, booleans,
+/// datetimes, arrays, maps) that result from property access (`n.name`) or literal
+/// expressions. `Path` stores ordered sequences of node/edge IDs for named path patterns
+/// like `p = (a)-[]->(b)`. `Null` represents the absence of a value, following Cypher's
+/// three-valued logic (true/false/null).
 #[derive(Debug, Clone)]
 pub enum Value {
     /// A fully materialized node

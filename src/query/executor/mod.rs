@@ -1,6 +1,80 @@
-//! Query execution engine using Volcano iterator model
+//! # Query Execution Engine: Volcano Iterator Model
 //!
-//! Implements REQ-CYPHER-009 (query optimization) and ADR-007
+//! This module implements query execution using the **Volcano iterator model**, an
+//! architecture invented by Goetz Graefe in the early 1990s that remains the foundation
+//! of nearly every relational and graph database engine today (PostgreSQL, MySQL, Neo4j,
+//! and now Samyama all use it).
+//!
+//! ## How Volcano Works
+//!
+//! An execution plan is a **tree of operators**. Each operator implements a `next()` method
+//! that returns the next [`Record`] (or `None` when exhausted). The root operator pulls
+//! from its child, which pulls from its child, and so on down to the leaf (a scan operator).
+//! Records flow **upward** through the tree, one at a time:
+//!
+//! ```text
+//!   ProjectOperator::next()          ← caller pulls from here
+//!        │
+//!        ├── calls FilterOperator::next()
+//!        │        │
+//!        │        ├── calls ExpandOperator::next()
+//!        │        │        │
+//!        │        │        └── calls NodeScanOperator::next()   ← reads from GraphStore
+//!        │        │                    returns Record { n: NodeRef(42) }
+//!        │        │            returns Record { n: NodeRef(42), m: NodeRef(99) }
+//!        │        │
+//!        │        └── checks WHERE predicate, passes or skips
+//!        │
+//!        └── extracts RETURN columns, materializes NodeRef → Node if needed
+//! ```
+//!
+//! ## Why Volcano?
+//!
+//! - **Composability**: operators are independent building blocks. Adding a new operator
+//!   (say, `UnwindOperator`) requires no changes to existing operators.
+//! - **Memory efficiency**: no intermediate result sets are fully materialized. A
+//!   `MATCH ... WHERE ... RETURN ... LIMIT 10` query can stop after 10 records without
+//!   scanning the entire graph.
+//! - **Pipelining**: records flow through the tree without buffering (except for blocking
+//!   operators like `SortOperator` and `AggregateOperator` which must see all input first).
+//!
+//! ## Physical Operators
+//!
+//! The operator zoo includes:
+//! - **Scans**: `NodeScanOperator`, `IndexScanOperator` -- leaf operators that read from the graph
+//! - **Filters**: `FilterOperator` -- evaluates WHERE predicates
+//! - **Traversal**: `ExpandOperator` (fan-out along edges), `ExpandIntoOperator` (check edge existence between two bound nodes), `ShortestPathOperator`
+//! - **Projection**: `ProjectOperator` -- evaluates RETURN expressions, materializes lazy refs
+//! - **Pagination**: `LimitOperator`, `SkipOperator`
+//! - **Grouping**: `AggregateOperator` (COUNT, SUM, AVG, etc.), `SortOperator`
+//! - **Joins**: `JoinOperator` (hash join), `LeftOuterJoinOperator` (for OPTIONAL MATCH), `CartesianProductOperator`
+//! - **Mutations**: `CreateNodeOperator`, `CreateEdgeOperator`, `DeleteOperator`, `SetPropertyOperator`, `MergeOperator`
+//! - **Misc**: `UnwindOperator`, `ForeachOperator`, `WithBarrierOperator`
+//!
+//! ## Late Materialization (ADR-012)
+//!
+//! Scan operators produce `Value::NodeRef(id)` instead of cloning the full node with all
+//! its properties. Properties are resolved **on demand** via `Value::resolve_property()`.
+//! This is the key performance optimization for traversal-heavy queries: on a 3-hop path
+//! query, most intermediate nodes are never accessed for their properties, so cloning them
+//! would be pure waste.
+//!
+//! ## Read vs Write Execution
+//!
+//! - **[`QueryExecutor`]**: read-only path. Takes `&GraphStore` (shared reference).
+//!   Operators call `next(store)` with an immutable borrow.
+//! - **[`MutQueryExecutor`]**: write path. Takes `&mut GraphStore` (exclusive reference).
+//!   Operators call `next_mut(store)` to create nodes, edges, or modify properties.
+//!
+//! ## Trait Objects: `Box<dyn PhysicalOperator>`
+//!
+//! Each operator has a different Rust type (`NodeScanOperator`, `FilterOperator`, etc.),
+//! but the planner needs to compose them into a tree without knowing the concrete types.
+//! This is where **trait objects** come in: `Box<dyn PhysicalOperator>` erases the concrete
+//! type and dispatches `next()` calls through a vtable (virtual function table), just like
+//! virtual methods in C++ or interface dispatch in Java. This is Rust's mechanism for
+//! **runtime polymorphism** -- the alternative to compile-time generics when you need
+//! heterogeneous collections of operators.
 
 pub mod cost_model;
 pub mod logical_optimizer;

@@ -1,10 +1,45 @@
-//! Raft consensus implementation for high availability
+//! # Raft Consensus for High Availability
 //!
-//! Implements Phase 4 requirements:
-//! - REQ-HA-001: Raft consensus protocol
-//! - REQ-HA-002: Leader election and failover
-//! - REQ-HA-003: Log replication across nodes
-//! - REQ-HA-004: Cluster membership management
+//! ## What is Raft?
+//!
+//! Raft (Ongaro & Ousterhout, 2014) is a distributed consensus algorithm that ensures
+//! all nodes in a cluster agree on the same sequence of operations, even when some nodes
+//! fail or network partitions occur. It was designed to be **understandable** — in contrast
+//! to Paxos, which is mathematically equivalent but notoriously difficult to implement
+//! correctly.
+//!
+//! ## Key concepts
+//!
+//! - **Leader Election**: at any time, one node is the leader and all others are followers.
+//!   If the leader fails, followers detect the timeout and hold an election. A candidate
+//!   needs votes from a majority (quorum) to become the new leader.
+//! - **Log Replication**: the leader receives all write requests, appends them to its log,
+//!   and replicates log entries to followers. An entry is "committed" once a majority of
+//!   nodes have acknowledged it — committed entries are never lost.
+//! - **Safety**: Raft guarantees that if a log entry is committed, it will be present in
+//!   the logs of all future leaders. This is enforced by election restrictions (candidates
+//!   must have all committed entries to win).
+//!
+//! ## Terms
+//!
+//! Terms are Raft's logical clock — monotonically increasing integers that represent
+//! leader epochs. Each term has at most one leader. When a node sees a higher term, it
+//! knows its information is stale and updates. Terms prevent "split brain" scenarios
+//! where two nodes both think they are leader.
+//!
+//! ## Why Raft over Paxos?
+//!
+//! Paxos solves the same problem but is presented as a monolithic protocol. Raft
+//! decomposes consensus into three sub-problems (leader election, log replication, safety)
+//! that can be understood and implemented independently. This decomposition has made Raft
+//! the dominant choice for new distributed systems (etcd, CockroachDB, TiKV).
+//!
+//! ## In Samyama
+//!
+//! All write operations (CREATE, SET, DELETE, MERGE) go through the Raft leader, which
+//! replicates them to followers before committing. Reads can go to any node with relaxed
+//! consistency (may read slightly stale data) or only to the leader for strong consistency.
+//! This module uses the `openraft` crate, a Rust implementation of the Raft protocol.
 
 pub mod node;
 pub mod network;

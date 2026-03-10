@@ -1,4 +1,36 @@
-//! Core type definitions for the graph database
+//! # Core Type Definitions -- Newtype Wrappers for Type Safety
+//!
+//! This module defines the fundamental identifier and label types used throughout
+//! the graph engine. Every type here follows Rust's **newtype pattern**: wrapping
+//! a primitive (`u64` for identifiers, `String` for names) in a single-field
+//! tuple struct.
+//!
+//! ## The newtype pattern
+//!
+//! Without newtypes, a function signature like `fn create_edge(u64, u64, u64)`
+//! is ambiguous -- which argument is the edge ID, which is the source, which is
+//! the target? Newtypes make the compiler reject `create_edge(edge_id, target, source)`
+//! when the signature expects `(EdgeId, NodeId, NodeId)`. This is a **zero-cost
+//! abstraction**: the Rust compiler erases the wrapper at compile time, generating
+//! the same machine code as if you had used raw `u64` values directly.
+//!
+//! ## `Display` vs `Debug`
+//!
+//! Each type implements both traits, serving different audiences:
+//! - [`Display`](std::fmt::Display) (`{}`) produces user-facing output
+//!   (e.g., `"NodeId(42)"`), used in error messages and query results.
+//! - [`Debug`](std::fmt::Debug) (`{:?}`) produces programmer-facing output
+//!   with full structural detail, used in logs, test failures, and `dbg!()`.
+//!
+//! The `#[derive(Debug)]` attribute auto-generates `Debug`; we implement
+//! `Display` manually to control the format.
+//!
+//! ## Derived traits
+//!
+//! All types derive `Clone`, `Copy` (identifiers are trivially copyable since
+//! they are just `u64`), `PartialEq`, `Eq`, `Hash` (for use as `HashMap` keys),
+//! `PartialOrd`, `Ord` (for sorted adjacency lists and `BTreeMap` usage),
+//! and `Serialize`/`Deserialize` (for persistence and network transport).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

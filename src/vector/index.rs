@@ -1,7 +1,48 @@
-//! Vector index implementation using HNSW
+//! # HNSW Vector Index Implementation
 //!
-//! This module provides a wrapper around the hnsw_rs library for
-//! high-performance approximate nearest neighbor search.
+//! ## How HNSW works
+//!
+//! HNSW (Hierarchical Navigable Small World) builds a proximity graph with multiple
+//! layers. Each node is assigned a random maximum layer (exponentially distributed —
+//! most nodes live only on layer 0, few reach the top). Insertion connects the new
+//! point to its nearest neighbors on each layer. Search starts at the top layer's
+//! entry point and greedily descends, refining the candidate set at each level.
+//!
+//! ## Key parameters
+//!
+//! - **`m`** (max connections per node): Controls graph density. Higher m = better recall
+//!   but more memory and slower insertion. Typical values: 12-48. Layer 0 uses `2*m`
+//!   connections.
+//! - **`ef_construction`** (search width during insertion): How many candidates to
+//!   consider when connecting a new node. Higher = better graph quality but slower build.
+//!   Typical values: 100-400.
+//! - **`ef_search`** (search width during query): How many candidates to track during
+//!   search. Higher = better recall but slower queries. Must be >= k (number of results).
+//!   This is the main recall-vs-speed knob at query time.
+//!
+//! ## Distance trait
+//!
+//! Rust's trait system enables polymorphic distance computation. The `hnsw_rs` crate
+//! defines a `Distance<T>` trait, and this module implements it with `CosineDistance`
+//! and `InnerProductDistance` structs. This allows the same HNSW data structure to work
+//! with different distance metrics without runtime dispatch overhead (monomorphization).
+//!
+//! ## Cosine distance formula
+//!
+//! `cosine_distance(a, b) = 1 - (a . b) / (||a|| * ||b||)`
+//!
+//! This measures angular distance between vectors:
+//! - **0** = identical direction (parallel vectors)
+//! - **1** = orthogonal (perpendicular, no similarity)
+//! - **2** = opposite direction (anti-correlated)
+//!
+//! ## Persistence strategy
+//!
+//! HNSW indices (from `hnsw_rs`) don't expose an iterator over stored vectors.
+//! To support persistence, all inserted vectors are also stored in a `Vec<StoredVector>`
+//! alongside the HNSW structure. On serialization, this vector list is saved via
+//! `bincode`. On load, a fresh HNSW index is constructed and all stored vectors are
+//! re-inserted. This trades load-time speed for implementation simplicity.
 
 use crate::graph::NodeId;
 use hnsw_rs::prelude::*;

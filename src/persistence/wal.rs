@@ -1,6 +1,42 @@
-//! Write-Ahead Log (WAL) implementation
+//! # Write-Ahead Log (WAL)
 //!
-//! Implements REQ-PERSIST-002 (Write-Ahead Logging for durability)
+//! ## Core theory
+//!
+//! The fundamental insight behind WAL is that **sequential writes are fast** (especially
+//! on SSDs and spinning disks), while random writes are slow. By appending each operation
+//! to a log file before modifying the in-memory data structures, we get durability without
+//! expensive random I/O. If the process crashes after writing to the log but before
+//! updating the main data, we can reconstruct the correct state from the log.
+//!
+//! ## Recovery
+//!
+//! On startup, the WAL is scanned from the beginning (or from the last checkpoint).
+//! Each entry is replayed against the in-memory graph to reconstruct state. Checkpoints
+//! record a "safe point" — all data before the checkpoint is known to be persisted to
+//! RocksDB, so the WAL can be truncated to prevent unbounded growth.
+//!
+//! ## CRC32 checksums
+//!
+//! Each WAL record includes a CRC32 checksum computed over its payload. This detects
+//! corruption from hardware errors (bit flips in storage or memory). During recovery,
+//! if a checksum mismatch is found, the corrupt entry is detected and skipped — this
+//! is safer than silently applying corrupted data.
+//!
+//! ## Sequence numbers
+//!
+//! Every WAL entry gets a monotonically increasing sequence number. These provide a
+//! total ordering of operations, which is essential for exactly-once replay during
+//! recovery (skip entries already applied) and for coordinating with checkpoints.
+//!
+//! ## Sync modes
+//!
+//! There is a fundamental trade-off between durability and performance:
+//! - **`fsync` after every write**: guarantees the data is on stable storage, but each
+//!   fsync can take 1-10ms (limits throughput to ~100-1000 writes/sec)
+//! - **Buffered writes**: the OS may cache writes in its page cache, risking loss of
+//!   the most recent writes on crash, but achieving much higher throughput
+//!
+//! Most databases offer both modes and let users choose based on their requirements.
 
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};

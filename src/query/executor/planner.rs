@@ -1,6 +1,59 @@
-//! Query planner - converts AST to execution plan
+//! # Query Planner: From Declarative Query to Imperative Execution
 //!
-//! Implements basic query optimization (REQ-CYPHER-009)
+//! The planner is the heart of the query engine. It transforms a **declarative** query
+//! ("find all people who know Alice") into an **imperative** execution plan ("scan Person
+//! nodes, expand along KNOWS edges, filter where name = 'Alice'"). This transformation is
+//! the most important optimization opportunity in any database -- the same query can have
+//! dozens of valid execution plans, and the best one can be orders of magnitude faster
+//! than the worst.
+//!
+//! ## Cost-Based Optimization (ADR-015)
+//!
+//! Like PostgreSQL, MySQL, and other mature databases, Samyama uses **cost-based
+//! optimization**. The planner:
+//! 1. **Enumerates** candidate plans (different join orders, scan strategies, traversal
+//!    directions)
+//! 2. **Estimates** the cost of each plan using **cardinality estimation** -- statistical
+//!    models that predict how many records each operator will produce (e.g., "there are
+//!    10,000 Person nodes, 0.1% have name = 'Alice', so an equality filter produces ~10
+//!    records")
+//! 3. **Picks** the cheapest plan
+//!
+//! The statistics come from [`GraphStore::compute_statistics()`] which samples property
+//! distributions, counts labels, and measures average degree.
+//!
+//! ## Key Optimization Techniques
+//!
+//! - **Predicate pushdown**: move WHERE filters as close to the scan as possible. Filtering
+//!   1 million nodes down to 100 *before* expanding edges is vastly cheaper than expanding
+//!   all edges and filtering afterward.
+//! - **Index selection**: when a WHERE clause matches an indexed property (`WHERE n.email = $x`
+//!   and an index exists on `:Person(email)`), use `IndexScanOperator` instead of
+//!   `NodeScanOperator + FilterOperator`. This turns O(n) scans into O(log n) lookups.
+//! - **Join ordering**: for multi-pattern MATCH clauses, the order in which patterns are
+//!   joined matters enormously. Joining a 10-row result with a 1M-row result is fast;
+//!   joining two 1M-row results is catastrophic.
+//! - **Early LIMIT propagation**: push LIMIT down into the operator tree so that scans
+//!   stop after producing enough records.
+//!
+//! ## Plan Cache
+//!
+//! Planning is not free -- enumerating plans and computing cost estimates takes time. For
+//! repeated queries (common in applications), the planner caches planning metadata (index
+//! hints, cost estimates) keyed by a hash of the query string. A **generation counter**
+//! (`AtomicU64`) is incremented on schema changes (CREATE INDEX, DROP INDEX) to invalidate
+//! stale cache entries. This uses `AtomicU64` with `Ordering::Relaxed` because exact
+//! ordering is not required -- a stale read just causes one extra re-plan.
+//!
+//! ## Rust Concepts
+//!
+//! - **`Mutex<HashMap<u64, PlanCacheEntry>>`**: the plan cache is shared across threads
+//!   (the query engine is `Send + Sync`). `Mutex` provides mutual exclusion -- only one
+//!   thread can read/write the cache at a time. `HashMap<u64, _>` uses a pre-computed hash
+//!   of the query string as the key.
+//! - **`AtomicU64`**: a lock-free atomic integer for the generation counter. Atomics are
+//!   cheaper than mutexes for simple counters because they use CPU-level atomic instructions
+//!   (e.g., `LOCK CMPXCHG` on x86) instead of OS-level locks.
 
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
@@ -14,7 +67,19 @@ use crate::query::executor::{
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
 
-/// Execution plan - a tree of physical operators
+/// An execution plan: a tree of physical operators ready to execute.
+///
+/// The `root` field holds the top-level operator (typically a `ProjectOperator` or
+/// `LimitOperator`). Calling `root.next(store)` begins the Volcano pull-based execution,
+/// cascading `next()` calls down the operator tree until a leaf scan produces a record.
+///
+/// `output_columns` lists the variable names that appear in the RETURN clause, used to
+/// construct the final `RecordBatch` column headers.
+///
+/// `is_write` distinguishes read plans from write plans. When `true`, the executor must
+/// use `next_mut(&mut store)` instead of `next(&store)`, and the caller must hold an
+/// exclusive (`&mut`) reference to the `GraphStore`. This flag is set by the planner
+/// when it encounters CREATE, DELETE, SET, MERGE, or schema-modification clauses.
 pub struct ExecutionPlan {
     /// Root operator
     pub root: OperatorBox,

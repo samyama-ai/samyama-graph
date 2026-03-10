@@ -1,6 +1,68 @@
-//! Physical operators for query execution (Volcano iterator model)
+//! Physical operators for query execution using the Volcano iterator model.
 //!
-//! Implements ADR-007 (Volcano Iterator Model)
+//! # Volcano Iterator Model (ADR-007)
+//!
+//! The Volcano model (Goetz Graefe, 1990s) is the dominant query execution paradigm in
+//! relational and graph databases. Each operator implements a `next()` method that returns
+//! one record at a time, pulling from child operators on demand. This creates a pipeline
+//! where data flows from leaf operators (scans) up through filters, joins, and projections
+//! to the root operator that produces final results.
+//!
+//! # Physical Operators
+//!
+//! | Operator | Description |
+//! |---|---|
+//! | `NodeScanOperator` | Scans all nodes matching a label (like a table scan in SQL) |
+//! | `IndexScanOperator` | Uses a B-tree index to find nodes matching a predicate |
+//! | `FilterOperator` | Evaluates a WHERE predicate, discarding non-matching records |
+//! | `ExpandOperator` | Traverses edges from bound nodes to discover neighbors (graph-native; no SQL equivalent without expensive JOINs) |
+//! | `ExpandIntoOperator` | Checks if an edge exists between two already-bound nodes (a semi-join) |
+//! | `ProjectOperator` | Evaluates RETURN expressions, materializing `NodeRef` → `Node` for output |
+//! | `LimitOperator` / `SkipOperator` | LIMIT and SKIP clauses |
+//! | `SortOperator` | ORDER BY with multi-key comparison |
+//! | `AggregateOperator` | GROUP BY + aggregation functions (count, sum, avg, min, max, collect) |
+//! | `JoinOperator` | Hash join for multi-pattern MATCH queries |
+//! | `LeftOuterJoinOperator` | For OPTIONAL MATCH (preserves unmatched left rows with NULLs) |
+//! | `CartesianProductOperator` | Cross product for disconnected patterns |
+//! | `UnwindOperator` | Expands arrays into individual rows |
+//! | `MergeOperator` | MERGE (upsert): CREATE if not exists, otherwise match |
+//! | `ShortestPathOperator` | BFS/Dijkstra for `shortestPath()` function |
+//! | `VectorSearchOperator` | HNSW approximate nearest neighbor search |
+//! | `AlgorithmOperator` | Runs graph algorithms (PageRank, WCC, SCC, etc.) |
+//! | DDL operators | `CreateIndex`, `DropIndex`, `CreateConstraint`, `ShowIndexes`, etc. |
+//!
+//! # Expression Evaluation
+//!
+//! The `eval_expression()` function recursively evaluates AST expressions against a record.
+//! It handles property access (`n.name`), arithmetic (`a + b`), comparisons (`a > b`),
+//! boolean logic (`AND`/`OR`/`NOT`), function calls (`toUpper()`, `count()`), CASE
+//! expressions, list operations, and more.
+//!
+//! # Type Coercion and NULL Propagation
+//!
+//! Integer/Float automatic promotion (widening), String concatenation via `+`, and NULL
+//! propagation following three-valued logic: any operation involving NULL returns NULL,
+//! except `IS NULL` / `IS NOT NULL`.
+//!
+//! # Late Materialization
+//!
+//! Operators work with `Value::NodeRef(id)` instead of full `Value::Node(id, clone)`.
+//! Property access goes through `resolve_property()`, which looks up the property from
+//! the [`GraphStore`] on demand. Full materialization only happens at `ProjectOperator`
+//! when the query returns a node variable. See ADR-012.
+//!
+//! # Metaheuristic Optimization Solvers
+//!
+//! `AlgorithmOperator` integrates 16 solvers from `samyama-optimization` (Jaya, Rao,
+//! TLBO, Firefly, Cuckoo, GWO, GA, SA, Bat, ABC, GSA, NSGA2, MOTLBO, HS, FPA) for
+//! solving continuous optimization problems within graph queries.
+//!
+//! # Rust Patterns
+//!
+//! - `Box<dyn PhysicalOperator>` — dynamic dispatch via trait objects for operator trees
+//! - `&GraphStore` — lifetime-bounded borrow of the graph during execution
+//! - `HashMap` — build phase of hash joins in `JoinOperator`
+//! - `BTreeSet` — sorted unique results where ordering matters
 
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
 use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
@@ -460,7 +522,7 @@ fn eval_reduce(
     Ok(acc)
 }
 
-/// Evaluate pattern comprehension: [(a)-[:REL]->(b) | expr]
+/// Evaluate pattern comprehension: `[(a)-[:REL]->(b) | expr]`
 fn eval_pattern_comprehension(
     pattern: &Pattern,
     filter: Option<&Expression>,
@@ -1937,7 +1999,7 @@ impl PhysicalOperator for FilterOperator {
     }
 }
 
-/// Expand operator: -[:KNOWS]->
+/// Expand operator: `-[:KNOWS]->`
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -4178,7 +4240,7 @@ impl PhysicalOperator for SchemaVisualizationOperator {
     }
 }
 
-/// Create edge operator: CREATE (a)-[:KNOWS]->(b)
+/// Create edge operator: `CREATE (a)-[:KNOWS]->(b)`
 pub struct CreateEdgeOperator {
     /// Input operator (provides source/target nodes from MATCH)
     input: Option<OperatorBox>,
@@ -4287,7 +4349,7 @@ impl PhysicalOperator for CreateEdgeOperator {
 }
 
 /// Combined operator for CREATE patterns with both nodes and edges
-/// Example: CREATE (a:Person)-[:KNOWS]->(b:Person)
+/// Example: `CREATE (a:Person)-[:KNOWS]->(b:Person)`
 /// This operator first creates all nodes, then creates edges between them
 pub struct CreateNodesAndEdgesOperator {
     /// Node creation operator
@@ -4406,7 +4468,7 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 }
 
 /// Operator for MATCH...CREATE queries
-/// Example: MATCH (a:Trial {id: 'NCT001'}), (b:Condition {mesh_id: 'D001'}) CREATE (a)-[:STUDIES]->(b)
+/// Example: `MATCH (a:Trial {id: 'NCT001'}), (b:Condition {mesh_id: 'D001'}) CREATE (a)-[:STUDIES]->(b)`
 /// This operator takes matched nodes and creates edges between them
 pub struct MatchCreateEdgeOperator {
     /// Input operator (MATCH results)

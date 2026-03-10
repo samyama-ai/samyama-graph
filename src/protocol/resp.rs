@@ -1,7 +1,37 @@
-//! RESP (Redis Serialization Protocol) implementation
+//! # RESP3 Encoder/Decoder
 //!
-//! Implements REQ-REDIS-001 (RESP protocol support)
-//! Based on RESP3 specification: https://redis.io/docs/reference/protocol-spec/
+//! ## RESP3 encoding and decoding
+//!
+//! The protocol uses `\r\n` (CRLF) as line terminators. Each message starts with a type
+//! byte (`+` for simple strings, `-` for errors, `:` for integers, `$` for bulk strings,
+//! `*` for arrays, `_` for null). The decoder reads the type byte, then parses the
+//! remainder according to the type-specific format.
+//!
+//! ## State machine parsing
+//!
+//! Messages arrive as byte streams over TCP. A single logical message may be split across
+//! multiple TCP packets (fragmentation), or multiple messages may arrive in one packet
+//! (pipelining). The `decode()` function handles this by returning:
+//! - `Ok(Some(value))` — a complete message was parsed and consumed from the buffer
+//! - `Ok(None)` — not enough data yet; the caller should buffer more bytes and retry
+//! - `Err(...)` — the data is malformed
+//!
+//! This pattern is standard in async network programming and integrates with Tokio's
+//! codec framework.
+//!
+//! ## `BytesMut` from the `bytes` crate
+//!
+//! `BytesMut` is a mutable byte buffer optimized for network I/O. Unlike `Vec<u8>`, it
+//! supports zero-copy slicing (`split_to()` returns the consumed bytes without copying)
+//! and efficient prepending. It is the standard buffer type in the Tokio ecosystem for
+//! reading from and writing to sockets.
+//!
+//! ## Rust concept: the `Buf` trait
+//!
+//! The `Buf` trait (from the `bytes` crate) abstracts over "a buffer with a read cursor."
+//! Methods like `chunk()` return the readable bytes, and `advance(n)` moves the cursor
+//! forward without copying data. This enables efficient sequential reads through a buffer,
+//! which is exactly what a protocol parser needs.
 
 use bytes::{Buf, BytesMut};
 use std::io::{self, Write};

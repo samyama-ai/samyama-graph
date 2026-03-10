@@ -1,14 +1,73 @@
-//! Query processing module
+//! # Query Processing Pipeline
 //!
-//! Implements OpenCypher query language support:
-//! - REQ-CYPHER-001: OpenCypher query language
-//! - REQ-CYPHER-002: Pattern matching
-//! - REQ-CYPHER-003: CRUD operations
-//! - REQ-CYPHER-007: WHERE clauses
-//! - REQ-CYPHER-008: ORDER BY and LIMIT
-//! - REQ-CYPHER-009: Query optimization
+//! This module implements the full **query processing pipeline** for Samyama's OpenCypher
+//! dialect, following the same staged architecture used by virtually every database engine
+//! and compiler:
 //!
-//! Architecture follows ADR-007 (Volcano Iterator Model)
+//! ```text
+//!   Source Text          Pest PEG Parser        Abstract Syntax Tree
+//!  ┌──────────┐        ┌──────────────┐        ┌──────────────────┐
+//!  │ MATCH    │──Lex──>│  cypher.pest │──AST──>│  Query struct    │
+//!  │ (n:Foo)  │ +Parse │  (PEG rules) │        │  (ast.rs)        │
+//!  │ RETURN n │        └──────────────┘        └────────┬─────────┘
+//!  └──────────┘                                         │
+//!                                                       │ plan()
+//!                                                       v
+//!                     Execution Plan             ┌──────────────┐
+//!                    ┌──────────────┐            │ QueryPlanner │
+//!                    │ Operator tree│<───────────│ (planner.rs) │
+//!                    │ (Volcano)    │            └──────────────┘
+//!                    └──────┬───────┘
+//!                           │ next() / next_mut()
+//!                           v
+//!                    ┌──────────────┐
+//!                    │  RecordBatch │  (final output)
+//!                    └──────────────┘
+//! ```
+//!
+//! This mirrors how compilers work: source code is lexed into tokens, parsed into an AST,
+//! lowered to an intermediate representation (the execution plan), and finally "executed"
+//! (in a compiler, that means code generation; here, it means pulling records through
+//! operators). The analogy is not accidental -- query languages *are* domain-specific
+//! programming languages.
+//!
+//! ## Parsing: PEG via Pest
+//!
+//! The parser uses [Pest](https://pest.rs), a Rust crate that implements **Parsing Expression
+//! Grammars (PEGs)**. Unlike context-free grammars (CFGs) used by yacc/bison, PEGs use an
+//! ordered-choice operator (`/`) that tries alternatives left-to-right and commits to the
+//! first match. This makes PEGs **always unambiguous** -- there is exactly one parse tree for
+//! any input, which eliminates an entire class of grammar debugging. The grammar lives in
+//! [`cypher.pest`](cypher.pest) and is compiled into a Rust parser at build time via a proc
+//! macro (`#[derive(Parser)]`).
+//!
+//! ## Execution: Volcano Iterator Model (ADR-007)
+//!
+//! Query execution follows the **Volcano iterator model** invented by Goetz Graefe. Each
+//! physical operator (scan, filter, expand, project, etc.) implements a `next()` method that
+//! **pulls** a single record from its child operator. Records flow upward through the
+//! operator tree one at a time, like a lazy iterator chain in Rust (`iter().filter().map()`).
+//! This is memory-efficient because intermediate results are never fully materialized -- each
+//! operator processes one record and immediately passes it upstream.
+//!
+//! ## LRU Parse Cache
+//!
+//! Parsing is expensive (PEG matching, AST construction, string allocation). Since many
+//! applications execute the same queries repeatedly with different parameters, this module
+//! maintains an **LRU (Least Recently Used) cache** of parsed ASTs. On a cache hit, we skip
+//! parsing entirely and jump straight to planning. The cache uses `Mutex<LruCache>` for
+//! thread safety, with lock-free `AtomicU64` counters for hit/miss statistics.
+//!
+//! ## Read vs Write Execution Paths
+//!
+//! Queries are split into two execution paths based on mutability:
+//! - **[`QueryExecutor`]**: read-only queries (MATCH, RETURN, EXPLAIN). Takes `&GraphStore`.
+//! - **[`MutQueryExecutor`]**: write queries (CREATE, DELETE, SET, MERGE). Takes `&mut GraphStore`.
+//!
+//! This separation mirrors Rust's ownership model -- shared references (`&T`) allow
+//! concurrent reads, while exclusive references (`&mut T`) guarantee single-writer access.
+//! The type system enforces at compile time that no read query can accidentally modify the
+//! graph.
 
 pub mod ast;
 pub mod parser;
