@@ -9,6 +9,7 @@ use samyama_sdk::{
     EmbeddedClient, RemoteClient, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
     AlgorithmClient, PageRankConfig, PcaConfig,
+    VectorClient, DistanceMetric, NodeId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -422,6 +423,61 @@ impl SamyamaClient {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         Ok(rt.block_on(client.count_triangles(label, edge_type)))
+    }
+
+    // ========================================================================
+    // Vector methods (embedded mode only)
+    // ========================================================================
+
+    /// Create a vector index for a label/property.
+    /// metric: "cosine", "l2", or "dot"
+    #[pyo3(signature = (label, property, dimensions, metric="cosine"))]
+    fn create_vector_index(
+        &self,
+        label: &str,
+        property: &str,
+        dimensions: usize,
+        metric: &str,
+    ) -> PyResult<()> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let dist = match metric {
+            "l2" => DistanceMetric::L2,
+            "dot" | "inner_product" => DistanceMetric::InnerProduct,
+            _ => DistanceMetric::Cosine,
+        };
+        rt.block_on(client.create_vector_index(label, property, dimensions, dist))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Add a vector for a node in a vector index.
+    fn add_vector(
+        &self,
+        label: &str,
+        property: &str,
+        node_id: u64,
+        vector: Vec<f32>,
+    ) -> PyResult<()> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        rt.block_on(client.add_vector(label, property, NodeId(node_id), &vector))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Search for k nearest neighbors. Returns list of (node_id, distance) tuples.
+    #[pyo3(signature = (label, property, query_vector, k=10))]
+    fn vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        query_vector: Vec<f32>,
+        k: usize,
+    ) -> PyResult<Vec<(u64, f32)>> {
+        let client = self.require_embedded()?;
+        let rt = get_runtime();
+        let results = rt.block_on(client.vector_search(label, property, &query_vector, k))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(results.into_iter().map(|(nid, dist)| (nid.0, dist)).collect())
     }
 
     fn __repr__(&self) -> String {
