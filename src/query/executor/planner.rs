@@ -1047,6 +1047,22 @@ impl QueryPlanner {
                 name
             });
 
+            // Merge inline start node properties into predicates for index selection.
+            // Without this, {prop: val} in MATCH patterns falls back to NodeScan + Filter
+            // instead of IndexScan. See ADR-015 for context.
+            if let Some(ref props) = path.start.properties {
+                for (prop_name, prop_value) in props {
+                    per_path_preds[path_idx].push(Expression::Binary {
+                        left: Box::new(Expression::Property {
+                            variable: start_var.clone(),
+                            property: prop_name.clone(),
+                        }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expression::Literal(prop_value.clone())),
+                    });
+                }
+            }
+
             // Optimization: Check for index usage (using this path's assigned predicates)
             let mut index_op: Option<OperatorBox> = None;
             let mut remaining_predicates: Vec<Expression> = Vec::new();
@@ -1097,13 +1113,9 @@ impl QueryPlanner {
                 ))
             });
 
-            // Add property filter for start node if properties are specified
-            if let Some(ref props) = path.start.properties {
-                if !props.is_empty() {
-                    let filter_expr = self.build_property_filter(&start_var, props);
-                    path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
-                }
-            }
+            // Note: start node inline properties are already merged into per_path_preds
+            // above, so they're handled via IndexScan or remaining_predicates Filter.
+            // No separate FilterOperator needed here.
 
             // Split remaining predicates: those referencing only start_var can be pushed
             // down now; those referencing later-path variables must be deferred until
@@ -2216,6 +2228,46 @@ mod tests {
         let query = parse_query("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
         assert!(result.is_ok(), "Node with inline properties should plan: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_inline_properties_trigger_index_scan() {
+        // Inline properties like {name: 'Alice'} should use IndexScan when an index exists,
+        // not fall back to NodeScan + Filter (O(n)).
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
+        }
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
+
+        // Both forms should produce the same plan with IndexScan
+        use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
+
+        // WHERE form (already works)
+        let q_where = parse_query("EXPLAIN MATCH (n:Person) WHERE n.name = 'Person50' RETURN n").unwrap();
+        let executor_where = crate::query::executor::QueryExecutor::new(&store);
+        let r_where = executor_where.execute(&q_where).unwrap();
+        let plan_where = if let Some(Value::Property(PropertyValue::String(s))) = r_where.records[0].get("plan") {
+            s.clone()
+        } else { panic!("Expected plan text"); };
+
+        // Inline form (was broken, should now use IndexScan)
+        let q_inline = parse_query("EXPLAIN MATCH (n:Person {name: 'Person50'}) RETURN n").unwrap();
+        let executor_inline = crate::query::executor::QueryExecutor::new(&store);
+        let r_inline = executor_inline.execute(&q_inline).unwrap();
+        let plan_inline = if let Some(Value::Property(PropertyValue::String(s))) = r_inline.records[0].get("plan") {
+            s.clone()
+        } else { panic!("Expected plan text"); };
+
+        assert!(plan_where.contains("IndexScan"),
+            "WHERE form should use IndexScan: {}", plan_where);
+        assert!(plan_inline.contains("IndexScan"),
+            "Inline properties should use IndexScan: {}", plan_inline);
+        assert!(!plan_inline.contains("NodeScan"),
+            "Inline properties should NOT use NodeScan when index exists: {}", plan_inline);
     }
 
     #[test]
