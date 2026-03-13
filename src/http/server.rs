@@ -5,13 +5,19 @@ use axum::{
     Router,
     response::{Html, IntoResponse},
 };
+use axum::routing::{delete, patch};
 use crate::graph::GraphStore;
+use crate::persistence::TenantManager;
 use crate::query::QueryEngine;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use super::handler::{query_handler, status_handler, schema_handler, import_csv_handler, import_json_handler};
+use super::handler::{
+    query_handler, status_handler, schema_handler, import_csv_handler, import_json_handler,
+    list_tenants_handler, create_tenant_handler, get_tenant_handler,
+    delete_tenant_handler, update_tenant_handler, get_tenant_usage_handler,
+};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -33,18 +39,25 @@ async fn static_handler() -> impl IntoResponse {
 pub struct AppState {
     pub store: Arc<RwLock<GraphStore>>,
     pub engine: Arc<QueryEngine>,
+    pub tenant_manager: Arc<TenantManager>,
 }
 
 /// HTTP server managing the Visualizer API and static assets
 pub struct HttpServer {
     store: Arc<RwLock<GraphStore>>,
+    tenant_manager: Arc<TenantManager>,
     port: u16,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port }
+        Self { store, tenant_manager: Arc::new(TenantManager::new()), port }
+    }
+
+    /// Create a new HTTP server with a shared TenantManager
+    pub fn with_tenant_manager(store: Arc<RwLock<GraphStore>>, tenant_manager: Arc<TenantManager>, port: u16) -> Self {
+        Self { store, tenant_manager, port }
     }
 
     /// Start the HTTP server
@@ -52,6 +65,7 @@ impl HttpServer {
         let state = AppState {
             store: Arc::clone(&self.store),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::clone(&self.tenant_manager),
         };
 
         let app = Router::new()
@@ -61,6 +75,9 @@ impl HttpServer {
             .route("/api/schema", get(schema_handler))
             .route("/api/import/csv", post(import_csv_handler))
             .route("/api/import/json", post(import_json_handler))
+            .route("/api/tenants", get(list_tenants_handler).post(create_tenant_handler))
+            .route("/api/tenants/:id", get(get_tenant_handler).delete(delete_tenant_handler).patch(update_tenant_handler))
+            .route("/api/tenants/:id/usage", get(get_tenant_usage_handler))
             .layer(CorsLayer::permissive())
             .with_state(state);
 
@@ -78,6 +95,7 @@ impl HttpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::TenantManager;
     use crate::query::QueryEngine;
     use axum::body::Body;
     use http_body_util::BodyExt;
@@ -110,6 +128,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         let cloned = state.clone();
@@ -124,6 +143,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         let cloned = state.clone();
@@ -144,6 +164,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         let c1 = state.clone();
@@ -162,6 +183,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         // Write through the state
@@ -196,6 +218,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         let _app: Router = Router::new()
@@ -211,6 +234,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
 
         let app = Router::new()
