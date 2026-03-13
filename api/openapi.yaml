@@ -104,6 +104,9 @@ paths:
                 delimiter:
                   type: string
                   description: "CSV delimiter character (default: ',')"
+                graph:
+                  type: string
+                  description: "Target graph/tenant name (default: 'default')"
       responses:
         '200':
           description: Import successful
@@ -172,6 +175,155 @@ paths:
                   nodes: 2000
                   edges: 11000
 
+  /api/tenants:
+    get:
+      operationId: listTenants
+      summary: List all tenants
+      description: Returns all configured tenants with their settings and quotas.
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tenant'
+    post:
+      operationId: createTenant
+      summary: Create a new tenant
+      description: Create a new tenant with optional resource quotas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+            example:
+              id: analytics
+              name: Analytics Team
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '409':
+          description: Tenant already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tenants/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Tenant ID
+    get:
+      operationId: getTenant
+      summary: Get a tenant
+      description: Returns a single tenant by ID.
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteTenant
+      summary: Delete a tenant
+      description: Delete a tenant by ID. The "default" tenant cannot be deleted.
+      responses:
+        '200':
+          description: Tenant deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: string
+        '403':
+          description: Cannot delete default tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      operationId: updateTenant
+      summary: Update tenant settings
+      description: |
+        Update a tenant's enabled status, resource quotas, or configuration.
+        Only provided fields are updated; omitted fields remain unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
+      responses:
+        '200':
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tenants/{id}/usage:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Tenant ID
+    get:
+      operationId: getTenantUsage
+      summary: Get tenant resource usage
+      description: Returns current resource usage for a tenant (nodes, edges, memory, storage, connections).
+      responses:
+        '200':
+          description: Resource usage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageResponse'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     QueryRequest:
@@ -184,6 +336,10 @@ components:
           description: An OpenCypher query string
           examples:
             - "MATCH (n:Person) RETURN n"
+        graph:
+          type: string
+          description: "Target graph/tenant name (default: 'default')"
+          default: default
 
     QueryResponse:
       type: object
@@ -354,6 +510,10 @@ components:
           items:
             type: object
             additionalProperties: true
+        graph:
+          type: string
+          description: "Target graph/tenant name (default: 'default')"
+          default: default
 
     CsvImportResponse:
       type: object
@@ -389,3 +549,110 @@ components:
         error:
           type: string
           description: Error message
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Tenant ID (unique identifier)
+        name:
+          type: string
+          description: Display name
+        enabled:
+          type: boolean
+          description: Whether the tenant is enabled
+        created_at:
+          type: integer
+          description: Creation timestamp (Unix seconds)
+        quotas:
+          $ref: '#/components/schemas/ResourceQuotas'
+        nlq_config:
+          type: object
+          nullable: true
+          description: NLQ configuration
+        agent_config:
+          type: object
+          nullable: true
+          description: Agent configuration
+        embed_config:
+          type: object
+          nullable: true
+          description: Auto-embed configuration
+
+    ResourceQuotas:
+      type: object
+      properties:
+        max_nodes:
+          type: integer
+          nullable: true
+          description: Maximum number of nodes
+        max_edges:
+          type: integer
+          nullable: true
+          description: Maximum number of edges
+        max_memory_bytes:
+          type: integer
+          nullable: true
+          description: Maximum memory in bytes
+        max_storage_bytes:
+          type: integer
+          nullable: true
+          description: Maximum storage in bytes
+        max_connections:
+          type: integer
+          nullable: true
+          description: Maximum concurrent connections
+        max_query_time_ms:
+          type: integer
+          nullable: true
+          description: Maximum query execution time in milliseconds
+
+    CreateTenantRequest:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+          description: Tenant ID (unique)
+        name:
+          type: string
+          description: Display name
+        quotas:
+          $ref: '#/components/schemas/ResourceQuotas'
+
+    UpdateTenantRequest:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: Enable or disable the tenant
+        quotas:
+          $ref: '#/components/schemas/ResourceQuotas'
+        nlq_config:
+          type: object
+          description: NLQ configuration
+        agent_config:
+          type: object
+          description: Agent configuration
+        embed_config:
+          type: object
+          description: Auto-embed configuration
+
+    UsageResponse:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        node_count:
+          type: integer
+        edge_count:
+          type: integer
+        memory_bytes:
+          type: integer
+        storage_bytes:
+          type: integer
+        active_connections:
+          type: integer

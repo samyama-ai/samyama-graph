@@ -1,11 +1,12 @@
 //! HTTP handlers for the Visualizer API
 
 use axum::{
-    extract::{State, Json, Multipart},
+    extract::{Path, State, Json, Multipart},
     response::IntoResponse,
 };
 use crate::query::Value;
 use crate::graph::PropertyValue;
+use crate::persistence::{ResourceQuotas, NLQConfig, AgentConfig, AutoEmbedConfig};
 use crate::http::server::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -15,6 +16,12 @@ use std::collections::{HashMap, BTreeMap, BTreeSet};
 #[derive(Deserialize)]
 pub struct QueryRequest {
     pub query: String,
+    #[serde(default = "default_graph")]
+    pub graph: String,
+}
+
+fn default_graph() -> String {
+    "default".to_string()
 }
 
 /// Response containing both graph data and raw tabular data
@@ -39,7 +46,7 @@ pub async fn query_handler(
 
     let result = if is_write {
         let mut store_guard = state.store.write().await;
-        state.engine.execute_mut(&payload.query, &mut *store_guard, "default")
+        state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph)
     } else {
         let store_guard = state.store.read().await;
         state.engine.execute(&payload.query, &*store_guard)
@@ -270,6 +277,7 @@ pub async fn import_csv_handler(
     let mut label = String::new();
     let mut id_column: Option<String> = None;
     let mut delimiter = b',';
+    let mut _graph = "default".to_string();
 
     loop {
         let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> = multipart.next_field().await;
@@ -298,6 +306,11 @@ pub async fn import_csv_handler(
                             if let Some(&ch) = text.as_bytes().first() {
                                 delimiter = ch;
                             }
+                        }
+                    }
+                    "graph" => {
+                        if let Ok(text) = field.text().await {
+                            _graph = text;
                         }
                     }
                     _ => {}
@@ -380,6 +393,8 @@ pub async fn import_csv_handler(
 pub struct JsonImportRequest {
     pub label: String,
     pub nodes: Vec<serde_json::Value>,
+    #[serde(default = "default_graph")]
+    pub graph: String,
 }
 
 /// Handler for JSON node import
@@ -426,15 +441,194 @@ pub async fn import_json_handler(
     })).into_response()
 }
 
+// ==================== Tenant Management Handlers ====================
+
+/// Request for creating a tenant
+#[derive(Deserialize)]
+pub struct CreateTenantRequest {
+    pub id: String,
+    pub name: String,
+    pub quotas: Option<ResourceQuotas>,
+}
+
+/// Request for updating a tenant
+#[derive(Deserialize)]
+pub struct UpdateTenantRequest {
+    pub enabled: Option<bool>,
+    pub quotas: Option<ResourceQuotas>,
+    pub nlq_config: Option<NLQConfig>,
+    pub agent_config: Option<AgentConfig>,
+    pub embed_config: Option<AutoEmbedConfig>,
+}
+
+/// Serialize a Tenant to JSON
+fn tenant_to_json(t: &crate::persistence::Tenant) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "name": t.name,
+        "enabled": t.enabled,
+        "created_at": t.created_at,
+        "quotas": t.quotas,
+        "nlq_config": t.nlq_config,
+        "agent_config": t.agent_config,
+        "embed_config": t.embed_config,
+    })
+}
+
+/// Map TenantError to HTTP status code
+fn tenant_error_status(e: &crate::persistence::TenantError) -> axum::http::StatusCode {
+    use crate::persistence::TenantError;
+    match e {
+        TenantError::AlreadyExists(_) => axum::http::StatusCode::CONFLICT,
+        TenantError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
+        TenantError::QuotaExceeded { .. } => axum::http::StatusCode::TOO_MANY_REQUESTS,
+        TenantError::PermissionDenied(_) => axum::http::StatusCode::FORBIDDEN,
+    }
+}
+
+/// GET /api/tenants — list all tenants
+pub async fn list_tenants_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let tenants = state.tenant_manager.list_tenants();
+    let items: Vec<serde_json::Value> = tenants.iter().map(tenant_to_json).collect();
+    Json(json!({ "tenants": items }))
+}
+
+/// POST /api/tenants — create a new tenant
+pub async fn create_tenant_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateTenantRequest>,
+) -> impl IntoResponse {
+    match state.tenant_manager.create_tenant(payload.id.clone(), payload.name, payload.quotas) {
+        Ok(()) => {
+            match state.tenant_manager.get_tenant(&payload.id) {
+                Ok(tenant) => (axum::http::StatusCode::CREATED, Json(tenant_to_json(&tenant))).into_response(),
+                Err(_) => (axum::http::StatusCode::CREATED, Json(json!({"status": "created"}))).into_response(),
+            }
+        }
+        Err(e) => {
+            let status = tenant_error_status(&e);
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+/// GET /api/tenants/:id — get a single tenant
+pub async fn get_tenant_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.tenant_manager.get_tenant(&id) {
+        Ok(tenant) => Json(tenant_to_json(&tenant)).into_response(),
+        Err(e) => {
+            let status = tenant_error_status(&e);
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+/// DELETE /api/tenants/:id — delete a tenant
+pub async fn delete_tenant_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.tenant_manager.delete_tenant(&id) {
+        Ok(()) => Json(json!({ "status": "deleted", "id": id })).into_response(),
+        Err(e) => {
+            let status = tenant_error_status(&e);
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+/// PATCH /api/tenants/:id — update tenant settings
+pub async fn update_tenant_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateTenantRequest>,
+) -> impl IntoResponse {
+    // Apply enabled toggle
+    if let Some(enabled) = payload.enabled {
+        if let Err(e) = state.tenant_manager.set_enabled(&id, enabled) {
+            let status = tenant_error_status(&e);
+            return (status, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    // Apply quotas
+    if let Some(quotas) = payload.quotas {
+        if let Err(e) = state.tenant_manager.update_quotas(&id, quotas) {
+            let status = tenant_error_status(&e);
+            return (status, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    // Apply NLQ config
+    if let Some(nlq_config) = payload.nlq_config {
+        if let Err(e) = state.tenant_manager.update_nlq_config(&id, Some(nlq_config)) {
+            let status = tenant_error_status(&e);
+            return (status, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    // Apply Agent config
+    if let Some(agent_config) = payload.agent_config {
+        if let Err(e) = state.tenant_manager.update_agent_config(&id, Some(agent_config)) {
+            let status = tenant_error_status(&e);
+            return (status, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    // Apply Embed config
+    if let Some(embed_config) = payload.embed_config {
+        if let Err(e) = state.tenant_manager.update_embed_config(&id, Some(embed_config)) {
+            let status = tenant_error_status(&e);
+            return (status, Json(json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+
+    // Return updated tenant
+    match state.tenant_manager.get_tenant(&id) {
+        Ok(tenant) => Json(tenant_to_json(&tenant)).into_response(),
+        Err(e) => {
+            let status = tenant_error_status(&e);
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+/// GET /api/tenants/:id/usage — get resource usage for a tenant
+pub async fn get_tenant_usage_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.tenant_manager.get_usage(&id) {
+        Ok(usage) => Json(json!({
+            "tenant_id": id,
+            "node_count": usage.node_count,
+            "edge_count": usage.edge_count,
+            "memory_bytes": usage.memory_bytes,
+            "storage_bytes": usage.storage_bytes,
+            "active_connections": usage.active_connections,
+        })).into_response(),
+        Err(e) => {
+            let status = tenant_error_status(&e);
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::GraphStore;
+    use crate::persistence::TenantManager;
     use crate::query::QueryEngine;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
-        routing::{get, post},
+        routing::{delete, get, patch, post},
         Router,
     };
     use http_body_util::BodyExt;
@@ -447,10 +641,14 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            tenant_manager: Arc::new(TenantManager::new()),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/tenants", get(list_tenants_handler).post(create_tenant_handler))
+            .route("/api/tenants/:id", get(get_tenant_handler).delete(delete_tenant_handler).patch(update_tenant_handler))
+            .route("/api/tenants/:id/usage", get(get_tenant_usage_handler))
             .with_state(state.clone());
         (app, state)
     }
@@ -945,5 +1143,280 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["type"], "FRIENDS");
         assert_eq!(edges[0]["properties"]["since"], 2020);
+    }
+
+    // ==================== query_handler graph param tests ====================
+
+    #[tokio::test]
+    async fn test_query_handler_default_graph_param() {
+        // When no graph field is sent, should default to "default"
+        let (app, _state) = test_app();
+
+        let (status, _json) = post_query(
+            app,
+            r#"{"query": "MATCH (n) RETURN n"}"#,
+        ).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_handler_explicit_graph_param() {
+        // When graph field is sent, should use that graph
+        let (app, _state) = test_app();
+
+        let (status, _json) = post_query(
+            app,
+            r#"{"query": "MATCH (n) RETURN n", "graph": "test_graph"}"#,
+        ).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ==================== tenant handler helpers ====================
+
+    /// Helper: send an HTTP request and return (status, json).
+    async fn send_request(app: Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, serde_json::Value) {
+        let req_body = match body {
+            Some(b) => Body::from(b.to_string()),
+            None => Body::empty(),
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(req_body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = if bytes.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(json!({"raw": std::str::from_utf8(&bytes).unwrap_or("")}))
+        };
+        (status, json)
+    }
+
+    // ==================== list_tenants_handler tests ====================
+
+    #[tokio::test]
+    async fn test_list_tenants_returns_default() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "GET", "/api/tenants", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let tenants = json["tenants"].as_array().unwrap();
+        assert_eq!(tenants.len(), 1);
+        assert_eq!(tenants[0]["id"], "default");
+        assert_eq!(tenants[0]["enabled"], true);
+    }
+
+    // ==================== create_tenant_handler tests ====================
+
+    #[tokio::test]
+    async fn test_create_tenant_success() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(
+            app,
+            "POST",
+            "/api/tenants",
+            Some(r#"{"id": "analytics", "name": "Analytics Team"}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["id"], "analytics");
+        assert_eq!(json["name"], "Analytics Team");
+        assert_eq!(json["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_create_tenant_with_quotas() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(
+            app,
+            "POST",
+            "/api/tenants",
+            Some(r#"{"id": "limited", "name": "Limited", "quotas": {"max_nodes": 100, "max_edges": 500}}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["id"], "limited");
+        assert_eq!(json["quotas"]["max_nodes"], 100);
+        assert_eq!(json["quotas"]["max_edges"], 500);
+    }
+
+    #[tokio::test]
+    async fn test_create_tenant_duplicate_returns_409() {
+        let (app, state) = test_app();
+
+        // Create first tenant
+        state.tenant_manager.create_tenant("dup".to_string(), "Dup".to_string(), None).unwrap();
+
+        // Try to create again via HTTP
+        let (status, json) = send_request(
+            app,
+            "POST",
+            "/api/tenants",
+            Some(r#"{"id": "dup", "name": "Duplicate"}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(json["error"].as_str().unwrap().contains("already exists"));
+    }
+
+    // ==================== get_tenant_handler tests ====================
+
+    #[tokio::test]
+    async fn test_get_tenant_default() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "GET", "/api/tenants/default", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["id"], "default");
+        assert_eq!(json["name"], "Default Tenant");
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_not_found_returns_404() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "GET", "/api/tenants/nonexistent", None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    // ==================== delete_tenant_handler tests ====================
+
+    #[tokio::test]
+    async fn test_delete_tenant_success() {
+        let (app, state) = test_app();
+
+        state.tenant_manager.create_tenant("temp".to_string(), "Temporary".to_string(), None).unwrap();
+
+        let (status, json) = send_request(app, "DELETE", "/api/tenants/temp", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "deleted");
+        assert_eq!(json["id"], "temp");
+    }
+
+    #[tokio::test]
+    async fn test_delete_default_tenant_returns_403() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "DELETE", "/api/tenants/default", None).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(json["error"].as_str().unwrap().contains("Permission denied") || json["error"].as_str().unwrap().contains("default"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_tenant_returns_404() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "DELETE", "/api/tenants/ghost", None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ==================== update_tenant_handler tests ====================
+
+    #[tokio::test]
+    async fn test_update_tenant_enable_disable() {
+        let (app, state) = test_app();
+
+        state.tenant_manager.create_tenant("toggle".to_string(), "Toggle".to_string(), None).unwrap();
+
+        let (status, json) = send_request(
+            app,
+            "PATCH",
+            "/api/tenants/toggle",
+            Some(r#"{"enabled": false}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn test_update_tenant_quotas() {
+        let (app, state) = test_app();
+
+        state.tenant_manager.create_tenant("quota_test".to_string(), "Quota Test".to_string(), None).unwrap();
+
+        let (status, json) = send_request(
+            app,
+            "PATCH",
+            "/api/tenants/quota_test",
+            Some(r#"{"quotas": {"max_nodes": 500, "max_edges": 2000}}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["quotas"]["max_nodes"], 500);
+        assert_eq!(json["quotas"]["max_edges"], 2000);
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_tenant_returns_404() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(
+            app,
+            "PATCH",
+            "/api/tenants/nope",
+            Some(r#"{"enabled": false}"#),
+        ).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ==================== get_tenant_usage_handler tests ====================
+
+    #[tokio::test]
+    async fn test_get_tenant_usage_default() {
+        let (app, _state) = test_app();
+
+        let (status, json) = send_request(app, "GET", "/api/tenants/default/usage", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["tenant_id"], "default");
+        assert_eq!(json["node_count"], 0);
+        assert_eq!(json["edge_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_usage_not_found() {
+        let (app, _state) = test_app();
+
+        let (status, _json) = send_request(app, "GET", "/api/tenants/missing/usage", None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ==================== list after create/delete tests ====================
+
+    #[tokio::test]
+    async fn test_list_tenants_after_create() {
+        let (app, state) = test_app();
+
+        state.tenant_manager.create_tenant("t1".to_string(), "Tenant One".to_string(), None).unwrap();
+        state.tenant_manager.create_tenant("t2".to_string(), "Tenant Two".to_string(), None).unwrap();
+
+        let (status, json) = send_request(app, "GET", "/api/tenants", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let tenants = json["tenants"].as_array().unwrap();
+        assert_eq!(tenants.len(), 3); // default + t1 + t2
     }
 }
