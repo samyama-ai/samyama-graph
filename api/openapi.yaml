@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Samyama Graph Database API
-  version: 0.6.0
+  version: 0.6.1
   description: |
     HTTP API for the Samyama high-performance distributed graph database.
     Supports OpenCypher queries, graph status, and CRUD operations.
@@ -170,7 +170,7 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
               example:
                 status: healthy
-                version: 0.6.0
+                version: 0.6.1
                 storage:
                   nodes: 2000
                   edges: 11000
@@ -414,7 +414,7 @@ components:
           type: string
           description: Server version
           examples:
-            - 0.6.0
+            - 0.6.1
         storage:
           type: object
           properties:

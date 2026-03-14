@@ -1,8 +1,8 @@
 # Samyama Graph Database
 
-![Version](https://img.shields.io/badge/version-0.6.0-blue)
+![Version](https://img.shields.io/badge/version-0.6.1-blue)
 ![Rust](https://img.shields.io/badge/rust-1.85-orange)
-![Tests](https://img.shields.io/badge/tests-1746_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1842_passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-89.7%25-brightgreen)
 ![Bugs](https://img.shields.io/badge/bugs-0-brightgreen)
 ![Vulnerabilities](https://img.shields.io/badge/vulnerabilities-0-brightgreen)
@@ -24,6 +24,15 @@
 
 See [docs/ldbc/](docs/ldbc/) for detailed per-query results, latency tables, and analysis.
 
+### What's New in v0.6.1
+
+- **HTTP Tenant Management API**: Full CRUD for tenants via REST endpoints (`POST /api/tenants`, `GET /api/tenants`, `GET /api/tenants/{id}`, `DELETE /api/tenants/{id}`).
+- **samyama-mcp-serve**: Auto-generate [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers from any graph schema. Discovers labels, edge types, and properties, then generates typed tools for AI agents. Install via `pip install samyama[mcp]` and run `samyama-mcp-serve --demo` for instant agent tool access.
+- **Snapshot format (.sgsnap)**: Portable gzip JSON-lines snapshot export/import for graph tenants, enabling backup and migration across instances.
+- **Cricket dataset loader**: Load 21K Cricsheet T20/ODI/Test matches (36K nodes, 1.4M edges) via `cargo run --release --example cricket_loader`.
+- **AACT clinical trials loader**: Full AACT dataset loader for clinical trial analysis (575K studies, 7.7M nodes, 27M edges).
+- **Index scan fix**: Inline MATCH properties `{prop: val}` now trigger IndexScan when a matching index exists, avoiding full label scans.
+
 ## Key Features
 
 - **OpenCypher Query Engine**: ~90% OpenCypher coverage — MATCH, CREATE, DELETE, SET, MERGE, OPTIONAL MATCH, UNION, WITH, UNWIND, aggregations, and 30+ built-in functions.
@@ -36,6 +45,9 @@ See [docs/ldbc/](docs/ldbc/) for detailed per-query results, latency tables, and
 - **High Availability**: Raft consensus (via `openraft`) for cluster replication and automatic failover.
 - **Persistence**: RocksDB storage with Write-Ahead Log and checkpointing.
 - **EXPLAIN Queries**: Inspect query execution plans without running them.
+- **HTTP Tenant API**: REST endpoints for tenant CRUD (create, list, get, delete) alongside the RESP protocol.
+- **MCP Server Generation**: Auto-generate MCP servers from graph schema for AI agent integration (`samyama-mcp-serve`).
+- **Snapshot Export/Import**: Portable `.sgsnap` format (gzip JSON-lines) for tenant backup and migration.
 
 ## Getting Started
 
@@ -97,6 +109,21 @@ Each demo builds a domain-specific knowledge graph, runs Cypher queries, execute
 | Enterprise SOC | `cargo run --example enterprise_soc_demo` | Threat intel, MITRE ATT&CK mapping, attack path analysis (Dijkstra), lateral movement simulation |
 | Agentic Enrichment | `cargo run --example agentic_enrichment_demo` | Generation-Augmented Knowledge (GAK) — LLM generates Cypher to enrich the graph autonomously |
 
+### Data Loaders
+
+| Example | Command | Description |
+|---------|---------|-------------|
+| LDBC SNB | `cargo run --example ldbc_loader` | Load LDBC SNB SF1 dataset (3.18M nodes, 17.26M edges) |
+| FinBench | `cargo run --example finbench_loader` | Load/generate LDBC FinBench dataset |
+| Cricket | `cargo run --release --example cricket_loader` | Load 21K Cricsheet matches (36K nodes, 1.4M edges) |
+| AACT Clinical Trials | `cargo run --release --example aact_loader` | Full AACT dataset (575K studies, 7.7M nodes, 27M edges) |
+
+### AI Agent Integration
+
+| Example | Command | Description |
+|---------|---------|-------------|
+| MCP Server | `samyama-mcp-serve --demo` | Auto-generate MCP server from graph schema for AI agents (Python, `pip install samyama[mcp]`) |
+
 ## Cypher Support
 
 **~90% OpenCypher coverage.** See [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) for the full matrix.
@@ -135,6 +162,7 @@ src/
 ├── raft/            # Raft consensus (openraft)
 ├── nlq/             # Natural Language Query pipeline (OpenAI, Gemini, Ollama, Claude Code)
 ├── vector/          # HNSW vector index
+├── snapshot/        # Portable .sgsnap export/import
 └── sharding/        # Tenant-level sharding
 ```
 
@@ -168,7 +196,7 @@ Run with `cargo bench`. See [docs/performance/](docs/performance/) for detailed 
 
 ## Testing
 
-1746 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
+1842 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
 
 ```bash
 cargo test                     # Run all tests
