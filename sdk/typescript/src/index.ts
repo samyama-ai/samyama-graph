@@ -1,5 +1,5 @@
-export { SamyamaClient } from "./client";
-export { HttpTransport } from "./http-client";
+export { SamyamaClient } from "./client.js";
+export { HttpTransport } from "./http-client.js";
 export type {
   SdkNode,
   SdkEdge,
@@ -14,4 +14,4 @@ export type {
   ConstraintInfo,
   CsvImportResult,
   JsonImportResult,
-} from "./types";
+} from "./types.js";

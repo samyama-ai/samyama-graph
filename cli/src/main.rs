@@ -48,7 +48,11 @@ enum Commands {
     /// Ping the server
     Ping,
     /// Start an interactive REPL
-    Shell,
+    Shell {
+        /// Graph/tenant name
+        #[arg(long, default_value = "default")]
+        graph: String,
+    },
 }
 
 #[tokio::main]
@@ -62,7 +66,7 @@ async fn main() {
         }
         Commands::Status => run_status(&client, &cli.format).await,
         Commands::Ping => run_ping(&client).await,
-        Commands::Shell => run_shell(&client, &cli.format).await,
+        Commands::Shell { graph } => run_shell(&client, &graph, &cli.format).await,
     };
 
     if let Err(e) = result {
@@ -149,9 +153,10 @@ async fn run_ping(client: &RemoteClient) -> Result<(), Box<dyn std::error::Error
 
 async fn run_shell(
     client: &RemoteClient,
+    graph: &str,
     format: &OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Samyama Interactive Shell");
+    println!("Samyama Interactive Shell (graph: {})", graph);
     println!("Type Cypher queries, or :help for commands. :quit to exit.\n");
 
     let stdin = std::io::stdin();
@@ -190,7 +195,7 @@ async fn run_shell(
                 }
             }
             cypher => {
-                if let Err(e) = run_query(client, "default", cypher, false, format).await {
+                if let Err(e) = run_query(client, graph, cypher, false, format).await {
                     eprintln!("Error: {}", e);
                 }
             }

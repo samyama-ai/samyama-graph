@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "commonjs",
+    "module": "ES2020",
     "lib": ["ES2020", "DOM"],
     "declaration": true,
     "strict": true,
@@ -9,6 +9,7 @@
     "strictNullChecks": true,
     "outDir": "dist",
     "rootDir": ".",
+    "moduleResolution": "node",
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

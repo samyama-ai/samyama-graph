@@ -5,8 +5,8 @@ import type {
   GraphSchema,
   CsvImportResult,
   JsonImportResult,
-} from "./types";
-import { HttpTransport } from "./http-client";
+} from "./types.js";
+import { HttpTransport } from "./http-client.js";
 
 const DEFAULT_URL = "http://localhost:8080";
 
@@ -50,40 +50,40 @@ export class SamyamaClient {
   }
 
   /** Execute a read-write Cypher query */
-  async query(cypher: string, _graph: string = "default"): Promise<QueryResult> {
-    return this.http.query(cypher);
+  async query(cypher: string, graph: string = "default"): Promise<QueryResult> {
+    return this.http.query(cypher, graph);
   }
 
   /** Execute a read-only Cypher query */
-  async queryReadonly(cypher: string, _graph: string = "default"): Promise<QueryResult> {
-    return this.http.query(cypher);
+  async queryReadonly(cypher: string, graph: string = "default"): Promise<QueryResult> {
+    return this.http.query(cypher, graph);
   }
 
   /**
    * Return the EXPLAIN plan for a Cypher query without executing it.
    * Returns the plan as text rows in the QueryResult records.
    */
-  async explain(cypher: string): Promise<QueryResult> {
+  async explain(cypher: string, graph: string = "default"): Promise<QueryResult> {
     const prefixed = cypher.trimStart().toUpperCase().startsWith("EXPLAIN")
       ? cypher
       : `EXPLAIN ${cypher}`;
-    return this.http.query(prefixed);
+    return this.http.query(prefixed, graph);
   }
 
   /**
    * Execute a Cypher query with PROFILE instrumentation.
    * Returns plan text with actual row counts and timing per operator.
    */
-  async profile(cypher: string): Promise<QueryResult> {
+  async profile(cypher: string, graph: string = "default"): Promise<QueryResult> {
     const prefixed = cypher.trimStart().toUpperCase().startsWith("PROFILE")
       ? cypher
       : `PROFILE ${cypher}`;
-    return this.http.query(prefixed);
+    return this.http.query(prefixed, graph);
   }
 
   /** Delete a graph (executes MATCH (n) DELETE n) */
-  async deleteGraph(_graph: string = "default"): Promise<void> {
-    await this.http.query("MATCH (n) DELETE n");
+  async deleteGraph(graph: string = "default"): Promise<void> {
+    await this.http.query("MATCH (n) DELETE n", graph);
   }
 
   /** List graphs (OSS: always returns ["default"]) */

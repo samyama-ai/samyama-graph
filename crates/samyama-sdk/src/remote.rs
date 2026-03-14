@@ -33,9 +33,9 @@ impl RemoteClient {
     }
 
     /// Execute a POST request to /api/query
-    async fn post_query(&self, cypher: &str) -> SamyamaResult<QueryResult> {
+    async fn post_query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);
-        let body = serde_json::json!({ "query": cypher });
+        let body = serde_json::json!({ "query": cypher, "graph": graph });
 
         let response = self.http_client.post(&url)
             .json(&body)
@@ -59,18 +59,18 @@ impl RemoteClient {
 
 #[async_trait]
 impl SamyamaClient for RemoteClient {
-    async fn query(&self, _graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
-        self.post_query(cypher).await
+    async fn query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
+        self.post_query(graph, cypher).await
     }
 
-    async fn query_readonly(&self, _graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
-        self.post_query(cypher).await
+    async fn query_readonly(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
+        self.post_query(graph, cypher).await
     }
 
-    async fn delete_graph(&self, _graph: &str) -> SamyamaResult<()> {
+    async fn delete_graph(&self, graph: &str) -> SamyamaResult<()> {
         // The HTTP API doesn't expose GRAPH.DELETE directly.
         // We can execute a Cypher that deletes all nodes/edges.
-        self.post_query("MATCH (n) DELETE n").await?;
+        self.post_query(graph, "MATCH (n) DELETE n").await?;
         Ok(())
     }
 

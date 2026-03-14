@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
-import { SamyamaClient, HttpTransport } from "../src/index";
+import { SamyamaClient, HttpTransport } from "../src/index.js";
 import type {
   QueryResult,
   ServerStatus,
@@ -11,7 +11,7 @@ import type {
   ConstraintInfo,
   CsvImportResult,
   JsonImportResult,
-} from "../src/index";
+} from "../src/index.js";
 
 describe("SamyamaClient", () => {
   it("should create a client with default URL", () => {

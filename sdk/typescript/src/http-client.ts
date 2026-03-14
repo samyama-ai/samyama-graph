@@ -5,7 +5,7 @@ import type {
   GraphSchema,
   CsvImportResult,
   JsonImportResult,
-} from "./types";
+} from "./types.js";
 
 /**
  * HTTP transport for the Samyama SDK.
@@ -19,11 +19,11 @@ export class HttpTransport {
   }
 
   /** Execute a Cypher query via POST /api/query */
-  async query(cypher: string): Promise<QueryResult> {
+  async query(cypher: string, graph: string = "default"): Promise<QueryResult> {
     const response = await fetch(`${this.baseUrl}/api/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: cypher }),
+      body: JSON.stringify({ query: cypher, graph }),
     });
 
     if (!response.ok) {
