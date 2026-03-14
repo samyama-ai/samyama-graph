@@ -67,6 +67,93 @@ use crate::query::executor::{
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
 
+/// Recursively extract aggregate function calls (sum, avg, count, min, max, collect)
+/// from an expression tree, replacing each with a `Variable("__agg_N")` reference.
+///
+/// Returns the rewritten expression and the list of extracted aggregates.
+/// This enables expressions like `round(sum(b.runs) * 100 / sum(b.balls))` where
+/// aggregate calls are nested inside arithmetic or scalar function calls.
+fn extract_nested_aggregates(
+    expr: &Expression,
+    counter: &mut usize,
+) -> (Expression, Vec<AggregateFunction>) {
+    let mut aggregates = Vec::new();
+    let rewritten = extract_agg_inner(expr, counter, &mut aggregates);
+    (rewritten, aggregates)
+}
+
+fn extract_agg_inner(
+    expr: &Expression,
+    counter: &mut usize,
+    aggs: &mut Vec<AggregateFunction>,
+) -> Expression {
+    match expr {
+        Expression::Function { name, args, distinct } => {
+            let func_type = match name.to_lowercase().as_str() {
+                "count" => Some(AggregateType::Count),
+                "sum" => Some(AggregateType::Sum),
+                "avg" => Some(AggregateType::Avg),
+                "min" => Some(AggregateType::Min),
+                "max" => Some(AggregateType::Max),
+                "collect" => Some(AggregateType::Collect),
+                _ => None,
+            };
+
+            if let Some(func) = func_type {
+                let alias = format!("__agg_{}", *counter);
+                *counter += 1;
+
+                let arg_expr = if matches!(func, AggregateType::Count) && args.is_empty() {
+                    Expression::Literal(PropertyValue::Integer(1))
+                } else {
+                    args.first().cloned()
+                        .unwrap_or(Expression::Literal(PropertyValue::Null))
+                };
+
+                aggs.push(AggregateFunction {
+                    func,
+                    expr: arg_expr,
+                    alias: alias.clone(),
+                    distinct: *distinct,
+                });
+
+                Expression::Variable(alias)
+            } else {
+                // Non-aggregate function — recurse into args
+                Expression::Function {
+                    name: name.clone(),
+                    args: args.iter().map(|a| extract_agg_inner(a, counter, aggs)).collect(),
+                    distinct: *distinct,
+                }
+            }
+        }
+        Expression::Binary { left, op, right } => {
+            Expression::Binary {
+                left: Box::new(extract_agg_inner(left, counter, aggs)),
+                op: op.clone(),
+                right: Box::new(extract_agg_inner(right, counter, aggs)),
+            }
+        }
+        Expression::Unary { op, expr: inner } => {
+            Expression::Unary {
+                op: op.clone(),
+                expr: Box::new(extract_agg_inner(inner, counter, aggs)),
+            }
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            Expression::Case {
+                operand: operand.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+                when_clauses: when_clauses.iter().map(|(cond, then)| {
+                    (extract_agg_inner(cond, counter, aggs), extract_agg_inner(then, counter, aggs))
+                }).collect(),
+                else_result: else_result.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+            }
+        }
+        // Leaf expressions and others — no aggregates possible
+        other => other.clone(),
+    }
+}
+
 /// An execution plan: a tree of physical operators ready to execute.
 ///
 /// The `root` field holds the top-level operator (typically a `ProjectOperator` or
@@ -392,10 +479,22 @@ impl QueryPlanner {
         if let Some(with_clause) = &query.with_clause {
             if let Some(op) = operator {
                 // Parse WITH items into projections and aggregations
+                // Uses extract_nested_aggregates to handle aggregates nested in expressions
+                // e.g. round(sum(b.runs) * 100 / sum(b.balls)) / 100 AS strike_rate
                 let mut items = Vec::new();
                 let mut aggregates = Vec::new();
                 let mut group_by = Vec::new();
                 let mut has_aggregation = false;
+                let mut agg_counter = 0usize;
+
+                // First pass: detect aggregates
+                struct WithItemInfo {
+                    alias: String,
+                    original_expr: Expression,
+                    rewritten_expr: Expression,
+                    extracted_aggs: Vec<AggregateFunction>,
+                }
+                let mut item_infos = Vec::new();
 
                 for (idx, item) in with_clause.items.iter().enumerate() {
                     let alias = item.alias.clone().unwrap_or_else(|| {
@@ -418,41 +517,33 @@ impl QueryPlanner {
                         }
                     });
 
-                    items.push((item.expression.clone(), alias.clone()));
-
-                    let mut is_agg_func = false;
-                    if let Expression::Function { name, args, distinct } = &item.expression {
-                        let func_type = match name.to_lowercase().as_str() {
-                            "count" => Some(AggregateType::Count),
-                            "sum" => Some(AggregateType::Sum),
-                            "avg" => Some(AggregateType::Avg),
-                            "min" => Some(AggregateType::Min),
-                            "max" => Some(AggregateType::Max),
-                            "collect" => Some(AggregateType::Collect),
-                            _ => None,
-                        };
-
-                        if let Some(func) = func_type {
-                            is_agg_func = true;
-                            has_aggregation = true;
-                            let arg_expr = if matches!(func, AggregateType::Count) && args.is_empty() {
-                                // count(*) — use non-null literal so every row is counted
-                                Expression::Literal(PropertyValue::Integer(1))
-                            } else {
-                                args.first().cloned()
-                                    .unwrap_or(Expression::Literal(PropertyValue::Null))
-                            };
-                            aggregates.push(AggregateFunction {
-                                func,
-                                expr: arg_expr,
-                                alias: alias.clone(),
-                                distinct: *distinct,
-                            });
-                        }
+                    let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
+                    if !extracted.is_empty() {
+                        has_aggregation = true;
                     }
+                    item_infos.push(WithItemInfo {
+                        alias,
+                        original_expr: item.expression.clone(),
+                        rewritten_expr: rewritten,
+                        extracted_aggs: extracted,
+                    });
+                }
 
-                    if !is_agg_func {
-                        group_by.push((item.expression.clone(), alias));
+                // Second pass: build items, group_by, aggregates
+                for info in item_infos {
+                    if has_aggregation {
+                        // Aggregation mode: items get post-projection expressions
+                        if !info.extracted_aggs.is_empty() {
+                            aggregates.extend(info.extracted_aggs);
+                            items.push((info.rewritten_expr, info.alias.clone()));
+                        } else {
+                            group_by.push((info.original_expr, info.alias.clone()));
+                            // Use Variable(alias) since after aggregation only aliases exist
+                            items.push((Expression::Variable(info.alias.clone()), info.alias.clone()));
+                        }
+                    } else {
+                        // No aggregation: items keep original expressions
+                        items.push((info.original_expr, info.alias.clone()));
                     }
                 }
 
@@ -611,9 +702,14 @@ impl QueryPlanner {
 
         let mut operator = operator.unwrap();
 
-        // Add WHERE clause if present
-        if let Some(where_clause) = &query.where_clause {
-            operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+        // Add WHERE clause if present.
+        // When a WITH clause exists, WHERE predicates were already decomposed and
+        // pushed into per-MATCH/cross-MATCH filters above. Applying them again here
+        // would fail because the WithBarrier projects away referenced variables.
+        if query.with_clause.is_none() {
+            if let Some(where_clause) = &query.where_clause {
+                operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+            }
         }
 
         // Add UNWIND clause if present
@@ -746,6 +842,10 @@ impl QueryPlanner {
             let mut group_by = Vec::new();
             let mut projections = Vec::new();
             let mut has_aggregation = false;
+            let mut agg_counter = 0usize;
+            // Post-projection items: after aggregation, compute final expressions
+            // from aggregate aliases (e.g. round(__agg_0 * 100 / __agg_1) AS strike_rate)
+            let mut post_projections: Vec<(Expression, String)> = Vec::new();
 
             for (idx, item) in return_clause.items.iter().enumerate() {
                 let alias = item.alias.clone().unwrap_or_else(|| {
@@ -770,47 +870,28 @@ impl QueryPlanner {
 
                 output_columns.push(alias.clone());
 
-                // Detect Aggregation
-                let mut is_agg_func = false;
-                if let Expression::Function { name, args, distinct } = &item.expression {
-                    let func_type = match name.to_lowercase().as_str() {
-                        "count" => Some(AggregateType::Count),
-                        "sum" => Some(AggregateType::Sum),
-                        "avg" => Some(AggregateType::Avg),
-                        "min" => Some(AggregateType::Min),
-                        "max" => Some(AggregateType::Max),
-                        "collect" => Some(AggregateType::Collect),
-                        _ => None,
-                    };
+                // Extract nested aggregates from expressions like round(sum(x) / sum(y))
+                let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
 
-                    if let Some(func) = func_type {
-                        is_agg_func = true;
-                        has_aggregation = true;
-                        let arg_expr = if matches!(func, AggregateType::Count) && args.is_empty() {
-                            // count(*) — use non-null literal so every row is counted
-                            Expression::Literal(PropertyValue::Integer(1))
-                        } else {
-                            args.first().cloned().unwrap_or(Expression::Literal(PropertyValue::Null))
-                        };
-                        aggregates.push(AggregateFunction {
-                            func,
-                            expr: arg_expr,
-                            alias: alias.clone(),
-                            distinct: *distinct,
-                        });
-                    }
-                }
-
-                if !is_agg_func {
+                if !extracted.is_empty() {
+                    has_aggregation = true;
+                    aggregates.extend(extracted);
+                    post_projections.push((rewritten, alias.clone()));
+                } else {
                     group_by.push((item.expression.clone(), alias.clone()));
                     projections.push((item.expression.clone(), alias.clone()));
+                    // Use Variable(alias) for post-projection since after aggregation
+                    // the record only has the alias bound, not the original expression
+                    post_projections.push((Expression::Variable(alias.clone()), alias.clone()));
                 }
             }
 
             if has_aggregation {
                 operator = Box::new(AggregateOperator::new(operator, group_by, aggregates));
-                
-                // Sort after aggregation
+                // Post-aggregation projection: compute final expressions from aggregate aliases
+                operator = Box::new(ProjectOperator::new(operator, post_projections));
+
+                // Sort after aggregation + projection
                 if let Some(order_by) = &query.order_by {
                     let mut sort_items = Vec::new();
                     for item in &order_by.items {
@@ -827,7 +908,7 @@ impl QueryPlanner {
                     }
                     operator = Box::new(SortOperator::new(operator, sort_items));
                 }
-                
+
                 operator = Box::new(ProjectOperator::new(operator, projections));
             }
         } else {
@@ -2379,6 +2460,66 @@ mod tests {
         let query = parse_query("MATCH (n:Person) WITH n.city AS city, count(n) AS cnt, collect(n.name) AS names RETURN city, cnt, names").unwrap();
         let result = planner.plan(&query, &store);
         assert!(result.is_ok(), "WITH multiple aggregations should plan: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_where_not_duplicated_after_with_barrier() {
+        // Regression test: WHERE predicates referencing variables that are projected
+        // away by WITH should not cause "Variable not found" errors. The WHERE must
+        // only be applied before the WithBarrier, not after it.
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Team");
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("India".into()));
+        let n2 = store.create_node("Match");
+        let n3 = store.create_node("Tournament");
+        store.get_node_mut(n3).unwrap().set_property("name", PropertyValue::String("IPL".into()));
+        store.create_edge(n1, n2, "COMPETED_IN").unwrap();
+        store.create_edge(n2, n3, "PART_OF").unwrap();
+
+        let query = parse_query(
+            "MATCH (t:Team)-[:COMPETED_IN]->(m:Match)-[:PART_OF]->(trn:Tournament) \
+             WHERE trn.name = 'IPL' \
+             WITH t, count(m) AS played \
+             RETURN t.name AS team, played"
+        ).unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(result.is_ok(), "WHERE + WITH should not fail: {:?}", result.err());
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_node_identity_comparison() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Team");
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("India".into()));
+        let n2 = store.create_node("Team");
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Australia".into()));
+        let m1 = store.create_node("Match");
+        store.create_edge(n1, m1, "COMPETED_IN").unwrap();
+        store.create_edge(n2, m1, "COMPETED_IN").unwrap();
+
+        // Test: t1 <> t2 (node inequality comparison)
+        let query = parse_query(
+            "MATCH (t1:Team)-[:COMPETED_IN]->(m:Match)<-[:COMPETED_IN]-(t2:Team) \
+             WHERE t1 <> t2 \
+             RETURN t1.name AS team1, t2.name AS team2"
+        ).unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(result.is_ok(), "Node identity comparison should work: {:?}", result.err());
+        let batch = result.unwrap();
+        // Should get 2 rows: (India, Australia) and (Australia, India)
+        assert_eq!(batch.records.len(), 2);
     }
 
     // ============================
