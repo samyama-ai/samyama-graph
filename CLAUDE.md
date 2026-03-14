@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Samyama is a high-performance distributed graph database written in Rust with ~90% OpenCypher query support, Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v0.6.0.
+Samyama is a high-performance distributed graph database written in Rust with ~90% OpenCypher query support, Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v0.6.1.
 
 ## Build & Development Commands
 
@@ -13,7 +13,7 @@ Samyama is a high-performance distributed graph database written in Rust with ~9
 cargo build                    # Debug build
 cargo build --release          # Release build (optimized)
 
-# Run tests (1746 unit tests)
+# Run tests (1842 unit tests)
 cargo test                     # All tests
 cargo test graph::node         # Specific module tests
 cargo test -- --nocapture      # Tests with output
@@ -44,6 +44,8 @@ cargo run --example persistence_demo          # Persistence & multi-tenancy
 cargo run --example cluster_demo              # Raft clustering
 cargo run --example ldbc_loader               # Load LDBC SNB SF1 dataset
 cargo run --example finbench_loader           # Load/generate FinBench dataset
+cargo run --release --example cricket_loader  # Load 21K Cricsheet matches
+cargo run --release --example aact_loader     # Load AACT clinical trials dataset
 
 # Start RESP server
 cargo run                      # RESP on 127.0.0.1:6379, HTTP on :8080
@@ -102,6 +104,7 @@ src/
 │   └── client.rs    # NLQClient (OpenAI, Gemini, Ollama, Claude Code providers)
 │
 ├── vector/          # HNSW Vector Index
+├── snapshot/        # Portable .sgsnap export/import
 └── sharding/        # Tenant-level sharding
 ```
 
@@ -161,8 +164,8 @@ graph.create_edge(source_id, target_id, "KNOWS")?;
 
 ## Testing
 
-- **1746 unit tests** across all modules (89.7% coverage)
+- **1842 unit tests** across all modules (89.7% coverage)
 - **10 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Python scripts in `tests/integration/`
 - **8 domain-specific example demos** with NLQ integration
-- **2 data loaders** (LDBC SNB, FinBench) in `examples/`
+- **4 data loaders** (LDBC SNB, FinBench, Cricket, AACT) in `examples/`
