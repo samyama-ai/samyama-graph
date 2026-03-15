@@ -124,6 +124,9 @@ pub struct Query {
     pub with_split_index: Option<usize>,
     /// Post-WITH WHERE clause (second WHERE after WITH ... MATCH ... WHERE ...)
     pub post_with_where_clause: Option<WhereClause>,
+    /// Additional WITH stages (for multi-WITH queries like WITH ... MATCH ... WITH ... RETURN)
+    /// Each stage: (with_clause, unwind_clause, post_match_clauses, post_where_clause)
+    pub extra_with_stages: Vec<(WithClause, Option<UnwindClause>, Vec<MatchClause>, Option<WhereClause>)>,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -618,6 +621,7 @@ impl Query {
             explain: false,
             with_split_index: None,
             post_with_where_clause: None,
+            extra_with_stages: Vec::new(),
         }
     }
 

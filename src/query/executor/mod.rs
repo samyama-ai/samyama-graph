@@ -126,6 +126,7 @@ pub struct QueryExecutor<'a> {
     store: &'a GraphStore,
     planner: QueryPlanner,
     params: HashMap<String, crate::graph::PropertyValue>,
+    deadline: Option<std::time::Instant>,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -135,7 +136,14 @@ impl<'a> QueryExecutor<'a> {
             store,
             planner: QueryPlanner::new(),
             params: HashMap::new(),
+            deadline: None,
         }
+    }
+
+    /// Set a query execution deadline
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = deadline.into();
+        self
     }
 
     /// Set query parameters
@@ -231,6 +239,14 @@ impl<'a> QueryExecutor<'a> {
         // Pull records from the root operator in batches (Vectorized Execution)
         while let Some(batch) = plan.root.next_batch(self.store, batch_size)? {
             records.extend(batch.records);
+            // Cooperative timeout check every batch
+            if let Some(deadline) = self.deadline {
+                if std::time::Instant::now() > deadline {
+                    return Err(ExecutionError::RuntimeError(
+                        format!("Query timed out after {} rows", records.len())
+                    ));
+                }
+            }
         }
 
         Ok(RecordBatch {

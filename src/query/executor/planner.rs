@@ -248,7 +248,7 @@ impl QueryPlanner {
     }
 
     /// Plan a query
-    pub fn plan(&self, query: &Query, _store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+    pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         // Handle SHOW INDEXES
         if query.show_indexes {
             return Ok(ExecutionPlan {
@@ -438,7 +438,7 @@ impl QueryPlanner {
 
         // 1a. Handle pre-WITH MATCH clauses
         for (match_idx, match_clause) in pre_with_clauses.iter().enumerate() {
-            let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), _store)?;
+            let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
 
@@ -624,7 +624,7 @@ impl QueryPlanner {
         }
 
         for (match_idx, match_clause) in post_with_clauses.iter().enumerate() {
-            let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), _store)?;
+            let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = post_match_var_sets[match_idx].clone();
 
@@ -709,6 +709,51 @@ impl QueryPlanner {
         if query.with_clause.is_none() {
             if let Some(where_clause) = &query.where_clause {
                 operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+            }
+        }
+
+        // Process extra WITH stages (multi-WITH support)
+        for (extra_with, extra_unwind, extra_matches, extra_where) in &query.extra_with_stages {
+            // Create WithBarrier for this stage
+            operator = self.build_with_barrier(operator, extra_with, store)?;
+
+            // Apply UNWIND for this stage (e.g., UNWIND top_players AS player)
+            if let Some(unwind) = extra_unwind {
+                operator = Box::new(UnwindOperator::new(
+                    operator,
+                    unwind.expression.clone(),
+                    unwind.variable.clone(),
+                ));
+                known_vars.insert(unwind.variable.clone());
+            }
+
+            // Process post-WITH MATCH clauses for this stage
+            for mc in extra_matches {
+                let call_op = self.plan_match(mc, None, store)?;
+                let call_vars: HashSet<String> = self.extract_match_vars(mc);
+                let shared_vars: Vec<String> = known_vars.intersection(&call_vars).cloned().collect();
+                if !shared_vars.is_empty() {
+                    operator = Box::new(JoinOperator::new(operator, call_op, shared_vars[0].clone()));
+                } else {
+                    operator = Box::new(CartesianProductOperator::new(operator, call_op));
+                }
+                for v in call_vars { known_vars.insert(v); }
+            }
+
+            // Apply post-WITH WHERE for this stage
+            if let Some(where_clause) = extra_where {
+                operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+            }
+
+            // Update known_vars to only include this WITH's outputs
+            known_vars.clear();
+            for item in &extra_with.items {
+                let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                    Expression::Variable(v) => v.clone(),
+                    Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                    _ => "?".to_string(),
+                });
+                known_vars.insert(alias);
             }
         }
 
@@ -1527,6 +1572,105 @@ fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     }
 }
 
+impl QueryPlanner {
+    /// Build a WithBarrier operator from a WithClause (extracted for multi-WITH reuse)
+    fn build_with_barrier(&self, input: OperatorBox, with_clause: &WithClause, _store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        let mut items = Vec::new();
+        let mut aggregates = Vec::new();
+        let mut group_by = Vec::new();
+        let mut has_aggregation = false;
+        let mut agg_counter = 0usize;
+
+        struct WithItemInfo {
+            alias: String,
+            original_expr: Expression,
+            rewritten_expr: Expression,
+            extracted_aggs: Vec<AggregateFunction>,
+        }
+        let mut item_infos = Vec::new();
+
+        for (idx, item) in with_clause.items.iter().enumerate() {
+            let alias = item.alias.clone().unwrap_or_else(|| {
+                match &item.expression {
+                    Expression::Variable(var) => var.clone(),
+                    Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                    Expression::Function { name, args, distinct } => {
+                        let arg_strs: Vec<String> = args.iter().map(|a| match a {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                            _ => "?".to_string(),
+                        }).collect();
+                        if *distinct {
+                            format!("{}(DISTINCT {})", name, arg_strs.join(", "))
+                        } else {
+                            format!("{}({})", name, arg_strs.join(", "))
+                        }
+                    },
+                    _ => format!("col_{}", idx),
+                }
+            });
+
+            let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
+            if !extracted.is_empty() {
+                has_aggregation = true;
+            }
+            item_infos.push(WithItemInfo {
+                alias,
+                original_expr: item.expression.clone(),
+                rewritten_expr: rewritten,
+                extracted_aggs: extracted,
+            });
+        }
+
+        for info in item_infos {
+            if has_aggregation {
+                if !info.extracted_aggs.is_empty() {
+                    aggregates.extend(info.extracted_aggs);
+                    items.push((info.rewritten_expr, info.alias.clone()));
+                } else {
+                    group_by.push((info.original_expr, info.alias.clone()));
+                    items.push((Expression::Variable(info.alias.clone()), info.alias.clone()));
+                }
+            } else {
+                items.push((info.original_expr, info.alias.clone()));
+            }
+        }
+
+        let sort_items: Vec<(Expression, bool)> = with_clause.order_by.as_ref()
+            .map(|ob| ob.items.iter().map(|i| (i.expression.clone(), i.ascending)).collect())
+            .unwrap_or_default();
+
+        let where_predicate = with_clause.where_clause.as_ref()
+            .map(|wc| wc.predicate.clone());
+
+        Ok(Box::new(WithBarrierOperator::new(
+            input,
+            items,
+            aggregates,
+            group_by,
+            has_aggregation,
+            with_clause.distinct,
+            where_predicate,
+            sort_items,
+            with_clause.skip,
+            with_clause.limit,
+        )))
+    }
+
+    /// Extract variable names from a MATCH clause
+    fn extract_match_vars(&self, mc: &MatchClause) -> HashSet<String> {
+        let mut vars = HashSet::new();
+        for path in &mc.pattern.paths {
+            if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+            }
+        }
+        vars
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2178,6 +2322,7 @@ mod tests {
             explain: false,
             with_split_index: None,
             post_with_where_clause: None,
+            extra_with_stages: vec![],
         };
         let result = planner.plan(&query, &store);
         assert!(result.is_err());

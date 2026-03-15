@@ -133,6 +133,8 @@ pub struct QueryEngine {
     ast_cache: Mutex<LruCache<String, Query>>,
     /// Lock-free hit/miss counters
     stats: CacheStats,
+    /// Per-query timeout in seconds (0 = no timeout)
+    query_timeout_secs: u64,
 }
 
 impl QueryEngine {
@@ -147,6 +149,7 @@ impl QueryEngine {
         Self {
             ast_cache: Mutex::new(LruCache::new(cap)),
             stats: CacheStats::new(),
+            query_timeout_secs: 45,
         }
     }
 
@@ -192,7 +195,12 @@ impl QueryEngine {
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
-        let executor = QueryExecutor::new(store);
+        let mut executor = QueryExecutor::new(store);
+        if self.query_timeout_secs > 0 {
+            executor = executor.with_deadline(
+                std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
+            );
+        }
         let result = executor.execute(&query)?;
 
         Ok(result)
