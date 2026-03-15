@@ -38,7 +38,7 @@ on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ unwind_clause? ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)?)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)? ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)?)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
 foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
