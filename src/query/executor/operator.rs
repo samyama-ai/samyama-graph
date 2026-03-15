@@ -73,8 +73,26 @@ use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem}
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
 
+/// Extract node ID from a Value for identity comparison
+fn node_id_of(v: &Value) -> Option<NodeId> {
+    match v {
+        Value::NodeRef(id) | Value::Node(id, _) => Some(*id),
+        _ => None,
+    }
+}
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
+    // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
+    if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+        if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
+            let eq = lid == rid;
+            return Ok(Value::Property(PropertyValue::Boolean(
+                if matches!(op, BinaryOp::Eq) { eq } else { !eq }
+            )));
+        }
+    }
+
     let left_prop = match left {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
@@ -1642,7 +1660,10 @@ impl FilterOperator {
                 self.evaluate_binary_op(op, left_val, right_val)
             }
             Expression::Function { name, args, .. } => {
-                self.evaluate_function(name, args, record, store)
+                let arg_vals: Vec<Value> = args.iter()
+                    .map(|a| self.evaluate_expression(a, record, store))
+                    .collect::<ExecutionResult<Vec<_>>>()?;
+                eval_function(name, &arg_vals, Some(store))
             }
             Expression::Unary { op, expr } => {
                 let val = self.evaluate_expression(expr, record, store)?;
@@ -1712,6 +1733,16 @@ impl FilterOperator {
     }
 
     fn evaluate_binary_op(&self, op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
+        // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
+                let eq = lid == rid;
+                return Ok(Value::Property(PropertyValue::Boolean(
+                    if matches!(op, BinaryOp::Eq) { eq } else { !eq }
+                )));
+            }
+        }
+
         // Extract property values
         let left_prop = match left {
             Value::Property(p) => p,
@@ -1940,15 +1971,7 @@ impl FilterOperator {
         }
     }
 
-    fn evaluate_function(&self, name: &str, _args: &[Expression], _record: &Record, _store: &GraphStore) -> ExecutionResult<Value> {
-        match name.to_lowercase().as_str() {
-            "count" => {
-                // Simple count - just return 1 for now (should be aggregated)
-                Ok(Value::Property(PropertyValue::Integer(1)))
-            }
-            _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
-        }
-    }
+    // evaluate_function removed — FilterOperator now delegates to global eval_function
 }
 
 impl PhysicalOperator for FilterOperator {
@@ -6032,7 +6055,19 @@ impl WithBarrierOperator {
                 }
                 records.push(record);
             }
-            records
+
+            // Post-projection: evaluate items (which may contain rewritten aggregate
+            // references like Variable("__agg_0")) against the intermediate records
+            let mut projected = Vec::with_capacity(records.len());
+            for intermediate in records {
+                let mut new_record = Record::new();
+                for (expr, alias) in &self.items {
+                    let value = Self::evaluate_expression(expr, &intermediate, store)?;
+                    new_record.bind(alias.clone(), value);
+                }
+                projected.push(new_record);
+            }
+            projected
         } else {
             // Non-aggregation path: project each row
             let mut records = Vec::new();

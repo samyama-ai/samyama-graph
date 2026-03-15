@@ -425,13 +425,22 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             }
             Rule::where_clause => {
                 if query.with_split_index.is_some() {
-                    // Second WHERE clause (after WITH ... MATCH ... WHERE ...)
+                    // WHERE clause after WITH ... MATCH ...
                     query.post_with_where_clause = Some(parse_where_clause(inner)?);
                 } else {
                     query.where_clause = Some(parse_where_clause(inner)?);
                 }
             }
             Rule::with_clause => {
+                if query.with_clause.is_some() {
+                    // Additional WITH clause — save current post-WITH state as an extra stage
+                    let split = query.with_split_index.unwrap_or(query.match_clauses.len());
+                    let post_matches: Vec<_> = query.match_clauses.drain(split..).collect();
+                    let post_where = query.post_with_where_clause.take();
+                    let prev_with = query.with_clause.take().unwrap();
+                    let prev_unwind = query.unwind_clause.take();
+                    query.extra_with_stages.push((prev_with, prev_unwind, post_matches, post_where));
+                }
                 // Record where WITH splits pre-WITH from post-WITH match clauses
                 query.with_split_index = Some(query.match_clauses.len());
                 query.with_clause = Some(parse_with_clause(inner)?);
