@@ -267,6 +267,131 @@ pub async fn schema_handler(
     }))
 }
 
+/// Request for sampling a subgraph for visualization
+#[derive(Deserialize)]
+pub struct SampleRequest {
+    /// Maximum number of nodes to return (default: 200)
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+    /// Optional: only include these labels (empty = all)
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Tenant/graph name
+    #[serde(default = "default_graph")]
+    pub graph: String,
+}
+
+fn default_max_nodes() -> usize { 200 }
+
+/// Handler for subgraph sampling — returns a representative subset for visualization
+pub async fn sample_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<SampleRequest>,
+) -> impl IntoResponse {
+    let store_guard = state.store.read().await;
+    let max_nodes = payload.max_nodes.min(1000); // Cap at 1000
+
+    // Determine which labels to sample
+    let all_labels = store_guard.all_labels();
+    let target_labels: Vec<&crate::graph::Label> = if payload.labels.is_empty() {
+        all_labels
+    } else {
+        let label_set: std::collections::HashSet<&str> = payload.labels.iter().map(|s| s.as_str()).collect();
+        all_labels.into_iter().filter(|l| label_set.contains(l.as_str())).collect()
+    };
+
+    // Calculate total nodes across target labels
+    let total: usize = target_labels.iter().map(|l| store_guard.label_node_count(l)).sum();
+    if total == 0 {
+        return Json(json!({ "nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0 }));
+    }
+
+    // Proportionally sample nodes per label
+    let mut sampled_ids: std::collections::HashSet<crate::graph::NodeId> = std::collections::HashSet::new();
+    let mut node_list = Vec::new();
+
+    for label in &target_labels {
+        let count = store_guard.label_node_count(label);
+        let sample_size = ((max_nodes as f64 * count as f64 / total as f64).ceil() as usize).max(1).min(count);
+        let nodes = store_guard.get_nodes_by_label(label);
+
+        // Sample evenly across the label's nodes using stride
+        let stride = if nodes.len() <= sample_size { 1 } else { nodes.len() / sample_size };
+        let mut taken = 0;
+        for (i, node) in nodes.iter().enumerate() {
+            if taken >= sample_size { break; }
+            if i % stride == 0 {
+                sampled_ids.insert(node.id);
+
+                // Build node JSON with all properties
+                let mut props = serde_json::Map::new();
+                for (k, v) in &node.properties {
+                    props.insert(k.clone(), match v {
+                        PropertyValue::String(s) => json!(s),
+                        PropertyValue::Integer(i) => json!(i),
+                        PropertyValue::Float(f) => json!(f),
+                        PropertyValue::Boolean(b) => json!(b),
+                        PropertyValue::Null => json!(null),
+                        _ => json!(v.to_string()),
+                    });
+                }
+
+                // Determine node name (first string property, or id)
+                let name = node.properties.iter()
+                    .find(|(k, _)| k.as_str() == "name" || k.as_str() == "title" || k.as_str() == "label")
+                    .and_then(|(_, v)| match v {
+                        PropertyValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("{}", node.id.as_u64()));
+
+                node_list.push(json!({
+                    "id": node.id.as_u64(),
+                    "label": label.as_str(),
+                    "name": name,
+                    "properties": props,
+                }));
+                taken += 1;
+            }
+        }
+    }
+
+    // Find edges between sampled nodes
+    let mut edge_list = Vec::new();
+    for edge_type in store_guard.all_edge_types() {
+        for edge in store_guard.get_edges_by_type(edge_type) {
+            if sampled_ids.contains(&edge.source) && sampled_ids.contains(&edge.target) {
+                let mut props = serde_json::Map::new();
+                for (k, v) in &edge.properties {
+                    props.insert(k.clone(), match v {
+                        PropertyValue::String(s) => json!(s),
+                        PropertyValue::Integer(i) => json!(i),
+                        PropertyValue::Float(f) => json!(f),
+                        PropertyValue::Boolean(b) => json!(b),
+                        _ => json!(v.to_string()),
+                    });
+                }
+                edge_list.push(json!({
+                    "id": edge.id.as_u64(),
+                    "source": edge.source.as_u64(),
+                    "target": edge.target.as_u64(),
+                    "type": edge_type.as_str(),
+                    "properties": props,
+                }));
+            }
+        }
+    }
+
+    Json(json!({
+        "nodes": node_list,
+        "edges": edge_list,
+        "total_nodes": total,
+        "total_edges": store_guard.edge_count(),
+        "sampled_nodes": node_list.len(),
+        "sampled_edges": edge_list.len(),
+    }))
+}
+
 /// Handler for CSV file upload and import
 pub async fn import_csv_handler(
     State(state): State<AppState>,
