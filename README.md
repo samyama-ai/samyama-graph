@@ -15,9 +15,11 @@
 
 ### See it in action
 
-> Dashboard → Cypher Queries → Graph Simulation (Cricket KG — 36K nodes, 1.4M edges)
+> Graph Simulation — Cricket KG (36K nodes, 1.4M edges) with live activity particles
 
-https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4
+[![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
+
+*Click for full demo (1:56) — Dashboard, Cypher Queries, and Graph Simulation*
 
 ### LDBC Benchmark Results (v0.6.0, Mac Mini M4)
 
