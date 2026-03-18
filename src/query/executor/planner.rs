@@ -380,7 +380,23 @@ impl QueryPlanner {
         // Handle CREATE-only queries (no MATCH/CALL required)
         if query.match_clauses.is_empty() && query.call_clause.is_none() {
             if let Some(create_clause) = &query.create_clause {
-                return self.plan_create_only(create_clause);
+                let mut plan = self.plan_create_only(create_clause)?;
+                // CY-12: Wrap with ProjectOperator if RETURN clause is present
+                if let Some(return_clause) = &query.return_clause {
+                    let mut output_columns = Vec::new();
+                    let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                        let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                            _ => format!("col_{}", i),
+                        });
+                        output_columns.push(alias.clone());
+                        (item.expression.clone(), alias)
+                    }).collect();
+                    plan.root = Box::new(ProjectOperator::new(plan.root, projections));
+                    plan.output_columns = output_columns;
+                }
+                return Ok(plan);
             }
             return Err(ExecutionError::PlanningError(
                 "Query must have at least one MATCH, CALL or CREATE clause".to_string()
@@ -880,6 +896,51 @@ impl QueryPlanner {
                 set_items,
                 create_patterns,
             ));
+            true
+        } else {
+            is_write
+        };
+
+        // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
+        let is_write = if let Some(merge_clause) = &query.merge_clause {
+            let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
+                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                .collect();
+            let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
+                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+                .collect();
+
+            // Extract edge patterns from MERGE clause
+            let mut edges_to_merge = Vec::new();
+            for path in &merge_clause.pattern.paths {
+                let mut current_var = path.start.variable.clone();
+                for segment in &path.segments {
+                    let edge = &segment.edge;
+                    let edge_type = edge.types.first().cloned()
+                        .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                    let edge_props = edge.properties.clone().unwrap_or_default();
+                    let edge_var = edge.variable.clone();
+                    let target_var = segment.node.variable.clone();
+
+                    if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
+                        edges_to_merge.push((src.clone(), tgt.clone(), edge_type, edge_props, edge_var));
+                    }
+                    current_var = target_var;
+                }
+            }
+
+            if !edges_to_merge.is_empty() {
+                // Edge MERGE: use MatchMergeEdgeOperator
+                use crate::query::executor::operator::MatchMergeEdgeOperator;
+                operator = Box::new(MatchMergeEdgeOperator::new(
+                    operator, edges_to_merge, on_create, on_match,
+                ));
+            } else {
+                // Node-only MERGE: use existing MergeOperator with input
+                operator = Box::new(MergeOperator::new(
+                    merge_clause.pattern.clone(), on_create, on_match,
+                ));
+            }
             true
         } else {
             is_write
