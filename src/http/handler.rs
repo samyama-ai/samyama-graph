@@ -41,7 +41,14 @@ pub async fn query_handler(
     let query_upper = payload.query.trim().to_uppercase();
     let is_write = query_upper.starts_with("CREATE") ||
                    query_upper.starts_with("SET") ||
-                   query_upper.starts_with("DELETE");
+                   query_upper.starts_with("DELETE") ||
+                   query_upper.starts_with("MERGE") ||
+                   (query_upper.starts_with("MATCH") &&
+                    (query_upper.contains(" CREATE ") || query_upper.contains(" SET ") ||
+                     query_upper.contains(" DELETE ") || query_upper.contains(" MERGE ") ||
+                     query_upper.contains(" REMOVE ") ||
+                     query_upper.ends_with(" CREATE") || query_upper.ends_with(" SET") ||
+                     query_upper.ends_with(" DELETE") || query_upper.ends_with(" MERGE")));
 
     let result = if is_write {
         let mut store_guard = state.store.write().await;

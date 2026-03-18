@@ -82,7 +82,7 @@ edge_pattern = {
     ("-" ~ edge_detail ~ "-")
 }
 edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ "]" }
-edge_types = { (":" ~ edge_type)+ }
+edge_types = { ":" ~ edge_type ~ (("|" | ":") ~ edge_type)* }
 edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Variable length: *1..5 or * or *3..
