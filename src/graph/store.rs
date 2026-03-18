@@ -735,6 +735,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Ok(())
     }
 
+    /// Set a property on an edge, updating both columnar and row storage.
+    pub fn set_edge_property(
+        &mut self,
+        edge_id: EdgeId,
+        key: impl Into<String>,
+        value: impl Into<PropertyValue>,
+    ) -> GraphResult<()> {
+        let key_str = key.into();
+        let val = value.into();
+        let idx = edge_id.as_u64() as usize;
+
+        // Update columnar storage
+        self.edge_columns.set_property(idx, &key_str, val.clone());
+
+        // Update edge row storage
+        if let Some(edge) = self.get_edge_mut(edge_id) {
+            edge.set_property(key_str, val);
+        }
+
+        Ok(())
+    }
+
     /// Delete a node and all its connected edges
     pub fn delete_node(
         &mut self,
