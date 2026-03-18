@@ -821,10 +821,18 @@ fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> Exec
             }
         }
         "round" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.round() as i64))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                _ => Err(ExecutionError::TypeError("round() requires numeric".to_string())),
+            if args.len() >= 2 {
+                // CY-23: round(x, precision) — e.g. round(3.14159, 2) → 3.14
+                let v = extract_float(&args[0])?;
+                let precision = extract_float(&args[1])? as i32;
+                let factor = 10f64.powi(precision);
+                Ok(Value::Property(PropertyValue::Float((v * factor).round() / factor)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.round() as i64))),
+                    Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                    _ => Err(ExecutionError::TypeError("round() requires numeric".to_string())),
+                }
             }
         }
         "sqrt" => {
@@ -1178,6 +1186,121 @@ fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> Exec
             // Scalar fallback:
             Ok(Value::Property(PropertyValue::Float(0.0)))
         }
+        // CY-17: Trigonometric functions
+        "sin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.sin()))) }
+        "cos" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.cos()))) }
+        "tan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.tan()))) }
+        "cot" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(1.0 / v.tan()))) }
+        "asin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.asin()))) }
+        "acos" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.acos()))) }
+        "atan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.atan()))) }
+        "atan2" => {
+            let y = extract_float(&args[0])?;
+            let x = extract_float(&args[1])?;
+            Ok(Value::Property(PropertyValue::Float(y.atan2(x))))
+        }
+        "sinh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.sinh()))) }
+        "cosh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.cosh()))) }
+        "tanh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.tanh()))) }
+        "degrees" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.to_degrees()))) }
+        "radians" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.to_radians()))) }
+        "pi" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::PI))),
+        "haversin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float((1.0 - v.cos()) / 2.0))) }
+        // CY-22: Math constants & minor functions
+        "e" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::E))),
+        "log10" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.log10()))) }
+        "isnan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Boolean(v.is_nan()))) }
+        // CY-24: elementId()
+        "elementid" => {
+            match &args[0] {
+                Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::String(format!("node:{}", id.as_u64())))),
+                Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(PropertyValue::String(format!("edge:{}", id.as_u64())))),
+                _ => Err(ExecutionError::TypeError("elementId() requires a node or edge".to_string())),
+            }
+        }
+        // CY-25: randomUUID()
+        "randomuuid" => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            let seed = t.as_nanos();
+            // Simple v4-like UUID (not cryptographically secure, but unique enough)
+            let uuid = format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+                (seed & 0xFFFFFFFF) as u32,
+                ((seed >> 32) & 0xFFFF) as u16,
+                ((seed >> 48) & 0x0FFF) as u16,
+                (0x8000 | ((seed >> 60) & 0x3FFF)) as u16,
+                (seed >> 76) as u64 ^ (seed & 0xFFFFFFFFFFFF) as u64,
+            );
+            Ok(Value::Property(PropertyValue::String(uuid)))
+        }
+        // CY-26: valueType()
+        "valuetype" => {
+            let type_name = match &args[0] {
+                Value::Property(PropertyValue::Integer(_)) => "INTEGER",
+                Value::Property(PropertyValue::Float(_)) => "FLOAT",
+                Value::Property(PropertyValue::String(_)) => "STRING",
+                Value::Property(PropertyValue::Boolean(_)) => "BOOLEAN",
+                Value::Property(PropertyValue::Array(_)) => "LIST",
+                Value::Property(PropertyValue::Map(_)) => "MAP",
+                Value::Property(PropertyValue::Null) => "NULL",
+                Value::NodeRef(_) | Value::Node(_, _) => "NODE",
+                Value::EdgeRef(..) | Value::Edge(_, _) => "RELATIONSHIP",
+                Value::Path { .. } => "PATH",
+                Value::Null => "NULL",
+                _ => "ANY",
+            };
+            Ok(Value::Property(PropertyValue::String(type_name.to_string())))
+        }
+        // CY-27: toBoolean and OrNull variants
+        "toboolean" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(*b))),
+                Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
+                    "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
+                    "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
+                    _ => Err(ExecutionError::TypeError(format!("Cannot convert '{}' to boolean", s))),
+                },
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Boolean(*i != 0))),
+                Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
+                _ => Err(ExecutionError::TypeError("toBoolean() requires a boolean, string, or integer".to_string())),
+            }
+        }
+        "tobooleanornull" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(*b))),
+                Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
+                    "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
+                    "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
+                    _ => Ok(Value::Null),
+                },
+                _ => Ok(Value::Null),
+            }
+        }
+        "tointegerornull" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
+                Value::Property(PropertyValue::String(s)) => Ok(s.parse::<i64>().map(|i| Value::Property(PropertyValue::Integer(i))).unwrap_or(Value::Null)),
+                _ => Ok(Value::Null),
+            }
+        }
+        "tofloatornull" => {
+            match &args[0] {
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
+                Value::Property(PropertyValue::String(s)) => Ok(s.parse::<f64>().map(|f| Value::Property(PropertyValue::Float(f))).unwrap_or(Value::Null)),
+                _ => Ok(Value::Null),
+            }
+        }
+        "tostringornull" => {
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::String(s.clone()))),
+                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::String(i.to_string()))),
+                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::String(f.to_string()))),
+                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::String(b.to_string()))),
+                _ => Ok(Value::Null),
+            }
+        }
         _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
     }
 }
@@ -1195,6 +1318,15 @@ fn extract_int(val: &Value) -> ExecutionResult<i64> {
     match val {
         Value::Property(PropertyValue::Integer(i)) => Ok(*i),
         _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
+    }
+}
+
+/// Helper: extract float from Value (with integer promotion)
+fn extract_float(val: &Value) -> ExecutionResult<f64> {
+    match val {
+        Value::Property(PropertyValue::Float(f)) => Ok(*f),
+        Value::Property(PropertyValue::Integer(i)) => Ok(*i as f64),
+        _ => Err(ExecutionError::TypeError("Expected numeric argument".to_string())),
     }
 }
 
@@ -4734,6 +4866,116 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
     fn is_mutating(&self) -> bool {
         true
     }
+}
+
+/// Operator for MATCH...MERGE edge patterns.
+/// Checks if edge exists between bound endpoints before creating.
+pub struct MatchMergeEdgeOperator {
+    input: OperatorBox,
+    /// (source_var, target_var, edge_type, properties, edge_var)
+    edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    on_create_set: Vec<(String, String, Expression)>,
+    on_match_set: Vec<(String, String, Expression)>,
+    done: bool,
+    results: Vec<Record>,
+    result_index: usize,
+}
+
+impl MatchMergeEdgeOperator {
+    pub fn new(
+        input: OperatorBox,
+        edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+        on_create_set: Vec<(String, String, Expression)>,
+        on_match_set: Vec<(String, String, Expression)>,
+    ) -> Self {
+        Self { input, edges_to_merge, on_create_set, on_match_set, done: false, results: Vec::new(), result_index: 0 }
+    }
+}
+
+impl PhysicalOperator for MatchMergeEdgeOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError("MatchMergeEdgeOperator requires mutable store access".to_string()))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.done {
+            while let Some(record) = self.input.next_mut(store, tenant_id)? {
+                for (source_var, target_var, edge_type, properties, edge_var) in &self.edges_to_merge {
+                    let source_id = match record.get(source_var).and_then(|v| v.node_id()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let target_id = match record.get(target_var).and_then(|v| v.node_id()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+
+                    // Check if edge already exists
+                    let existing = store.edge_between(source_id, target_id, Some(edge_type));
+
+                    let mut result_record = record.clone();
+
+                    if let Some(edge_id) = existing {
+                        // Edge exists — apply ON MATCH SET
+                        for (var, prop, expr) in &self.on_match_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let val = eval_expression(expr, &result_record, store)?;
+                                if let Value::Property(pv) = val {
+                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                }
+                            }
+                        }
+                        if let Some(ref ev) = edge_var {
+                            if let Some(edge) = store.get_edge(edge_id) {
+                                result_record.bind(ev.clone(), Value::Edge(edge_id, edge.clone()));
+                            }
+                        }
+                    } else {
+                        // Edge doesn't exist — create it + apply ON CREATE SET
+                        let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+
+                        for (key, value) in properties {
+                            let _ = store.set_edge_property(edge_id, key.clone(), value.clone());
+                        }
+
+                        for (var, prop, expr) in &self.on_create_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let val = eval_expression(expr, &result_record, store)?;
+                                if let Value::Property(pv) = val {
+                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                }
+                            }
+                        }
+
+                        if let Some(ref ev) = edge_var {
+                            if let Some(edge) = store.get_edge(edge_id) {
+                                result_record.bind(ev.clone(), Value::Edge(edge_id, edge.clone()));
+                            }
+                        }
+                    }
+                    self.results.push(result_record);
+                }
+            }
+            self.done = true;
+        }
+
+        if self.result_index >= self.results.len() {
+            return Ok(None);
+        }
+        let result = self.results[self.result_index].clone();
+        self.result_index += 1;
+        Ok(Some(result))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.done = false;
+        self.results.clear();
+        self.result_index = 0;
+    }
+
+    fn is_mutating(&self) -> bool { true }
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
