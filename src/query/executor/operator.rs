@@ -1123,6 +1123,61 @@ fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> Exec
                 _ => Err(ExecutionError::TypeError("duration.between() requires two datetime arguments".to_string())),
             }
         }
+        // CY-20: properties() — return all properties as a map
+        "properties" => {
+            match &args[0] {
+                Value::Node(_, node) => {
+                    Ok(Value::Property(PropertyValue::Map(node.properties.clone())))
+                }
+                Value::NodeRef(id) => {
+                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("properties() on NodeRef requires store".to_string()))?;
+                    let node = s.get_node(*id).ok_or_else(|| ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())))?;
+                    Ok(Value::Property(PropertyValue::Map(node.properties.clone())))
+                }
+                Value::Edge(_, edge) => {
+                    Ok(Value::Property(PropertyValue::Map(edge.properties.clone())))
+                }
+                Value::EdgeRef(eid, _, _, _) => {
+                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("properties() on EdgeRef requires store".to_string()))?;
+                    let edge = s.get_edge(*eid).ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {} not found", eid.as_u64())))?;
+                    Ok(Value::Property(PropertyValue::Map(edge.properties.clone())))
+                }
+                Value::Property(PropertyValue::Map(m)) => Ok(Value::Property(PropertyValue::Map(m.clone()))),
+                Value::Null => Ok(Value::Null),
+                _ => Err(ExecutionError::TypeError("properties() requires a node, edge, or map".to_string())),
+            }
+        }
+        // CY-21: isEmpty() — check if collection/string/map is empty
+        "isempty" => {
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Boolean(s.is_empty()))),
+                Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Boolean(a.is_empty()))),
+                Value::Property(PropertyValue::Map(m)) => Ok(Value::Property(PropertyValue::Boolean(m.is_empty()))),
+                Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
+                _ => Err(ExecutionError::TypeError("isEmpty() requires a string, list, or map".to_string())),
+            }
+        }
+        // CY-18: percentileCont / percentileDisc
+        "percentilecont" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError("percentileCont requires 2 arguments".to_string()));
+            }
+            // This is an aggregation function — handled in GroupByOperator, not here.
+            // Scalar fallback for single-value case:
+            Ok(args[0].clone())
+        }
+        "percentiledisc" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError("percentileDisc requires 2 arguments".to_string()));
+            }
+            Ok(args[0].clone())
+        }
+        // CY-19: stDev / stDevP
+        "stdev" | "stdevp" => {
+            // Aggregation function — handled in GroupByOperator.
+            // Scalar fallback:
+            Ok(Value::Property(PropertyValue::Float(0.0)))
+        }
         _ => Err(ExecutionError::RuntimeError(format!("Unknown function: {}", name))),
     }
 }
@@ -2456,6 +2511,10 @@ pub enum AggregateType {
     Min,
     Max,
     Collect,
+    PercentileCont,
+    PercentileDisc,
+    StDev,
+    StDevP,
 }
 
 /// Aggregation function definition
@@ -2478,6 +2537,8 @@ enum AggregatorState {
     Max(Option<PropertyValue>),
     Collect(Vec<PropertyValue>),
     CollectDistinct(BTreeSet<PropertyValue>),
+    Percentile { values: Vec<f64>, pct: f64, cont: bool },
+    StDev { values: Vec<f64>, population: bool },
 }
 
 impl AggregatorState {
@@ -2491,6 +2552,10 @@ impl AggregatorState {
             (AggregateType::Max, _) => AggregatorState::Max(None),
             (AggregateType::Collect, true) => AggregatorState::CollectDistinct(BTreeSet::new()),
             (AggregateType::Collect, false) => AggregatorState::Collect(Vec::new()),
+            (AggregateType::PercentileCont, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: true },
+            (AggregateType::PercentileDisc, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: false },
+            (AggregateType::StDev, _) => AggregatorState::StDev { values: Vec::new(), population: false },
+            (AggregateType::StDevP, _) => AggregatorState::StDev { values: Vec::new(), population: true },
         }
     }
 
@@ -2558,6 +2623,18 @@ impl AggregatorState {
                     }
                 }
             }
+            AggregatorState::Percentile { values, .. } => {
+                if let Some(prop) = value.as_property() {
+                    if let Some(f) = prop.as_float() { values.push(f); }
+                    else if let Some(i) = prop.as_integer() { values.push(i as f64); }
+                }
+            }
+            AggregatorState::StDev { values, .. } => {
+                if let Some(prop) = value.as_property() {
+                    if let Some(f) = prop.as_float() { values.push(f); }
+                    else if let Some(i) = prop.as_integer() { values.push(i as f64); }
+                }
+            }
         }
     }
 
@@ -2574,6 +2651,33 @@ impl AggregatorState {
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Collect(items) => Value::Property(PropertyValue::Array(items.clone())),
             AggregatorState::CollectDistinct(set) => Value::Property(PropertyValue::Array(set.iter().cloned().collect())),
+            AggregatorState::Percentile { values, pct, cont } => {
+                if values.is_empty() { return Value::Null; }
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if *cont {
+                    // Linear interpolation
+                    let idx = pct * (n - 1) as f64;
+                    let lo = idx.floor() as usize;
+                    let hi = idx.ceil() as usize;
+                    let frac = idx - lo as f64;
+                    let result = sorted[lo] * (1.0 - frac) + sorted[hi.min(n - 1)] * frac;
+                    Value::Property(PropertyValue::Float(result))
+                } else {
+                    // Nearest rank
+                    let idx = (pct * n as f64).ceil() as usize;
+                    Value::Property(PropertyValue::Float(sorted[idx.saturating_sub(1).min(n - 1)]))
+                }
+            }
+            AggregatorState::StDev { values, population } => {
+                if values.is_empty() { return Value::Null; }
+                let n = values.len() as f64;
+                let mean = values.iter().sum::<f64>() / n;
+                let variance: f64 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                let denom = if *population { n } else { (n - 1.0).max(1.0) };
+                Value::Property(PropertyValue::Float((variance / denom).sqrt()))
+            }
         }
     }
 }
@@ -5351,20 +5455,16 @@ impl PhysicalOperator for SetPropertyOperator {
                 (var.clone(), prop.clone(), val)
             }).collect();
 
-            // Apply mutations (mutable borrow of store)
+            // Apply mutations via store methods (syncs columnar + row + index)
             for (var, prop, val) in &evaluated {
 
                 if let Some(node_val) = record.get(var) {
                     match node_val {
                         Value::NodeRef(id) | Value::Node(id, _) => {
-                            if let Some(node) = store.get_node_mut(*id) {
-                                node.set_property(prop, val.clone());
-                            }
+                            let _ = store.set_node_property(tenant_id, *id, prop.clone(), val.clone());
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            if let Some(edge) = store.get_edge_mut(*id) {
-                                edge.set_property(prop, val.clone());
-                            }
+                            let _ = store.set_edge_property(*id, prop.clone(), val.clone());
                         }
                         _ => {}
                     }
@@ -5558,7 +5658,7 @@ impl PhysicalOperator for MergeOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -5603,9 +5703,7 @@ impl PhysicalOperator for MergeOperator {
                 if var == &start_var {
                     let val = eval_expression(expr, &record, store)?;
                     if let Value::Property(pv) = val {
-                        if let Some(node) = store.get_node_mut(node_id) {
-                            node.set_property(prop.clone(), pv);
-                        }
+                        let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
                     }
                 }
             }
@@ -5621,9 +5719,7 @@ impl PhysicalOperator for MergeOperator {
 
             if let Some(required_props) = props {
                 for (k, v) in required_props {
-                    if let Some(node) = store.get_node_mut(node_id) {
-                        node.set_property(k.clone(), v.clone());
-                    }
+                    let _ = store.set_node_property(tenant_id, node_id, k.clone(), v.clone());
                 }
             }
 
@@ -5633,9 +5729,7 @@ impl PhysicalOperator for MergeOperator {
                 if var == &start_var {
                     let val = eval_expression(expr, &record, store)?;
                     if let Value::Property(pv) = val {
-                        if let Some(node) = store.get_node_mut(node_id) {
-                            node.set_property(prop.clone(), pv);
-                        }
+                        let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
                     }
                 }
             }
@@ -5714,14 +5808,10 @@ impl PhysicalOperator for ForeachOperator {
                     if let Some(node_val) = inner_record.get(var) {
                         match node_val {
                             Value::NodeRef(id) | Value::Node(id, _) => {
-                                if let Some(node) = store.get_node_mut(*id) {
-                                    node.set_property(prop, prop_val.clone());
-                                }
+                                let _ = store.set_node_property(tenant_id, *id, prop.to_string(), prop_val.clone());
                             }
                             Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                                if let Some(edge) = store.get_edge_mut(*id) {
-                                    edge.set_property(prop, prop_val.clone());
-                                }
+                                let _ = store.set_edge_property(*id, prop.to_string(), prop_val.clone());
                             }
                             _ => {}
                         }
@@ -5737,9 +5827,7 @@ impl PhysicalOperator for ForeachOperator {
                         let node_id = store.create_node(label_str);
                         if let Some(props) = &path.start.properties {
                             for (k, v) in props {
-                                if let Some(node) = store.get_node_mut(node_id) {
-                                    node.set_property(k, v.clone());
-                                }
+                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), v.clone());
                             }
                         }
                     }

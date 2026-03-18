@@ -96,6 +96,10 @@ fn extract_agg_inner(
                 "min" => Some(AggregateType::Min),
                 "max" => Some(AggregateType::Max),
                 "collect" => Some(AggregateType::Collect),
+                "percentilecont" => Some(AggregateType::PercentileCont),
+                "percentiledisc" => Some(AggregateType::PercentileDisc),
+                "stdev" => Some(AggregateType::StDev),
+                "stdevp" => Some(AggregateType::StDevP),
                 _ => None,
             };
 
