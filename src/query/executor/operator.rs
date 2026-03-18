@@ -5334,19 +5334,25 @@ impl PhysicalOperator for SetPropertyOperator {
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
-            for (var, prop, expr) in &self.items {
-                // Evaluate the expression
-                let val = match expr {
-                    Expression::Literal(lit) => lit.clone(),
-                    Expression::Property { variable, property } => {
-                        if let Some(v) = record.get(variable) {
-                            v.resolve_property(property, store)
-                        } else {
-                            PropertyValue::Null
-                        }
-                    }
-                    _ => PropertyValue::Null,
+            // Evaluate all SET expressions first (immutable borrow of store)
+            let evaluated: Vec<_> = self.items.iter().map(|(var, prop, expr)| {
+                let val = match eval_expression(expr, &record, store) {
+                    Ok(v) => match v {
+                        Value::Property(pv) => pv,
+                        Value::Null => PropertyValue::Null,
+                        Value::NodeRef(id) => PropertyValue::Integer(id.as_u64() as i64),
+                        Value::Node(id, _) => PropertyValue::Integer(id.as_u64() as i64),
+                        Value::EdgeRef(id, ..) => PropertyValue::Integer(id.as_u64() as i64),
+                        Value::Edge(id, _) => PropertyValue::Integer(id.as_u64() as i64),
+                        Value::Path { .. } => PropertyValue::Null,
+                    },
+                    Err(_) => PropertyValue::Null,
                 };
+                (var.clone(), prop.clone(), val)
+            }).collect();
+
+            // Apply mutations (mutable borrow of store)
+            for (var, prop, val) in &evaluated {
 
                 if let Some(node_val) = record.get(var) {
                     match node_val {
