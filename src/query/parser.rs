@@ -504,10 +504,16 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
 
 fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::pattern {
-            query.create_clause = Some(CreateClause {
-                pattern: parse_pattern(inner)?,
-            });
+        match inner.as_rule() {
+            Rule::pattern => {
+                query.create_clause = Some(CreateClause {
+                    pattern: parse_pattern(inner)?,
+                });
+            }
+            Rule::return_clause => {
+                query.return_clause = Some(parse_return_clause(inner)?);
+            }
+            _ => {}
         }
     }
     Ok(())

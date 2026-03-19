@@ -6113,4 +6113,299 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 2);
     }
+
+    // ==================== CY-12: CREATE...RETURN ====================
+
+    #[test]
+    fn test_create_return_node_name() {
+        let mut store = GraphStore::new();
+        let query = parse_query(r#"CREATE (n:Person {name: "Alice"}) RETURN n.name"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.columns, vec!["n.name"]);
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("n.name").unwrap();
+        assert_eq!(*val, Value::Property(PropertyValue::String("Alice".to_string())));
+    }
+
+    #[test]
+    fn test_create_return_node_variable() {
+        let mut store = GraphStore::new();
+        let query = parse_query(r#"CREATE (n:Person {name: "Bob"}) RETURN n"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert!(result.records[0].get("n").unwrap().node_id().is_some());
+    }
+
+    #[test]
+    fn test_create_return_multiple_properties() {
+        let mut store = GraphStore::new();
+        let query = parse_query(r#"CREATE (n:Person {name: "Carol", age: 30}) RETURN n.name, n.age"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.columns, vec!["n.name", "n.age"]);
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("n.name").unwrap(), Value::Property(PropertyValue::String("Carol".to_string())));
+        assert_eq!(*result.records[0].get("n.age").unwrap(), Value::Property(PropertyValue::Integer(30)));
+    }
+
+    // ==================== CY-13: Edge MERGE in MATCH context ====================
+
+    #[test]
+    fn test_match_merge_edge_creates() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
+        let b = store.create_node("Person");
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
+
+        let query = parse_query(r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "Edge MERGE failed: {:?}", result.err());
+        assert!(store.edge_between(a, b, Some(&crate::graph::EdgeType::new("KNOWS"))).is_some());
+    }
+
+    #[test]
+    fn test_match_merge_edge_idempotent() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
+        let b = store.create_node("Person");
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
+
+        let q = r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#;
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        executor.execute(&parse_query(q).unwrap()).unwrap();
+        let edge_count = store.edge_count();
+
+        let mut executor2 = MutQueryExecutor::new(&mut store, "default".to_string());
+        executor2.execute(&parse_query(q).unwrap()).unwrap();
+        assert_eq!(store.edge_count(), edge_count, "MERGE created a duplicate edge");
+    }
+
+    // ==================== QE-10: SET on existing properties ====================
+
+    #[test]
+    fn test_set_overwrites_existing_property() {
+        let mut store = GraphStore::new();
+        let mut ex = MutQueryExecutor::new(&mut store, "default".to_string());
+        ex.execute(&parse_query(r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap()).unwrap();
+
+        let mut ex2 = MutQueryExecutor::new(&mut store, "default".to_string());
+        ex2.execute(&parse_query(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#).unwrap()).unwrap();
+
+        let result = QueryExecutor::new(&store).execute(&parse_query(r#"MATCH (n:Person {name: "Alice"}) RETURN n.age AS age"#).unwrap()).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("age").unwrap(), Value::Property(PropertyValue::Integer(31)));
+    }
+
+    #[test]
+    fn test_set_with_function_expression() {
+        let mut store = GraphStore::new();
+        let mut ex = MutQueryExecutor::new(&mut store, "default".to_string());
+        ex.execute(&parse_query(r#"CREATE (n:Person {name: "alice"})"#).unwrap()).unwrap();
+
+        let mut ex2 = MutQueryExecutor::new(&mut store, "default".to_string());
+        ex2.execute(&parse_query(r#"MATCH (n:Person {name: "alice"}) SET n.upper_name = toUpper(n.name)"#).unwrap()).unwrap();
+
+        let result = QueryExecutor::new(&store).execute(&parse_query(r#"MATCH (n:Person) RETURN n.upper_name AS u"#).unwrap()).unwrap();
+        assert_eq!(*result.records[0].get("u").unwrap(), Value::Property(PropertyValue::String("ALICE".to_string())));
+    }
+
+    // ==================== CY-11: Piped edge types ====================
+
+    #[test]
+    fn test_piped_edge_types() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
+        let _ = store.set_node_property("default", c, "name", PropertyValue::String("Carol".to_string()));
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, c, "WORKS_WITH").unwrap();
+
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"MATCH (a:Person {name: "Alice"})-[:KNOWS|WORKS_WITH]->(b) RETURN b.name AS name ORDER BY b.name"#).unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(*result.records[0].get("name").unwrap(), Value::Property(PropertyValue::String("Bob".to_string())));
+        assert_eq!(*result.records[1].get("name").unwrap(), Value::Property(PropertyValue::String("Carol".to_string())));
+    }
+
+    // ==================== CY-17: Trigonometric functions ====================
+
+    #[test]
+    fn test_trig_functions() {
+        use crate::query::executor::operator::eval_function;
+        let val = |f: f64| Value::Property(PropertyValue::Float(f));
+
+        let sin_r = eval_function("sin", &[val(0.0)], None).unwrap();
+        assert_eq!(sin_r, Value::Property(PropertyValue::Float(0.0)));
+
+        let cos_r = eval_function("cos", &[val(0.0)], None).unwrap();
+        assert_eq!(cos_r, Value::Property(PropertyValue::Float(1.0)));
+
+        let pi_r = eval_function("pi", &[], None).unwrap();
+        if let Value::Property(PropertyValue::Float(pi)) = pi_r {
+            assert!((pi - std::f64::consts::PI).abs() < 1e-10);
+        } else { panic!("pi() should return Float"); }
+
+        let haversin_r = eval_function("haversin", &[val(0.0)], None).unwrap();
+        assert_eq!(haversin_r, Value::Property(PropertyValue::Float(0.0)));
+    }
+
+    #[test]
+    fn test_degrees_radians() {
+        use crate::query::executor::operator::eval_function;
+        let val = |f: f64| Value::Property(PropertyValue::Float(f));
+
+        if let Value::Property(PropertyValue::Float(d)) = eval_function("degrees", &[val(std::f64::consts::PI)], None).unwrap() {
+            assert!((d - 180.0).abs() < 1e-6);
+        }
+        if let Value::Property(PropertyValue::Float(r)) = eval_function("radians", &[val(180.0)], None).unwrap() {
+            assert!((r - std::f64::consts::PI).abs() < 1e-6);
+        }
+    }
+
+    // ==================== CY-20: properties() ====================
+
+    #[test]
+    fn test_properties_function() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("Person");
+        let _ = store.set_node_property("default", n, "name", PropertyValue::String("Alice".to_string()));
+        let _ = store.set_node_property("default", n, "age", PropertyValue::Integer(30));
+
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"MATCH (n:Person) RETURN properties(n) AS props"#).unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Value::Property(PropertyValue::Map(map)) = result.records[0].get("props").unwrap() {
+            assert!(map.contains_key("name"));
+            assert!(map.contains_key("age"));
+        } else { panic!("properties() should return a Map"); }
+    }
+
+    // ==================== CY-21: isEmpty() ====================
+
+    #[test]
+    fn test_isempty_function() {
+        use crate::query::executor::operator::eval_function;
+        let str_val = |s: &str| Value::Property(PropertyValue::String(s.to_string()));
+
+        let r1 = eval_function("isempty", &[str_val("")], None).unwrap();
+        assert_eq!(r1, Value::Property(PropertyValue::Boolean(true)));
+
+        let r2 = eval_function("isempty", &[str_val("hello")], None).unwrap();
+        assert_eq!(r2, Value::Property(PropertyValue::Boolean(false)));
+
+        let r3 = eval_function("isempty", &[Value::Null], None).unwrap();
+        assert_eq!(r3, Value::Null);
+    }
+
+    // ==================== CY-23: round(x, precision) ====================
+
+    #[test]
+    fn test_round_with_precision() {
+        use crate::query::executor::operator::eval_function;
+        let fval = |f: f64| Value::Property(PropertyValue::Float(f));
+        let ival = |i: i64| Value::Property(PropertyValue::Integer(i));
+
+        let r = eval_function("round", &[fval(3.14159), ival(2)], None).unwrap();
+        assert_eq!(r, Value::Property(PropertyValue::Float(3.14)));
+    }
+
+    // ==================== CY-24: elementId() ====================
+
+    #[test]
+    fn test_element_id() {
+        let mut store = GraphStore::new();
+        store.create_node("Person");
+
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"MATCH (n:Person) RETURN elementId(n) AS eid"#).unwrap()
+        ).unwrap();
+        if let Value::Property(PropertyValue::String(s)) = result.records[0].get("eid").unwrap() {
+            assert!(s.starts_with("node:"));
+        } else { panic!("elementId() should return string"); }
+    }
+
+    // ==================== CY-26: valueType() ====================
+
+    #[test]
+    fn test_value_type() {
+        use crate::query::executor::operator::eval_function;
+        let r1 = eval_function("valuetype", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
+        assert_eq!(r1, Value::Property(PropertyValue::String("INTEGER".to_string())));
+        let r2 = eval_function("valuetype", &[Value::Property(PropertyValue::String("hi".to_string()))], None).unwrap();
+        assert_eq!(r2, Value::Property(PropertyValue::String("STRING".to_string())));
+        let r3 = eval_function("valuetype", &[Value::Property(PropertyValue::Boolean(true))], None).unwrap();
+        assert_eq!(r3, Value::Property(PropertyValue::String("BOOLEAN".to_string())));
+    }
+
+    // ==================== CY-27: toBoolean / OrNull conversions ====================
+
+    #[test]
+    fn test_toboolean() {
+        use crate::query::executor::operator::eval_function;
+        let str_val = |s: &str| Value::Property(PropertyValue::String(s.to_string()));
+        let r1 = eval_function("toboolean", &[str_val("true")], None).unwrap();
+        assert_eq!(r1, Value::Property(PropertyValue::Boolean(true)));
+        let r2 = eval_function("toboolean", &[str_val("false")], None).unwrap();
+        assert_eq!(r2, Value::Property(PropertyValue::Boolean(false)));
+    }
+
+    #[test]
+    fn test_tointegerornull_valid() {
+        use crate::query::executor::operator::eval_function;
+        let r = eval_function("tointegerornull", &[Value::Property(PropertyValue::String("42".to_string()))], None).unwrap();
+        assert_eq!(r, Value::Property(PropertyValue::Integer(42)));
+    }
+
+    #[test]
+    fn test_tointegerornull_invalid() {
+        use crate::query::executor::operator::eval_function;
+        let r = eval_function("tointegerornull", &[Value::Property(PropertyValue::String("not_a_number".to_string()))], None).unwrap();
+        assert_eq!(r, Value::Null);
+    }
+
+    // ==================== CY-18/19: percentile/stDev aggregation ====================
+
+    #[test]
+    fn test_percentile_cont() {
+        let mut store = GraphStore::new();
+        for i in 1..=10i64 {
+            let n = store.create_node("Val");
+            let _ = store.set_node_property("default", n, "x", PropertyValue::Integer(i));
+        }
+
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("MATCH (n:Val) RETURN percentileCont(n.x, 0.5) AS median").unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Value::Property(PropertyValue::Float(median)) = result.records[0].get("median").unwrap() {
+            assert!((median - 5.5).abs() < 0.01, "Median should be 5.5, got {}", median);
+        } else { panic!("percentileCont should return Float"); }
+    }
+
+    #[test]
+    fn test_stdev_population() {
+        let mut store = GraphStore::new();
+        for v in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] {
+            let n = store.create_node("Val");
+            let _ = store.set_node_property("default", n, "x", PropertyValue::Float(v));
+        }
+
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("MATCH (n:Val) RETURN stDevP(n.x) AS sd").unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 1);
+        if let Value::Property(PropertyValue::Float(sd)) = result.records[0].get("sd").unwrap() {
+            assert!((sd - 2.0).abs() < 0.01, "StDevP should be ~2.0, got {}", sd);
+        } else { panic!("stDevP should return Float"); }
+    }
 }

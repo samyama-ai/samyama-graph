@@ -60,7 +60,7 @@ skip_clause = { ^"SKIP" ~ integer }
 limit_clause = { ^"LIMIT" ~ integer }
 
 // Standalone CREATE clause
-create_stmt = { ^"CREATE" ~ pattern }
+create_stmt = { ^"CREATE" ~ pattern ~ return_clause? }
 
 // Pattern matching
 pattern = { named_path ~ ("," ~ named_path)* }
