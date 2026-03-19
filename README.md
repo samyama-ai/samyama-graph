@@ -2,8 +2,8 @@
 
 ![Version](https://img.shields.io/badge/version-0.6.1-blue)
 ![Rust](https://img.shields.io/badge/rust-1.85-orange)
-![Tests](https://img.shields.io/badge/tests-1842_passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-89.7%25-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1814_passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-87.8%25-brightgreen)
 ![Bugs](https://img.shields.io/badge/bugs-0-brightgreen)
 ![Vulnerabilities](https://img.shields.io/badge/vulnerabilities-0-brightgreen)
 ![Quality Gate](https://img.shields.io/badge/quality_gate-passed-brightgreen)
@@ -204,7 +204,7 @@ Run with `cargo bench`. See [docs/performance/](docs/performance/) for detailed 
 
 ## Testing
 
-1842 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
+1814 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
 
 ```bash
 cargo test                     # Run all tests
