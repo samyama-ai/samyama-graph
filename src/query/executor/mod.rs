@@ -6559,4 +6559,87 @@ mod tests {
         assert_eq!(*result.records[0].get("f").unwrap(), Value::Property(PropertyValue::Boolean(false)));
         assert_eq!(*result.records[0].get("n").unwrap(), Value::Property(PropertyValue::Null));
     }
+
+    // ==================== CY-33: toString() for DateTime ====================
+
+    #[test]
+    fn test_tostring_datetime() {
+        use crate::query::executor::operator::eval_function;
+        let dt = chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:00Z").unwrap().timestamp_millis();
+        let r = eval_function("tostring", &[Value::Property(PropertyValue::DateTime(dt))], None).unwrap();
+        if let Value::Property(PropertyValue::String(s)) = r {
+            assert!(s.contains("2024-06-15"), "toString should contain date: {}", s);
+            assert!(s.contains("10:30"), "toString should contain time: {}", s);
+        } else { panic!("toString(datetime) should return string"); }
+    }
+
+    #[test]
+    fn test_tostring_duration() {
+        use crate::query::executor::operator::eval_function;
+        let d = Value::Property(PropertyValue::Duration { months: 2, days: 5, seconds: 3600, nanos: 0 });
+        let r = eval_function("tostring", &[d], None).unwrap();
+        if let Value::Property(PropertyValue::String(s)) = r {
+            assert_eq!(s, "P2M5DT3600S");
+        } else { panic!("toString(duration) should return string"); }
+    }
+
+    // ==================== CY-32: WITH...RETURN ====================
+
+    #[test]
+    fn test_with_return_datetime_component() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"WITH datetime("2024-06-15T10:30:45Z") AS dt RETURN dt.year AS y, dt.month AS m"#).unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("y").unwrap(), Value::Property(PropertyValue::Integer(2024)));
+        assert_eq!(*result.records[0].get("m").unwrap(), Value::Property(PropertyValue::Integer(6)));
+    }
+
+    #[test]
+    fn test_with_return_expression() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("WITH 10 * 5 AS val RETURN val + 1 AS result").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("result").unwrap(), Value::Property(PropertyValue::Integer(51)));
+    }
+
+    // ==================== CY-29: Duration arithmetic ====================
+
+    #[test]
+    fn test_datetime_plus_duration() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN datetime("2024-01-01T00:00:00Z") + duration({days: 1}) AS tomorrow"#).unwrap()
+        ).unwrap();
+        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("tomorrow").unwrap() {
+            use chrono::{Datelike, TimeZone};
+            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
+            assert_eq!(dt.day(), 2);
+        } else { panic!("datetime + duration should return DateTime"); }
+    }
+
+    #[test]
+    fn test_datetime_minus_datetime() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN datetime("2024-01-03T00:00:00Z") - datetime("2024-01-01T00:00:00Z") AS diff"#).unwrap()
+        ).unwrap();
+        if let Value::Property(PropertyValue::Duration { days, .. }) = result.records[0].get("diff").unwrap() {
+            assert_eq!(*days, 2);
+        } else { panic!("datetime - datetime should return Duration"); }
+    }
+
+    // ==================== CY-31: MERGE...RETURN ====================
+
+    #[test]
+    fn test_merge_return() {
+        let mut store = GraphStore::new();
+        let query = parse_query(r#"MERGE (n:City {name: "London"}) RETURN n.name AS city"#).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("city").unwrap(), Value::Property(PropertyValue::String("London".to_string())));
+    }
 }

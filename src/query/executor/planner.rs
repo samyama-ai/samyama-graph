@@ -398,6 +398,42 @@ impl QueryPlanner {
                 }
                 return Ok(plan);
             }
+            // CY-32: Standalone WITH...RETURN (e.g., WITH datetime() AS dt RETURN dt.year)
+            if let (Some(with_clause), Some(return_clause)) = (&query.with_clause, &query.return_clause) {
+                use crate::query::executor::operator::SingleRowOperator;
+
+                // WITH projection: bind expressions to aliases
+                let with_projections: Vec<(Expression, String)> = with_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.alias.clone().unwrap_or_else(|| format!("col_{}", i));
+                    (item.expression.clone(), alias)
+                }).collect();
+
+                let with_op: OperatorBox = Box::new(ProjectOperator::new(
+                    Box::new(SingleRowOperator::new()),
+                    with_projections,
+                ));
+
+                // RETURN projection: project from WITH-bound variables
+                let mut output_columns = Vec::new();
+                let return_projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                        Expression::Variable(v) => v.clone(),
+                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                        _ => format!("col_{}", i),
+                    });
+                    output_columns.push(alias.clone());
+                    (item.expression.clone(), alias)
+                }).collect();
+
+                let root: OperatorBox = Box::new(ProjectOperator::new(with_op, return_projections));
+
+                return Ok(ExecutionPlan {
+                    root,
+                    output_columns,
+                    is_write: false,
+                });
+            }
+
             // CY-30: Standalone RETURN without MATCH/CREATE (e.g., RETURN 1+2, RETURN sin(0.5))
             if let Some(return_clause) = &query.return_clause {
                 // Single-row operator that emits one empty record for projection

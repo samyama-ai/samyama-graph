@@ -739,6 +739,15 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::Integer(i)) => i.to_string(),
                 Value::Property(PropertyValue::Float(f)) => f.to_string(),
                 Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
+                Value::Property(PropertyValue::DateTime(millis)) => {
+                    use chrono::TimeZone;
+                    chrono::Utc.timestamp_millis_opt(*millis).single()
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| format!("DateTime({})", millis))
+                }
+                Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
+                    format!("P{}M{}DT{}S", months, days, seconds)
+                }
                 Value::Null | Value::Property(PropertyValue::Null) => "null".to_string(),
                 _ => return Err(ExecutionError::TypeError("Cannot convert to string".to_string())),
             };
