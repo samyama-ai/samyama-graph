@@ -6408,4 +6408,59 @@ mod tests {
             assert!((sd - 2.0).abs() < 0.01, "StDevP should be ~2.0, got {}", sd);
         } else { panic!("stDevP should return Float"); }
     }
+
+    // ==================== CY-30: Standalone RETURN ====================
+
+    #[test]
+    fn test_standalone_return_literal() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN 42 AS answer").unwrap()
+        ).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("answer").unwrap(), Value::Property(PropertyValue::Integer(42)));
+    }
+
+    #[test]
+    fn test_standalone_return_arithmetic() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN 1 + 2 AS sum, 10 * 3 AS product").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("sum").unwrap(), Value::Property(PropertyValue::Integer(3)));
+        assert_eq!(*result.records[0].get("product").unwrap(), Value::Property(PropertyValue::Integer(30)));
+    }
+
+    #[test]
+    fn test_standalone_return_function() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN sin(0) AS s, pi() AS p, toUpper(\"hello\") AS u").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("s").unwrap(), Value::Property(PropertyValue::Float(0.0)));
+        assert_eq!(*result.records[0].get("u").unwrap(), Value::Property(PropertyValue::String("HELLO".to_string())));
+        if let Value::Property(PropertyValue::Float(p)) = result.records[0].get("p").unwrap() {
+            assert!((p - std::f64::consts::PI).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_standalone_return_string() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN "hello world" AS greeting"#).unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("greeting").unwrap(), Value::Property(PropertyValue::String("hello world".to_string())));
+    }
+
+    #[test]
+    fn test_standalone_return_boolean_null() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN true AS t, false AS f, null AS n").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("t").unwrap(), Value::Property(PropertyValue::Boolean(true)));
+        assert_eq!(*result.records[0].get("f").unwrap(), Value::Property(PropertyValue::Boolean(false)));
+        assert_eq!(*result.records[0].get("n").unwrap(), Value::Property(PropertyValue::Null));
+    }
 }

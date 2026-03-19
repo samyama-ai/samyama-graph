@@ -180,6 +180,33 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::create_stmt => {
                 parse_create_statement(inner, query)?;
             }
+            Rule::return_stmt => {
+                for child in inner.into_inner() {
+                    match child.as_rule() {
+                        Rule::return_clause => {
+                            query.return_clause = Some(parse_return_clause(child)?);
+                        }
+                        Rule::order_by_clause => {
+                            query.order_by = Some(parse_order_by_clause(child)?);
+                        }
+                        Rule::skip_clause => {
+                            for skip_inner in child.into_inner() {
+                                if skip_inner.as_rule() == Rule::integer {
+                                    query.skip = skip_inner.as_str().parse::<usize>().ok();
+                                }
+                            }
+                        }
+                        Rule::limit_clause => {
+                            for limit_inner in child.into_inner() {
+                                if limit_inner.as_rule() == Rule::integer {
+                                    query.limit = limit_inner.as_str().parse::<usize>().ok();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }

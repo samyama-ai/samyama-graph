@@ -8,7 +8,8 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { show_indexes_stmt | show_constraints_stmt | drop_index_stmt | create_constraint_stmt | create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt }
+statement = { show_indexes_stmt | show_constraints_stmt | drop_index_stmt | create_constraint_stmt | create_vector_index_stmt | create_index_stmt | call_stmt | merge_stmt | match_stmt | create_stmt | return_stmt }
+return_stmt = { return_clause ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 
 // CREATE VECTOR INDEX statement
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
