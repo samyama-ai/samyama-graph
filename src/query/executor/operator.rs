@@ -1086,6 +1086,107 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
             }
         }
+        // CY-28: time() — time of day, stored as millis from epoch midnight
+        "time" => {
+            if args.is_empty() {
+                use chrono::Timelike;
+                let now = chrono::Utc::now();
+                let millis = (now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64) * 1000
+                    + now.timestamp_subsec_millis() as i64;
+                Ok(Value::Property(PropertyValue::DateTime(millis)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::String(s)) => {
+                        // Parse HH:MM:SS or HH:MM:SS.sss (ignore timezone for storage)
+                        let time_str = s.split('+').next().unwrap_or(s).split('-').next().unwrap_or(s);
+                        if let Ok(t) = chrono::NaiveTime::parse_from_str(time_str, "%H:%M:%S") {
+                            use chrono::Timelike;
+                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000;
+                            Ok(Value::Property(PropertyValue::DateTime(millis)))
+                        } else if let Ok(t) = chrono::NaiveTime::parse_from_str(time_str, "%H:%M:%S%.f") {
+                            use chrono::Timelike;
+                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000
+                                + (t.nanosecond() / 1_000_000) as i64;
+                            Ok(Value::Property(PropertyValue::DateTime(millis)))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Cannot parse time: {}. Expected HH:MM:SS", s)))
+                        }
+                    }
+                    Value::Property(PropertyValue::Map(map)) => {
+                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let millis = (hour * 3600 + minute * 60 + second) * 1000;
+                        Ok(Value::Property(PropertyValue::DateTime(millis)))
+                    }
+                    _ => Err(ExecutionError::TypeError("time() requires string or map argument".to_string())),
+                }
+            }
+        }
+        // CY-28: localtime() — same as time() but explicitly no timezone
+        "localtime" => {
+            if args.is_empty() {
+                use chrono::Timelike;
+                let now = chrono::Utc::now();
+                let millis = (now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64) * 1000
+                    + now.timestamp_subsec_millis() as i64;
+                Ok(Value::Property(PropertyValue::DateTime(millis)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::String(s)) => {
+                        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+                            use chrono::Timelike;
+                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000;
+                            Ok(Value::Property(PropertyValue::DateTime(millis)))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Cannot parse localtime: {}. Expected HH:MM:SS", s)))
+                        }
+                    }
+                    Value::Property(PropertyValue::Map(map)) => {
+                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0);
+                        let millis = (hour * 3600 + minute * 60 + second) * 1000;
+                        Ok(Value::Property(PropertyValue::DateTime(millis)))
+                    }
+                    _ => Err(ExecutionError::TypeError("localtime() requires string or map argument".to_string())),
+                }
+            }
+        }
+        // CY-28: localdatetime() — datetime without timezone
+        "localdatetime" => {
+            if args.is_empty() {
+                let now = chrono::Utc::now().timestamp_millis();
+                Ok(Value::Property(PropertyValue::DateTime(now)))
+            } else {
+                match &args[0] {
+                    Value::Property(PropertyValue::String(s)) => {
+                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
+                        } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Cannot parse localdatetime: {}. Expected YYYY-MM-DDTHH:MM:SS", s)))
+                        }
+                    }
+                    Value::Property(PropertyValue::Map(map)) => {
+                        use chrono::TimeZone;
+                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
+                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                        if let Some(dt) = chrono::Utc.with_ymd_and_hms(year, month, day, hour, minute, second).single() {
+                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
+                        } else {
+                            Err(ExecutionError::RuntimeError(format!("Invalid localdatetime components")))
+                        }
+                    }
+                    _ => Err(ExecutionError::TypeError("localdatetime() requires string or map argument".to_string())),
+                }
+            }
+        }
         "duration" => {
             if args.is_empty() {
                 return Err(ExecutionError::RuntimeError("duration() requires an argument".to_string()));
