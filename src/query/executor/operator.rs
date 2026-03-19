@@ -4991,6 +4991,32 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
     fn is_mutating(&self) -> bool { true }
 }
 
+/// Emits a single empty record. Used for standalone RETURN queries (CY-30).
+pub struct SingleRowOperator {
+    emitted: bool,
+}
+
+impl SingleRowOperator {
+    pub fn new() -> Self { Self { emitted: false } }
+}
+
+impl PhysicalOperator for SingleRowOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.emitted {
+            Ok(None)
+        } else {
+            self.emitted = true;
+            Ok(Some(Record::new()))
+        }
+    }
+
+    fn reset(&mut self) { self.emitted = false; }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription { name: "SingleRow".to_string(), details: String::new(), children: Vec::new() }
+    }
+}
+
 /// Algorithm operator: CALL algo.pageRank(...)
 pub struct AlgorithmOperator {
     /// Procedure name

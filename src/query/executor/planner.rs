@@ -398,8 +398,35 @@ impl QueryPlanner {
                 }
                 return Ok(plan);
             }
+            // CY-30: Standalone RETURN without MATCH/CREATE (e.g., RETURN 1+2, RETURN sin(0.5))
+            if let Some(return_clause) = &query.return_clause {
+                // Single-row operator that emits one empty record for projection
+                use crate::query::executor::operator::SingleRowOperator;
+                let mut output_columns = Vec::new();
+                let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                        Expression::Variable(v) => v.clone(),
+                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                        _ => format!("col_{}", i),
+                    });
+                    output_columns.push(alias.clone());
+                    (item.expression.clone(), alias)
+                }).collect();
+
+                let root: OperatorBox = Box::new(ProjectOperator::new(
+                    Box::new(SingleRowOperator::new()),
+                    projections,
+                ));
+
+                return Ok(ExecutionPlan {
+                    root,
+                    output_columns,
+                    is_write: false,
+                });
+            }
+
             return Err(ExecutionError::PlanningError(
-                "Query must have at least one MATCH, CALL or CREATE clause".to_string()
+                "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()
             ));
         }
 
