@@ -324,6 +324,37 @@ impl Value {
                     PropertyValue::Null
                 }
             }
+            // Temporal component access: dt.year, dt.month, dur.days, etc.
+            Value::Property(PropertyValue::DateTime(millis)) => {
+                use chrono::{Datelike, Timelike, TimeZone};
+                match chrono::Utc.timestamp_millis_opt(*millis).single() {
+                    Some(dt) => match property {
+                        "year" => PropertyValue::Integer(dt.year() as i64),
+                        "month" => PropertyValue::Integer(dt.month() as i64),
+                        "day" => PropertyValue::Integer(dt.day() as i64),
+                        "hour" => PropertyValue::Integer(dt.hour() as i64),
+                        "minute" => PropertyValue::Integer(dt.minute() as i64),
+                        "second" => PropertyValue::Integer(dt.second() as i64),
+                        "millisecond" => PropertyValue::Integer(dt.timestamp_subsec_millis() as i64),
+                        "epochMillis" => PropertyValue::Integer(*millis),
+                        _ => PropertyValue::Null,
+                    },
+                    None => PropertyValue::Null,
+                }
+            }
+            Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
+                match property {
+                    "months" => PropertyValue::Integer(*months),
+                    "days" => PropertyValue::Integer(*days),
+                    "seconds" => PropertyValue::Integer(*seconds),
+                    "nanoseconds" => PropertyValue::Integer(*nanos as i64),
+                    "hours" => PropertyValue::Integer(*seconds / 3600),
+                    "minutes" => PropertyValue::Integer((*seconds % 3600) / 60),
+                    "minutesOfHour" => PropertyValue::Integer((*seconds % 3600) / 60),
+                    "secondsOfMinute" => PropertyValue::Integer(*seconds % 60),
+                    _ => PropertyValue::Null,
+                }
+            }
             _ => PropertyValue::Null,
         }
     }

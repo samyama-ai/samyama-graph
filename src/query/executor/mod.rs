@@ -6409,6 +6409,102 @@ mod tests {
         } else { panic!("stDevP should return Float"); }
     }
 
+    // ==================== CY-28: Temporal types ====================
+
+    #[test]
+    fn test_date_constructor_string() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN date("2024-06-15") AS d"#).unwrap()
+        ).unwrap();
+        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("d").unwrap() {
+            use chrono::{Datelike, TimeZone};
+            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
+            assert_eq!(dt.year(), 2024);
+            assert_eq!(dt.month(), 6);
+            assert_eq!(dt.day(), 15);
+        } else { panic!("date() should return DateTime"); }
+    }
+
+    #[test]
+    fn test_date_constructor_no_args() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN date() AS d").unwrap()
+        ).unwrap();
+        assert!(matches!(result.records[0].get("d").unwrap(), Value::Property(PropertyValue::DateTime(_))));
+    }
+
+    #[test]
+    fn test_time_constructor_string() {
+        use crate::query::executor::operator::eval_function;
+        let r = eval_function("time", &[Value::Property(PropertyValue::String("10:30:00".to_string()))], None).unwrap();
+        if let Value::Property(PropertyValue::DateTime(millis)) = r {
+            assert_eq!(millis, (10 * 3600 + 30 * 60) * 1000);
+        } else { panic!("time() should return DateTime"); }
+    }
+
+    #[test]
+    fn test_time_constructor_map() {
+        use crate::query::executor::operator::eval_function;
+        let mut map = std::collections::HashMap::new();
+        map.insert("hour".to_string(), PropertyValue::Integer(14));
+        map.insert("minute".to_string(), PropertyValue::Integer(45));
+        map.insert("second".to_string(), PropertyValue::Integer(30));
+        let r = eval_function("time", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        if let Value::Property(PropertyValue::DateTime(millis)) = r {
+            assert_eq!(millis, (14 * 3600 + 45 * 60 + 30) * 1000);
+        } else { panic!("time() should return DateTime"); }
+    }
+
+    #[test]
+    fn test_localdatetime_constructor_string() {
+        let store = GraphStore::new();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN localdatetime("2024-03-15T14:30:00") AS dt"#).unwrap()
+        ).unwrap();
+        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("dt").unwrap() {
+            use chrono::{Datelike, Timelike, TimeZone};
+            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
+            assert_eq!(dt.year(), 2024);
+            assert_eq!(dt.month(), 3);
+            assert_eq!(dt.hour(), 14);
+            assert_eq!(dt.minute(), 30);
+        } else { panic!("localdatetime() should return DateTime"); }
+    }
+
+    #[test]
+    fn test_datetime_component_access() {
+        // Test via resolve_property directly since standalone WITH...RETURN isn't supported yet
+        let store = GraphStore::new();
+        let dt_val = Value::Property(PropertyValue::DateTime(
+            chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z").unwrap().timestamp_millis()
+        ));
+        assert_eq!(dt_val.resolve_property("year", &store), PropertyValue::Integer(2024));
+        assert_eq!(dt_val.resolve_property("month", &store), PropertyValue::Integer(6));
+        assert_eq!(dt_val.resolve_property("day", &store), PropertyValue::Integer(15));
+        assert_eq!(dt_val.resolve_property("hour", &store), PropertyValue::Integer(10));
+        assert_eq!(dt_val.resolve_property("minute", &store), PropertyValue::Integer(30));
+        assert_eq!(dt_val.resolve_property("second", &store), PropertyValue::Integer(45));
+        assert_eq!(dt_val.resolve_property("epochMillis", &store), PropertyValue::Integer(
+            chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z").unwrap().timestamp_millis()
+        ));
+    }
+
+    #[test]
+    fn test_duration_component_access() {
+        use crate::query::executor::operator::eval_function;
+        let mut map = std::collections::HashMap::new();
+        map.insert("days".to_string(), PropertyValue::Integer(5));
+        map.insert("hours".to_string(), PropertyValue::Integer(3));
+        map.insert("minutes".to_string(), PropertyValue::Integer(30));
+        let dur = eval_function("duration", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        if let Value::Property(PropertyValue::Duration { days, seconds, .. }) = &dur {
+            assert_eq!(*days, 5);
+            assert_eq!(*seconds, 3 * 3600 + 30 * 60);
+        } else { panic!("duration() should return Duration"); }
+    }
+
     // ==================== CY-30: Standalone RETURN ====================
 
     #[test]
