@@ -670,7 +670,7 @@ fn eval_pattern_comprehension(
 }
 
 /// Shared function evaluation for scalar functions (not aggregates)
-fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
+pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
     match name.to_lowercase().as_str() {
         // String functions
         "toupper" | "touppercase" => {
@@ -2612,6 +2612,19 @@ impl PhysicalOperator for ProjectOperator {
                 records: projected_records,
                 columns,
             }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            let mut new_record = Record::new();
+            for (expr, alias) in &self.projections {
+                let value = self.evaluate_expression(expr, &record, store)?;
+                new_record.bind(alias.clone(), value);
+            }
+            Ok(Some(new_record))
         } else {
             Ok(None)
         }
