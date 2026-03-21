@@ -195,7 +195,13 @@ impl QueryEngine {
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
-        let mut executor = QueryExecutor::new(store);
+        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+            QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
+                executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
+            ))
+        } else {
+            QueryExecutor::new(store)
+        };
         if self.query_timeout_secs > 0 {
             executor = executor.with_deadline(
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
