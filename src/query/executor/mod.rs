@@ -140,6 +140,16 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
+    /// Create a query executor with a custom planner configuration
+    pub fn with_planner(store: &'a GraphStore, planner: QueryPlanner) -> Self {
+        Self {
+            store,
+            planner,
+            params: HashMap::new(),
+            deadline: None,
+        }
+    }
+
     /// Set a query execution deadline
     pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
         self.deadline = deadline.into();
@@ -212,9 +222,33 @@ impl<'a> QueryExecutor<'a> {
 
     fn explain_plan_with_stats(plan: &ExecutionPlan, store: Option<&GraphStore>) -> RecordBatch {
         use crate::graph::PropertyValue;
+        use crate::query::executor::planner::PLAN_DIAGNOSTICS;
 
         let description = plan.root.describe();
         let mut plan_text = description.format(0);
+
+        // Append planner diagnostics (candidate plans) if available
+        let diagnostics = PLAN_DIAGNOSTICS.with(|diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take());
+        if let Some(diag) = diagnostics {
+            plan_text.push_str("\n--- Planner Diagnostics ---\n");
+            plan_text.push_str(&format!(
+                "Candidates evaluated: {}\nChosen plan cost: {:.2}\n",
+                diag.candidates_evaluated, diag.chosen_plan_cost
+            ));
+            if diag.candidate_costs.len() > 1 {
+                plan_text.push_str("Alternative plans:\n");
+                for (i, (desc, cost)) in diag.candidate_costs.iter().enumerate().skip(1).take(5) {
+                    plan_text.push_str(&format!(
+                        "  #{} (cost {:.2}): {}\n", i + 1, cost, desc
+                    ));
+                }
+                if diag.candidate_costs.len() > 6 {
+                    plan_text.push_str(&format!(
+                        "  ... and {} more\n", diag.candidate_costs.len() - 6
+                    ));
+                }
+            }
+        }
 
         // Append statistics summary if store is available
         if let Some(store) = store {

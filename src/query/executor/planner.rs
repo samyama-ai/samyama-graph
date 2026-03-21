@@ -66,6 +66,20 @@ use crate::query::executor::{
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
+use std::cell::RefCell;
+
+/// Diagnostics from the graph-native planner (ADR-015), used by EXPLAIN
+#[derive(Debug, Clone)]
+pub struct PlanDiagnostics {
+    pub candidates_evaluated: usize,
+    pub chosen_plan_cost: f64,
+    pub candidate_costs: Vec<(String, f64)>,
+}
+
+thread_local! {
+    /// Thread-local storage for planner diagnostics, consumed by EXPLAIN
+    pub static PLAN_DIAGNOSTICS: RefCell<Option<PlanDiagnostics>> = RefCell::new(None);
+}
 
 /// Recursively extract aggregate function calls (sum, avg, count, min, max, collect)
 /// from an expression tree, replacing each with a `Variable("__agg_N")` reference.
@@ -179,6 +193,15 @@ pub struct ExecutionPlan {
     /// Whether this plan contains write operations (CREATE/DELETE/SET)
     /// If true, executor must use next_mut() with mutable GraphStore
     pub is_write: bool,
+    /// Planner diagnostics: number of candidate plans evaluated (0 = legacy planner)
+    #[allow(dead_code)]
+    pub candidates_evaluated: usize,
+    /// Planner diagnostics: cost of chosen plan (0.0 = not computed)
+    #[allow(dead_code)]
+    pub chosen_plan_cost: f64,
+    /// Planner diagnostics: summary of each candidate (description, cost), sorted ascending
+    #[allow(dead_code)]
+    pub candidate_costs: Vec<(String, f64)>,
 }
 
 /// Simple plan cache entry storing planning metadata
@@ -258,7 +281,7 @@ impl QueryPlanner {
             return Ok(ExecutionPlan {
                 root: Box::new(ShowIndexesOperator::new()),
                 output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
-                is_write: false,
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -267,7 +290,7 @@ impl QueryPlanner {
             return Ok(ExecutionPlan {
                 root: Box::new(ShowConstraintsOperator::new()),
                 output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
-                is_write: false,
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -279,7 +302,7 @@ impl QueryPlanner {
                     clause.property.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -291,7 +314,7 @@ impl QueryPlanner {
                     clause.property.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -305,7 +328,7 @@ impl QueryPlanner {
                     clause.similarity.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -321,7 +344,7 @@ impl QueryPlanner {
                         clause.property.clone(),
                     )),
                     output_columns: vec![],
-                    is_write: true,
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             } else {
                 // Composite index: create operator for first property
@@ -334,7 +357,7 @@ impl QueryPlanner {
                             .collect(),
                     )),
                     output_columns: vec![],
-                    is_write: true,
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
         }
@@ -372,7 +395,7 @@ impl QueryPlanner {
                 return Ok(ExecutionPlan {
                     root: operator,
                     output_columns,
-                    is_write: true,
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
         }
@@ -430,7 +453,7 @@ impl QueryPlanner {
                 return Ok(ExecutionPlan {
                     root,
                     output_columns,
-                    is_write: false,
+                    is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
 
@@ -457,7 +480,7 @@ impl QueryPlanner {
                 return Ok(ExecutionPlan {
                     root,
                     output_columns,
-                    is_write: false,
+                    is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
 
@@ -1124,7 +1147,7 @@ impl QueryPlanner {
         Ok(ExecutionPlan {
             root: operator,
             output_columns,
-            is_write,
+            is_write, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
         })
     }
 
@@ -1194,10 +1217,18 @@ impl QueryPlanner {
         }
     }
 
-    /// Dispatch to graph-native or legacy planner based on configuration
+    /// Dispatch to graph-native or legacy planner based on configuration.
+    /// Falls back to legacy planner if graph-native fails (e.g., label-free patterns).
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if self.config.graph_native {
-            self.plan_match_native(match_clause, where_clause, store)
+            match self.plan_match_native(match_clause, where_clause, store) {
+                Ok(plan) => Ok(plan),
+                Err(_) => {
+                    // Fallback to legacy planner for patterns the graph-native
+                    // planner can't handle (e.g., no labels, variable-length paths)
+                    self.plan_match(match_clause, where_clause, store)
+                }
+            }
         } else {
             self.plan_match(match_clause, where_clause, store)
         }
@@ -1225,9 +1256,26 @@ impl QueryPlanner {
             return Err(ExecutionError::PlanningError("No valid plans enumerated".to_string()));
         }
 
+        // Collect candidate diagnostics before consuming
+        let num_candidates = candidates.len();
+        let candidate_summaries: Vec<(String, f64)> = candidates.iter().map(|(plan, cost)| {
+            let desc = format!("{:?}", plan).chars().take(80).collect::<String>();
+            (desc, *cost)
+        }).collect();
+        let best_cost = candidates[0].1;
+
         // Pick the cheapest plan (first one — already sorted)
-        let (best_plan, _best_cost) = candidates.into_iter().next().unwrap();
+        let (best_plan, _) = candidates.into_iter().next().unwrap();
         let physical = logical_to_physical(&best_plan);
+
+        // Store diagnostics in thread-local for EXPLAIN to pick up
+        PLAN_DIAGNOSTICS.with(|diag| {
+            *diag.borrow_mut() = Some(PlanDiagnostics {
+                candidates_evaluated: num_candidates,
+                chosen_plan_cost: best_cost,
+                candidate_costs: candidate_summaries,
+            });
+        });
 
         Ok(physical)
     }
@@ -1676,7 +1724,7 @@ impl QueryPlanner {
         Ok(ExecutionPlan {
             root: final_operator,
             output_columns,
-            is_write: true,
+            is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
         })
     }
 }
@@ -2994,5 +3042,234 @@ mod tests {
 
         assert_eq!(legacy_results, native_results,
             "WHERE filter results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
+    }
+
+
+    // Regression tests: graph-native planner fallback to legacy
+    // Ensures dashboard/common queries work with SAMYAMA_GRAPH_NATIVE=true
+    // ============================
+
+    /// Helper: execute a query with graph-native planner and verify it doesn't error
+    fn assert_native_query_ok(store: &GraphStore, cypher: &str) {
+        let query = crate::query::parse_query(cypher).unwrap_or_else(|e| panic!("Parse error for '{}': {}", cypher, e));
+
+        let mut executor = super::super::QueryExecutor::with_planner(store, QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        }));
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "Query failed for '{}': {:?}", cypher, result.err());
+    }
+
+    /// Helper: create a store with Horse Digital Twin-like data
+    fn horse_twin_store() -> GraphStore {
+        let mut store = GraphStore::new();
+        // Stables
+        let s1 = store.create_node("Stable");
+        store.get_node_mut(s1).unwrap().set_property("name", PropertyValue::String("Flyinge".to_string()));
+        let s2 = store.create_node("Stable");
+        store.get_node_mut(s2).unwrap().set_property("name", PropertyValue::String("Täby".to_string()));
+        // Horses
+        let h1 = store.create_node("Horse");
+        store.get_node_mut(h1).unwrap().set_property("name", PropertyValue::String("Storm Runner".to_string()));
+        store.get_node_mut(h1).unwrap().set_property("breed", PropertyValue::String("Thoroughbred".to_string()));
+        store.get_node_mut(h1).unwrap().set_property("sex", PropertyValue::String("male".to_string()));
+        let h2 = store.create_node("Horse");
+        store.get_node_mut(h2).unwrap().set_property("name", PropertyValue::String("Nordic Star".to_string()));
+        store.get_node_mut(h2).unwrap().set_property("breed", PropertyValue::String("Swedish Warmblood".to_string()));
+        store.get_node_mut(h2).unwrap().set_property("sex", PropertyValue::String("female".to_string()));
+        let h3 = store.create_node("Horse");
+        store.get_node_mut(h3).unwrap().set_property("name", PropertyValue::String("Autumn Gold".to_string()));
+        // Pedigree
+        store.create_edge(h3, h1, "SIRE").unwrap(); // Autumn Gold's sire = Storm Runner
+        store.create_edge(h3, h2, "DAM").unwrap();  // Autumn Gold's dam = Nordic Star
+        // Stabled
+        store.create_edge(h1, s1, "STABLED_AT").unwrap();
+        store.create_edge(h2, s2, "STABLED_AT").unwrap();
+        store.create_edge(h3, s1, "STABLED_AT").unwrap();
+        // Sensors
+        let sn1 = store.create_node("Sensor");
+        store.get_node_mut(sn1).unwrap().set_property("sensor_type", PropertyValue::String("heart_rate".to_string()));
+        store.create_edge(sn1, h1, "WEARS").unwrap();
+        // Alerts
+        let a1 = store.create_node("Alert");
+        store.get_node_mut(a1).unwrap().set_property("severity", PropertyValue::String("critical".to_string()));
+        store.get_node_mut(a1).unwrap().set_property("alert_type", PropertyValue::String("hr_spike".to_string()));
+        store.get_node_mut(a1).unwrap().set_property("resolved", PropertyValue::Boolean(false));
+        store.create_edge(sn1, a1, "TRIGGERED").unwrap();
+        // Trainer + TrainingSession
+        let t1 = store.create_node("Trainer");
+        store.get_node_mut(t1).unwrap().set_property("name", PropertyValue::String("Johan".to_string()));
+        store.create_edge(h1, t1, "TRAINED_BY").unwrap();
+        let ts1 = store.create_node("TrainingSession");
+        store.get_node_mut(ts1).unwrap().set_property("session_type", PropertyValue::String("gallop".to_string()));
+        store.get_node_mut(ts1).unwrap().set_property("distance_km", PropertyValue::Float(5.2));
+        store.create_edge(h1, ts1, "COMPLETED").unwrap();
+        store.create_edge(t1, ts1, "SUPERVISED_BY").unwrap();
+        // Race + RaceResult
+        let r1 = store.create_node("Race");
+        store.get_node_mut(r1).unwrap().set_property("name", PropertyValue::String("Täby Cup".to_string()));
+        let rr1 = store.create_node("RaceResult");
+        store.get_node_mut(rr1).unwrap().set_property("position", PropertyValue::Integer(1));
+        store.create_edge(h1, rr1, "ENTERED").unwrap();
+        store.create_edge(rr1, r1, "RESULT_OF").unwrap();
+        // HealthRecord + Vet
+        let hr1 = store.create_node("HealthRecord");
+        store.get_node_mut(hr1).unwrap().set_property("record_type", PropertyValue::String("vaccination".to_string()));
+        store.get_node_mut(hr1).unwrap().set_property("diagnosis", PropertyValue::String("routine".to_string()));
+        store.create_edge(h1, hr1, "HAS_RECORD").unwrap();
+        let v1 = store.create_node("Veterinarian");
+        store.get_node_mut(v1).unwrap().set_property("name", PropertyValue::String("Dr. Eva".to_string()));
+        store.create_edge(v1, hr1, "EXAMINED_BY").unwrap();
+        // Owner
+        let o1 = store.create_node("Owner");
+        store.get_node_mut(o1).unwrap().set_property("name", PropertyValue::String("Erik".to_string()));
+        store.create_edge(h1, o1, "OWNED_BY").unwrap();
+
+        store
+    }
+
+    #[test]
+    fn test_native_fallback_label_free_edge_count() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH ()-[r]->() RETURN count(r) AS total_edges");
+    }
+
+    #[test]
+    fn test_native_fallback_label_free_node_count() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (n) RETURN count(n) AS total_nodes");
+    }
+
+    #[test]
+    fn test_native_label_count() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS count ORDER BY count DESC");
+    }
+
+    #[test]
+    fn test_native_edge_type_count() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC");
+    }
+
+    #[test]
+    fn test_native_single_hop_with_label() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:STABLED_AT]->(s:Stable) RETURN h.name, s.name");
+    }
+
+    #[test]
+    fn test_native_two_hop_chain() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:ENTERED]->(rr:RaceResult)-[:RESULT_OF]->(r:Race) RETURN h.name, r.name");
+    }
+
+    #[test]
+    fn test_native_two_hop_sensor_chain() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (s:Sensor)-[:WEARS]->(h:Horse)-[:COMPLETED]->(ts:TrainingSession) RETURN s.sensor_type, h.name");
+    }
+
+    #[test]
+    fn test_native_dual_match_join() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:SIRE]->(sire:Horse) MATCH (h)-[:DAM]->(dam:Horse) RETURN h.name, sire.name, dam.name");
+    }
+
+    #[test]
+    fn test_native_with_where_filter() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (a:Alert) WHERE a.severity = 'critical' AND a.resolved = false RETURN a.alert_type");
+    }
+
+    #[test]
+    fn test_native_with_aggregation() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:STABLED_AT]->(s:Stable) RETURN s.name, count(h) AS horses ORDER BY horses DESC");
+    }
+
+    #[test]
+    fn test_native_with_optional_match() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse) OPTIONAL MATCH (h)-[:SIRE]->(sire:Horse) RETURN h.name, sire.name");
+    }
+
+    #[test]
+    fn test_native_explain_shows_diagnostics() {
+        let store = horse_twin_store();
+        let mut executor = super::super::QueryExecutor::with_planner(&store, QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        }));
+        let query = crate::query::parse_query(
+            "EXPLAIN MATCH (s:Sensor)-[:WEARS]->(h:Horse)-[:COMPLETED]->(ts:TrainingSession) RETURN s.sensor_type"
+        ).unwrap();
+        let result = executor.execute(&query);
+        assert!(result.is_ok(), "EXPLAIN should succeed: {:?}", result.err());
+        let batch = result.unwrap();
+        let plan_text = if let Some(record) = batch.records.first() {
+            if let Some(super::super::Value::Property(PropertyValue::String(s))) = record.get("plan") {
+                s.clone()
+            } else { String::new() }
+        } else { String::new() };
+
+        assert!(plan_text.contains("Planner Diagnostics"), "EXPLAIN should include planner diagnostics section. Got: {}", &plan_text[..200.min(plan_text.len())]);
+        assert!(plan_text.contains("Candidates evaluated"), "EXPLAIN should show candidate count");
+    }
+
+    #[test]
+    fn test_native_reverse_direction() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (ts:TrainingSession)<-[:COMPLETED]-(h:Horse) RETURN h.name, ts.session_type");
+    }
+
+    #[test]
+    fn test_native_variable_length_path_fallback() {
+        let store = horse_twin_store();
+        // Variable-length paths may not be supported by graph-native planner — should fallback
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:SIRE*1..3]->(ancestor:Horse) RETURN h.name, ancestor.name");
+    }
+
+    #[test]
+    fn test_native_three_hop_chain() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (s:Sensor)-[:WEARS]->(h:Horse)-[:ENTERED]->(rr:RaceResult)-[:RESULT_OF]->(r:Race) RETURN s.sensor_type, r.name");
+    }
+
+    #[test]
+    fn test_native_vet_health_horse_chain() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (v:Veterinarian)-[:EXAMINED_BY]->(hr:HealthRecord)<-[:HAS_RECORD]-(h:Horse) RETURN v.name, hr.diagnosis, h.name");
+    }
+
+    #[test]
+    fn test_native_limit() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse) RETURN h.name LIMIT 1");
+    }
+
+    #[test]
+    fn test_native_order_by() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse) RETURN h.name ORDER BY h.name");
+    }
+
+    #[test]
+    fn test_native_with_clause() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:STABLED_AT]->(s:Stable) WITH s, count(h) AS cnt RETURN s.name, cnt ORDER BY cnt DESC");
+    }
+
+    #[test]
+    fn test_native_count_star() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse) RETURN count(*) AS total");
+    }
+
+    #[test]
+    fn test_native_distinct() {
+        let store = horse_twin_store();
+        assert_native_query_ok(&store, "MATCH (h:Horse) RETURN DISTINCT h.breed");
     }
 }
