@@ -103,7 +103,16 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize)
         let id = graph.create_node("Article");
         set_str(graph, id, "pmid", pmid);
         // Only store title (skip abstract to save ~30 GB of RAM)
-        let title = if fields[1].len() > 300 { &fields[1][..300] } else { fields[1] };
+        // Safe truncation: find char boundary at or before 300 bytes
+        let title = {
+            let s = fields[1];
+            if s.len() <= 300 { s }
+            else {
+                let mut end = 300;
+                while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+                &s[..end]
+            }
+        };
         set_str(graph, id, "title", title);
         set_str(graph, id, "pub_date", fields[4]);
         if let Ok(year) = fields[5].parse::<i64>() {
