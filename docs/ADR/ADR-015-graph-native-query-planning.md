@@ -1,10 +1,10 @@
 # ADR-015: Graph-Native Query Planning
 
 ## Status
-**Accepted**
+**Implemented** — Core planner operational since v0.6.0. Enhanced 2026-03-20: EXPLAIN shows candidate plan diagnostics (count, costs, alternatives), fallback to legacy planner for label-free patterns, 21 regression tests, `SAMYAMA_GRAPH_NATIVE=true` env var.
 
 ## Date
-2026-03-06
+2026-03-06 (Implemented v0.6.0, enhanced 2026-03-20)
 
 ## Context
 
