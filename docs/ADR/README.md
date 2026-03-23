@@ -50,6 +50,7 @@ Links to related ADRs
 | [013](./ADR-013-peg-grammar-atomic-keywords.md) | PEG Grammar with Atomic Keyword Rules | Implemented | 2025-12-20 |
 | [014](./ADR-014-explain-profile-queries.md) | EXPLAIN and PROFILE Query Plan Visualization | Implemented | 2026-02-16 |
 | [015](./ADR-015-graph-native-query-planning.md) | Graph-Native Query Planning | Implemented | 2026-03-06 |
+| [016](./ADR-016-billion-node-distributed-architecture.md) | Billion-Node Distributed Architecture | Proposed | 2026-03-23 |
 
 ## Decision Process
 
