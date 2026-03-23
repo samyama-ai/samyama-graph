@@ -1,10 +1,10 @@
 # ADR-009: Graph-Aware Partitioning for Distributed Mode
 
 ## Status
-**Proposed** (Phase 4+)
+**Proposed** (Phase 4+) — Stub implementation only (188 LOC in `src/sharding/`). Not production-ready.
 
 ## Date
-2025-10-14
+2025-10-14 (Updated 2026-03-23)
 
 ## Context
 

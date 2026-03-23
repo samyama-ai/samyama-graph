@@ -1,10 +1,10 @@
 # ADR-010: Use Prometheus + OpenTelemetry for Observability
 
 ## Status
-**Accepted**
+**Accepted** — Implemented in Enterprise only. OSS has structured logging (tracing) but no Prometheus metrics.
 
 ## Date
-2025-10-14
+2025-10-14 (Updated 2026-03-23)
 
 ## Context
 

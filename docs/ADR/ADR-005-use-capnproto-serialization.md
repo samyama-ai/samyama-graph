@@ -1,10 +1,10 @@
 # ADR-005: Use Cap'n Proto for Zero-Copy Serialization
 
 ## Status
-**Accepted**
+**Superseded** — Never adopted. Replaced by bincode for snapshots/internal and JSON for HTTP/API. See update notes below.
 
 ## Date
-2025-10-14
+2025-10-14 (Superseded 2026-03-23)
 
 ## Context
 
@@ -513,5 +513,26 @@ Cap'n Proto is mature and proven.
 
 ---
 
-**Last Updated**: 2025-10-14
-**Status**: Accepted and Implemented
+**Last Updated**: 2026-03-23
+**Status**: Superseded
+
+---
+
+## Supersession Note (2026-03-23)
+
+This ADR was accepted in October 2025 but **never implemented**. In practice, Samyama uses:
+
+| Use Case | Actual Format | Why |
+|----------|---------------|-----|
+| Snapshots (.sgsnap) | **bincode** + custom binary format | Fast, Rust-native, no schema compilation step |
+| RocksDB persistence | **bincode** | Internal Rust-only path, simplicity wins |
+| HTTP API | **JSON** | Universal client compatibility |
+| Raft log entries | **bincode** | Internal Rust-only, performance-critical |
+| HNSW vector persistence | **bincode** | Serialized Vec<f32> arrays |
+
+Cap'n Proto's zero-copy advantage is real but the integration overhead (schema compilation, build.rs, capnp dependency) was not justified given that:
+1. Samyama's hot path is in-memory (HashMap + adjacency lists), not serialization-bound
+2. bincode is fast enough (sub-millisecond for typical snapshots)
+3. The project prioritized query engine features over serialization optimization
+
+**If revisited**: Consider only for the Raft inter-node communication path where zero-copy network reads would eliminate a deserialize step. Not needed for persistence (RocksDB read path is already fast with bincode).

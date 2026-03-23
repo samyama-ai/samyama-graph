@@ -1,10 +1,10 @@
 # ADR-011: Implement Cypher CRUD Operations (DELETE, SET, REMOVE)
 
 ## Status
-**Proposed**
+**Implemented** — DELETE, SET, REMOVE, MERGE all fully operational since v0.5.x. MutQueryExecutor handles all write operations.
 
 ## Date
-2025-12-27
+2025-12-27 (Implemented v0.5.x, updated 2026-03-23)
 
 ## Context
 

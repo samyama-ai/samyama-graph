@@ -35,20 +35,21 @@ Links to related ADRs
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [001](./ADR-001-use-rust-as-primary-language.md) | Use Rust as Primary Programming Language | Accepted | 2025-10-14 |
-| [002](./ADR-002-use-rocksdb-for-persistence.md) | Use RocksDB for Persistence Layer | Accepted | 2025-10-14 |
-| [003](./ADR-003-use-resp-protocol.md) | Use RESP Protocol for Network Communication | Accepted | 2025-10-14 |
-| [004](./ADR-004-use-raft-consensus.md) | Use Raft Consensus for Distributed Coordination | Accepted | 2025-10-14 |
-| [005](./ADR-005-use-capnproto-serialization.md) | Use Cap'n Proto for Zero-Copy Serialization | Accepted | 2025-10-14 |
-| [006](./ADR-006-use-tokio-async-runtime.md) | Use Tokio as Async Runtime | Accepted | 2025-10-14 |
-| [007](./ADR-007-volcano-iterator-execution.md) | Use Volcano Iterator Model for Query Execution | Accepted | 2025-10-14 |
-| [008](./ADR-008-multi-tenancy-namespace-isolation.md) | Use Namespace Isolation for Multi-Tenancy | Accepted | 2025-10-14 |
-| [009](./ADR-009-graph-partitioning-strategy.md) | Graph-Aware Partitioning for Distributed Mode | Proposed | 2025-10-14 |
-| [010](./ADR-010-observability-stack.md) | Use Prometheus + OpenTelemetry for Observability | Accepted | 2025-10-14 |
-| [011](./ADR-011-cypher-crud-operations.md) | Implement Cypher CRUD Operations (DELETE, SET, REMOVE) | Proposed | 2025-12-27 |
-| [012](./ADR-012-late-materialization.md) | Late Materialization with NodeRef/EdgeRef | Accepted | 2025-12-15 |
-| [013](./ADR-013-peg-grammar-atomic-keywords.md) | PEG Grammar with Atomic Keyword Rules | Accepted | 2025-12-20 |
-| [014](./ADR-014-explain-profile-queries.md) | EXPLAIN and PROFILE Query Plan Visualization | Accepted | 2026-02-16 |
+| [001](./ADR-001-use-rust-as-primary-language.md) | Use Rust as Primary Programming Language | Implemented | 2025-10-14 |
+| [002](./ADR-002-use-rocksdb-for-persistence.md) | Use RocksDB for Persistence Layer | Implemented | 2025-10-14 |
+| [003](./ADR-003-use-resp-protocol.md) | Use RESP Protocol for Network Communication | Implemented | 2025-10-14 |
+| [004](./ADR-004-use-raft-consensus.md) | Use Raft Consensus for Distributed Coordination | Implemented | 2025-10-14 |
+| [005](./ADR-005-use-capnproto-serialization.md) | Use Cap'n Proto for Zero-Copy Serialization | **Superseded** | 2025-10-14 |
+| [006](./ADR-006-use-tokio-async-runtime.md) | Use Tokio as Async Runtime | Implemented | 2025-10-14 |
+| [007](./ADR-007-volcano-iterator-execution.md) | Use Volcano Iterator Model for Query Execution | Implemented | 2025-10-14 |
+| [008](./ADR-008-multi-tenancy-namespace-isolation.md) | Use Namespace Isolation for Multi-Tenancy | Implemented | 2025-10-14 |
+| [009](./ADR-009-graph-partitioning-strategy.md) | Graph-Aware Partitioning for Distributed Mode | Proposed (stub) | 2025-10-14 |
+| [010](./ADR-010-observability-stack.md) | Use Prometheus + OpenTelemetry for Observability | Enterprise only | 2025-10-14 |
+| [011](./ADR-011-cypher-crud-operations.md) | Implement Cypher CRUD Operations (DELETE, SET, REMOVE) | Implemented | 2025-12-27 |
+| [012](./ADR-012-late-materialization.md) | Late Materialization with NodeRef/EdgeRef | Implemented | 2025-12-15 |
+| [013](./ADR-013-peg-grammar-atomic-keywords.md) | PEG Grammar with Atomic Keyword Rules | Implemented | 2025-12-20 |
+| [014](./ADR-014-explain-profile-queries.md) | EXPLAIN and PROFILE Query Plan Visualization | Implemented | 2026-02-16 |
+| [015](./ADR-015-graph-native-query-planning.md) | Graph-Native Query Planning | Implemented | 2026-03-06 |
 
 ## Decision Process
 
@@ -60,4 +61,4 @@ Links to related ADRs
 ---
 
 **Maintained by**: Samyama Graph Database Team
-**Last Updated**: 2026-02-16
+**Last Updated**: 2026-03-23
