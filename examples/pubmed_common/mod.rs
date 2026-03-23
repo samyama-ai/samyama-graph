@@ -52,24 +52,28 @@ fn set_int(g: &mut GraphStore, id: NodeId, k: &str, v: i64) {
     }
 }
 
-/// Read a pipe-delimited file, skip header, return rows as Vec of field vectors.
-fn read_pipe_file(path: &Path, max_rows: usize) -> Vec<Vec<String>> {
+/// Process a pipe-delimited file line by line, calling handler for each row.
+/// Streaming — never loads entire file into memory.
+fn process_pipe_file<F>(path: &Path, max_rows: usize, mut handler: F) -> usize
+where F: FnMut(&[&str])
+{
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) => { eprintln!("  SKIP {}: {}", path.display(), e); return Vec::new(); }
+        Err(e) => { eprintln!("  SKIP {}: {}", path.display(), e); return 0; }
     };
-    let reader = BufReader::with_capacity(1024 * 1024, file);
-    let mut rows = Vec::new();
+    let reader = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut first = true;
+    let mut count = 0usize;
 
     for line in reader.lines() {
         let line = match line { Ok(l) => l, Err(_) => continue };
         if first { first = false; continue; } // skip header
-        let fields: Vec<String> = line.split('|').map(|s| s.to_string()).collect();
-        rows.push(fields);
-        if max_rows > 0 && rows.len() >= max_rows { break; }
+        let fields: Vec<&str> = line.split('|').collect();
+        handler(&fields);
+        count += 1;
+        if max_rows > 0 && count >= max_rows { break; }
     }
-    rows
+    count
 }
 
 pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize) -> Result<LoadResult, Error> {
@@ -78,124 +82,112 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize)
     let mut ec: usize = 0;
     let dir = Path::new(data_dir);
 
-    // ID maps for edge creation
-    let mut pmid_to_node: HashMap<String, NodeId> = HashMap::new();
-    let mut author_to_node: HashMap<String, NodeId> = HashMap::new();
-    let mut mesh_to_node: HashMap<String, NodeId> = HashMap::new();
-    let mut chemical_to_node: HashMap<String, NodeId> = HashMap::new();
-    let mut journal_to_node: HashMap<String, NodeId> = HashMap::new();
-    let mut grant_to_node: HashMap<String, NodeId> = HashMap::new();
+    // ID maps for edge creation — these are the main memory consumers
+    // pmid_to_node: 40M entries × ~40 bytes = ~1.6 GB (acceptable)
+    let mut pmid_to_node: HashMap<String, NodeId> = HashMap::with_capacity(40_000_000);
+    let mut author_to_node: HashMap<String, NodeId> = HashMap::with_capacity(10_000_000);
+    let mut mesh_to_node: HashMap<String, NodeId> = HashMap::with_capacity(30_000);
+    let mut chemical_to_node: HashMap<String, NodeId> = HashMap::with_capacity(500_000);
+    let mut journal_to_node: HashMap<String, NodeId> = HashMap::with_capacity(50_000);
+    let mut grant_to_node: HashMap<String, NodeId> = HashMap::with_capacity(1_000_000);
 
-    // ── Phase 1: Create indexes ──────────────────────────────────
-    eprintln!("Phase 0: Creating indexes...");
-    // Indexes are implicit in GraphStore (label_index)
-
-    // ── Phase 1: Load articles ───────────────────────────────────
-    eprintln!("Phase 1: Loading articles...");
+    // ── Phase 1: Load articles (streaming) ───────────────────────
+    eprintln!("Phase 1: Loading articles (streaming 41 GB file)...");
     let t = Instant::now();
-    let articles = read_pipe_file(&dir.join("articles.txt"), max_articles);
-    for row in &articles {
-        if row.len() < 6 { continue; }
-        let pmid = &row[0];
-        if pmid.is_empty() || pmid_to_node.contains_key(pmid) { continue; }
+    process_pipe_file(&dir.join("articles.txt"), max_articles, |fields| {
+        if fields.len() < 6 { return; }
+        let pmid = fields[0];
+        if pmid.is_empty() { return; }
+        if pmid_to_node.contains_key(pmid) { return; }
 
         let id = graph.create_node("Article");
         set_str(graph, id, "pmid", pmid);
-        set_str(graph, id, "title", &row[1]);
-        // Truncate abstract to save memory at scale
-        let abstract_text = if row[2].len() > 500 { &row[2][..500] } else { &row[2] };
-        set_str(graph, id, "abstract", abstract_text);
-        set_str(graph, id, "pub_date", &row[4]);
-        if let Ok(year) = row[5].parse::<i64>() {
+        // Only store title (skip abstract to save ~30 GB of RAM)
+        let title = if fields[1].len() > 300 { &fields[1][..300] } else { fields[1] };
+        set_str(graph, id, "title", title);
+        set_str(graph, id, "pub_date", fields[4]);
+        if let Ok(year) = fields[5].parse::<i64>() {
             set_int(graph, id, "pub_year", year);
         }
 
-        // Journal → dedup and create edge
-        let journal = &row[3];
+        // Journal → dedup
+        let journal = fields[3];
         if !journal.is_empty() {
             let journal_lower = journal.to_lowercase();
-            let jid = *journal_to_node.entry(journal_lower.clone()).or_insert_with(|| {
+            let jid = *journal_to_node.entry(journal_lower).or_insert_with(|| {
                 let jid = graph.create_node("Journal");
                 set_str(graph, jid, "title", journal);
                 nc += 1;
                 jid
             });
-            if let Ok(_) = graph.create_edge(id, jid, "PUBLISHED_IN") { ec += 1; }
+            let _ = graph.create_edge(id, jid, "PUBLISHED_IN");
+            ec += 1;
         }
 
-        pmid_to_node.insert(pmid.clone(), id);
+        pmid_to_node.insert(pmid.to_string(), id);
         nc += 1;
 
-        if nc % 1_000_000 == 0 {
-            eprintln!("  ... {} articles loaded ({:.1}s)", format_num(nc), t.elapsed().as_secs_f64());
+        if nc % 2_000_000 == 0 {
+            eprintln!("  ... {} articles ({:.0}s, {:.0}/sec)",
+                format_num(nc), t.elapsed().as_secs_f64(),
+                nc as f64 / t.elapsed().as_secs_f64());
         }
-    }
+    });
     eprintln!("  Article: {} nodes, Journal: {} nodes ({:.1}s)",
         format_num(pmid_to_node.len()), format_num(journal_to_node.len()), t.elapsed().as_secs_f64());
 
-    // ── Phase 2: Load authors + AUTHORED_BY edges ────────────────
-    eprintln!("Phase 2: Loading authors...");
+    // ── Phase 2: Load authors (streaming) ────────────────────────
+    eprintln!("Phase 2: Loading authors (streaming 16 GB file)...");
     let t = Instant::now();
-    let authors = read_pipe_file(&dir.join("authors.txt"), 0);
     let mut auth_edges = 0usize;
-
-    for row in &authors {
-        if row.len() < 3 { continue; }
-        let pmid = &row[0];
-        let last_name = &row[1];
-        let fore_name = &row[2];
-        if last_name.is_empty() && fore_name.is_empty() { continue; }
+    process_pipe_file(&dir.join("authors.txt"), 0, |fields| {
+        if fields.len() < 3 { return; }
+        let pmid = fields[0];
+        let last_name = fields[1];
+        let fore_name = fields[2];
+        if last_name.is_empty() && fore_name.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
-            None => continue,
+            None => return,
         };
 
-        // Dedup author by "last|fore"
         let author_key = format!("{}|{}", last_name.to_lowercase(), fore_name.to_lowercase());
-        let author_nid = *author_to_node.entry(author_key.clone()).or_insert_with(|| {
+        let author_nid = *author_to_node.entry(author_key).or_insert_with(|| {
             let aid = graph.create_node("Author");
-            set_str(graph, aid, "last_name", last_name);
-            set_str(graph, aid, "fore_name", fore_name);
-            let full_name = if fore_name.is_empty() { last_name.clone() }
-                else { format!("{} {}", fore_name, last_name) };
-            set_str(graph, aid, "name", &full_name);
+            set_str(graph, aid, "name", &format!("{} {}", fore_name, last_name));
             nc += 1;
             aid
         });
 
-        if let Ok(_) = graph.create_edge(article_nid, author_nid, "AUTHORED_BY") {
-            ec += 1; auth_edges += 1;
-        }
+        let _ = graph.create_edge(article_nid, author_nid, "AUTHORED_BY");
+        ec += 1; auth_edges += 1;
 
-        if auth_edges % 5_000_000 == 0 && auth_edges > 0 {
-            eprintln!("  ... {} AUTHORED_BY edges ({:.1}s)", format_num(auth_edges), t.elapsed().as_secs_f64());
+        if auth_edges % 10_000_000 == 0 {
+            eprintln!("  ... {} AUTHORED_BY edges ({:.0}s)", format_num(auth_edges), t.elapsed().as_secs_f64());
         }
-    }
+    });
     eprintln!("  Author: {} nodes, AUTHORED_BY: {} edges ({:.1}s)",
         format_num(author_to_node.len()), format_num(auth_edges), t.elapsed().as_secs_f64());
 
-    // ── Phase 3: Load MeSH terms + ANNOTATED_WITH edges ──────────
-    eprintln!("Phase 3: Loading MeSH terms...");
+    // ── Phase 3: Load MeSH terms (streaming) ─────────────────────
+    eprintln!("Phase 3: Loading MeSH terms (streaming 11 GB file)...");
     let t = Instant::now();
-    let mesh_rows = read_pipe_file(&dir.join("mesh_terms.txt"), 0);
     let mut mesh_edges = 0usize;
-
-    for row in &mesh_rows {
-        if row.len() < 4 { continue; }
-        let pmid = &row[0];
-        let desc_id = &row[1];
-        let desc_name = &row[2];
-        let is_major = &row[3];
-        if desc_name.is_empty() { continue; }
+    process_pipe_file(&dir.join("mesh_terms.txt"), 0, |fields| {
+        if fields.len() < 3 { return; }
+        let pmid = fields[0];
+        let desc_id = fields[1];
+        let desc_name = fields[2];
+        if desc_name.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
-            None => continue,
+            None => return,
         };
 
         let mesh_key = desc_name.to_lowercase();
-        let mesh_nid = *mesh_to_node.entry(mesh_key.clone()).or_insert_with(|| {
+        let mesh_nid = *mesh_to_node.entry(mesh_key).or_insert_with(|| {
             let mid = graph.create_node("MeSHTerm");
             set_str(graph, mid, "descriptor_id", desc_id);
             set_str(graph, mid, "name", desc_name);
@@ -203,37 +195,34 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize)
             mid
         });
 
-        if let Ok(_) = graph.create_edge(article_nid, mesh_nid, "ANNOTATED_WITH") {
-            ec += 1; mesh_edges += 1;
-        }
+        let _ = graph.create_edge(article_nid, mesh_nid, "ANNOTATED_WITH");
+        ec += 1; mesh_edges += 1;
 
-        if mesh_edges % 10_000_000 == 0 && mesh_edges > 0 {
-            eprintln!("  ... {} ANNOTATED_WITH edges ({:.1}s)", format_num(mesh_edges), t.elapsed().as_secs_f64());
+        if mesh_edges % 20_000_000 == 0 {
+            eprintln!("  ... {} ANNOTATED_WITH edges ({:.0}s)", format_num(mesh_edges), t.elapsed().as_secs_f64());
         }
-    }
+    });
     eprintln!("  MeSHTerm: {} nodes, ANNOTATED_WITH: {} edges ({:.1}s)",
         format_num(mesh_to_node.len()), format_num(mesh_edges), t.elapsed().as_secs_f64());
 
-    // ── Phase 4: Load chemicals + MENTIONS_CHEMICAL edges ────────
-    eprintln!("Phase 4: Loading chemicals...");
+    // ── Phase 4: Load chemicals (streaming) ──────────────────────
+    eprintln!("Phase 4: Loading chemicals (streaming 2 GB file)...");
     let t = Instant::now();
-    let chem_rows = read_pipe_file(&dir.join("chemicals.txt"), 0);
     let mut chem_edges = 0usize;
-
-    for row in &chem_rows {
-        if row.len() < 3 { continue; }
-        let pmid = &row[0];
-        let reg_num = &row[1];
-        let substance = &row[2];
-        if substance.is_empty() { continue; }
+    process_pipe_file(&dir.join("chemicals.txt"), 0, |fields| {
+        if fields.len() < 3 { return; }
+        let pmid = fields[0];
+        let reg_num = fields[1];
+        let substance = fields[2];
+        if substance.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
-            None => continue,
+            None => return,
         };
 
         let chem_key = substance.to_lowercase();
-        let chem_nid = *chemical_to_node.entry(chem_key.clone()).or_insert_with(|| {
+        let chem_nid = *chemical_to_node.entry(chem_key).or_insert_with(|| {
             let cid = graph.create_node("Chemical");
             set_str(graph, cid, "registry_number", reg_num);
             set_str(graph, cid, "name", substance);
@@ -241,59 +230,57 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize)
             cid
         });
 
-        if let Ok(_) = graph.create_edge(article_nid, chem_nid, "MENTIONS_CHEMICAL") {
-            ec += 1; chem_edges += 1;
-        }
-    }
+        let _ = graph.create_edge(article_nid, chem_nid, "MENTIONS_CHEMICAL");
+        ec += 1; chem_edges += 1;
+    });
     eprintln!("  Chemical: {} nodes, MENTIONS_CHEMICAL: {} edges ({:.1}s)",
         format_num(chemical_to_node.len()), format_num(chem_edges), t.elapsed().as_secs_f64());
 
-    // ── Phase 5: Load citations (CITES edges) ────────────────────
-    eprintln!("Phase 5: Loading citations...");
+    // ── Phase 5: Load citations (streaming) ──────────────────────
+    eprintln!("Phase 5: Loading citations (streaming 6.6 GB file)...");
     let t = Instant::now();
-    let cite_rows = read_pipe_file(&dir.join("citations.txt"), 0);
     let mut cite_edges = 0usize;
-
-    for row in &cite_rows {
-        if row.len() < 2 { continue; }
-        let citing = &row[0];
-        let cited = &row[1];
+    process_pipe_file(&dir.join("citations.txt"), 0, |fields| {
+        if fields.len() < 2 { return; }
+        let citing = fields[0];
+        let cited = fields[1];
 
         let citing_nid = match pmid_to_node.get(citing) {
             Some(&nid) => nid,
-            None => continue,
+            None => return,
         };
         let cited_nid = match pmid_to_node.get(cited) {
             Some(&nid) => nid,
-            None => continue, // cited article not in our dataset
+            None => return,
         };
 
-        if let Ok(_) = graph.create_edge(citing_nid, cited_nid, "CITES") {
-            ec += 1; cite_edges += 1;
+        let _ = graph.create_edge(citing_nid, cited_nid, "CITES");
+        ec += 1; cite_edges += 1;
+
+        if cite_edges % 20_000_000 == 0 {
+            eprintln!("  ... {} CITES edges ({:.0}s)", format_num(cite_edges), t.elapsed().as_secs_f64());
         }
-    }
+    });
     eprintln!("  CITES: {} edges ({:.1}s)", format_num(cite_edges), t.elapsed().as_secs_f64());
 
-    // ── Phase 6: Load grants + FUNDED_BY edges ───────────────────
-    eprintln!("Phase 6: Loading grants...");
+    // ── Phase 6: Load grants (streaming) ─────────────────────────
+    eprintln!("Phase 6: Loading grants (streaming 739 MB file)...");
     let t = Instant::now();
-    let grant_rows = read_pipe_file(&dir.join("grants.txt"), 0);
     let mut grant_edges = 0usize;
-
-    for row in &grant_rows {
-        if row.len() < 4 { continue; }
-        let pmid = &row[0];
-        let grant_id = &row[1];
-        let agency = &row[2];
-        if grant_id.is_empty() { continue; }
+    process_pipe_file(&dir.join("grants.txt"), 0, |fields| {
+        if fields.len() < 3 { return; }
+        let pmid = fields[0];
+        let grant_id = fields[1];
+        let agency = fields[2];
+        if grant_id.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
-            None => continue,
+            None => return,
         };
 
         let grant_key = grant_id.to_lowercase();
-        let grant_nid = *grant_to_node.entry(grant_key.clone()).or_insert_with(|| {
+        let grant_nid = *grant_to_node.entry(grant_key).or_insert_with(|| {
             let gid = graph.create_node("Grant");
             set_str(graph, gid, "grant_id", grant_id);
             set_str(graph, gid, "agency", agency);
@@ -301,10 +288,9 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize)
             gid
         });
 
-        if let Ok(_) = graph.create_edge(article_nid, grant_nid, "FUNDED_BY") {
-            ec += 1; grant_edges += 1;
-        }
-    }
+        let _ = graph.create_edge(article_nid, grant_nid, "FUNDED_BY");
+        ec += 1; grant_edges += 1;
+    });
     eprintln!("  Grant: {} nodes, FUNDED_BY: {} edges ({:.1}s)",
         format_num(grant_to_node.len()), format_num(grant_edges), t.elapsed().as_secs_f64());
 
