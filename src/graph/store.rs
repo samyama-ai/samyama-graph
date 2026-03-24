@@ -259,6 +259,106 @@ impl GraphStatistics {
 /// Thread safety: `GraphStore` is not `Sync` by itself. Concurrent access
 /// is managed by the server layer, which wraps it in `Arc<RwLock<GraphStore>>`
 /// for shared-nothing read parallelism with exclusive write access.
+// ============================================================================
+// CSR Frozen Adjacency Tier (DS-07)
+// ============================================================================
+
+/// Compressed Sparse Row (CSR) storage for bulk-loaded adjacency data.
+/// Immutable after construction — all new edges go to the write buffer (Vec-of-Vec).
+/// Queries merge results from frozen tier + write buffer transparently.
+#[derive(Debug, Clone)]
+pub struct FrozenAdjacency {
+    /// Offset table: offsets[node_idx] .. offsets[node_idx + 1] gives the range
+    /// of entries in `edges` for that node. Length = max_node_id + 2.
+    offsets: Vec<u32>,
+    /// Packed edge entries: (neighbor_NodeId, EdgeId) sorted by neighbor within each node's range.
+    edges: Vec<(NodeId, EdgeId)>,
+}
+
+impl FrozenAdjacency {
+    /// Create an empty frozen tier
+    fn empty() -> Self {
+        Self { offsets: vec![0], edges: Vec::new() }
+    }
+
+    /// Build frozen tier from Vec-of-Vec adjacency lists, consuming the data.
+    /// After this, the Vec-of-Vec should be cleared (becomes the empty write buffer).
+    fn from_vec_of_vec(adj: &[Vec<(NodeId, EdgeId)>]) -> Self {
+        let num_nodes = adj.len();
+        let total_edges: usize = adj.iter().map(|v| v.len()).sum();
+
+        let mut offsets = Vec::with_capacity(num_nodes + 1);
+        let mut edges = Vec::with_capacity(total_edges);
+
+        let mut offset: u32 = 0;
+        for node_edges in adj {
+            offsets.push(offset);
+            for &entry in node_edges {
+                edges.push(entry);
+            }
+            offset += node_edges.len() as u32;
+        }
+        offsets.push(offset); // sentinel
+
+        Self { offsets, edges }
+    }
+
+    /// Get the neighbor list for a given node index.
+    #[inline]
+    fn neighbors(&self, node_idx: usize) -> &[(NodeId, EdgeId)] {
+        if node_idx + 1 >= self.offsets.len() {
+            return &[];
+        }
+        let start = self.offsets[node_idx] as usize;
+        let end = self.offsets[node_idx + 1] as usize;
+        &self.edges[start..end]
+    }
+
+    /// Check if the frozen tier has any data
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// Total number of edge entries across all nodes
+    #[inline]
+    fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Number of nodes tracked
+    #[inline]
+    fn node_capacity(&self) -> usize {
+        if self.offsets.len() > 0 { self.offsets.len() - 1 } else { 0 }
+    }
+
+    /// Binary search within a node's frozen neighbor list
+    fn find_neighbor(&self, node_idx: usize, search_key: NodeId) -> Option<(NodeId, EdgeId)> {
+        let neighbors = self.neighbors(node_idx);
+        match neighbors.binary_search_by_key(&search_key, |(nid, _)| *nid) {
+            Ok(pos) => Some(neighbors[pos]),
+            Err(_) => None,
+        }
+    }
+
+    /// Find all edges to a specific neighbor (there may be multiple with different types)
+    fn find_all_neighbors(&self, node_idx: usize, search_key: NodeId) -> Vec<(NodeId, EdgeId)> {
+        let neighbors = self.neighbors(node_idx);
+        match neighbors.binary_search_by_key(&search_key, |(nid, _)| *nid) {
+            Ok(pos) => {
+                // Walk back to first occurrence
+                let mut start = pos;
+                while start > 0 && neighbors[start - 1].0 == search_key { start -= 1; }
+                // Walk forward to last
+                let mut end = pos + 1;
+                while end < neighbors.len() && neighbors[end].0 == search_key { end += 1; }
+                neighbors[start..end].to_vec()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
@@ -267,11 +367,17 @@ pub struct GraphStore {
     /// Edge storage (Arena with versioning: EdgeId -> [Versions])
     edges: Vec<Vec<Edge>>,
 
-    /// Outgoing edges for each node, sorted by target NodeId: (target_NodeId, EdgeId)
+    /// Outgoing edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     outgoing: Vec<Vec<(NodeId, EdgeId)>>,
 
-    /// Incoming edges for each node, sorted by source NodeId: (source_NodeId, EdgeId)
+    /// Incoming edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     incoming: Vec<Vec<(NodeId, EdgeId)>>,
+
+    /// Frozen outgoing adjacency (CSR): bulk-loaded data, immutable, compact
+    frozen_outgoing: FrozenAdjacency,
+
+    /// Frozen incoming adjacency (CSR): bulk-loaded data, immutable, compact
+    frozen_incoming: FrozenAdjacency,
 
     /// Current global version for MVCC
     pub current_version: u64,
@@ -321,6 +427,8 @@ impl GraphStore {
             edges: Vec::with_capacity(4096),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
+            frozen_outgoing: FrozenAdjacency::empty(),
+            frozen_incoming: FrozenAdjacency::empty(),
             current_version: 1,
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
@@ -802,11 +910,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // TODO: Implement proper tombstone versions
         let node = self.nodes[idx].pop().unwrap();
 
-        // Remove all connected edges
-        let outgoing_edges: Vec<EdgeId> = std::mem::take(&mut self.outgoing[idx])
-            .into_iter().map(|(_, eid)| eid).collect();
-        let incoming_edges: Vec<EdgeId> = std::mem::take(&mut self.incoming[idx])
-            .into_iter().map(|(_, eid)| eid).collect();
+        // Remove all connected edges — collect from both frozen tier and write buffer
+        let mut outgoing_edges: Vec<EdgeId> = self.frozen_outgoing.neighbors(idx)
+            .iter().map(|&(_, eid)| eid).collect();
+        outgoing_edges.extend(
+            std::mem::take(&mut self.outgoing[idx]).into_iter().map(|(_, eid)| eid)
+        );
+        let mut incoming_edges: Vec<EdgeId> = self.frozen_incoming.neighbors(idx)
+            .iter().map(|&(_, eid)| eid).collect();
+        incoming_edges.extend(
+            std::mem::take(&mut self.incoming[idx]).into_iter().map(|(_, eid)| eid)
+        );
 
         for edge_id in outgoing_edges.iter().chain(incoming_edges.iter()) {
             let _ = self.delete_edge(*edge_id);
@@ -1054,121 +1168,87 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get all outgoing edges from a node
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
-        self.outgoing
-            .get(node_id.as_u64() as usize)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|&(_, eid)| self.get_edge(eid))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let idx = node_id.as_u64() as usize;
+        let mut result: Vec<&Edge> = Vec::new();
+        // Frozen tier (CSR)
+        for &(_, eid) in self.frozen_outgoing.neighbors(idx) {
+            if let Some(e) = self.get_edge(eid) { result.push(e); }
+        }
+        // Write buffer
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(_, eid) in entries {
+                if let Some(e) = self.get_edge(eid) { result.push(e); }
+            }
+        }
+        result
     }
 
     /// Get all incoming edges to a node
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
-        self.incoming
-            .get(node_id.as_u64() as usize)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|&(_, eid)| self.get_edge(eid))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let idx = node_id.as_u64() as usize;
+        let mut result: Vec<&Edge> = Vec::new();
+        // Frozen tier
+        for &(_, eid) in self.frozen_incoming.neighbors(idx) {
+            if let Some(e) = self.get_edge(eid) { result.push(e); }
+        }
+        // Write buffer
+        if let Some(entries) = self.incoming.get(idx) {
+            for &(_, eid) in entries {
+                if let Some(e) = self.get_edge(eid) { result.push(e); }
+            }
+        }
+        result
     }
 
     /// Get outgoing edge targets as lightweight tuples (no Edge clone)
     /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each outgoing edge
     pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
-        self.outgoing
-            .get(node_id.as_u64() as usize)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|&(_, eid)| {
-                        self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        let idx = node_id.as_u64() as usize;
+        let mut result = Vec::new();
+        // Frozen tier
+        for &(_, eid) in self.frozen_outgoing.neighbors(idx) {
+            if let Some(e) = self.get_edge(eid) {
+                result.push((eid, e.source, e.target, &e.edge_type));
+            }
+        }
+        // Write buffer
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(_, eid) in entries {
+                if let Some(e) = self.get_edge(eid) {
+                    result.push((eid, e.source, e.target, &e.edge_type));
+                }
+            }
+        }
+        result
     }
 
     /// Get incoming edge sources as lightweight tuples (no Edge clone)
     /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each incoming edge
     pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
-        self.incoming
-            .get(node_id.as_u64() as usize)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|&(_, eid)| {
-                        self.get_edge(eid).map(|e| (eid, e.source, e.target, &e.edge_type))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Check if an edge exists between source and target, optionally filtered by edge type.
-    /// Uses binary search on sorted adjacency lists for O(log d) lookup.
-    /// Returns the first matching EdgeId, or None.
-    pub fn edge_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Option<EdgeId> {
-        let out_len = self.outgoing.get(source.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
-        let in_len = self.incoming.get(target.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
-
-        // Use outgoing from source (search for target) or incoming to target (search for source)
-        let (entries, search_key) = if out_len <= in_len {
-            (self.outgoing.get(source.as_u64() as usize)?, target)
-        } else {
-            (self.incoming.get(target.as_u64() as usize)?, source)
-        };
-
-        // Binary search to find the neighborhood of matching entries
-        let start = match entries.binary_search_by_key(&search_key, |(nid, _)| *nid) {
-            Ok(pos) => {
-                // Walk back to find the first entry with this key
-                let mut p = pos;
-                while p > 0 && entries[p - 1].0 == search_key { p -= 1; }
-                p
-            }
-            Err(_) => return None,
-        };
-
-        // Scan forward through entries with the matching key
-        for i in start..entries.len() {
-            let (nid, eid) = entries[i];
-            if nid != search_key { break; }
+        let idx = node_id.as_u64() as usize;
+        let mut result = Vec::new();
+        // Frozen tier
+        for &(_, eid) in self.frozen_incoming.neighbors(idx) {
             if let Some(e) = self.get_edge(eid) {
-                if e.source == source && e.target == target {
-                    match edge_type {
-                        Some(et) if &e.edge_type != et => continue,
-                        _ => return Some(eid),
-                    }
+                result.push((eid, e.source, e.target, &e.edge_type));
+            }
+        }
+        // Write buffer
+        if let Some(entries) = self.incoming.get(idx) {
+            for &(_, eid) in entries {
+                if let Some(e) = self.get_edge(eid) {
+                    result.push((eid, e.source, e.target, &e.edge_type));
                 }
             }
         }
-        None
+        result
     }
 
-    /// Get all edges between source and target, optionally filtered by edge type.
-    /// Uses binary search on sorted adjacency lists.
-    pub fn edges_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Vec<EdgeId> {
-        let out_len = self.outgoing.get(source.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
-        let in_len = self.incoming.get(target.as_u64() as usize).map(|v| v.len()).unwrap_or(0);
-
-        let (entries, search_key) = if out_len <= in_len {
-            match self.outgoing.get(source.as_u64() as usize) {
-                Some(e) => (e, target),
-                None => return Vec::new(),
-            }
-        } else {
-            match self.incoming.get(target.as_u64() as usize) {
-                Some(e) => (e, source),
-                None => return Vec::new(),
-            }
-        };
-
+    /// Helper: search a sorted slice for edges between source and target
+    fn search_adjacency_slice(
+        &self, entries: &[(NodeId, EdgeId)], search_key: NodeId,
+        source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
+    ) -> Vec<EdgeId> {
         let start = match entries.binary_search_by_key(&search_key, |(nid, _)| *nid) {
             Ok(pos) => {
                 let mut p = pos;
@@ -1190,6 +1270,40 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                     }
                 }
             }
+        }
+        result
+    }
+
+    /// Check if an edge exists between source and target, optionally filtered by edge type.
+    /// Checks both frozen tier (CSR) and write buffer.
+    /// Returns the first matching EdgeId, or None.
+    pub fn edge_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Option<EdgeId> {
+        let src_idx = source.as_u64() as usize;
+        let tgt_idx = target.as_u64() as usize;
+
+        // Check write buffer first (likely has recent edges)
+        let buffer_entries = self.outgoing.get(src_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+        let found = self.search_adjacency_slice(buffer_entries, target, source, target, edge_type);
+        if let Some(&eid) = found.first() { return Some(eid); }
+
+        // Check frozen tier
+        let frozen_entries = self.frozen_outgoing.neighbors(src_idx);
+        let found = self.search_adjacency_slice(frozen_entries, target, source, target, edge_type);
+        found.first().copied()
+    }
+
+    /// Get all edges between source and target, optionally filtered by edge type.
+    /// Merges results from frozen tier and write buffer.
+    pub fn edges_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Vec<EdgeId> {
+        let src_idx = source.as_u64() as usize;
+
+        // Frozen tier
+        let mut result = self.search_adjacency_slice(
+            self.frozen_outgoing.neighbors(src_idx), target, source, target, edge_type
+        );
+        // Write buffer
+        if let Some(entries) = self.outgoing.get(src_idx) {
+            result.extend(self.search_adjacency_slice(entries, target, source, target, edge_type));
         }
         result
     }
@@ -1336,12 +1450,71 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_type_index.keys().collect()
     }
 
+    /// Compact the write buffer into the frozen CSR tier.
+    /// After compaction, the write buffer is cleared and all adjacency data
+    /// lives in the memory-efficient CSR format.
+    /// Call this after bulk loading (snapshot import, batch CREATE) for memory savings.
+    pub fn compact_adjacency(&mut self) {
+        if self.outgoing.iter().all(|v| v.is_empty()) && self.incoming.iter().all(|v| v.is_empty()) {
+            // Nothing in write buffer to compact
+            if !self.frozen_outgoing.is_empty() {
+                return; // Already compacted
+            }
+        }
+
+        // If frozen tier has data, we need to merge frozen + buffer before rebuilding.
+        // For simplicity in v1: rebuild CSR from scratch using buffer data only.
+        // (Frozen tier should be empty on first compaction after load)
+        if self.frozen_outgoing.is_empty() {
+            // First compaction: convert Vec-of-Vec directly to CSR
+            self.frozen_outgoing = FrozenAdjacency::from_vec_of_vec(&self.outgoing);
+            self.frozen_incoming = FrozenAdjacency::from_vec_of_vec(&self.incoming);
+        } else {
+            // Merge: rebuild Vec-of-Vec from frozen + buffer, then re-freeze
+            let max_nodes = self.outgoing.len().max(self.frozen_outgoing.node_capacity());
+            let mut merged_out: Vec<Vec<(NodeId, EdgeId)>> = Vec::with_capacity(max_nodes);
+            let mut merged_in: Vec<Vec<(NodeId, EdgeId)>> = Vec::with_capacity(max_nodes);
+
+            for i in 0..max_nodes {
+                let mut out = self.frozen_outgoing.neighbors(i).to_vec();
+                if i < self.outgoing.len() {
+                    out.extend_from_slice(&self.outgoing[i]);
+                    out.sort_by_key(|(nid, _)| *nid);
+                }
+                merged_out.push(out);
+
+                let mut inc = self.frozen_incoming.neighbors(i).to_vec();
+                if i < self.incoming.len() {
+                    inc.extend_from_slice(&self.incoming[i]);
+                    inc.sort_by_key(|(nid, _)| *nid);
+                }
+                merged_in.push(inc);
+            }
+
+            self.frozen_outgoing = FrozenAdjacency::from_vec_of_vec(&merged_out);
+            self.frozen_incoming = FrozenAdjacency::from_vec_of_vec(&merged_in);
+        }
+
+        // Clear write buffer — shrink to minimal capacity
+        for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
+        for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
+
+        let buffer_edge_count: usize = 0;
+        let frozen_edge_count = self.frozen_outgoing.edge_count();
+        eprintln!(
+            "[compact] Frozen: {} edges ({} nodes). Buffer: {} edges.",
+            frozen_edge_count, self.frozen_outgoing.node_capacity(), buffer_edge_count
+        );
+    }
+
     /// Clear all data from the graph
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.edges.clear();
         self.outgoing.clear();
         self.incoming.clear();
+        self.frozen_outgoing = FrozenAdjacency::empty();
+        self.frozen_incoming = FrozenAdjacency::empty();
         self.free_node_ids.clear();
         self.free_edge_ids.clear();
         self.label_index.clear();
@@ -2962,5 +3135,164 @@ mod tests {
         // Non-existent target
         let fake = NodeId::new(9999);
         assert!(store.edge_between(hub, fake, Some(&EdgeType::new("LINKS"))).is_none());
+    }
+
+    // ============================
+    // DS-07: CSR Compaction Tests
+    // ============================
+
+    #[test]
+    fn test_compact_adjacency_basic() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, c, "KNOWS").unwrap();
+        store.create_edge(b, c, "LIKES").unwrap();
+
+        // Before compaction: edges in write buffer
+        assert_eq!(store.get_outgoing_edges(a).len(), 2);
+        assert_eq!(store.get_outgoing_edges(b).len(), 1);
+        assert!(store.frozen_outgoing.is_empty());
+
+        // Compact
+        store.compact_adjacency();
+
+        // After compaction: same results, data now in frozen tier
+        assert!(!store.frozen_outgoing.is_empty());
+        assert_eq!(store.get_outgoing_edges(a).len(), 2);
+        assert_eq!(store.get_outgoing_edges(b).len(), 1);
+        assert_eq!(store.get_incoming_edges(c).len(), 2);
+
+        // edge_between still works
+        assert!(store.edge_between(a, b, None).is_some());
+        assert!(store.edge_between(a, c, None).is_some());
+        assert!(store.edge_between(b, c, None).is_some());
+        assert!(store.edge_between(c, a, None).is_none());
+    }
+
+    #[test]
+    fn test_compact_then_create_edge() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        store.create_edge(a, b, "KNOWS").unwrap();
+
+        // Compact
+        store.compact_adjacency();
+        assert_eq!(store.get_outgoing_edges(a).len(), 1);
+
+        // Create new edge after compaction — goes to write buffer
+        store.create_edge(a, c, "LIKES").unwrap();
+
+        // Should see both: frozen (a→b) + buffer (a→c)
+        assert_eq!(store.get_outgoing_edges(a).len(), 2);
+        assert!(store.edge_between(a, b, None).is_some()); // frozen
+        assert!(store.edge_between(a, c, None).is_some()); // buffer
+    }
+
+    #[test]
+    fn test_compact_twice() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        store.create_edge(a, b, "KNOWS").unwrap();
+
+        // First compaction
+        store.compact_adjacency();
+        assert_eq!(store.frozen_outgoing.edge_count(), 1);
+
+        // Add more edges
+        store.create_edge(a, c, "LIKES").unwrap();
+        store.create_edge(b, c, "FOLLOWS").unwrap();
+
+        // Second compaction — merges frozen + buffer
+        store.compact_adjacency();
+        assert_eq!(store.frozen_outgoing.edge_count(), 3);
+        assert_eq!(store.get_outgoing_edges(a).len(), 2);
+        assert_eq!(store.get_outgoing_edges(b).len(), 1);
+    }
+
+    #[test]
+    fn test_compact_empty_graph() {
+        let mut store = GraphStore::new();
+        store.compact_adjacency(); // Should not panic
+        assert!(store.frozen_outgoing.is_empty());
+    }
+
+    #[test]
+    fn test_compact_edge_targets() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        store.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
+        let b = store.create_node("Person");
+        store.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
+        store.create_edge(a, b, "KNOWS").unwrap();
+
+        store.compact_adjacency();
+
+        // get_outgoing_edge_targets should work with frozen tier
+        let targets = store.get_outgoing_edge_targets(a);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].2, b); // target is b
+    }
+
+    #[test]
+    fn test_compact_incoming_edges() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        store.create_edge(a, c, "KNOWS").unwrap();
+        store.create_edge(b, c, "KNOWS").unwrap();
+
+        store.compact_adjacency();
+
+        // c should have 2 incoming edges from frozen tier
+        let incoming = store.get_incoming_edge_sources(c);
+        assert_eq!(incoming.len(), 2);
+    }
+
+    #[test]
+    fn test_compact_edges_between() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, b, "LIKES").unwrap();
+
+        store.compact_adjacency();
+
+        // Should find both edges in frozen tier
+        let edges = store.edges_between(a, b, None);
+        assert_eq!(edges.len(), 2);
+
+        // Filtered
+        let knows = store.edges_between(a, b, Some(&EdgeType::new("KNOWS")));
+        assert_eq!(knows.len(), 1);
+    }
+
+    #[test]
+    fn test_compact_memory_savings() {
+        // Verify that write buffer is actually cleared after compaction
+        let mut store = GraphStore::new();
+        let nodes: Vec<NodeId> = (0..100).map(|_| store.create_node("Node")).collect();
+        for i in 0..99 {
+            store.create_edge(nodes[i], nodes[i + 1], "NEXT").unwrap();
+        }
+
+        // Before compaction: write buffer has data
+        let buffer_non_empty: usize = store.outgoing.iter().filter(|v| !v.is_empty()).count();
+        assert!(buffer_non_empty > 0);
+
+        store.compact_adjacency();
+
+        // After compaction: write buffer should be empty
+        let buffer_non_empty: usize = store.outgoing.iter().filter(|v| !v.is_empty()).count();
+        assert_eq!(buffer_non_empty, 0, "Write buffer should be empty after compaction");
+        assert_eq!(store.frozen_outgoing.edge_count(), 99);
     }
 }
