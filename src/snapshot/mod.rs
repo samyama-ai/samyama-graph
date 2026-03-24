@@ -238,6 +238,11 @@ pub fn import_tenant(
         // Skip unrecognized lines
     }
 
+    // Compact adjacency lists to CSR for memory efficiency (DS-07)
+    if imported_edge_count > 0 {
+        store.compact_adjacency();
+    }
+
     let mut labels: Vec<String> = imported_labels.into_iter().collect();
     labels.sort();
     let mut edge_types: Vec<String> = imported_edge_types.into_iter().collect();
