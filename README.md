@@ -11,7 +11,15 @@
 ![LOC](https://img.shields.io/badge/LOC-44K-informational)
 ![License](https://img.shields.io/badge/license-Apache_2.0-blue)
 
-**Samyama** is a high-performance, distributed, AI-native graph database written in **Rust**. It combines a **property graph engine**, **vector search**, **graph analytics**, and **natural language querying** in a single binary.
+**Samyama** (Sanskrit: the union of focused query, sustained analysis, and unified insight) is a high-performance graph-vector database written in **Rust**. It combines a **property graph engine** (~90% OpenCypher), **vector search** (HNSW), **graph algorithms**, and **natural language querying** in a single binary. Zero GC pauses, 1,814 tests, Apache-2.0.
+
+### Scale Benchmark
+
+| Dataset | Nodes | Edges | RAM | Instance Cost |
+|---------|-------|-------|-----|--------------|
+| **PubMed/MEDLINE** | **66.2M** | **1.04B** | 130 GB | **$2.50 total** |
+| Biomedical Trifecta | 7.9M | 28.0M | 2 GB | Mac Mini M4 |
+| Cricket (Cricsheet) | 37K | 1.39M | < 1 GB | Mac Mini M4 |
 
 ### See it in action
 
@@ -52,10 +60,12 @@ See [docs/ldbc/](docs/ldbc/) for detailed per-query results, latency tables, and
 - **Multi-Tenancy**: Tenant-level isolation with per-tenant quotas via RocksDB column families.
 - **High Availability**: Raft consensus (via `openraft`) for cluster replication and automatic failover.
 - **Persistence**: RocksDB storage with Write-Ahead Log and checkpointing.
-- **EXPLAIN Queries**: Inspect query execution plans without running them.
+- **Cost-Based Query Planner**: Graph-native plan enumeration with triple-level statistics (GraphCatalog), predicate pushdown, direction reversal, ExpandInto, and plan cache. EXPLAIN/PROFILE for plan visualization.
+- **Late Materialization**: Scan operators produce lightweight `NodeRef` tokens instead of full clones — 4x traversal speedup on multi-hop queries.
+- **Two-Phase Bulk Loading**: `create_node_stub()` + `create_edge_stub()` reduce per-edge memory from 709 to 52 bytes (13.6x), enabling billion-edge graphs on commodity hardware.
 - **HTTP Tenant API**: REST endpoints for tenant CRUD (create, list, get, delete) alongside the RESP protocol.
 - **MCP Server Generation**: Auto-generate MCP servers from graph schema for AI agent integration (`samyama-mcp-serve`).
-- **Snapshot Export/Import**: Portable `.sgsnap` format (gzip JSON-lines) for tenant backup and migration.
+- **Snapshot Persistence**: Portable `.sgsnap` format with automatic persistence — imported snapshots survive server restart.
 
 ## Getting Started
 
