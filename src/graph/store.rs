@@ -430,6 +430,14 @@ pub struct GraphStore {
     /// Edge storage (Arena with versioning: EdgeId -> [Versions])
     edges: Vec<Vec<Edge>>,
 
+    /// Edge type lookup table: maps type string → u16 index (DS-07c)
+    edge_type_table: Vec<EdgeType>,            // index → EdgeType (small, ~6-20 entries)
+    edge_type_to_id: HashMap<EdgeType, u16>,   // EdgeType → index
+
+    /// Compact edge type array: EdgeId → type index. 2 bytes per edge (1B edges = 2 GB).
+    /// Populated by create_edge_stub(). Replaces full Edge objects for type lookups.
+    edge_type_ids: Vec<u16>,
+
     /// Outgoing edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     outgoing: Vec<Vec<(NodeId, EdgeId)>>,
 
@@ -488,6 +496,9 @@ impl GraphStore {
         GraphStore {
             nodes: Vec::with_capacity(1024),
             edges: Vec::with_capacity(4096),
+            edge_type_table: Vec::new(),
+            edge_type_to_id: HashMap::new(),
+            edge_type_ids: Vec::new(),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
             frozen_outgoing: FrozenAdjacencyStore::new(),
@@ -894,6 +905,32 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.node_columns.set_property(idx, key, value);
     }
 
+    /// Intern an edge type string → u16 index. Returns existing index if already interned.
+    fn intern_edge_type(&mut self, edge_type: &EdgeType) -> u16 {
+        if let Some(&id) = self.edge_type_to_id.get(edge_type) {
+            return id;
+        }
+        let id = self.edge_type_table.len() as u16;
+        self.edge_type_table.push(edge_type.clone());
+        self.edge_type_to_id.insert(edge_type.clone(), id);
+        id
+    }
+
+    /// Get edge type for an edge — checks compact type array first, then full Edge store.
+    /// Works for both stub-loaded and fully-loaded edges.
+    pub fn get_edge_type(&self, edge_id: EdgeId) -> Option<EdgeType> {
+        let idx = edge_id.as_u64() as usize;
+        // Check compact type array (populated by create_edge_stub)
+        if idx < self.edge_type_ids.len() {
+            let type_id = self.edge_type_ids[idx] as usize;
+            if type_id < self.edge_type_table.len() {
+                return Some(self.edge_type_table[type_id].clone());
+            }
+        }
+        // Fall back to full Edge store (populated by create_edge)
+        self.get_edge(edge_id).map(|e| e.edge_type.clone())
+    }
+
     /// Set a property on a node and update vector indices if necessary
     pub fn set_node_property(
         &mut self,
@@ -1096,30 +1133,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = edge_id_u64 as usize;
         let edge_type = edge_type.into();
 
-        // Adjacency lists only — sorted insert
-        {
-            let out_list = &mut self.outgoing[source.as_u64() as usize];
-            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
-                .unwrap_or_else(|p| p);
-            out_list.insert(pos, (target, edge_id));
-        }
-        {
-            let in_list = &mut self.incoming[target.as_u64() as usize];
-            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
-                .unwrap_or_else(|p| p);
-            in_list.insert(pos, (source, edge_id));
-        }
+        // Unsorted append — O(1) per edge. Sorted at compact_adjacency().
+        // Saves ~50% of edge phase time vs sorted insert (no binary search + shift).
+        self.outgoing[source.as_u64() as usize].push((target, edge_id));
+        self.incoming[target.as_u64() as usize].push((source, edge_id));
 
-        // Skip Edge object entirely — only adjacency matters for traversal.
-        // get_edge() won't find these edges, but traversal operators use adjacency lists.
-        // Edge type is encoded in the adjacency structure via the edge_type_index.
-        // For bulk loading, this saves ~500 bytes per edge.
+        // Compact edge type: 2 bytes per edge (DS-07c)
+        let type_id = self.intern_edge_type(&edge_type);
+        if idx >= self.edge_type_ids.len() {
+            self.edge_type_ids.resize(idx + 1, 0);
+        }
+        self.edge_type_ids[idx] = type_id;
 
-        // We still need the edges arena to be sized correctly for EdgeId allocation
+        // Size the edges arena for EdgeId allocation (no Edge object stored)
         if idx >= self.edges.len() {
             self.edges.resize(idx + 1, Vec::new());
         }
-        // Don't push any Edge object — leave the slot empty
 
         Ok(edge_id)
     }
@@ -1367,6 +1396,49 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             for &(_, eid) in entries {
                 if let Some(e) = self.get_edge(eid) {
                     result.push((eid, e.source, e.target, &e.edge_type));
+                }
+            }
+        }
+        result
+    }
+
+    /// Get outgoing edge targets with owned EdgeType — works for both full and stub edges.
+    /// Uses compact edge_type_ids array (DS-07c) when Edge objects are not available.
+    pub fn get_outgoing_edge_targets_owned(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+        let src_idx = node_id.as_u64() as usize;
+        let mut result = Vec::new();
+        // Frozen tier
+        for &(target, eid) in &self.frozen_outgoing.neighbors_collected(src_idx) {
+            if let Some(et) = self.get_edge_type(eid) {
+                result.push((eid, node_id, target, et));
+            }
+        }
+        // Write buffer
+        if let Some(entries) = self.outgoing.get(src_idx) {
+            for &(target, eid) in entries {
+                if let Some(et) = self.get_edge_type(eid) {
+                    result.push((eid, node_id, target, et));
+                }
+            }
+        }
+        result
+    }
+
+    /// Get incoming edge sources with owned EdgeType — works for both full and stub edges.
+    pub fn get_incoming_edge_sources_owned(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+        let tgt_idx = node_id.as_u64() as usize;
+        let mut result = Vec::new();
+        // Frozen tier
+        for &(source, eid) in &self.frozen_incoming.neighbors_collected(tgt_idx) {
+            if let Some(et) = self.get_edge_type(eid) {
+                result.push((eid, source, node_id, et));
+            }
+        }
+        // Write buffer
+        if let Some(entries) = self.incoming.get(tgt_idx) {
+            for &(source, eid) in entries {
+                if let Some(et) = self.get_edge_type(eid) {
+                    result.push((eid, source, node_id, et));
                 }
             }
         }
@@ -1682,6 +1754,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.edges.clear();
+        self.edge_type_table.clear();
+        self.edge_type_to_id.clear();
+        self.edge_type_ids.clear();
         self.outgoing.clear();
         self.incoming.clear();
         self.frozen_outgoing.clear();
