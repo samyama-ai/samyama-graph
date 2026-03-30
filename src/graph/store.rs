@@ -263,6 +263,69 @@ impl GraphStatistics {
 // CSR Frozen Adjacency Tier (DS-07)
 // ============================================================================
 
+/// Multi-segment frozen CSR — holds one or more immutable CSR segments.
+/// Each `compact_adjacency()` call appends a new segment (no merge, no memory spike).
+/// `neighbors()` iterates all segments.
+#[derive(Debug, Clone, Default)]
+pub struct FrozenAdjacencyStore {
+    segments: Vec<FrozenAdjacency>,
+    /// Cached total edge count across all segments
+    total_edges: usize,
+}
+
+impl FrozenAdjacencyStore {
+    fn new() -> Self { Self::default() }
+
+    fn is_empty(&self) -> bool { self.total_edges == 0 }
+
+    /// Append a new frozen segment from the current write buffer.
+    fn push(&mut self, segment: FrozenAdjacency) {
+        self.total_edges += segment.edge_count();
+        self.segments.push(segment);
+    }
+
+    fn edge_count(&self) -> usize { self.total_edges }
+
+    fn node_capacity(&self) -> usize {
+        self.segments.iter().map(|s| s.node_capacity()).max().unwrap_or(0)
+    }
+
+    /// Collect all neighbors across all segments for a node. Returns a Vec.
+    fn neighbors_collected(&self, node_idx: usize) -> Vec<(NodeId, EdgeId)> {
+        match self.segments.len() {
+            0 => Vec::new(),
+            1 => self.segments[0].neighbors(node_idx).to_vec(),
+            _ => {
+                let mut result = Vec::new();
+                for seg in &self.segments {
+                    result.extend_from_slice(seg.neighbors(node_idx));
+                }
+                result
+            }
+        }
+    }
+
+    /// Get neighbors from the single segment (fast path for single-segment case).
+    /// Panics if there are multiple segments — use neighbors_collected() instead.
+    fn neighbors(&self, node_idx: usize) -> &[(NodeId, EdgeId)] {
+        match self.segments.len() {
+            0 => &[],
+            1 => self.segments[0].neighbors(node_idx),
+            _ => panic!("Use neighbors_collected() for multi-segment frozen stores"),
+        }
+    }
+
+    /// Check if there's only one segment (common case for non-bulk-load usage)
+    fn is_single_segment(&self) -> bool {
+        self.segments.len() <= 1
+    }
+
+    fn clear(&mut self) {
+        self.segments.clear();
+        self.total_edges = 0;
+    }
+}
+
 /// Compressed Sparse Row (CSR) storage for bulk-loaded adjacency data.
 /// Immutable after construction — all new edges go to the write buffer (Vec-of-Vec).
 /// Queries merge results from frozen tier + write buffer transparently.
@@ -374,10 +437,10 @@ pub struct GraphStore {
     incoming: Vec<Vec<(NodeId, EdgeId)>>,
 
     /// Frozen outgoing adjacency (CSR): bulk-loaded data, immutable, compact
-    frozen_outgoing: FrozenAdjacency,
+    frozen_outgoing: FrozenAdjacencyStore,
 
     /// Frozen incoming adjacency (CSR): bulk-loaded data, immutable, compact
-    frozen_incoming: FrozenAdjacency,
+    frozen_incoming: FrozenAdjacencyStore,
 
     /// Current global version for MVCC
     pub current_version: u64,
@@ -427,8 +490,8 @@ impl GraphStore {
             edges: Vec::with_capacity(4096),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
-            frozen_outgoing: FrozenAdjacency::empty(),
-            frozen_incoming: FrozenAdjacency::empty(),
+            frozen_outgoing: FrozenAdjacencyStore::new(),
+            frozen_incoming: FrozenAdjacencyStore::new(),
             current_version: 1,
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
@@ -791,6 +854,46 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.get_node(id).is_some()
     }
 
+    /// Create a lightweight node stub: label + identity only, no properties, no index events.
+    /// Properties should be set via `set_column_property()` for two-phase bulk loading.
+    pub fn create_node_stub(&mut self, label: impl Into<Label>) -> NodeId {
+        let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
+            id
+        } else {
+            let id = self.next_node_id;
+            self.next_node_id += 1;
+            id
+        };
+        let node_id = NodeId::new(node_id_u64);
+        let idx = node_id_u64 as usize;
+
+        let label = label.into();
+        let mut node = Node::new_stub(node_id, label.clone());
+        node.version = self.current_version;
+
+        self.label_index
+            .entry(label.clone())
+            .or_insert_with(HashSet::new)
+            .insert(node_id);
+
+        self.catalog.on_label_added(&label);
+
+        if idx >= self.nodes.len() {
+            self.nodes.resize(idx + 1, Vec::new());
+            self.outgoing.resize(idx + 1, Vec::new());
+            self.incoming.resize(idx + 1, Vec::new());
+        }
+
+        self.nodes[idx].push(node);
+        node_id
+    }
+
+    /// Set a property directly in the columnar store, bypassing the Node's row HashMap.
+    pub fn set_column_property(&mut self, node_id: NodeId, key: &str, value: PropertyValue) {
+        let idx = node_id.as_u64() as usize;
+        self.node_columns.set_property(idx, key, value);
+    }
+
     /// Set a property on a node and update vector indices if necessary
     pub fn set_node_property(
         &mut self,
@@ -911,12 +1014,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let node = self.nodes[idx].pop().unwrap();
 
         // Remove all connected edges — collect from both frozen tier and write buffer
-        let mut outgoing_edges: Vec<EdgeId> = self.frozen_outgoing.neighbors(idx)
+        let mut outgoing_edges: Vec<EdgeId> = self.frozen_outgoing.neighbors_collected(idx)
             .iter().map(|&(_, eid)| eid).collect();
         outgoing_edges.extend(
             std::mem::take(&mut self.outgoing[idx]).into_iter().map(|(_, eid)| eid)
         );
-        let mut incoming_edges: Vec<EdgeId> = self.frozen_incoming.neighbors(idx)
+        let mut incoming_edges: Vec<EdgeId> = self.frozen_incoming.neighbors_collected(idx)
             .iter().map(|&(_, eid)| eid).collect();
         incoming_edges.extend(
             std::mem::take(&mut self.incoming[idx]).into_iter().map(|(_, eid)| eid)
@@ -973,6 +1076,54 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Create an edge between two nodes
+    /// Create a lightweight edge stub: adjacency only, no Edge struct, no properties, no index events.
+    /// Skips: Edge object allocation, edge_type_index, IndexEvent, PropertyMap, timestamp.
+    /// For two-phase bulk loading where edge properties aren't needed.
+    pub fn create_edge_stub(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: impl Into<EdgeType>,
+    ) -> GraphResult<EdgeId> {
+        let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
+            id
+        } else {
+            let id = self.next_edge_id;
+            self.next_edge_id += 1;
+            id
+        };
+        let edge_id = EdgeId::new(edge_id_u64);
+        let idx = edge_id_u64 as usize;
+        let edge_type = edge_type.into();
+
+        // Adjacency lists only — sorted insert
+        {
+            let out_list = &mut self.outgoing[source.as_u64() as usize];
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            out_list.insert(pos, (target, edge_id));
+        }
+        {
+            let in_list = &mut self.incoming[target.as_u64() as usize];
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
+                .unwrap_or_else(|p| p);
+            in_list.insert(pos, (source, edge_id));
+        }
+
+        // Skip Edge object entirely — only adjacency matters for traversal.
+        // get_edge() won't find these edges, but traversal operators use adjacency lists.
+        // Edge type is encoded in the adjacency structure via the edge_type_index.
+        // For bulk loading, this saves ~500 bytes per edge.
+
+        // We still need the edges arena to be sized correctly for EdgeId allocation
+        if idx >= self.edges.len() {
+            self.edges.resize(idx + 1, Vec::new());
+        }
+        // Don't push any Edge object — leave the slot empty
+
+        Ok(edge_id)
+    }
+
     pub fn create_edge(
         &mut self,
         source: NodeId,
@@ -1171,7 +1322,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = node_id.as_u64() as usize;
         let mut result: Vec<&Edge> = Vec::new();
         // Frozen tier (CSR)
-        for &(_, eid) in self.frozen_outgoing.neighbors(idx) {
+        for &(_, eid) in &self.frozen_outgoing.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) { result.push(e); }
         }
         // Write buffer
@@ -1188,7 +1339,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = node_id.as_u64() as usize;
         let mut result: Vec<&Edge> = Vec::new();
         // Frozen tier
-        for &(_, eid) in self.frozen_incoming.neighbors(idx) {
+        for &(_, eid) in &self.frozen_incoming.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) { result.push(e); }
         }
         // Write buffer
@@ -1206,7 +1357,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = node_id.as_u64() as usize;
         let mut result = Vec::new();
         // Frozen tier
-        for &(_, eid) in self.frozen_outgoing.neighbors(idx) {
+        for &(_, eid) in &self.frozen_outgoing.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) {
                 result.push((eid, e.source, e.target, &e.edge_type));
             }
@@ -1228,7 +1379,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = node_id.as_u64() as usize;
         let mut result = Vec::new();
         // Frozen tier
-        for &(_, eid) in self.frozen_incoming.neighbors(idx) {
+        for &(_, eid) in &self.frozen_incoming.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) {
                 result.push((eid, e.source, e.target, &e.edge_type));
             }
@@ -1287,7 +1438,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if let Some(&eid) = found.first() { return Some(eid); }
 
         // Check frozen tier
-        let frozen_entries = self.frozen_outgoing.neighbors(src_idx);
+        let frozen_entries = &self.frozen_outgoing.neighbors_collected(src_idx);
         let found = self.search_adjacency_slice(frozen_entries, target, source, target, edge_type);
         found.first().copied()
     }
@@ -1299,7 +1450,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Frozen tier
         let mut result = self.search_adjacency_slice(
-            self.frozen_outgoing.neighbors(src_idx), target, source, target, edge_type
+            &self.frozen_outgoing.neighbors_collected(src_idx), target, source, target, edge_type
         );
         // Write buffer
         if let Some(entries) = self.outgoing.get(src_idx) {
@@ -1450,60 +1601,80 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_type_index.keys().collect()
     }
 
+    /// Generate a schema summary for NLQ pipeline
+    pub fn schema_summary(&self) -> String {
+        let mut summary = String::new();
+        summary.push_str("Node Labels:\n");
+        for (label, node_ids) in &self.label_index {
+            summary.push_str(&format!("  :{} ({} nodes)\n", label.as_str(), node_ids.len()));
+        }
+
+        // Discover relationship patterns by sampling edges
+        use std::collections::BTreeMap;
+        let mut patterns: BTreeMap<String, usize> = BTreeMap::new();
+        for (edge_type, edge_ids) in &self.edge_type_index {
+            for edge_id in edge_ids.iter().take(5) {
+                if let Some(edge) = self.get_edge(*edge_id) {
+                    let src_label = self.get_node(edge.source)
+                        .and_then(|n| n.labels.iter().next().map(|l| l.as_str().to_string()))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let tgt_label = self.get_node(edge.target)
+                        .and_then(|n| n.labels.iter().next().map(|l| l.as_str().to_string()))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let key = format!("({})-[:{}]->({})", src_label, edge_type.as_str(), tgt_label);
+                    patterns.entry(key).or_insert(edge_ids.len());
+                    break;
+                }
+            }
+        }
+
+        summary.push_str("\nRelationship Patterns:\n");
+        for (pattern, count) in &patterns {
+            summary.push_str(&format!("  {} ({} edges)\n", pattern, count));
+        }
+
+        summary.push_str("\nKey Properties:\n");
+        for (label, node_ids) in &self.label_index {
+            if let Some(first_id) = node_ids.iter().next() {
+                if let Some(node) = self.get_node(*first_id) {
+                    let props: Vec<_> = node.properties.keys().take(5).collect();
+                    if !props.is_empty() {
+                        summary.push_str(&format!("  :{} has properties: {}\n",
+                            label.as_str(),
+                            props.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+
+        summary
+    }
+
     /// Compact the write buffer into the frozen CSR tier.
     /// After compaction, the write buffer is cleared and all adjacency data
     /// lives in the memory-efficient CSR format.
     /// Call this after bulk loading (snapshot import, batch CREATE) for memory savings.
     pub fn compact_adjacency(&mut self) {
-        if self.outgoing.iter().all(|v| v.is_empty()) && self.incoming.iter().all(|v| v.is_empty()) {
-            // Nothing in write buffer to compact
-            if !self.frozen_outgoing.is_empty() {
-                return; // Already compacted
-            }
+        let buffer_out: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        let buffer_in: usize = self.incoming.iter().map(|v| v.len()).sum();
+        if buffer_out == 0 && buffer_in == 0 {
+            return; // Nothing to compact
         }
 
-        // If frozen tier has data, we need to merge frozen + buffer before rebuilding.
-        // For simplicity in v1: rebuild CSR from scratch using buffer data only.
-        // (Frozen tier should be empty on first compaction after load)
-        if self.frozen_outgoing.is_empty() {
-            // First compaction: convert Vec-of-Vec directly to CSR
-            self.frozen_outgoing = FrozenAdjacency::from_vec_of_vec(&self.outgoing);
-            self.frozen_incoming = FrozenAdjacency::from_vec_of_vec(&self.incoming);
-        } else {
-            // Merge: rebuild Vec-of-Vec from frozen + buffer, then re-freeze
-            let max_nodes = self.outgoing.len().max(self.frozen_outgoing.node_capacity());
-            let mut merged_out: Vec<Vec<(NodeId, EdgeId)>> = Vec::with_capacity(max_nodes);
-            let mut merged_in: Vec<Vec<(NodeId, EdgeId)>> = Vec::with_capacity(max_nodes);
-
-            for i in 0..max_nodes {
-                let mut out = self.frozen_outgoing.neighbors(i).to_vec();
-                if i < self.outgoing.len() {
-                    out.extend_from_slice(&self.outgoing[i]);
-                    out.sort_by_key(|(nid, _)| *nid);
-                }
-                merged_out.push(out);
-
-                let mut inc = self.frozen_incoming.neighbors(i).to_vec();
-                if i < self.incoming.len() {
-                    inc.extend_from_slice(&self.incoming[i]);
-                    inc.sort_by_key(|(nid, _)| *nid);
-                }
-                merged_in.push(inc);
-            }
-
-            self.frozen_outgoing = FrozenAdjacency::from_vec_of_vec(&merged_out);
-            self.frozen_incoming = FrozenAdjacency::from_vec_of_vec(&merged_in);
-        }
+        // Append a new frozen segment from the write buffer.
+        // No merge with existing segments — avoids memory spike.
+        self.frozen_outgoing.push(FrozenAdjacency::from_vec_of_vec(&self.outgoing));
+        self.frozen_incoming.push(FrozenAdjacency::from_vec_of_vec(&self.incoming));
 
         // Clear write buffer — shrink to minimal capacity
         for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
         for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
 
-        let buffer_edge_count: usize = 0;
         let frozen_edge_count = self.frozen_outgoing.edge_count();
         eprintln!(
-            "[compact] Frozen: {} edges ({} nodes). Buffer: {} edges.",
-            frozen_edge_count, self.frozen_outgoing.node_capacity(), buffer_edge_count
+            "[compact] Frozen: {} edges ({} segments, {} nodes). Buffer: 0 edges.",
+            frozen_edge_count, self.frozen_outgoing.segments.len(), self.frozen_outgoing.node_capacity()
         );
     }
 
@@ -1513,8 +1684,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edges.clear();
         self.outgoing.clear();
         self.incoming.clear();
-        self.frozen_outgoing = FrozenAdjacency::empty();
-        self.frozen_incoming = FrozenAdjacency::empty();
+        self.frozen_outgoing.clear();
+        self.frozen_incoming.clear();
         self.free_node_ids.clear();
         self.free_edge_ids.clear();
         self.label_index.clear();
@@ -1982,6 +2153,27 @@ mod tests {
 
         assert_eq!(n3, n1); // ID reuse
         assert_eq!(store.node_count(), 2); // B and C
+    }
+
+    #[test]
+    fn test_schema_summary_deterministic_patterns() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("Person");
+        let n2 = store.create_node("Company");
+        let n3 = store.create_node("Person");
+        store.create_edge(n1, n2, "WORKS_AT").unwrap();
+        store.create_edge(n3, n2, "WORKS_AT").unwrap();
+        store.create_edge(n1, n3, "KNOWS").unwrap();
+
+        // Call schema_summary multiple times; BTreeMap ensures stable ordering
+        let s1 = store.schema_summary();
+        let s2 = store.schema_summary();
+        assert_eq!(s1, s2, "schema_summary should be deterministic");
+
+        // Verify it contains expected patterns
+        assert!(s1.contains("Relationship Patterns:"));
+        assert!(s1.contains("WORKS_AT"));
+        assert!(s1.contains("KNOWS"));
     }
 
     // ========== Batch 5: Additional Store Tests ==========

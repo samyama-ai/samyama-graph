@@ -111,6 +111,56 @@ impl LogicalPlanNode {
             }
         }
     }
+
+    /// Format as indented plan text (same format as physical EXPLAIN output)
+    pub fn display_plan(&self, indent: usize) -> String {
+        let prefix = "   ".repeat(indent);
+        let connector = if indent > 0 { "+- " } else { "" };
+        match self {
+            LogicalPlanNode::LabelScan { variable, label } => {
+                let lbl = label.as_ref().map(|l| format!("\"{}\"", l.as_str())).unwrap_or_else(|| "*".to_string());
+                format!("{}{}NodeScan (var={}, labels=[{}])", prefix, connector, variable, lbl)
+            }
+            LogicalPlanNode::IndexLookup { variable, label, property, .. } => {
+                format!("{}{}IndexScan (var={}, label=\"{}\", prop={})", prefix, connector, variable, label.as_str(), property)
+            }
+            LogicalPlanNode::Expand { input, source_var, target_var, edge_types, direction, .. } => {
+                let dir_str = match direction {
+                    ExpandDirection::Forward => format!("({})-[:{}]->({})", source_var, Self::fmt_etypes(edge_types), target_var),
+                    ExpandDirection::Reverse => format!("({})<-[:{}]-({})", source_var, Self::fmt_etypes(edge_types), target_var),
+                };
+                let child = input.display_plan(indent + 1);
+                format!("{}{}Expand ({})\n{}", prefix, connector, dir_str, child)
+            }
+            LogicalPlanNode::ExpandInto { input, source_var, target_var, edge_types, .. } => {
+                let types = Self::fmt_etypes(edge_types);
+                let child = input.display_plan(indent + 1);
+                format!("{}{}ExpandInto ({}<-[:{}]->{})\n{}", prefix, connector, source_var, types, target_var, child)
+            }
+            LogicalPlanNode::Filter { input, predicate } => {
+                let child = input.display_plan(indent + 1);
+                format!("{}{}Filter ({:?})\n{}", prefix, connector, predicate, child)
+            }
+            LogicalPlanNode::Join { left, right, join_keys, .. } => {
+                let l = left.display_plan(indent + 1);
+                let r = right.display_plan(indent + 1);
+                format!("{}{}Join (on=[{}])\n{}\n{}", prefix, connector, join_keys.join(", "), l, r)
+            }
+            LogicalPlanNode::CartesianProduct { left, right } => {
+                let l = left.display_plan(indent + 1);
+                let r = right.display_plan(indent + 1);
+                format!("{}{}CartesianProduct\n{}\n{}", prefix, connector, l, r)
+            }
+        }
+    }
+
+    fn fmt_etypes(edge_types: &[EdgeType]) -> String {
+        if edge_types.is_empty() {
+            "*".to_string()
+        } else {
+            edge_types.iter().map(|e| e.as_str()).collect::<Vec<_>>().join("|")
+        }
+    }
 }
 
 // ============================================================
