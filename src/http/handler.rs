@@ -644,17 +644,33 @@ pub async fn restore_snapshot_handler(
     };
 
     let mut store_guard = state.store.write().await;
-    let cursor = std::io::Cursor::new(data);
+    let cursor = std::io::Cursor::new(&data);
 
     match crate::snapshot::import_tenant(&mut store_guard, cursor) {
-        Ok(stats) => Json(json!({
-            "status": "ok",
-            "nodes_imported": stats.node_count,
-            "edges_imported": stats.edge_count,
-            "labels": stats.labels,
-            "edge_types": stats.edge_types,
-        }))
-        .into_response(),
+        Ok(stats) => {
+            // HA-08: Persist snapshot to disk so it survives server restart
+            if let Some(ref data_path) = state.data_path {
+                let snap_dir = format!("{}/snapshots", data_path);
+                if let Err(e) = std::fs::create_dir_all(&snap_dir) {
+                    eprintln!("[snapshot-persist] Failed to create dir {}: {}", snap_dir, e);
+                } else {
+                    let snap_path = format!("{}/default.sgsnap", snap_dir);
+                    match std::fs::write(&snap_path, &data) {
+                        Ok(_) => eprintln!("[snapshot-persist] Saved {} ({} bytes)", snap_path, data.len()),
+                        Err(e) => eprintln!("[snapshot-persist] Failed to write {}: {}", snap_path, e),
+                    }
+                }
+            }
+
+            Json(json!({
+                "status": "ok",
+                "nodes_imported": stats.node_count,
+                "edges_imported": stats.edge_count,
+                "labels": stats.labels,
+                "edge_types": stats.edge_types,
+            }))
+            .into_response()
+        }
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -684,6 +700,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))

@@ -38,18 +38,27 @@ async fn static_handler() -> impl IntoResponse {
 pub struct AppState {
     pub store: Arc<RwLock<GraphStore>>,
     pub engine: Arc<QueryEngine>,
+    /// Data directory for persisting snapshots (HA-08)
+    pub data_path: Option<String>,
 }
 
 /// HTTP server managing the Visualizer API and static assets
 pub struct HttpServer {
     store: Arc<RwLock<GraphStore>>,
     port: u16,
+    data_path: Option<String>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port }
+        Self { store, port, data_path: None }
+    }
+
+    /// Set the data directory for snapshot persistence (HA-08)
+    pub fn with_data_path(mut self, path: Option<String>) -> Self {
+        self.data_path = path;
+        self
     }
 
     /// Start the HTTP server
@@ -57,6 +66,7 @@ impl HttpServer {
         let state = AppState {
             store: Arc::clone(&self.store),
             engine: Arc::new(QueryEngine::new()),
+            data_path: self.data_path.clone(),
         };
 
         let app = Router::new()
@@ -119,6 +129,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         let cloned = state.clone();
@@ -133,6 +144,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         let cloned = state.clone();
@@ -153,6 +165,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         let c1 = state.clone();
@@ -171,6 +184,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         // Write through the state
@@ -205,6 +219,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         let _app: Router = Router::new()
@@ -220,6 +235,7 @@ mod tests {
         let state = AppState {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
+            data_path: None,
         };
 
         let app = Router::new()

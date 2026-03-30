@@ -204,6 +204,20 @@ pub struct ExecutionPlan {
     pub candidate_costs: Vec<(String, f64)>,
 }
 
+impl ExecutionPlan {
+    /// Create a plan without planner diagnostics (used by legacy planner paths)
+    pub fn new(root: OperatorBox, output_columns: Vec<String>, is_write: bool) -> Self {
+        Self {
+            root,
+            output_columns,
+            is_write,
+            candidates_evaluated: 0,
+            chosen_plan_cost: 0.0,
+            candidate_costs: Vec::new(),
+        }
+    }
+}
+
 /// Simple plan cache entry storing planning metadata
 struct PlanCacheEntry {
     /// Timestamp when entry was created
@@ -1259,7 +1273,7 @@ impl QueryPlanner {
         // Collect candidate diagnostics before consuming
         let num_candidates = candidates.len();
         let candidate_summaries: Vec<(String, f64)> = candidates.iter().map(|(plan, cost)| {
-            let desc = format!("{:?}", plan).chars().take(80).collect::<String>();
+            let desc = plan.display_plan(0);
             (desc, *cost)
         }).collect();
         let best_cost = candidates[0].1;
@@ -3044,6 +3058,7 @@ mod tests {
             "WHERE filter results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
     }
 
+    // ============================
 
     // Regression tests: graph-native planner fallback to legacy
     // Ensures dashboard/common queries work with SAMYAMA_GRAPH_NATIVE=true

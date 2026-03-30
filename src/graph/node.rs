@@ -87,6 +87,22 @@ impl Node {
         }
     }
 
+    /// Create a lightweight node stub — label + identity only, no property HashMap allocation.
+    /// Used for two-phase bulk loading: Phase A creates topology, Phase B adds properties via ColumnStore.
+    /// The empty PropertyMap uses HashMap::new() which allocates nothing until first insert.
+    pub fn new_stub(id: NodeId, label: impl Into<Label>) -> Self {
+        let mut labels = HashSet::with_capacity(1);
+        labels.insert(label.into());
+        Node {
+            id,
+            version: 1,
+            labels,
+            properties: PropertyMap::new(), // zero allocation until first insert
+            created_at: 0,  // skip chrono::Utc::now() — saves syscall per node
+            updated_at: 0,
+        }
+    }
+
     /// Create a new node with multiple labels (REQ-GRAPH-006)
     pub fn new_with_labels(id: NodeId, labels: Vec<Label>) -> Self {
         let now = chrono::Utc::now().timestamp_millis();

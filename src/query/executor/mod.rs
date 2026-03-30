@@ -239,8 +239,11 @@ impl<'a> QueryExecutor<'a> {
                 plan_text.push_str("Alternative plans:\n");
                 for (i, (desc, cost)) in diag.candidate_costs.iter().enumerate().skip(1).take(5) {
                     plan_text.push_str(&format!(
-                        "  #{} (cost {:.2}): {}\n", i + 1, cost, desc
+                        "  #{} (cost {:.2}):\n", i + 1, cost
                     ));
+                    for line in desc.lines() {
+                        plan_text.push_str(&format!("    {}\n", line));
+                    }
                 }
                 if diag.candidate_costs.len() > 6 {
                     plan_text.push_str(&format!(
@@ -1429,30 +1432,6 @@ mod tests {
     }
 
     #[test]
-    fn test_null_comparison_filters_gracefully() {
-        // When a property doesn't exist, comparison should return Null (falsy),
-        // NOT a TypeError. This mirrors Neo4j's three-valued logic.
-        let mut store = GraphStore::new();
-        for i in 0..5 {
-            let id = store.create_node("Machine");
-            if let Some(node) = store.get_node_mut(id) {
-                node.set_property("name", format!("Machine{}", i));
-                // Only set utilization on some nodes
-                if i % 2 == 0 {
-                    node.set_property("utilization", PropertyValue::Float(80.0 + (i as f64) * 10.0));
-                }
-                // Nodes 1 and 3 have NO utilization property → Null
-            }
-        }
-        let executor = QueryExecutor::new(&store);
-        // This should NOT error — Null > 90 returns Null, which filters out the record
-        let query = parse_query("MATCH (m:Machine) WHERE m.utilization > 90 RETURN m.name").unwrap();
-        let result = executor.execute(&query).unwrap();
-        // Machine0=80.0, Machine2=100.0, Machine4=120.0 — only Machine2 and Machine4 > 90
-        assert_eq!(result.records.len(), 2, "Expected 2 machines with utilization > 90");
-    }
-
-    #[test]
     fn test_log_exp_functions() {
         let mut store = GraphStore::new();
         let id = store.create_node("Val");
@@ -1531,7 +1510,7 @@ mod tests {
         }
         let executor = QueryExecutor::new(&store);
 
-        // [1..3] → [2, 3] (start inclusive, end exclusive)
+        // [1..3] -> [2, 3] (start inclusive, end exclusive)
         let query = parse_query("MATCH (d:Data) RETURN d.items[1..3] AS sliced").unwrap();
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
@@ -1543,7 +1522,7 @@ mod tests {
             panic!("Expected array from list slice");
         }
 
-        // [..2] → [1, 2]
+        // [..2] -> [1, 2]
         let query = parse_query("MATCH (d:Data) RETURN d.items[..2] AS sliced").unwrap();
         let result = executor.execute(&query).unwrap();
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
@@ -1554,7 +1533,7 @@ mod tests {
             panic!("Expected array from list slice [..2]");
         }
 
-        // [3..] → [4, 5]
+        // [3..] -> [4, 5]
         let query = parse_query("MATCH (d:Data) RETURN d.items[3..] AS sliced").unwrap();
         let result = executor.execute(&query).unwrap();
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
@@ -1565,7 +1544,7 @@ mod tests {
             panic!("Expected array from list slice [3..]");
         }
 
-        // Negative index: [-2..] → [4, 5]
+        // Negative index: [-2..] -> [4, 5]
         let query = parse_query("MATCH (d:Data) RETURN d.items[-2..] AS sliced").unwrap();
         let result = executor.execute(&query).unwrap();
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("sliced") {
@@ -1575,6 +1554,30 @@ mod tests {
         } else {
             panic!("Expected array from list slice [-2..]");
         }
+    }
+
+    #[test]
+    fn test_null_comparison_filters_gracefully() {
+        // When a property doesn't exist, comparison should return Null (falsy),
+        // NOT a TypeError. This mirrors Neo4j's three-valued logic.
+        let mut store = GraphStore::new();
+        for i in 0..5 {
+            let id = store.create_node("Machine");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("Machine{}", i));
+                // Only set utilization on some nodes
+                if i % 2 == 0 {
+                    node.set_property("utilization", PropertyValue::Float(80.0 + (i as f64) * 10.0));
+                }
+                // Nodes 1 and 3 have NO utilization property → Null
+            }
+        }
+        let executor = QueryExecutor::new(&store);
+        // This should NOT error — Null > 90 returns Null, which filters out the record
+        let query = parse_query("MATCH (m:Machine) WHERE m.utilization > 90 RETURN m.name").unwrap();
+        let result = executor.execute(&query).unwrap();
+        // Machine0=80.0, Machine2=100.0, Machine4=120.0 — only Machine2 and Machine4 > 90
+        assert_eq!(result.records.len(), 2, "Expected 2 machines with utilization > 90");
     }
 
     // ========== Batch 2: EXPLAIN integration tests ==========
