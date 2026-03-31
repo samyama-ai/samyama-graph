@@ -110,6 +110,7 @@ pub use samyama::agent::AgentRuntime;
 pub use samyama::{
     PersistenceManager, PersistenceError, PersistenceResult,
     PersistentStorage, StorageError, StorageResult,
+    Tenant, TenantManager, ResourceQuotas, ResourceUsage,
     Wal, WalEntry, WalError, WalResult,
     NLQConfig, LLMProvider, AutoEmbedConfig,
 };

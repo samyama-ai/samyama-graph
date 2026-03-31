@@ -149,6 +149,7 @@ pub use protocol::{
 pub use persistence::{
     PersistenceManager, PersistenceError, PersistenceResult,
     PersistentStorage, StorageError, StorageResult,
+    Tenant, TenantManager, ResourceQuotas, ResourceUsage,
     Wal, WalEntry, WalError, WalResult,
     AutoEmbedConfig, NLQConfig, LLMProvider,
 };

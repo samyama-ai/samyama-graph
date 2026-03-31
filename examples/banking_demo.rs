@@ -36,7 +36,7 @@ use std::time::Instant;
 
 use samyama_sdk::{
     EmbeddedClient, SamyamaClient,
-    PersistenceManager,
+    PersistenceManager, ResourceQuotas,
     GraphStore, Label, NodeId,
     LLMProvider, NLQConfig,
 };
@@ -603,7 +603,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("└──────────────────────────────────────────────────────────────────────┘");
 
     let persist_mgr = PersistenceManager::new("./banking_data")?;
-    println!("  ✓ Initialized persistence layer");
+
+    // Retail Banking Division
+    let retail_quotas = ResourceQuotas {
+        max_nodes: Some(10_000_000),
+        max_edges: Some(50_000_000),
+        max_memory_bytes: Some(4 * 1024 * 1024 * 1024),
+        max_storage_bytes: Some(20 * 1024 * 1024 * 1024),
+        max_connections: Some(500),
+        max_query_time_ms: Some(60_000),
+    };
+    persist_mgr.tenants().create_tenant(
+        "retail_banking".to_string(),
+        "Retail Banking Division".to_string(),
+        Some(retail_quotas),
+    )?;
+    println!("  ✓ Created 'retail_banking' tenant (quota: 10M nodes, 50M edges)");
+
+    // Corporate Banking Division
+    let corporate_quotas = ResourceQuotas {
+        max_nodes: Some(1_000_000),
+        max_edges: Some(10_000_000),
+        max_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+        max_storage_bytes: Some(50 * 1024 * 1024 * 1024),
+        max_connections: Some(100),
+        max_query_time_ms: Some(120_000),
+    };
+    persist_mgr.tenants().create_tenant(
+        "corporate_banking".to_string(),
+        "Corporate Banking Division".to_string(),
+        Some(corporate_quotas),
+    )?;
+    println!("  ✓ Created 'corporate_banking' tenant (quota: 1M nodes, 10M edges)");
+
+    // Wealth Management Division
+    let wealth_quotas = ResourceQuotas {
+        max_nodes: Some(500_000),
+        max_edges: Some(5_000_000),
+        max_memory_bytes: Some(2 * 1024 * 1024 * 1024),
+        max_storage_bytes: Some(10 * 1024 * 1024 * 1024),
+        max_connections: Some(50),
+        max_query_time_ms: Some(180_000),
+    };
+    persist_mgr.tenants().create_tenant(
+        "wealth_management".to_string(),
+        "Wealth Management Division".to_string(),
+        Some(wealth_quotas),
+    )?;
+    println!("  ✓ Created 'wealth_management' tenant (quota: 500K nodes, 5M edges)");
     println!();
 
     // =========================================================================
