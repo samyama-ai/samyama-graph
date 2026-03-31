@@ -4,6 +4,7 @@
 
 use super::common::{GraphView, NodeId};
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 /// PageRank configuration
 pub struct PageRankConfig {
@@ -52,34 +53,55 @@ pub fn page_rank(
     let d = config.damping_factor;
     let base_score = (1.0 - d) / n as f64;
 
-    for _ in 0..config.iterations {
-        let mut total_diff = 0.0;
+    // Use parallel iteration for graphs with 1000+ nodes
+    let use_parallel = n >= 1000;
 
+    for _ in 0..config.iterations {
         // Compute dangling node mass if enabled
         let dangling_contrib = if config.dangling_redistribution {
-            let dangling_sum: f64 = (0..n)
-                .filter(|&i| view.out_degree(i) == 0)
-                .map(|i| scores[i])
-                .sum();
+            let dangling_sum: f64 = if use_parallel {
+                (0..n).into_par_iter()
+                    .filter(|&i| view.out_degree(i) == 0)
+                    .map(|i| scores[i])
+                    .sum()
+            } else {
+                (0..n).filter(|&i| view.out_degree(i) == 0)
+                    .map(|i| scores[i])
+                    .sum()
+            };
             dangling_sum / n as f64
         } else {
             0.0
         };
 
-        for i in 0..n {
-            let mut sum_incoming = 0.0;
-
-            // Iterate over incoming edges
-            for &source_idx in view.predecessors(i) {
-                let out_degree = view.out_degree(source_idx);
-                if out_degree > 0 {
-                    sum_incoming += scores[source_idx] / out_degree as f64;
+        // Compute new scores and convergence diff in parallel
+        let total_diff = if use_parallel {
+            next_scores.par_iter_mut().enumerate().map(|(i, next_score)| {
+                let mut sum_incoming = 0.0;
+                for &source_idx in view.predecessors(i) {
+                    let out_degree = view.out_degree(source_idx);
+                    if out_degree > 0 {
+                        sum_incoming += scores[source_idx] / out_degree as f64;
+                    }
                 }
+                *next_score = base_score + d * (sum_incoming + dangling_contrib);
+                (*next_score - scores[i]).abs()
+            }).sum::<f64>()
+        } else {
+            let mut diff = 0.0;
+            for i in 0..n {
+                let mut sum_incoming = 0.0;
+                for &source_idx in view.predecessors(i) {
+                    let out_degree = view.out_degree(source_idx);
+                    if out_degree > 0 {
+                        sum_incoming += scores[source_idx] / out_degree as f64;
+                    }
+                }
+                next_scores[i] = base_score + d * (sum_incoming + dangling_contrib);
+                diff += (next_scores[i] - scores[i]).abs();
             }
-
-            next_scores[i] = base_score + d * (sum_incoming + dangling_contrib);
-            total_diff += (next_scores[i] - scores[i]).abs();
-        }
+            diff
+        };
 
         // Swap buffers
         scores.copy_from_slice(&next_scores);

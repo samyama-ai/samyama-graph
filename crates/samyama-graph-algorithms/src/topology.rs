@@ -4,6 +4,7 @@
 
 use super::common::GraphView;
 use std::collections::HashSet;
+use rayon::prelude::*;
 
 /// Triangle Counting
 ///
@@ -11,37 +12,55 @@ use std::collections::HashSet;
 /// For undirected graphs, each triangle is counted once.
 /// For directed, we treat as undirected for counting.
 pub fn count_triangles(view: &GraphView) -> usize {
-    let mut triangle_count = 0;
-    
-    // Using simple algorithm: for each edge (u, v), find common neighbors of u and v.
-    // To avoid overcounting, we only consider nodes with indices i < j < k.
-    
-    for u in 0..view.node_count {
-        let u_neighbors: HashSet<_> = view.successors(u).iter()
-            .chain(view.predecessors(u).iter())
-            .cloned()
-            .collect();
-            
-        for &v in &u_neighbors {
-            if v <= u { continue; } // Order u < v
-            
-            let v_neighbors: HashSet<_> = view.successors(v).iter()
-                .chain(view.predecessors(v).iter())
+    let n = view.node_count;
+
+    // Parallel outer loop: each node computes its partial triangle count
+    if n >= 1000 {
+        (0..n).into_par_iter().map(|u| {
+            let u_neighbors: HashSet<_> = view.successors(u).iter()
+                .chain(view.predecessors(u).iter())
                 .cloned()
                 .collect();
-                
-            for &w in &v_neighbors {
-                if w <= v { continue; } // Order v < w
-                
-                // Check if w is also neighbor of u
-                if u_neighbors.contains(&w) {
-                    triangle_count += 1;
+
+            let mut count = 0;
+            for &v in &u_neighbors {
+                if v <= u { continue; }
+                let v_neighbors: HashSet<_> = view.successors(v).iter()
+                    .chain(view.predecessors(v).iter())
+                    .cloned()
+                    .collect();
+                for &w in &v_neighbors {
+                    if w <= v { continue; }
+                    if u_neighbors.contains(&w) {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }).sum()
+    } else {
+        let mut triangle_count = 0;
+        for u in 0..n {
+            let u_neighbors: HashSet<_> = view.successors(u).iter()
+                .chain(view.predecessors(u).iter())
+                .cloned()
+                .collect();
+            for &v in &u_neighbors {
+                if v <= u { continue; }
+                let v_neighbors: HashSet<_> = view.successors(v).iter()
+                    .chain(view.predecessors(v).iter())
+                    .cloned()
+                    .collect();
+                for &w in &v_neighbors {
+                    if w <= v { continue; }
+                    if u_neighbors.contains(&w) {
+                        triangle_count += 1;
+                    }
                 }
             }
         }
+        triangle_count
     }
-    
-    triangle_count
 }
 
 #[cfg(test)]
