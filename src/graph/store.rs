@@ -1145,10 +1145,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_type_ids[idx] = type_id;
 
-        // Size the edges arena for EdgeId allocation (no Edge object stored)
-        if idx >= self.edges.len() {
-            self.edges.resize(idx + 1, Vec::new());
-        }
+        // Skip edges arena resize — saves 24 bytes/slot × 1B = 24 GB.
+        // get_edge() returns None for stubs; get_edge_type() uses edge_type_ids.
 
         Ok(edge_id)
     }
