@@ -4069,9 +4069,13 @@ impl PhysicalOperator for CreateNodeOperator {
             .ok_or_else(|| ExecutionError::RuntimeError(format!("Created node {:?} not found", node_id)))?;
 
         let mut record = Record::new();
-        if let Some(var) = variable {
-            record.bind(var.clone(), Value::Node(*node_id, node.clone()));
-        }
+        // Always bind created node — use variable name if provided, otherwise
+        // generate an internal name so persistence code can discover it.
+        let bind_name = match variable {
+            Some(var) => var.clone(),
+            None => format!("__created_node_{}", self.current - 1),
+        };
+        record.bind(bind_name, Value::Node(*node_id, node.clone()));
 
         Ok(Some(record))
     }
@@ -4750,9 +4754,13 @@ impl PhysicalOperator for CreateEdgeOperator {
             .ok_or_else(|| ExecutionError::RuntimeError(format!("Created edge {:?} not found", edge_id)))?;
 
         let mut record = Record::new();
-        if let Some(var) = variable {
-            record.bind(var.clone(), Value::Edge(*edge_id, edge.clone()));
-        }
+        // Always bind created edge — use variable name if provided, otherwise
+        // generate an internal name so persistence code can discover it.
+        let bind_name = match variable {
+            Some(var) => var.clone(),
+            None => format!("__created_edge_{}", self.current - 1),
+        };
+        record.bind(bind_name, Value::Edge(*edge_id, edge.clone()));
 
         Ok(Some(record))
     }
@@ -4849,12 +4857,11 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                     }
                 }
 
-                // Get the created edge for returning
+                // Always track created edges for persistence (even without variable names)
                 if let Some(edge) = store.get_edge(edge_id) {
                     self.created_edges.push((edge_id, edge.clone(), edge_var.clone()));
-                    if edge_var.is_some() {
-                        self.results.push((edge_var.clone(), Value::Edge(edge_id, edge.clone())));
-                    }
+                    let var_name = edge_var.clone().or_else(|| Some(format!("__created_edge_{}", self.created_edges.len() - 1)));
+                    self.results.push((var_name, Value::Edge(edge_id, edge.clone())));
                 }
             }
             self.phase = 2;
