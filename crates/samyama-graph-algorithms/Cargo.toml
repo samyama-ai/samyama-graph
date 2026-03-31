@@ -15,3 +15,4 @@ readme = "README.md"
 serde = { version = "1.0", features = ["derive"], optional = true }
 ndarray = "0.15"
 rand = "0.8"
+rayon = "1.10"

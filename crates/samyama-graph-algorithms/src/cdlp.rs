@@ -6,6 +6,7 @@
 
 use super::common::{GraphView, NodeId};
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 /// Result of CDLP algorithm
 #[derive(Debug, Clone)]
@@ -46,37 +47,62 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
     let mut converged = false;
     let mut iterations = 0;
 
+    let use_parallel = n >= 1000;
+
     for _iter in 0..config.max_iterations {
-        converged = true;
         iterations += 1;
 
-        for idx in 0..n {
-            // Collect neighbor labels (undirected)
-            let mut label_counts: HashMap<NodeId, usize> = HashMap::new();
-            for &neighbor in view.successors(idx) {
-                *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
-            }
-            for &neighbor in view.predecessors(idx) {
-                *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
-            }
+        if use_parallel {
+            let results: Vec<(NodeId, bool)> = (0..n).into_par_iter().map(|idx| {
+                let mut label_counts: HashMap<NodeId, usize> = HashMap::new();
+                for &neighbor in view.successors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                for &neighbor in view.predecessors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                if label_counts.is_empty() {
+                    return (labels[idx], true);
+                }
+                let max_count = *label_counts.values().max().unwrap();
+                let best_label = label_counts.into_iter()
+                    .filter(|(_, count)| *count == max_count)
+                    .map(|(label, _)| label)
+                    .min()
+                    .unwrap();
+                (best_label, best_label == labels[idx])
+            }).collect();
 
-            if label_counts.is_empty() {
-                new_labels[idx] = labels[idx];
-                continue;
+            converged = true;
+            for (idx, (label, same)) in results.into_iter().enumerate() {
+                new_labels[idx] = label;
+                if !same { converged = false; }
             }
-
-            // Pick the most frequent label; break ties by choosing smallest label
-            let max_count = *label_counts.values().max().unwrap();
-            let best_label = label_counts.into_iter()
-                .filter(|(_, count)| *count == max_count)
-                .map(|(label, _)| label)
-                .min()
-                .unwrap();
-
-            if best_label != labels[idx] {
-                converged = false;
+        } else {
+            converged = true;
+            for idx in 0..n {
+                let mut label_counts: HashMap<NodeId, usize> = HashMap::new();
+                for &neighbor in view.successors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                for &neighbor in view.predecessors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                if label_counts.is_empty() {
+                    new_labels[idx] = labels[idx];
+                    continue;
+                }
+                let max_count = *label_counts.values().max().unwrap();
+                let best_label = label_counts.into_iter()
+                    .filter(|(_, count)| *count == max_count)
+                    .map(|(label, _)| label)
+                    .min()
+                    .unwrap();
+                if best_label != labels[idx] {
+                    converged = false;
+                }
+                new_labels[idx] = best_label;
             }
-            new_labels[idx] = best_label;
         }
 
         std::mem::swap(&mut labels, &mut new_labels);

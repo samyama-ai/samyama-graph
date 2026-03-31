@@ -11,6 +11,7 @@
 
 use super::common::{GraphView, NodeId};
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
 
 /// Result of LCC computation
 #[derive(Debug, Clone)]
@@ -44,73 +45,114 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
         return LccResult { coefficients: HashMap::new(), average: 0.0 };
     }
 
-    // Build undirected neighbor sets for each node (used for neighborhood)
-    let mut neighbors: Vec<HashSet<usize>> = Vec::with_capacity(n);
-    for idx in 0..n {
-        let mut set = HashSet::new();
-        for &s in view.successors(idx) {
-            if s != idx { set.insert(s); }
-        }
-        for &p in view.predecessors(idx) {
-            if p != idx { set.insert(p); }
-        }
-        neighbors.push(set);
-    }
+    // Build undirected neighbor sets for each node (parallel for large graphs)
+    let use_parallel = n >= 1000;
 
-    // For directed mode, also build successor sets for fast directed edge lookup
-    let successor_sets: Option<Vec<HashSet<usize>>> = if directed {
-        let mut sets = Vec::with_capacity(n);
-        for idx in 0..n {
-            let set: HashSet<usize> = view.successors(idx).iter().copied().collect();
-            sets.push(set);
-        }
-        Some(sets)
+    let neighbors: Vec<HashSet<usize>> = if use_parallel {
+        (0..n).into_par_iter().map(|idx| {
+            let mut set = HashSet::new();
+            for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+            for &p in view.predecessors(idx) { if p != idx { set.insert(p); } }
+            set
+        }).collect()
     } else {
-        None
+        (0..n).map(|idx| {
+            let mut set = HashSet::new();
+            for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+            for &p in view.predecessors(idx) { if p != idx { set.insert(p); } }
+            set
+        }).collect()
+    };
+
+    // For directed mode, build successor sets for directed edge checking
+    let successor_sets: Vec<HashSet<usize>> = if directed {
+        if use_parallel {
+            (0..n).into_par_iter().map(|idx| {
+                let mut set = HashSet::new();
+                for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+                set
+            }).collect()
+        } else {
+            (0..n).map(|idx| {
+                let mut set = HashSet::new();
+                for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+                set
+            }).collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Compute LCC per node in parallel
+    let per_node: Vec<(NodeId, f64)> = if use_parallel {
+        (0..n).into_par_iter().map(|idx| {
+            let deg = neighbors[idx].len();
+            if deg < 2 {
+                return (view.index_to_node[idx], 0.0);
+            }
+            let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
+
+            let cc = if directed {
+                let mut directed_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in 0..neighbor_vec.len() {
+                        if i != j && successor_sets[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            directed_edges += 1;
+                        }
+                    }
+                }
+                directed_edges as f64 / (deg * (deg - 1)) as f64
+            } else {
+                let mut triangle_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in (i + 1)..neighbor_vec.len() {
+                        if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            triangle_edges += 1;
+                        }
+                    }
+                }
+                triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
+            };
+            (view.index_to_node[idx], cc)
+        }).collect()
+    } else {
+        (0..n).map(|idx| {
+            let deg = neighbors[idx].len();
+            if deg < 2 {
+                return (view.index_to_node[idx], 0.0);
+            }
+            let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
+
+            let cc = if directed {
+                let mut directed_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in 0..neighbor_vec.len() {
+                        if i != j && successor_sets[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            directed_edges += 1;
+                        }
+                    }
+                }
+                directed_edges as f64 / (deg * (deg - 1)) as f64
+            } else {
+                let mut triangle_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in (i + 1)..neighbor_vec.len() {
+                        if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            triangle_edges += 1;
+                        }
+                    }
+                }
+                triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
+            };
+            (view.index_to_node[idx], cc)
+        }).collect()
     };
 
     let mut coefficients = HashMap::with_capacity(n);
     let mut sum = 0.0;
-
-    for idx in 0..n {
-        let deg = neighbors[idx].len();
-        if deg < 2 {
-            coefficients.insert(view.index_to_node[idx], 0.0);
-            continue;
-        }
-
-        let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
-
-        if directed {
-            // Directed mode: count directed edges u→w among neighbors
-            let succ_sets = successor_sets.as_ref().unwrap();
-            let mut directed_edges = 0usize;
-            for i in 0..neighbor_vec.len() {
-                for j in 0..neighbor_vec.len() {
-                    if i != j && succ_sets[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                        directed_edges += 1;
-                    }
-                }
-            }
-            let max_edges = deg * (deg - 1); // d*(d-1) for directed
-            let cc = directed_edges as f64 / max_edges as f64;
-            coefficients.insert(view.index_to_node[idx], cc);
-            sum += cc;
-        } else {
-            // Undirected mode: count undirected edges among neighbors
-            let mut triangle_edges = 0usize;
-            for i in 0..neighbor_vec.len() {
-                for j in (i + 1)..neighbor_vec.len() {
-                    if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                        triangle_edges += 1;
-                    }
-                }
-            }
-            let max_edges = deg * (deg - 1) / 2; // d*(d-1)/2 for undirected
-            let cc = triangle_edges as f64 / max_edges as f64;
-            coefficients.insert(view.index_to_node[idx], cc);
-            sum += cc;
-        }
+    for (node_id, cc) in per_node {
+        sum += cc;
+        coefficients.insert(node_id, cc);
     }
 
     let average = if n > 0 { sum / n as f64 } else { 0.0 };
