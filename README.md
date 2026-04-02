@@ -25,15 +25,15 @@ RETURN i.name, count(DISTINCT t) AS trials
 ORDER BY trials DESC LIMIT 5
 ```
 
-| Drug | Trials | Time |
-|------|--------|------|
-| Placebo | 521 | |
-| **Pembrolizumab** | **137** | |
-| Carboplatin | 106 | |
-| Paclitaxel | 106 | |
-| Cyclophosphamide | 98 | **5.2 seconds** |
+| Drug | Trials |
+|------|--------|
+| Placebo | 521 |
+| **Pembrolizumab** | **137** |
+| Carboplatin | 106 |
+| Paclitaxel | 106 |
+| Cyclophosphamide | 98 |
 
-One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
+**5.2 seconds.** One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
 
 [See all 100 benchmark queries →](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html)
 
