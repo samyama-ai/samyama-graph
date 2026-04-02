@@ -1,228 +1,250 @@
-# Samyama Graph Database
+<p align="center">
+  <h1 align="center">Samyama</h1>
+  <p align="center">
+    <strong>The graph database that queried 1 billion edges for $2.50</strong>
+  </p>
+  <p align="center">
+    <a href="https://github.com/samyama-ai/samyama-graph/releases/tag/v0.7.0"><img src="https://img.shields.io/badge/version-0.7.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-1877_passing-brightgreen" alt="Tests"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
+    <a href="https://samyama-ai.github.io/samyama-graph-book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
+  </p>
+</p>
 
-![Version](https://img.shields.io/badge/version-0.6.1-blue)
-![Rust](https://img.shields.io/badge/rust-1.85-orange)
-![Tests](https://img.shields.io/badge/tests-1814_passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-87.8%25-brightgreen)
-![Bugs](https://img.shields.io/badge/bugs-0-brightgreen)
-![Vulnerabilities](https://img.shields.io/badge/vulnerabilities-0-brightgreen)
-![Quality Gate](https://img.shields.io/badge/quality_gate-passed-brightgreen)
-![Maintainability](https://img.shields.io/badge/maintainability-A-brightgreen)
-![LOC](https://img.shields.io/badge/LOC-44K-informational)
-![License](https://img.shields.io/badge/license-Apache_2.0-blue)
+---
 
-**Samyama** (Sanskrit: the union of focused query, sustained analysis, and unified insight) is a high-performance graph-vector database written in **Rust**. It combines a **property graph engine** (~90% OpenCypher), **vector search** (HNSW), **graph algorithms**, and **natural language querying** in a single binary. Zero GC pauses, 1,814 tests, Apache-2.0.
+We loaded the entire PubMed corpus — every article published since 1966 — plus ClinicalTrials.gov, Reactome pathways, and DrugBank into **one graph**. Then we asked:
 
-### Scale Benchmark
+> *"What drugs are most tested in cancer clinical trials?"*
 
-| Dataset | Nodes | Edges | RAM | Instance Cost |
-|---------|-------|-------|-----|--------------|
-| **PubMed/MEDLINE** | **66.2M** | **1.04B** | 130 GB | **$2.50 total** |
-| Biomedical Trifecta | 7.9M | 28.0M | 2 GB | Mac Mini M4 |
-| Cricket (Cricsheet) | 37K | 1.39M | < 1 GB | Mac Mini M4 |
+```cypher
+MATCH (m:MeSHTerm)<-[:ANNOTATED_WITH]-(a:Article)
+      -[:REFERENCED_IN]->(t:ClinicalTrial)-[:TESTS]->(i:Intervention)
+WHERE m.name = 'Neoplasms'
+RETURN i.name, count(DISTINCT t) AS trials
+ORDER BY trials DESC LIMIT 5
+```
 
-### See it in action
+| Drug | Trials | Time |
+|------|--------|------|
+| Placebo | 521 | |
+| **Pembrolizumab** | **137** | |
+| Carboplatin | 106 | |
+| Paclitaxel | 106 | |
+| Cyclophosphamide | 98 | **5.2 seconds** |
 
-> Graph Simulation — Cricket KG (36K nodes, 1.4M edges) with live activity particles
+One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
+
+[See all 100 benchmark queries →](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html)
+
+---
+
+## What is Samyama?
+
+A graph-vector database written in Rust. OpenCypher queries, Redis protocol, vector search, graph algorithms — one binary, no JVM, no GC pauses.
+
+```bash
+# Install and run (30 seconds)
+git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
+cargo build --release
+./target/release/samyama    # RESP on :6379, HTTP on :8080
+```
+
+```bash
+# Connect with any Redis client
+redis-cli -p 6379
+GRAPH.QUERY mydb "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})"
+GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
+```
+
+---
+
+## Why Samyama?
+
+**If your data has relationships, you need a graph database.** If your graph database can't handle a billion edges on a single machine, you need Samyama.
+
+| What | How |
+|------|-----|
+| **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge ($2.50 spot) |
+| **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html) |
+| **Parallel everything** | Rayon: PageRank 3.1x, LCC 9.1x, Triangle Count 6x. Parallel scan, filter, compaction |
+| **975 QPS concurrent** | 16-client read workload, p99 < 25ms, zero errors across 67K queries |
+| **LDBC certified** | SNB Interactive 21/21, FinBench 40/40, Graphalytics 12/12 |
+
+---
+
+## The 30-Second Tour
+
+**Cypher queries** — ~90% OpenCypher. MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions.
+
+```cypher
+MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
+WHERE a.name = 'Alice'
+RETURN b.name, length(shortestPath(a, b))
+```
+
+**Graph algorithms** — PageRank, WCC, SCC, BFS, Dijkstra, LCC, CDLP, Triangle Count. All rayon-parallelized.
+
+```cypher
+CALL pagerank('social') YIELD nodeId, score
+RETURN nodeId, score ORDER BY score DESC LIMIT 10
+```
+
+**Vector search** — HNSW indexing for semantic search and Graph RAG.
+
+```cypher
+CREATE VECTOR INDEX ON :Paper(embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
+CALL vector.search('Paper', 'embedding', [0.1, 0.2, ...], 10) YIELD node, score
+```
+
+**Natural language** — Ask questions in English. The LLM translates to Cypher.
+
+```
+NLQ "Who are Alice's friends of friends that work at Google?"
+→ MATCH (a:Person {name:'Alice'})-[:KNOWS]->()-[:KNOWS]->(fof)-[:WORKS_AT]->(c:Company {name:'Google'}) RETURN fof.name
+```
+
+**AI agents** — Auto-generated MCP servers from your graph schema.
+
+```bash
+pip install samyama[mcp]
+samyama-mcp-serve --demo cricket    # Instant AI agent tools for any graph
+```
+
+---
+
+## Benchmarks
+
+### Scale: 74M Nodes, 1 Billion Edges
+
+| KG | Source | Nodes | Edges |
+|----|--------|-------|-------|
+| PubMed/MEDLINE | NLM | 66.2M | 1.04B |
+| Clinical Trials | ClinicalTrials.gov | 7.8M | 27M |
+| Pathways | Reactome | 119K | 835K |
+| Drug Interactions | DrugBank + ChEMBL + SIDER | 245K | 388K |
+
+Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all four KGs. [Full results →](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html)
+
+### Cross-KG Query Highlights
+
+| Query | Time | Result |
+|-------|------|--------|
+| Cancer → Trial interventions | 5.2s | Pembrolizumab #1 (137 trials) |
+| Diabetes → Trial interventions | 2.4s | Metformin #1 (70 trials) |
+| Metformin → Trial adverse events | 2.1s | Diarrhoea (185 trials) — known side effect confirmed |
+| Cancer trial sites by country | 3.8s | US 4,062 · China 1,170 · France 827 |
+| NCI-funded → Trial drugs | 19.4s | Cyclophosphamide (517) · Radiation (362) |
+| Aspirin articles → Trials | 1.5s | NCT00000491 "Aspirin MI study" |
+
+### LDBC Compliance
+
+| Benchmark | Pass Rate | Dataset |
+|-----------|-----------|---------|
+| SNB Interactive | **21/21 (100%)** | SF1: 3.18M nodes, 17.26M edges |
+| SNB BI | **16/16 (100%)** | SF1 |
+| Graphalytics | **12/12 (100%)** | XS reference graphs |
+| FinBench | **40/40 (100%)** | 7.7K nodes, 42.2K edges |
+
+### Concurrent Performance
+
+| Workload | 1 client | 16 clients | Scaling |
+|----------|----------|------------|---------|
+| Pure read | 145 QPS | 975 QPS | 6.7x |
+| Mixed 80/20 | 181 QPS | 722 QPS | 4.0x |
+| Write-heavy | 279 QPS | 482 QPS | 1.7x |
+
+---
+
+## Demo
+
+> Cricket KG — 36K nodes, 1.4M edges, live graph simulation
 
 [![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
 
-*Click for full demo (1:56) — Dashboard, Cypher Queries, and Graph Simulation*
+*Click for full demo (1:56)*
 
-### LDBC Benchmark Results (v0.6.0, Mac Mini M4)
-
-| Benchmark | Queries | Pass Rate | Dataset |
-|-----------|---------|-----------|---------|
-| **SNB Interactive** | 21 reads | **21/21 (100%)** | SF1: 3.18M nodes, 17.26M edges |
-| **SNB Business Intelligence** | 20 analytical | **16/16 run (100%)** (BI-17+ timeout) | SF1 (same dataset) |
-| **Graphalytics** | 6 algorithms x 2 datasets | **12/12 (100%)** | LDBC XS reference graphs |
-| **FinBench** | 12 CR + 6 SR + 3 RW + 19 W | **40/40 (100%)** | Synthetic: 7.7K nodes, 42.2K edges |
-
-See [docs/ldbc/](docs/ldbc/) for detailed per-query results, latency tables, and analysis.
-
-### What's New in v0.6.1
-
-- **HTTP Tenant Management API**: Full CRUD for tenants via REST endpoints (`POST /api/tenants`, `GET /api/tenants`, `GET /api/tenants/{id}`, `DELETE /api/tenants/{id}`).
-- **samyama-mcp-serve**: Auto-generate [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers from any graph schema. Discovers labels, edge types, and properties, then generates typed tools for AI agents. Install via `pip install samyama[mcp]` and run `samyama-mcp-serve --demo` for instant agent tool access.
-- **Snapshot format (.sgsnap)**: Portable gzip JSON-lines snapshot export/import for graph tenants, enabling backup and migration across instances.
-- **Cricket dataset loader**: Load 21K Cricsheet T20/ODI/Test matches (36K nodes, 1.4M edges) via `cargo run --release --example cricket_loader`.
-- **AACT clinical trials loader**: Full AACT dataset loader for clinical trial analysis (575K studies, 7.7M nodes, 27M edges).
-- **Index scan fix**: Inline MATCH properties `{prop: val}` now trigger IndexScan when a matching index exists, avoiding full label scans.
-
-## Key Features
-
-- **OpenCypher Query Engine**: ~90% OpenCypher coverage — MATCH, CREATE, DELETE, SET, MERGE, OPTIONAL MATCH, UNION, WITH, UNWIND, aggregations, and 30+ built-in functions.
-- **RESP Protocol**: Drop-in compatibility with any Redis client (`redis-cli`, Jedis, ioredis).
-- **Vector Search**: Built-in HNSW indexing for millisecond semantic search and Graph RAG.
-- **NLQ (Natural Language Queries)**: Ask questions in plain English — the LLM translates to Cypher automatically.
-- **Graph Algorithms**: Native PageRank, BFS, Dijkstra, WCC, SCC, CDLP, LCC, MaxFlow, MST, SSSP, Triangle Counting.
-- **Optimization Solvers**: 15+ metaheuristic algorithms (Jaya, Rao, GWO, PSO, Firefly, Cuckoo, ABC, NSGA-II) for in-database optimization.
-- **Multi-Tenancy**: Tenant-level isolation with per-tenant quotas via RocksDB column families.
-- **High Availability**: Raft consensus (via `openraft`) for cluster replication and automatic failover.
-- **Persistence**: RocksDB storage with Write-Ahead Log and checkpointing.
-- **Cost-Based Query Planner**: Graph-native plan enumeration with triple-level statistics (GraphCatalog), predicate pushdown, direction reversal, ExpandInto, and plan cache. EXPLAIN/PROFILE for plan visualization.
-- **Late Materialization**: Scan operators produce lightweight `NodeRef` tokens instead of full clones — 4x traversal speedup on multi-hop queries.
-- **Two-Phase Bulk Loading**: `create_node_stub()` + `create_edge_stub()` reduce per-edge memory from 709 to 52 bytes (13.6x), enabling billion-edge graphs on commodity hardware.
-- **HTTP Tenant API**: REST endpoints for tenant CRUD (create, list, get, delete) alongside the RESP protocol.
-- **MCP Server Generation**: Auto-generate MCP servers from graph schema for AI agent integration (`samyama-mcp-serve`).
-- **Snapshot Persistence**: Portable `.sgsnap` format with automatic persistence — imported snapshots survive server restart.
-
-## Getting Started
-
-### Build
-
-```bash
-git clone https://github.com/samyama-ai/samyama-graph
-cd samyama-graph
-cargo build --release
-```
-
-### Run the Server
-
-```bash
-./target/release/samyama
-```
-
-This starts the RESP server on port 6379 and the HTTP API on port 8080.
-
-### Connect
-
-```bash
-redis-cli -p 6379
-
-# Create nodes
-GRAPH.QUERY mygraph "CREATE (n:Person {name: 'Alice', age: 30})"
-
-# Query
-GRAPH.QUERY mygraph "MATCH (n:Person) RETURN n"
-
-# Explain a query plan
-GRAPH.QUERY mygraph "EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n"
-```
+---
 
 ## Examples
 
-Samyama ships with domain-specific demos that showcase the full feature set.
+### Domain Knowledge Graphs
 
-### Core Infrastructure
-
-| Example | Command | Description |
-|---------|---------|-------------|
-| Persistence | `cargo run --example persistence_demo` | RocksDB persistence, WAL, multi-tenancy, recovery |
-| Cluster | `cargo run --example cluster_demo` | 3-node Raft cluster with leader election and failover |
-| Full Benchmark | `cargo run --example full_benchmark` | Scale test up to 1M+ nodes |
-
-### Industry Demos (with NLQ + Agentic Enrichment)
-
-Each demo builds a domain-specific knowledge graph, runs Cypher queries, executes graph algorithms, and demonstrates natural language querying via the NLQ pipeline.
-
-| Example | Command | What it demonstrates |
-|---------|---------|---------------------|
-| Banking / Fraud Detection | `cargo run --example banking_demo` | Customer segmentation, fraud patterns, money laundering detection, OFAC screening |
-| Clinical Trials | `cargo run --example clinical_trials_demo` | Patient-trial matching (vector search), drug interactions (PageRank), site optimization (NSGA-II) |
-| Supply Chain | `cargo run --example supply_chain_demo` | Disruption analysis, cold-chain monitoring, port optimization (Jaya), alternative suppliers (vector search) |
-| Smart Manufacturing | `cargo run --example smart_manufacturing_demo` | Digital twin, failure cascade analysis, production scheduling (Cuckoo Search), energy optimization |
-| Social Network | `cargo run --example social_network_demo` | Follower graphs, mutual connections, influence analysis (PageRank), community detection (WCC) |
-| Knowledge Graph | `cargo run --example knowledge_graph_demo` | Document lineage, expert finding (vector search), topic clustering, knowledge hub identification |
-| Enterprise SOC | `cargo run --example enterprise_soc_demo` | Threat intel, MITRE ATT&CK mapping, attack path analysis (Dijkstra), lateral movement simulation |
-| Agentic Enrichment | `cargo run --example agentic_enrichment_demo` | Generation-Augmented Knowledge (GAK) — LLM generates Cypher to enrich the graph autonomously |
+| Domain | Command | Nodes | Edges |
+|--------|---------|-------|-------|
+| Banking & Fraud | `cargo run --example banking_demo` | — | Fraud patterns, money laundering, OFAC |
+| Clinical Trials | `cargo run --example clinical_trials_demo` | — | Patient-trial matching, drug interactions |
+| Supply Chain | `cargo run --example supply_chain_demo` | — | Disruption analysis, port optimization |
+| Manufacturing | `cargo run --example smart_manufacturing_demo` | — | Digital twin, failure cascades |
+| Social Network | `cargo run --example social_network_demo` | — | Influence, communities, recommendations |
+| Enterprise SOC | `cargo run --example enterprise_soc_demo` | — | MITRE ATT&CK, attack paths, threat intel |
 
 ### Data Loaders
 
-| Example | Command | Description |
-|---------|---------|-------------|
-| LDBC SNB | `cargo run --example ldbc_loader` | Load LDBC SNB SF1 dataset (3.18M nodes, 17.26M edges) |
-| FinBench | `cargo run --example finbench_loader` | Load/generate LDBC FinBench dataset |
-| Cricket | `cargo run --release --example cricket_loader` | Load 21K Cricsheet matches (36K nodes, 1.4M edges) |
-| AACT Clinical Trials | `cargo run --release --example aact_loader` | Full AACT dataset (575K studies, 7.7M nodes, 27M edges) |
+| Dataset | Command | Scale |
+|---------|---------|-------|
+| LDBC SNB SF1 | `cargo run --example ldbc_loader` | 3.2M nodes, 17.3M edges |
+| Clinical Trials | `cargo run --release --example aact_loader` | 7.8M nodes, 27M edges |
+| Drug Interactions | `cargo run --release --example druginteractions_loader` | 245K nodes, 388K edges |
+| Cricket | `cargo run --release --example cricket_loader` | 36K nodes, 1.4M edges |
+| FinBench | `cargo run --example finbench_loader` | 7.7K nodes, 42K edges |
 
-### AI Agent Integration
-
-| Example | Command | Description |
-|---------|---------|-------------|
-| MCP Server | `samyama-mcp-serve --demo` | Auto-generate MCP server from graph schema for AI agents (Python, `pip install samyama[mcp]`) |
-
-## Cypher Support
-
-**~90% OpenCypher coverage.** See [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) for the full matrix.
-
-### Supported Clauses
-
-`MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `RETURN DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`, `CREATE`, `DELETE`, `DETACH DELETE`, `SET`, `REMOVE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`), `WITH`, `UNWIND`, `UNION` / `UNION ALL`, `EXPLAIN`, `EXISTS` subqueries
-
-### Supported Functions
-
-| Category | Functions |
-|----------|-----------|
-| String | `toUpper`, `toLower`, `trim`, `replace`, `substring`, `left`, `right`, `reverse`, `toString` |
-| Numeric | `abs`, `ceil`, `floor`, `round`, `sqrt`, `sign`, `toInteger`, `toFloat` |
-| Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect` |
-| List/Collection | `size`, `length`, `head`, `last`, `tail`, `keys`, `range` |
-| Graph | `id`, `labels`, `type`, `exists`, `coalesce`, `startsWith`, `endsWith`, `contains` |
-
-### Operators
-
-Arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`), logical (`AND`, `OR`, `NOT`, `XOR`), string (`STARTS WITH`, `ENDS WITH`, `CONTAINS`, `=~`), null (`IS NULL`, `IS NOT NULL`), list (`IN`).
-
-Cross-type coercion: Integer/Float promotion and String/Boolean coercion for LLM-generated queries. Null propagation follows Neo4j three-valued logic.
+---
 
 ## Architecture
 
 ```
-src/
-├── graph/           # Property graph model (Node, Edge, PropertyValue, GraphStore)
-├── query/           # OpenCypher engine
-│   ├── cypher.pest  #   PEG grammar (Pest)
-│   ├── parser.rs    #   Parser → AST
-│   └── executor/    #   Volcano iterator model (scan, filter, expand, project, aggregate, sort, limit)
-├── protocol/        # RESP3 server (Tokio TCP)
-├── persistence/     # RocksDB + WAL + multi-tenancy
-├── raft/            # Raft consensus (openraft)
-├── nlq/             # Natural Language Query pipeline (OpenAI, Gemini, Ollama, Claude Code)
-├── vector/          # HNSW vector index
-├── snapshot/        # Portable .sgsnap export/import
-└── sharding/        # Tenant-level sharding
+samyama
+├── graph/         Property graph model (Node, Edge, GraphStore, CSR adjacency)
+├── query/         OpenCypher engine
+│   ├── cypher.pest    PEG grammar
+│   ├── executor/      Volcano iterator + WCO LeapFrog TrieJoin
+│   └── planner.rs     Cost-based graph-native query planner
+├── protocol/      RESP3 server (Redis-compatible, Tokio async)
+├── persistence/   RocksDB + WAL + multi-tenancy
+├── vector/        HNSW vector index
+├── snapshot/      Portable .sgsnap v2 (CSR + ColumnStore)
+├── raft/          Distributed consensus (openraft)
+└── nlq/           Natural language → Cypher (OpenAI, Gemini, Ollama, Claude)
 ```
 
-Key design decisions are documented as [Architecture Decision Records](docs/ADR/).
+**Companion crates:**
+- [samyama-graph-algorithms](crates/samyama-graph-algorithms/) — PageRank, BFS, Dijkstra, WCC, SCC, LCC, CDLP, Triangle Count (all rayon-parallelized)
+- [samyama-optimization](crates/samyama-optimization/) — 15+ metaheuristic solvers (Jaya, Rao, GWO, NSGA-II, TLBO)
+- [samyama-sdk](crates/samyama-sdk/) — Rust SDK with embedded and remote clients
 
-## Companion Crates
-
-- **[samyama-graph-algorithms](crates/samyama-graph-algorithms/)**: PageRank, BFS, Dijkstra, WCC, SCC, MaxFlow, MST, Triangle Counting
-- **[samyama-optimization](crates/samyama-optimization/)**: 15+ metaheuristic solvers for single and multi-objective optimization
-
-## Benchmarks
-
-Run with `cargo bench`. See [docs/performance/](docs/performance/) for detailed results.
-
-| Operation | Throughput | Notes |
-|-----------|-----------|-------|
-| Node insertion | ~3.4M nodes/sec | At 1K batch, single-threaded |
-| Label scan | <1 us | 100-node label groups |
-| 1-hop traversal | ~22 us | MATCH-WHERE-RETURN pattern |
-| Cypher parse | <8 us | Multi-hop patterns with aggregation |
+---
 
 ## Documentation
 
-- [LDBC Benchmark Results](docs/ldbc/) — SNB Interactive, SNB BI, Graphalytics, FinBench
-- [Architecture](docs/ARCHITECTURE.md)
-- [Cypher Compatibility](docs/CYPHER_COMPATIBILITY.md)
-- [ACID Guarantees](docs/ACID_GUARANTEES.md)
-- [Benchmarks](docs/performance/BENCHMARKS.md)
-- [Architecture Decision Records](docs/ADR/)
-- [Technology Comparisons](docs/TECHNOLOGY_COMPARISONS.md)
+| Resource | Link |
+|----------|------|
+| **The Book** | [samyama-ai.github.io/samyama-graph-book](https://samyama-ai.github.io/samyama-graph-book/) |
+| Biomedical Benchmark | [100 queries, 96 pass](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html) |
+| Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
+| LDBC Results | [docs/ldbc/](docs/ldbc/) |
+| Architecture Decisions | [docs/ADR/](docs/ADR/) |
+| API Spec | [api/openapi.yaml](api/openapi.yaml) |
 
-## Testing
+---
 
-1814 unit tests, integration tests via Python scripts, and 8 domain-specific example demos.
+## Enterprise Edition
 
-```bash
-cargo test                     # Run all tests
-cargo bench                    # Run benchmarks
-cargo clippy -- -D warnings    # Lint
-cargo fmt -- --check           # Format check
-```
+Everything above is open source (Apache 2.0). [Samyama Enterprise](https://samyama.dev) adds:
+
+- GPU acceleration (wgpu + CUDA)
+- OpenTelemetry OTLP metrics
+- Prometheus + Grafana monitoring
+- Backup & disaster recovery
+- ADMIN commands + audit trail
+- Ed25519 signed license tokens
+
+[Contact us →](https://samyama.dev/contact)
+
+---
 
 ## License
 
-Apache License 2.0
+Apache License 2.0 — use it in production, contribute back if you'd like.
+
+**Samyama** (Sanskrit: संयम) — the union of focused query, sustained analysis, and unified insight.
