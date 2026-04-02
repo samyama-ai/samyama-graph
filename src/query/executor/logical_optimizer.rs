@@ -6,12 +6,13 @@
 //! - Predicate pushdown: push filters as close to their data source as possible
 
 use std::collections::HashSet;
-use super::logical_plan::{LogicalPlanNode, ExpandDirection};
+use super::logical_plan::{LogicalPlanNode, ExpandDirection, TrieJoinConstraint};
 
 /// Apply all logical optimization rules to a plan
 pub fn optimize(plan: LogicalPlanNode) -> LogicalPlanNode {
     let plan = push_filters_down(plan);
     let plan = insert_expand_into(plan);
+    let plan = merge_cyclic_to_trie_join(plan);
     plan
 }
 
@@ -166,6 +167,135 @@ fn insert_expand_into(plan: LogicalPlanNode) -> LogicalPlanNode {
             LogicalPlanNode::CartesianProduct {
                 left: Box::new(insert_expand_into(*left)),
                 right: Box::new(insert_expand_into(*right)),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Convert Expand+ExpandInto chains into TrieJoin for cyclic patterns (WCO).
+///
+/// Detects the pattern:
+///   ExpandInto(target_var → other_bound, ...)
+///     └── Expand(bound_var → target_var, direction, ...)
+///           └── <input where other_bound is already bound>
+///
+/// And merges it into:
+///   TrieJoin(target_var, constraints=[from_expand, from_expand_into])
+///     └── <input>
+///
+/// This enables worst-case optimal intersection via LeapFrog instead of
+/// sequential expand-then-filter.
+fn merge_cyclic_to_trie_join(plan: LogicalPlanNode) -> LogicalPlanNode {
+    match plan {
+        LogicalPlanNode::ExpandInto { input, source_var, target_var, edge_types, edge_var } => {
+            let optimized_input = merge_cyclic_to_trie_join(*input);
+
+            // Check if input is an Expand whose target is one of our endpoints
+            match optimized_input {
+                LogicalPlanNode::Expand { input: expand_input, source_var: exp_src, target_var: exp_tgt, edge_var: exp_ev, edge_types: exp_et, direction: exp_dir }
+                    if exp_tgt == source_var || exp_tgt == target_var =>
+                {
+                    // The new variable introduced by the Expand
+                    let new_var = exp_tgt.clone();
+
+                    // Constraint from Expand: new_var ∈ neighbors of exp_src
+                    let expand_constraint = TrieJoinConstraint {
+                        bound_var: exp_src.clone(),
+                        direction: exp_dir,
+                        edge_types: exp_et,
+                        edge_var: exp_ev,
+                    };
+
+                    // Constraint from ExpandInto: determine which bound var the new_var connects to
+                    // ExpandInto checks edge source_var → target_var
+                    let (into_bound, into_dir) = if new_var == source_var {
+                        // ExpandInto(new_var → target_var): edge from new_var to target_var
+                        // new_var ∈ N_in(target_var)
+                        (target_var.clone(), ExpandDirection::Reverse)
+                    } else {
+                        // ExpandInto(source_var → new_var): edge from source_var to new_var
+                        // new_var ∈ N_out(source_var)
+                        (source_var.clone(), ExpandDirection::Forward)
+                    };
+
+                    let into_constraint = TrieJoinConstraint {
+                        bound_var: into_bound,
+                        direction: into_dir,
+                        edge_types,
+                        edge_var,
+                    };
+
+                    LogicalPlanNode::TrieJoin {
+                        input: expand_input,
+                        target_var: new_var,
+                        constraints: vec![expand_constraint, into_constraint],
+                    }
+                }
+                // Also merge ExpandInto on top of an existing TrieJoin (for 4-cliques etc.)
+                LogicalPlanNode::TrieJoin { input: tj_input, target_var: tj_target, mut constraints }
+                    if tj_target == source_var || tj_target == target_var =>
+                {
+                    let new_var = tj_target;
+                    let (into_bound, into_dir) = if new_var == source_var {
+                        (target_var.clone(), ExpandDirection::Reverse)
+                    } else {
+                        (source_var.clone(), ExpandDirection::Forward)
+                    };
+                    constraints.push(TrieJoinConstraint {
+                        bound_var: into_bound,
+                        direction: into_dir,
+                        edge_types,
+                        edge_var,
+                    });
+                    LogicalPlanNode::TrieJoin {
+                        input: tj_input,
+                        target_var: new_var,
+                        constraints,
+                    }
+                }
+                other => {
+                    // Can't merge — keep as ExpandInto
+                    LogicalPlanNode::ExpandInto {
+                        input: Box::new(other),
+                        source_var,
+                        target_var,
+                        edge_types,
+                        edge_var,
+                    }
+                }
+            }
+        }
+        // Recurse into children
+        LogicalPlanNode::Expand { input, source_var, target_var, edge_var, edge_types, direction } => {
+            LogicalPlanNode::Expand {
+                input: Box::new(merge_cyclic_to_trie_join(*input)),
+                source_var, target_var, edge_var, edge_types, direction,
+            }
+        }
+        LogicalPlanNode::TrieJoin { input, target_var, constraints } => {
+            LogicalPlanNode::TrieJoin {
+                input: Box::new(merge_cyclic_to_trie_join(*input)),
+                target_var, constraints,
+            }
+        }
+        LogicalPlanNode::Filter { input, predicate } => {
+            LogicalPlanNode::Filter {
+                input: Box::new(merge_cyclic_to_trie_join(*input)),
+                predicate,
+            }
+        }
+        LogicalPlanNode::Join { left, right, join_keys } => {
+            LogicalPlanNode::Join {
+                left: Box::new(merge_cyclic_to_trie_join(*left)),
+                right: Box::new(merge_cyclic_to_trie_join(*right)),
+                join_keys,
+            }
+        }
+        LogicalPlanNode::CartesianProduct { left, right } => {
+            LogicalPlanNode::CartesianProduct {
+                left: Box::new(merge_cyclic_to_trie_join(*left)),
+                right: Box::new(merge_cyclic_to_trie_join(*right)),
             }
         }
         other => other,
@@ -416,5 +546,119 @@ mod tests {
             }
             other => panic!("Expected ExpandInto at top, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_triangle_pattern_becomes_trie_join() {
+        // Simulate a triangle plan after insert_expand_into:
+        // ExpandInto(c→a, input=Expand(b→c, input=Expand(a→b, input=Scan(a))))
+        // The optimizer should merge Expand(b→c)+ExpandInto(c→a) into TrieJoin
+        let plan = LogicalPlanNode::ExpandInto {
+            input: Box::new(LogicalPlanNode::Expand {
+                input: Box::new(LogicalPlanNode::Expand {
+                    input: Box::new(LogicalPlanNode::LabelScan {
+                        variable: "a".to_string(),
+                        label: Some(Label::new("Node")),
+                    }),
+                    source_var: "a".to_string(),
+                    target_var: "b".to_string(),
+                    edge_var: None,
+                    edge_types: vec![EdgeType::new("EDGE")],
+                    direction: ExpandDirection::Forward,
+                }),
+                source_var: "b".to_string(),
+                target_var: "c".to_string(),
+                edge_var: None,
+                edge_types: vec![EdgeType::new("EDGE")],
+                direction: ExpandDirection::Forward,
+            }),
+            source_var: "c".to_string(),
+            target_var: "a".to_string(),
+            edge_types: vec![EdgeType::new("EDGE")],
+            edge_var: None,
+        };
+
+        let optimized = merge_cyclic_to_trie_join(plan);
+        match &optimized {
+            LogicalPlanNode::TrieJoin { target_var, constraints, input } => {
+                assert_eq!(target_var, "c", "TrieJoin should solve for c");
+                assert_eq!(constraints.len(), 2, "Should have 2 constraints");
+                // Constraint 1: from Expand(b→c) → c ∈ N_out(b)
+                assert_eq!(constraints[0].bound_var, "b");
+                assert_eq!(constraints[0].direction, ExpandDirection::Forward);
+                // Constraint 2: from ExpandInto(c→a) → c ∈ N_in(a)
+                assert_eq!(constraints[1].bound_var, "a");
+                assert_eq!(constraints[1].direction, ExpandDirection::Reverse);
+                // Input should be the Expand(a→b)
+                match input.as_ref() {
+                    LogicalPlanNode::Expand { source_var, target_var, .. } => {
+                        assert_eq!(source_var, "a");
+                        assert_eq!(target_var, "b");
+                    }
+                    other => panic!("Expected Expand(a→b) as input, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TrieJoin, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_non_cyclic_not_converted_to_trie_join() {
+        // Chain: Scan(a) → Expand(a→b) → Expand(b→c)
+        // No ExpandInto → no TrieJoin
+        let plan = LogicalPlanNode::Expand {
+            input: Box::new(LogicalPlanNode::Expand {
+                input: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "a".to_string(),
+                    label: Some(Label::new("Node")),
+                }),
+                source_var: "a".to_string(),
+                target_var: "b".to_string(),
+                edge_var: None,
+                edge_types: vec![],
+                direction: ExpandDirection::Forward,
+            }),
+            source_var: "b".to_string(),
+            target_var: "c".to_string(),
+            edge_var: None,
+            edge_types: vec![],
+            direction: ExpandDirection::Forward,
+        };
+
+        let optimized = merge_cyclic_to_trie_join(plan);
+        match optimized {
+            LogicalPlanNode::Expand { .. } => { /* correct — no TrieJoin for acyclic */ }
+            other => panic!("Expected Expand (no conversion), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_trie_join_bound_variables() {
+        use super::super::logical_plan::TrieJoinConstraint;
+        let plan = LogicalPlanNode::TrieJoin {
+            input: Box::new(LogicalPlanNode::Expand {
+                input: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "a".to_string(),
+                    label: None,
+                }),
+                source_var: "a".to_string(),
+                target_var: "b".to_string(),
+                edge_var: None,
+                edge_types: vec![],
+                direction: ExpandDirection::Forward,
+            }),
+            target_var: "c".to_string(),
+            constraints: vec![
+                TrieJoinConstraint { bound_var: "b".to_string(), direction: ExpandDirection::Forward, edge_types: vec![], edge_var: Some("r2".to_string()) },
+                TrieJoinConstraint { bound_var: "a".to_string(), direction: ExpandDirection::Reverse, edge_types: vec![], edge_var: None },
+            ],
+        };
+
+        let vars = plan.bound_variables();
+        assert!(vars.contains("a"));
+        assert!(vars.contains("b"));
+        assert!(vars.contains("c"));
+        assert!(vars.contains("r2"));
+        assert_eq!(vars.len(), 4);
     }
 }

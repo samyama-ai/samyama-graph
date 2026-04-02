@@ -111,6 +111,7 @@ pub use samyama::{
     PersistenceManager, PersistenceError, PersistenceResult,
     PersistentStorage, StorageError, StorageResult,
     Tenant, TenantManager, ResourceQuotas, ResourceUsage,
+    TenantError, TenantResult,
     Wal, WalEntry, WalError, WalResult,
     NLQConfig, LLMProvider, AutoEmbedConfig,
 };

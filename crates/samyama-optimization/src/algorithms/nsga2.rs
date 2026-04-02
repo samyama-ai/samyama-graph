@@ -29,7 +29,9 @@ impl NSGA2Solver {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
                 let fitness = problem.objectives(&vars);
-                MultiObjectiveIndividual::new(vars, fitness)
+                let penalties = problem.penalties(&vars);
+                let violation: f64 = penalties.iter().sum();
+                MultiObjectiveIndividual::new(vars, fitness, violation)
             })
             .collect();
 
@@ -48,9 +50,14 @@ impl NSGA2Solver {
                 self.mutate(&mut c1_vars, &lower, &upper);
                 self.mutate(&mut c2_vars, &lower, &upper);
                 
-                offspring.push(MultiObjectiveIndividual::new(c1_vars.clone(), problem.objectives(&c1_vars)));
+                let f1 = problem.objectives(&c1_vars);
+                let v1 = problem.penalties(&c1_vars).iter().sum();
+                offspring.push(MultiObjectiveIndividual::new(c1_vars.clone(), f1, v1));
+
                 if offspring.len() < pop_size {
-                    offspring.push(MultiObjectiveIndividual::new(c2_vars.clone(), problem.objectives(&c2_vars)));
+                    let f2 = problem.objectives(&c2_vars);
+                    let v2 = problem.penalties(&c2_vars).iter().sum();
+                    offspring.push(MultiObjectiveIndividual::new(c2_vars.clone(), f2, v2));
                 }
             }
 
@@ -111,9 +118,15 @@ impl NSGA2Solver {
         for i in 0..n {
             for j in 0..n {
                 if i == j { continue; }
-                if self.dominates(&population[i].fitness, &population[j].fitness) {
+                if self.dominates(
+                    &population[i].fitness, population[i].constraint_violation,
+                    &population[j].fitness, population[j].constraint_violation
+                ) {
                     dominated_sets[i].push(j);
-                } else if self.dominates(&population[j].fitness, &population[i].fitness) {
+                } else if self.dominates(
+                    &population[j].fitness, population[j].constraint_violation,
+                    &population[i].fitness, population[i].constraint_violation
+                ) {
                     dominance_counts[i] += 1;
                 }
             }
@@ -140,7 +153,22 @@ impl NSGA2Solver {
         }
     }
 
-    fn dominates(&self, f1: &[f64], f2: &[f64]) -> bool {
+    /// Constrained Dominance Principle (Deb et al.)
+    fn dominates(&self, f1: &[f64], v1: f64, f2: &[f64], v2: f64) -> bool {
+        // 1. Feasible vs Infeasible
+        if v1 == 0.0 && v2 > 0.0 {
+            return true;
+        }
+        if v1 > 0.0 && v2 == 0.0 {
+            return false;
+        }
+
+        // 2. Both Infeasible: Smaller violation is better
+        if v1 > 0.0 && v2 > 0.0 {
+            return v1 < v2;
+        }
+
+        // 3. Both Feasible: Pareto dominance
         let mut better = false;
         for i in 0..f1.len() {
             if f1[i] > f2[i] { return false; }

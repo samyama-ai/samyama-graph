@@ -80,6 +80,17 @@ pub fn estimate_plan_cost(plan: &LogicalPlanNode, catalog: &GraphCatalog) -> f64
             input_cost * selectivity
         }
 
+        LogicalPlanNode::TrieJoin { input, constraints, .. } => {
+            let input_cost = estimate_plan_cost(input, catalog);
+            // TrieJoin is worst-case optimal: cost is input_cost × intersection selectivity.
+            // With k constraints, the intersection is much tighter than chained ExpandInto.
+            // For k=2 constraints (triangle), selectivity ~ 0.01 (vs 0.1 per ExpandInto).
+            // For k=3+ constraints (cliques), selectivity drops further.
+            let k = constraints.len() as f64;
+            let selectivity = 0.1_f64.powf(k.max(1.0));
+            input_cost * selectivity.max(0.001)
+        }
+
         LogicalPlanNode::Filter { input, .. } => {
             let input_cost = estimate_plan_cost(input, catalog);
             input_cost * 0.5 // default selectivity
@@ -119,6 +130,7 @@ fn extract_label_for_var(plan: &LogicalPlanNode, variable: &str) -> Option<Label
         }
         LogicalPlanNode::Expand { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::ExpandInto { input, .. } => extract_label_for_var(input, variable),
+        LogicalPlanNode::TrieJoin { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::Filter { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::Join { left, right, .. } => {
             extract_label_for_var(left, variable)
