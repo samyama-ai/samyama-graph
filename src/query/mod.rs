@@ -149,7 +149,8 @@ impl QueryEngine {
         Self {
             ast_cache: Mutex::new(LruCache::new(cap)),
             stats: CacheStats::new(),
-            query_timeout_secs: 45,
+            query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(45),
         }
     }
 

@@ -32,9 +32,13 @@ pub struct LoadResult {
     pub gene_nodes: usize,
     pub side_effect_nodes: usize,
     pub indication_nodes: usize,
+    pub bioactivity_nodes: usize,
+    pub adverse_event_nodes: usize,
     pub interaction_edges: usize,
     pub side_effect_edges: usize,
     pub indication_edges: usize,
+    pub bioactivity_edges: usize,
+    pub adverse_event_edges: usize,
 }
 
 // ============================================================================
@@ -46,18 +50,24 @@ struct IdMaps {
     gene: HashMap<String, NodeId>,          // gene_name -> NodeId
     side_effect: HashMap<String, NodeId>,   // meddra_id -> NodeId
     indication: HashMap<String, NodeId>,    // meddra_id -> NodeId
+    bioactivity: HashMap<String, NodeId>,   // chembl_assay_id -> NodeId
+    adverse_event: HashMap<String, NodeId>, // term -> NodeId
     // Name lookups
     drug_name_to_dbid: HashMap<String, String>,  // lowercase name -> drugbank_id
     // Edge dedup
     interaction_edges: HashSet<String>,
     side_effect_edges: HashSet<String>,
     indication_edges: HashSet<String>,
+    bioactivity_edges: HashSet<String>,
+    adverse_event_edges: HashSet<String>,
 }
 
 impl IdMaps {
     fn new() -> Self {
         Self {
             drug: HashMap::new(),
+            bioactivity: HashMap::new(),
+            adverse_event: HashMap::new(),
             gene: HashMap::new(),
             side_effect: HashMap::new(),
             indication: HashMap::new(),
@@ -65,6 +75,8 @@ impl IdMaps {
             interaction_edges: HashSet::new(),
             side_effect_edges: HashSet::new(),
             indication_edges: HashSet::new(),
+            bioactivity_edges: HashSet::new(),
+            adverse_event_edges: HashSet::new(),
         }
     }
 }
@@ -119,9 +131,13 @@ pub fn load_dataset(
         gene_nodes: 0,
         side_effect_nodes: 0,
         indication_nodes: 0,
+        bioactivity_nodes: 0,
+        adverse_event_nodes: 0,
         interaction_edges: 0,
         side_effect_edges: 0,
         indication_edges: 0,
+        bioactivity_edges: 0,
+        adverse_event_edges: 0,
     };
 
     if phases.contains(&"drugbank_dgidb".to_string()) || phases.contains(&"all".to_string()) {
@@ -153,10 +169,39 @@ pub fn load_dataset(
         );
     }
 
+    if phases.contains(&"chembl".to_string()) || phases.contains(&"all".to_string()) {
+        let t = Instant::now();
+        let (bio_nodes, bio_edges, new_genes) =
+            load_chembl(graph, &mut maps, data_dir)?;
+        result.bioactivity_nodes = bio_nodes;
+        result.bioactivity_edges = bio_edges;
+        result.gene_nodes += new_genes;
+        eprintln!(
+            "  Phase 3 (ChEMBL): {} bioactivities, {} edges, {} new genes [{}]",
+            format_num(bio_nodes), format_num(bio_edges), format_num(new_genes),
+            format_duration(t.elapsed())
+        );
+    }
+
+    if phases.contains(&"openfda".to_string()) || phases.contains(&"all".to_string()) {
+        let t = Instant::now();
+        let (ae_nodes, ae_edges) =
+            load_openfda(graph, &mut maps, data_dir)?;
+        result.adverse_event_nodes = ae_nodes;
+        result.adverse_event_edges = ae_edges;
+        eprintln!(
+            "  Phase 4 (OpenFDA): {} adverse events, {} edges [{}]",
+            format_num(ae_nodes), format_num(ae_edges),
+            format_duration(t.elapsed())
+        );
+    }
+
     result.total_nodes = result.drug_nodes + result.gene_nodes
-        + result.side_effect_nodes + result.indication_nodes;
+        + result.side_effect_nodes + result.indication_nodes
+        + result.bioactivity_nodes + result.adverse_event_nodes;
     result.total_edges = result.interaction_edges
-        + result.side_effect_edges + result.indication_edges;
+        + result.side_effect_edges + result.indication_edges
+        + result.bioactivity_edges + result.adverse_event_edges;
 
     Ok(result)
 }
@@ -465,6 +510,207 @@ fn load_sider(
     }
 
     Ok((se_nodes, se_edges, ind_nodes, ind_edges))
+}
+
+// ============================================================================
+// PHASE 3: ChEMBL bioactivities
+// ============================================================================
+
+fn load_chembl(
+    graph: &mut GraphStore,
+    maps: &mut IdMaps,
+    data_dir: &Path,
+) -> Result<(usize, usize, usize), Error> {
+    let chembl_path = data_dir.join("chembl").join("chembl_activities.tsv");
+    if !chembl_path.exists() {
+        eprintln!("    ChEMBL: skipped (no chembl_activities.tsv)");
+        return Ok((0, 0, 0));
+    }
+
+    let file = File::open(&chembl_path)?;
+    let reader = BufReader::new(file);
+    let mut bio_nodes = 0usize;
+    let mut bio_edges = 0usize;
+    let mut new_genes = 0usize;
+    let mut first = true;
+    let mut col_idx: HashMap<String, usize> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if first {
+            for (i, col) in line.split('\t').enumerate() {
+                col_idx.insert(col.trim().to_string(), i);
+            }
+            first = false;
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        let chembl_id = tfield(&fields, &col_idx, "chembl_id");
+        let assay_id = tfield(&fields, &col_idx, "chembl_assay_id");
+        let assay_type = tfield(&fields, &col_idx, "assay_type");
+        let std_type = tfield(&fields, &col_idx, "standard_type");
+        let std_value = tfield(&fields, &col_idx, "standard_value");
+        let std_units = tfield(&fields, &col_idx, "standard_units");
+        let pchembl = tfield(&fields, &col_idx, "pchembl_value");
+        let gene_name = tfield(&fields, &col_idx, "gene_name");
+        let target_name = tfield(&fields, &col_idx, "target_name");
+
+        if assay_id.is_empty() {
+            continue;
+        }
+
+        // Create Bioactivity node if new
+        if !maps.bioactivity.contains_key(&assay_id) {
+            let nid = graph.create_node("Bioactivity");
+            if let Some(n) = graph.get_node_mut(nid) {
+                n.set_property("chembl_assay_id", PropertyValue::String(assay_id.clone()));
+                if !assay_type.is_empty() {
+                    n.set_property("assay_type", PropertyValue::String(assay_type.clone()));
+                }
+                if !std_type.is_empty() {
+                    n.set_property("standard_type", PropertyValue::String(std_type.clone()));
+                }
+                if !std_value.is_empty() {
+                    if let Ok(v) = std_value.parse::<f64>() {
+                        n.set_property("standard_value", PropertyValue::Float(v));
+                    }
+                }
+                if !std_units.is_empty() {
+                    n.set_property("standard_units", PropertyValue::String(std_units.clone()));
+                }
+                if !pchembl.is_empty() {
+                    if let Ok(v) = pchembl.parse::<f64>() {
+                        n.set_property("pchembl_value", PropertyValue::Float(v));
+                    }
+                }
+                if !target_name.is_empty() {
+                    n.set_property("target_name", PropertyValue::String(target_name));
+                }
+            }
+            maps.bioactivity.insert(assay_id.clone(), nid);
+            bio_nodes += 1;
+        }
+
+        let bio_node = maps.bioactivity[&assay_id];
+
+        // HAS_BIOACTIVITY edge (Drug -> Bioactivity) — resolve drug by chembl_id
+        let dbid = maps.drug_name_to_dbid.get(&chembl_id.to_lowercase()).cloned();
+        if let Some(ref dbid) = dbid {
+            if let Some(&drug_node) = maps.drug.get(dbid) {
+                let edge_key = format!("{}|{}", dbid, assay_id);
+                if !maps.bioactivity_edges.contains(&edge_key) {
+                    maps.bioactivity_edges.insert(edge_key);
+                    let _ = graph.create_edge(drug_node, bio_node, "HAS_BIOACTIVITY");
+                    bio_edges += 1;
+                }
+            }
+        }
+
+        // BIOACTIVITY_TARGET edge (Bioactivity -> Gene)
+        if !gene_name.is_empty() {
+            let gene_node = if let Some(&id) = maps.gene.get(&gene_name) {
+                id
+            } else {
+                let id = graph.create_node("Gene");
+                if let Some(n) = graph.get_node_mut(id) {
+                    n.set_property("gene_name", PropertyValue::String(gene_name.clone()));
+                }
+                maps.gene.insert(gene_name.clone(), id);
+                new_genes += 1;
+                id
+            };
+            let bt_key = format!("{}|{}", assay_id, gene_name);
+            if !maps.bioactivity_edges.contains(&bt_key) {
+                maps.bioactivity_edges.insert(bt_key);
+                let _ = graph.create_edge(bio_node, gene_node, "BIOACTIVITY_TARGET");
+                bio_edges += 1;
+            }
+        }
+
+        if bio_nodes % 100_000 == 0 && bio_nodes > 0 {
+            eprint!("\r    ChEMBL: {} bioactivities, {} edges", format_num(bio_nodes), format_num(bio_edges));
+        }
+    }
+    eprintln!("\r    ChEMBL: {} bioactivities, {} edges, {} new genes",
+        format_num(bio_nodes), format_num(bio_edges), format_num(new_genes));
+
+    Ok((bio_nodes, bio_edges, new_genes))
+}
+
+// ============================================================================
+// PHASE 4: OpenFDA FAERS adverse events
+// ============================================================================
+
+fn load_openfda(
+    graph: &mut GraphStore,
+    maps: &mut IdMaps,
+    data_dir: &Path,
+) -> Result<(usize, usize), Error> {
+    let openfda_path = data_dir.join("openfda").join("adverse_events.tsv");
+    if !openfda_path.exists() {
+        eprintln!("    OpenFDA: skipped (no adverse_events.tsv)");
+        return Ok((0, 0));
+    }
+
+    let file = File::open(&openfda_path)?;
+    let reader = BufReader::new(file);
+    let mut ae_nodes = 0usize;
+    let mut ae_edges = 0usize;
+    let mut first = true;
+    let mut col_idx: HashMap<String, usize> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if first {
+            for (i, col) in line.split('\t').enumerate() {
+                col_idx.insert(col.trim().to_string(), i);
+            }
+            first = false;
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        let dbid = tfield(&fields, &col_idx, "drugbank_id");
+        let ae_term = tfield(&fields, &col_idx, "adverse_event_term");
+        let count_str = tfield(&fields, &col_idx, "count");
+
+        if dbid.is_empty() || ae_term.is_empty() {
+            continue;
+        }
+
+        // Create AdverseEvent node if new
+        let ae_key = ae_term.to_lowercase();
+        let ae_node = if let Some(&id) = maps.adverse_event.get(&ae_key) {
+            id
+        } else {
+            let id = graph.create_node("AdverseEvent");
+            if let Some(n) = graph.get_node_mut(id) {
+                n.set_property("term", PropertyValue::String(ae_term.clone()));
+                n.set_property("source", PropertyValue::String("OpenFDA_FAERS".to_string()));
+            }
+            maps.adverse_event.insert(ae_key.clone(), id);
+            ae_nodes += 1;
+            id
+        };
+
+        // HAS_ADVERSE_EVENT edge (Drug -> AdverseEvent)
+        if let Some(&drug_node) = maps.drug.get(&dbid) {
+            let edge_key = format!("{}|{}", dbid, ae_key);
+            if !maps.adverse_event_edges.contains(&edge_key) {
+                maps.adverse_event_edges.insert(edge_key);
+                let eid = graph.create_edge(drug_node, ae_node, "HAS_ADVERSE_EVENT")
+                    .map_err(|e| format!("Edge creation failed: {}", e))?;
+                if let Ok(count) = count_str.parse::<i64>() {
+                    if let Some(e) = graph.get_edge_mut(eid) {
+                        e.set_property("report_count", PropertyValue::Integer(count));
+                    }
+                }
+                ae_edges += 1;
+            }
+        }
+    }
+    eprintln!("    OpenFDA: {} adverse events, {} edges", format_num(ae_nodes), format_num(ae_edges));
+
+    Ok((ae_nodes, ae_edges))
 }
 
 // ============================================================================

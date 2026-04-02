@@ -10,7 +10,7 @@ use std::collections::HashMap;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotHeader {
     pub format: String,           // Always "sgsnap"
-    pub version: u32,             // Format version (currently 1)
+    pub version: u32,             // Format version: 1 (legacy), 2 (with CSR + ColumnStore)
     pub tenant: String,           // Tenant ID that was exported
     pub node_count: u64,
     pub edge_count: u64,
@@ -19,6 +19,11 @@ pub struct SnapshotHeader {
     pub created_at: String,       // ISO 8601
     pub samyama_version: String,
 }
+
+/// Current snapshot format version.
+/// v1: JSON nodes + JSON edges (from Edge arena)
+/// v2: JSON nodes (with ColumnStore props merged) + stub edges (from adjacency lists)
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// A node record in the snapshot
 #[derive(Debug, Serialize, Deserialize)]

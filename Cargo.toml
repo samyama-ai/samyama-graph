@@ -72,6 +72,9 @@ lru = "0.12"
 # Snapshot compression
 flate2 = "1.0"
 
+# Parallel processing
+rayon = "1.10"
+
 # Optimization Engine (Phase 7)
 samyama-optimization = { path = "crates/samyama-optimization", version = "0.6.1" }
 samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "0.6.1" }
