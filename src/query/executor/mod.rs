@@ -77,6 +77,7 @@
 //! heterogeneous collections of operators.
 
 pub mod cost_model;
+pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
 pub mod operator;

@@ -25,7 +25,9 @@ impl MOTLBOSolver {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
                 let fitness = problem.objectives(&vars);
-                MultiObjectiveIndividual::new(vars, fitness)
+                let penalties = problem.penalties(&vars);
+                let violation: f64 = penalties.iter().sum();
+                MultiObjectiveIndividual::new(vars, fitness, violation)
             })
             .collect();
 
@@ -49,7 +51,11 @@ impl MOTLBOSolver {
                     let r: f64 = local_rng.gen();
                     new_vars[j] = (ind.variables[j] + r * (teacher_vars[j] - tf * mean_vars[j])).clamp(lower[j], upper[j]);
                 }
-                offspring.push(MultiObjectiveIndividual::new(new_vars.clone(), problem.objectives(&new_vars)));
+                
+                let fitness = problem.objectives(&new_vars);
+                let penalties = problem.penalties(&new_vars);
+                let violation: f64 = penalties.iter().sum();
+                offspring.push(MultiObjectiveIndividual::new(new_vars, fitness, violation));
             }
 
             // Learner Phase
@@ -62,8 +68,14 @@ impl MOTLBOSolver {
                 }
 
                 let mut new_vars = Array1::zeros(dim);
-                let dominates_i_j = self.dominates(&population[i].fitness, &population[j].fitness);
-                let dominates_j_i = self.dominates(&population[j].fitness, &population[i].fitness);
+                let dominates_i_j = self.dominates(
+                    &population[i].fitness, population[i].constraint_violation,
+                    &population[j].fitness, population[j].constraint_violation
+                );
+                let dominates_j_i = self.dominates(
+                    &population[j].fitness, population[j].constraint_violation,
+                    &population[i].fitness, population[i].constraint_violation
+                );
 
                 for k in 0..dim {
                     let r: f64 = local_rng.gen();
@@ -76,7 +88,11 @@ impl MOTLBOSolver {
                         new_vars[k] = population[i].variables[k];
                     }
                 }
-                offspring.push(MultiObjectiveIndividual::new(new_vars.clone(), problem.objectives(&new_vars)));
+                
+                let fitness = problem.objectives(&new_vars);
+                let penalties = problem.penalties(&new_vars);
+                let violation: f64 = penalties.iter().sum();
+                offspring.push(MultiObjectiveIndividual::new(new_vars, fitness, violation));
             }
 
             // Merge and Rank
@@ -148,9 +164,15 @@ impl MOTLBOSolver {
         for i in 0..n {
             for j in 0..n {
                 if i == j { continue; }
-                if self.dominates(&population[i].fitness, &population[j].fitness) {
+                if self.dominates(
+                    &population[i].fitness, population[i].constraint_violation,
+                    &population[j].fitness, population[j].constraint_violation
+                ) {
                     dominated_sets[i].push(j);
-                } else if self.dominates(&population[j].fitness, &population[i].fitness) {
+                } else if self.dominates(
+                    &population[j].fitness, population[j].constraint_violation,
+                    &population[i].fitness, population[i].constraint_violation
+                ) {
                     dominance_counts[i] += 1;
                 }
             }
@@ -177,7 +199,21 @@ impl MOTLBOSolver {
         }
     }
 
-    fn dominates(&self, f1: &[f64], f2: &[f64]) -> bool {
+    fn dominates(&self, f1: &[f64], v1: f64, f2: &[f64], v2: f64) -> bool {
+        // 1. Feasible vs Infeasible
+        if v1 == 0.0 && v2 > 0.0 {
+            return true;
+        }
+        if v1 > 0.0 && v2 == 0.0 {
+            return false;
+        }
+
+        // 2. Both Infeasible: Smaller violation is better
+        if v1 > 0.0 && v2 > 0.0 {
+            return v1 < v2;
+        }
+
+        // 3. Both Feasible: Pareto dominance
         let mut better = false;
         for i in 0..f1.len() {
             if f1[i] > f2[i] { return false; }

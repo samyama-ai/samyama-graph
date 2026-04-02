@@ -585,9 +585,12 @@ mod tests {
         let config = EnumerationConfig::default();
         let plans = enumerate_plans(&pg, None, &catalog, &config);
 
-        // At least one plan should contain ExpandInto
+        // After WCO optimization, ExpandInto+Expand chains become TrieJoin.
+        // At least one plan should contain a TrieJoin (upgraded from ExpandInto).
+        let has_wco = plans.iter().any(|(plan, _)| contains_trie_join(plan));
         let has_expand_into = plans.iter().any(|(plan, _)| contains_expand_into(plan));
-        assert!(has_expand_into, "Triangle pattern should produce at least one plan with ExpandInto");
+        assert!(has_wco || has_expand_into,
+            "Triangle pattern should produce at least one plan with TrieJoin or ExpandInto");
     }
 
     /// Helper to check if a plan contains an ExpandInto node
@@ -596,9 +599,24 @@ mod tests {
             LogicalPlanNode::ExpandInto { .. } => true,
             LogicalPlanNode::Expand { input, .. } => contains_expand_into(input),
             LogicalPlanNode::ExpandInto { input, .. } => contains_expand_into(input),
+            LogicalPlanNode::TrieJoin { input, .. } => contains_expand_into(input),
             LogicalPlanNode::Filter { input, .. } => contains_expand_into(input),
             LogicalPlanNode::Join { left, right, .. } => contains_expand_into(left) || contains_expand_into(right),
             LogicalPlanNode::CartesianProduct { left, right } => contains_expand_into(left) || contains_expand_into(right),
+            _ => false,
+        }
+    }
+
+    /// Helper to check if a plan contains a TrieJoin node (WCO)
+    fn contains_trie_join(plan: &LogicalPlanNode) -> bool {
+        match plan {
+            LogicalPlanNode::TrieJoin { .. } => true,
+            LogicalPlanNode::Expand { input, .. } => contains_trie_join(input),
+            LogicalPlanNode::ExpandInto { input, .. } => contains_trie_join(input),
+            LogicalPlanNode::TrieJoin { input, .. } => contains_trie_join(input),
+            LogicalPlanNode::Filter { input, .. } => contains_trie_join(input),
+            LogicalPlanNode::Join { left, right, .. } => contains_trie_join(left) || contains_trie_join(right),
+            LogicalPlanNode::CartesianProduct { left, right } => contains_trie_join(left) || contains_trie_join(right),
             _ => false,
         }
     }

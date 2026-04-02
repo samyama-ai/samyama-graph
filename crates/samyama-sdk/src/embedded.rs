@@ -83,6 +83,11 @@ impl EmbeddedClient {
         samyama::PersistenceManager::new(base_path)
     }
 
+    /// Create a tenant manager for multi-tenancy.
+    pub fn tenant_manager(&self) -> samyama::TenantManager {
+        samyama::TenantManager::new()
+    }
+
     /// Return AST cache statistics (hits, misses).
     pub fn cache_stats(&self) -> &samyama::query::CacheStats {
         self.engine.cache_stats()
@@ -107,9 +112,9 @@ impl EmbeddedClient {
         _tenant: &str,
         path: &std::path::Path,
     ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
-        let mut store_guard = self.store.write().await;
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
+        let mut store_guard = self.store.write().await;
         let stats = samyama::snapshot::import_tenant(&mut store_guard, reader)?;
         Ok(stats)
     }
@@ -451,6 +456,16 @@ mod tests {
         let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.name")
             .await.unwrap();
         assert_eq!(result.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_embedded_tenant_manager() {
+        let client = EmbeddedClient::new();
+        let tm = client.tenant_manager();
+        let tenants = tm.list_tenants();
+        // Default tenant should exist
+        assert!(!tenants.is_empty());
+        assert!(tm.is_tenant_enabled("default"));
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
 use crate::query::ast::Direction;
 use super::logical_plan::{LogicalPlanNode, ExpandDirection};
 use super::operator::*;
+use super::leapfrog::{TrieJoinOperator, PhysicalTrieConstraint};
 
 /// Convert a logical plan tree into a physical operator tree
 pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
@@ -63,6 +64,30 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
                 target_var.clone(),
                 et,
                 edge_var.clone(),
+            ))
+        }
+
+        LogicalPlanNode::TrieJoin { input, target_var, constraints } => {
+            let physical_input = logical_to_physical(input);
+
+            let physical_constraints: Vec<PhysicalTrieConstraint> = constraints.iter().map(|c| {
+                let direction = match c.direction {
+                    ExpandDirection::Forward => Direction::Outgoing,
+                    ExpandDirection::Reverse => Direction::Incoming,
+                };
+                let et_strings: Vec<String> = c.edge_types.iter().map(|et| et.as_str().to_string()).collect();
+                PhysicalTrieConstraint {
+                    bound_var: c.bound_var.clone(),
+                    direction,
+                    edge_types: et_strings,
+                    edge_var: c.edge_var.clone(),
+                }
+            }).collect();
+
+            Box::new(TrieJoinOperator::new(
+                physical_input,
+                target_var.clone(),
+                physical_constraints,
             ))
         }
 

@@ -41,15 +41,17 @@ pub trait Problem: Send + Sync {
 pub struct MultiObjectiveIndividual {
     pub variables: Array1<f64>,
     pub fitness: Vec<f64>,
+    pub constraint_violation: f64,
     pub rank: usize,
     pub crowding_distance: f64,
 }
 
 impl MultiObjectiveIndividual {
-    pub fn new(variables: Array1<f64>, fitness: Vec<f64>) -> Self {
+    pub fn new(variables: Array1<f64>, fitness: Vec<f64>, constraint_violation: f64) -> Self {
         Self { 
             variables, 
             fitness, 
+            constraint_violation,
             rank: 0, 
             crowding_distance: 0.0 
         }

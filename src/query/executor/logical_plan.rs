@@ -16,6 +16,20 @@ pub enum ExpandDirection {
     Reverse,
 }
 
+/// A constraint in a TrieJoin: the target variable must appear in the
+/// adjacency list of bound_var in the given direction.
+#[derive(Debug, Clone)]
+pub struct TrieJoinConstraint {
+    /// The already-bound variable whose adjacency list we intersect
+    pub bound_var: String,
+    /// Direction: Forward = target ∈ N_out(bound), Reverse = target ∈ N_in(bound)
+    pub direction: ExpandDirection,
+    /// Optional edge type filter
+    pub edge_types: Vec<EdgeType>,
+    /// Optional edge variable binding
+    pub edge_var: Option<String>,
+}
+
 /// A logical plan node — describes what to do, not how to do it
 #[derive(Debug, Clone)]
 pub enum LogicalPlanNode {
@@ -47,6 +61,17 @@ pub enum LogicalPlanNode {
         target_var: String,
         edge_types: Vec<EdgeType>,
         edge_var: Option<String>,
+    },
+    /// Worst-Case Optimal Join using LeapFrog TrieJoin for cyclic patterns.
+    /// Replaces Expand+ExpandInto chains with a single multi-way intersection.
+    /// For triangle (a)->(b)->(c)->(a): given bound {a,b}, finds all c in
+    /// N_out(b) ∩ N_in(a) simultaneously using sorted-list intersection.
+    TrieJoin {
+        input: Box<LogicalPlanNode>,
+        /// The variable being solved by intersection
+        target_var: String,
+        /// Adjacency constraints that must all be satisfied
+        constraints: Vec<TrieJoinConstraint>,
     },
     /// Apply a filter predicate
     Filter {
@@ -98,6 +123,16 @@ impl LogicalPlanNode {
                 }
                 s
             }
+            LogicalPlanNode::TrieJoin { input, target_var, constraints, .. } => {
+                let mut s = input.bound_variables();
+                s.insert(target_var.clone());
+                for c in constraints {
+                    if let Some(ref ev) = c.edge_var {
+                        s.insert(ev.clone());
+                    }
+                }
+                s
+            }
             LogicalPlanNode::Filter { input, .. } => input.bound_variables(),
             LogicalPlanNode::Join { left, right, .. } => {
                 let mut s = left.bound_variables();
@@ -136,6 +171,19 @@ impl LogicalPlanNode {
                 let types = Self::fmt_etypes(edge_types);
                 let child = input.display_plan(indent + 1);
                 format!("{}{}ExpandInto ({}<-[:{}]->{})\n{}", prefix, connector, source_var, types, target_var, child)
+            }
+            LogicalPlanNode::TrieJoin { input, target_var, constraints } => {
+                let edges: Vec<String> = constraints.iter().map(|c| {
+                    let dir = match c.direction {
+                        ExpandDirection::Forward => format!("N_out({})", c.bound_var),
+                        ExpandDirection::Reverse => format!("N_in({})", c.bound_var),
+                    };
+                    if c.edge_types.is_empty() { dir } else {
+                        format!("{}[:{}]", dir, Self::fmt_etypes(&c.edge_types))
+                    }
+                }).collect();
+                let child = input.display_plan(indent + 1);
+                format!("{}{}TrieJoin ({} ∈ {})\n{}", prefix, connector, target_var, edges.join(" ∩ "), child)
             }
             LogicalPlanNode::Filter { input, predicate } => {
                 let child = input.display_plan(indent + 1);
