@@ -1392,6 +1392,128 @@ fn load_design_group_interventions(
 ///
 /// # Returns
 /// `LoadResult` with total node and edge counts.
+// ============================================================================
+// STEP 13: Drug enrichment from DrugBank vocabulary (offline, no API)
+// ============================================================================
+
+/// Match DRUG-type Intervention names against DrugBank vocabulary (names + synonyms).
+/// Creates Drug nodes and CODED_AS_DRUG edges. No external API calls needed.
+fn enrich_drugs_from_drugbank(
+    graph: &mut GraphStore,
+    vocab_path: &Path,
+    ids: &IdMaps,
+) -> Result<(usize, usize), Error> {
+    // Build lookup: lowercase name/synonym -> (drugbank_id, canonical_name)
+    let mut name_to_drug: HashMap<String, (String, String)> = HashMap::new();
+
+    let file = File::open(vocab_path)?;
+    let reader = BufReader::new(file);
+    let mut first = true;
+    let mut col_idx: HashMap<String, usize> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if first {
+            // Parse CSV header
+            for (i, col) in line.split(',').enumerate() {
+                col_idx.insert(col.trim().trim_matches('"').to_string(), i);
+            }
+            first = false;
+            continue;
+        }
+        // Parse CSV with quoted fields
+        let fields = parse_drugbank_csv(&line);
+        let dbid = fields.get(*col_idx.get("DrugBank ID").unwrap_or(&0))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+        let common_name = fields.get(*col_idx.get("Common name").unwrap_or(&2))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+        let synonyms_str = fields.get(*col_idx.get("Synonyms").unwrap_or(&5))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+
+        if dbid.is_empty() || common_name.is_empty() {
+            continue;
+        }
+
+        let entry = (dbid.clone(), common_name.clone());
+        name_to_drug.insert(common_name.to_lowercase(), entry.clone());
+
+        // Index synonyms
+        for syn in synonyms_str.split('|') {
+            let syn = syn.trim();
+            if !syn.is_empty() {
+                name_to_drug.entry(syn.to_lowercase())
+                    .or_insert_with(|| entry.clone());
+            }
+        }
+    }
+
+    eprintln!("    DrugBank vocabulary: {} names/synonyms indexed", format_num(name_to_drug.len()));
+
+    // Match interventions against DrugBank
+    let mut drug_nodes: HashMap<String, NodeId> = HashMap::new();  // dbid -> NodeId
+    let mut node_count = 0usize;
+    let mut edge_count = 0usize;
+
+    for (interv_name_lower, &interv_node) in &ids.intervention {
+        // Check if this intervention is a DRUG type
+        let is_drug = graph.get_node(interv_node)
+            .and_then(|n| n.get_property("type"))
+            .map(|v| matches!(v, PropertyValue::String(s) if s == "DRUG"))
+            .unwrap_or(false);
+
+        if !is_drug {
+            continue;
+        }
+
+        // Try matching intervention name against DrugBank
+        if let Some((dbid, canonical_name)) = name_to_drug.get(interv_name_lower) {
+            let drug_node = if let Some(&existing) = drug_nodes.get(dbid) {
+                existing
+            } else {
+                let nid = graph.create_node("Drug");
+                if let Some(n) = graph.get_node_mut(nid) {
+                    n.set_property("drugbank_id", PropertyValue::String(dbid.clone()));
+                    n.set_property("name", PropertyValue::String(canonical_name.clone()));
+                }
+                drug_nodes.insert(dbid.clone(), nid);
+                node_count += 1;
+                nid
+            };
+
+            // Intervention -[:CODED_AS_DRUG]-> Drug
+            if graph.create_edge(interv_node, drug_node, "CODED_AS_DRUG").is_ok() {
+                edge_count += 1;
+            }
+        }
+    }
+
+    eprintln!("    Matched: {} Drug nodes, {} CODED_AS_DRUG edges (from {} drug-type interventions)",
+        format_num(node_count), format_num(edge_count),
+        format_num(ids.intervention.len()));
+
+    Ok((node_count, edge_count))
+}
+
+/// Parse a CSV line with quoted fields containing commas and pipes.
+fn parse_drugbank_csv(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current);
+    fields
+}
+
 pub fn load_dataset(
     graph: &mut GraphStore,
     data_dir: &Path,
@@ -1603,6 +1725,38 @@ pub fn load_dataset(
     ));
     total_nodes += nn;
     total_edges += ne;
+
+    // ====================================================================
+    // Step 13: Drug enrichment (DrugBank cross-reference, no API calls)
+    // ====================================================================
+    let drugbank_vocab = data_dir.join("..").join("drugbank_vocabulary.csv");
+    // Also check a few common locations
+    let drugbank_vocab = if drugbank_vocab.exists() {
+        Some(drugbank_vocab)
+    } else {
+        // Try sibling druginteractions-kg data dir
+        let alt = data_dir.join("..").join("..").join("..").join("druginteractions-kg")
+            .join("data").join("drugbank").join("drugbank_vocabulary.csv");
+        if alt.exists() { Some(alt) } else { None }
+    };
+
+    if let Some(vocab_path) = drugbank_vocab {
+        eprintln!("--- Step 13: Drug enrichment (DrugBank cross-reference) ---");
+        let t = Instant::now();
+        let (nn, ne) = enrich_drugs_from_drugbank(graph, &vocab_path, &ids)?;
+        print_done(&format!(
+            "  Drug           {:>12} nodes, {:>12} CODED_AS_DRUG edges ({})",
+            format_num(nn),
+            format_num(ne),
+            format_duration(t.elapsed())
+        ));
+        total_nodes += nn;
+        total_edges += ne;
+    } else {
+        eprintln!("--- Step 13: Drug enrichment skipped (no drugbank_vocabulary.csv found) ---");
+        eprintln!("  Hint: place drugbank_vocabulary.csv alongside the AACT data dir,");
+        eprintln!("  or ensure druginteractions-kg/data/drugbank/ is a sibling directory.");
+    }
 
     Ok(LoadResult {
         total_nodes,
