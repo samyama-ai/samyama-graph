@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "samyama"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2678,6 +2678,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "rand 0.8.5",
+ "rayon",
  "regex",
  "reqwest",
  "rio_api",
@@ -2704,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "clap",
  "comfy-table",
@@ -2715,16 +2716,17 @@ dependencies = [
 
 [[package]]
 name = "samyama-graph-algorithms"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "ndarray",
  "rand 0.8.5",
+ "rayon",
  "serde",
 ]
 
 [[package]]
 name = "samyama-optimization"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -2737,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-sdk"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "ndarray",
