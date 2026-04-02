@@ -87,6 +87,7 @@ use crate::index::IndexManager;
 use crate::graph::storage::ColumnStore;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
 use std::sync::Arc;
 use thiserror::Error;
 use crate::agent::{AgentRuntime, tools::WebSearchTool};
@@ -865,6 +866,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.get_node(id).is_some()
     }
 
+    /// Get sorted frozen outgoing neighbors for a node (for LeapFrog joins).
+    pub fn frozen_outgoing_neighbors(&self, idx: usize) -> Vec<(NodeId, EdgeId)> {
+        self.frozen_outgoing.neighbors_collected(idx)
+    }
+
+    /// Get sorted frozen incoming neighbors for a node (for LeapFrog joins).
+    pub fn frozen_incoming_neighbors(&self, idx: usize) -> Vec<(NodeId, EdgeId)> {
+        self.frozen_incoming.neighbors_collected(idx)
+    }
+
+    /// Get write buffer outgoing neighbors for a node (may be unsorted for stub-loaded).
+    pub fn get_outgoing_neighbor_slice(&self, node_id: NodeId) -> &[(NodeId, EdgeId)] {
+        let idx = node_id.as_u64() as usize;
+        self.outgoing.get(idx).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Get write buffer incoming neighbors for a node.
+    pub fn get_incoming_neighbor_slice(&self, node_id: NodeId) -> &[(NodeId, EdgeId)] {
+        let idx = node_id.as_u64() as usize;
+        self.incoming.get(idx).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
     /// Create a lightweight node stub: label + identity only, no properties, no index events.
     /// Properties should be set via `set_column_property()` for two-phase bulk loading.
     pub fn create_node_stub(&mut self, label: impl Into<Label>) -> NodeId {
@@ -918,13 +941,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get edge type for an edge — checks compact type array first, then full Edge store.
     /// Works for both stub-loaded and fully-loaded edges.
+    /// Sentinel value for unset entries in edge_type_ids.
+    /// Distinguishes "not set" from "type 0" so v1 full edges fall through to Edge arena.
+    const EDGE_TYPE_UNSET: u16 = u16::MAX;
+
     pub fn get_edge_type(&self, edge_id: EdgeId) -> Option<EdgeType> {
         let idx = edge_id.as_u64() as usize;
         // Check compact type array (populated by create_edge_stub)
         if idx < self.edge_type_ids.len() {
-            let type_id = self.edge_type_ids[idx] as usize;
-            if type_id < self.edge_type_table.len() {
-                return Some(self.edge_type_table[type_id].clone());
+            let type_id = self.edge_type_ids[idx];
+            if type_id != Self::EDGE_TYPE_UNSET && (type_id as usize) < self.edge_type_table.len() {
+                return Some(self.edge_type_table[type_id as usize].clone());
             }
         }
         // Fall back to full Edge store (populated by create_edge)
@@ -1141,12 +1168,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Compact edge type: 2 bytes per edge (DS-07c)
         let type_id = self.intern_edge_type(&edge_type);
         if idx >= self.edge_type_ids.len() {
-            self.edge_type_ids.resize(idx + 1, 0);
+            self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
 
-        // Skip edges arena resize — saves 24 bytes/slot × 1B = 24 GB.
-        // get_edge() returns None for stubs; get_edge_type() uses edge_type_ids.
+        // Size the edges arena for EdgeId allocation (no Edge object stored)
+        if idx >= self.edges.len() {
+            self.edges.resize(idx + 1, Vec::new());
+        }
 
         Ok(edge_id)
     }
@@ -1483,12 +1512,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for i in start..entries.len() {
             let (nid, eid) = entries[i];
             if nid != search_key { break; }
+            // Try full Edge first, fall back to edge_type_ids for stubs
             if let Some(e) = self.get_edge(eid) {
                 if e.source == source && e.target == target {
                     match edge_type {
                         Some(et) if &e.edge_type != et => {}
                         _ => result.push(eid),
                     }
+                }
+            } else {
+                // Stub edge: adjacency entry (nid, eid) tells us the neighbor.
+                // The source/target are implicit from the adjacency list direction.
+                // For outgoing[source], neighbor = target. Check edge type via compact array.
+                match edge_type {
+                    Some(et) => {
+                        if let Some(actual_et) = self.get_edge_type(eid) {
+                            if &actual_et == et { result.push(eid); }
+                        }
+                    }
+                    None => result.push(eid), // No type filter — match all
                 }
             }
         }
@@ -1562,7 +1604,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get total number of edges
     pub fn edge_count(&self) -> usize {
-        self.edges.iter().flatten().count()
+        // Count full Edge objects in arena
+        let arena_count = self.edges.iter().flatten().count();
+        if arena_count > 0 {
+            return arena_count;
+        }
+        // Fallback: count from frozen adjacency (for stub-loaded graphs)
+        let frozen = self.frozen_outgoing.edge_count();
+        let buffer: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        frozen + buffer
     }
 
     /// Get all nodes in the graph
@@ -1732,14 +1782,23 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return; // Nothing to compact
         }
 
-        // Append a new frozen segment from the write buffer.
-        // No merge with existing segments — avoids memory spike.
-        self.frozen_outgoing.push(FrozenAdjacency::from_vec_of_vec(&self.outgoing));
-        self.frozen_incoming.push(FrozenAdjacency::from_vec_of_vec(&self.incoming));
+        // Build CSR segments in parallel (outgoing + incoming simultaneously)
+        // Uses rayon's join for two independent tasks
+        let (frozen_out, frozen_in) = rayon::join(
+            || FrozenAdjacency::from_vec_of_vec(&self.outgoing),
+            || FrozenAdjacency::from_vec_of_vec(&self.incoming),
+        );
+        self.frozen_outgoing.push(frozen_out);
+        self.frozen_incoming.push(frozen_in);
 
-        // Clear write buffer — shrink to minimal capacity
-        for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
-        for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
+        // Clear write buffers in parallel (can be millions of Vecs)
+        if self.outgoing.len() >= 10_000 {
+            self.outgoing.par_iter_mut().for_each(|v| { v.clear(); v.shrink_to_fit(); });
+            self.incoming.par_iter_mut().for_each(|v| { v.clear(); v.shrink_to_fit(); });
+        } else {
+            for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
+            for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
+        }
 
         let frozen_edge_count = self.frozen_outgoing.edge_count();
         eprintln!(

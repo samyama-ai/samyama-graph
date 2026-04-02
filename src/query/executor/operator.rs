@@ -69,6 +69,7 @@ use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use rayon::prelude::*;
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
 use ndarray::Array1;
@@ -667,6 +668,19 @@ fn eval_pattern_comprehension(
     }
 
     Ok(Value::Property(PropertyValue::Array(results)))
+}
+
+/// Evaluate a boolean predicate expression standalone (for parallel batch filtering).
+/// Creates a temporary FilterOperator per call — no shared mutable state.
+pub fn eval_predicate_standalone(predicate: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<bool> {
+    // NullScan: produces nothing, never called — just satisfies the OperatorBox type
+    struct NullScan;
+    impl PhysicalOperator for NullScan {
+        fn next(&mut self, _: &GraphStore) -> ExecutionResult<Option<Record>> { Ok(None) }
+        fn reset(&mut self) {}
+    }
+    let evaluator = FilterOperator { input: Box::new(NullScan), predicate: predicate.clone() };
+    evaluator.evaluate_predicate(record, store)
 }
 
 /// Shared function evaluation for scalar functions (not aggregates)
@@ -1899,15 +1913,24 @@ impl PhysicalOperator for NodeScanOperator {
         };
 
         let end = (self.current + effective_batch).min(self.node_ids.len());
-        let range = self.current..end;
+        let slice = &self.node_ids[self.current..end];
         self.current = end;
 
-        let mut records = Vec::with_capacity(range.len());
-        for node_id in &self.node_ids[range] {
-            let mut record = Record::new();
-            record.bind(self.variable.clone(), Value::NodeRef(*node_id));
-            records.push(record);
-        }
+        // Parallel record construction for large batches
+        let records: Vec<Record> = if slice.len() >= 1024 {
+            let var = &self.variable;
+            slice.par_iter().map(|&node_id| {
+                let mut record = Record::new();
+                record.bind(var.clone(), Value::NodeRef(node_id));
+                record
+            }).collect()
+        } else {
+            slice.iter().map(|&node_id| {
+                let mut record = Record::new();
+                record.bind(self.variable.clone(), Value::NodeRef(node_id));
+                record
+            }).collect()
+        };
         self.produced += records.len();
 
         Ok(Some(RecordBatch {
@@ -2306,12 +2329,24 @@ impl PhysicalOperator for FilterOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         let mut filtered_records = Vec::new();
-        
+
         while filtered_records.len() < batch_size {
             if let Some(batch) = self.input.next_batch(store, batch_size)? {
-                for record in batch.records {
-                    if self.evaluate_predicate(&record, store)? {
-                        filtered_records.push(record);
+                let records = batch.records;
+                // Parallel filter for large batches (256+ records)
+                if records.len() >= 256 {
+                    let predicate = self.predicate.clone();
+                    let passed: Vec<Record> = records.into_par_iter()
+                        .filter(|record| {
+                            eval_predicate_standalone(&predicate, record, store).unwrap_or(false)
+                        })
+                        .collect();
+                    filtered_records.extend(passed);
+                } else {
+                    for record in records {
+                        if self.evaluate_predicate(&record, store)? {
+                            filtered_records.push(record);
+                        }
                     }
                 }
             } else {
@@ -2412,24 +2447,24 @@ impl ExpandOperator {
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
-        // Get lightweight edge tuples based on direction (no Edge clone)
-        let edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, &EdgeType)> = match self.direction {
-            Direction::Outgoing => store.get_outgoing_edge_targets(node_id),
-            Direction::Incoming => store.get_incoming_edge_sources(node_id),
+        // Get edge tuples with owned EdgeType — works for both full and stub edges.
+        // Uses compact edge_type_ids array (DS-07c) when Edge objects are not available.
+        let edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)> = match self.direction {
+            Direction::Outgoing => store.get_outgoing_edge_targets_owned(node_id),
+            Direction::Incoming => store.get_incoming_edge_sources_owned(node_id),
             Direction::Both => {
-                let mut all = store.get_outgoing_edge_targets(node_id);
-                all.extend(store.get_incoming_edge_sources(node_id));
+                let mut all = store.get_outgoing_edge_targets_owned(node_id);
+                all.extend(store.get_incoming_edge_sources_owned(node_id));
                 all
             }
         };
 
-        // Filter by edge type if specified, clone EdgeType ref to owned
+        // Filter by edge type if specified
         self.current_edges = if self.edge_types.is_empty() {
-            edges.into_iter().map(|(eid, src, tgt, et)| (eid, src, tgt, et.clone())).collect()
+            edges
         } else {
             edges.into_iter()
                 .filter(|(_, _, _, et)| self.edge_types.iter().any(|t| et.as_str() == t))
-                .map(|(eid, src, tgt, et)| (eid, src, tgt, et.clone()))
                 .collect()
         };
 
@@ -4125,15 +4160,23 @@ impl PhysicalOperator for CreateIndexOperator {
         // IndexManager uses RwLock internally so it handles its own mutability.
         
         // We collect entries to release the borrow on nodes
+        // Check both Node HashMap AND ColumnStore (for stub-loaded graphs)
         let mut entries = Vec::new();
         let nodes = store.get_nodes_by_label(&self.label);
-        
+
         for node in nodes {
+            // Try Node HashMap first
             if let Some(val) = node.get_property(&self.property) {
                 entries.push((node.id, val.clone()));
+            } else {
+                // Fall back to ColumnStore (create_node_stub + set_column_property path)
+                let col_val = store.node_columns.get_property(node.id.as_u64() as usize, &self.property);
+                if !col_val.is_null() {
+                    entries.push((node.id, col_val));
+                }
             }
         }
-        
+
         for (node_id, val) in entries {
             store.property_index.index_insert(&self.label, &self.property, val, node_id);
         }
@@ -4237,12 +4280,17 @@ impl PhysicalOperator for CompositeCreateIndexOperator {
         for property in &self.properties {
             store.property_index.create_index(self.label.clone(), property.clone());
 
-            // Backfill each index
+            // Backfill each index (check both HashMap and ColumnStore)
             let mut entries = Vec::new();
             let nodes = store.get_nodes_by_label(&self.label);
             for node in nodes {
                 if let Some(val) = node.get_property(property) {
                     entries.push((node.id, val.clone()));
+                } else {
+                    let col_val = store.node_columns.get_property(node.id.as_u64() as usize, property);
+                    if !col_val.is_null() {
+                        entries.push((node.id, col_val));
+                    }
                 }
             }
             for (node_id, val) in entries {
@@ -6788,10 +6836,16 @@ impl PhysicalOperator for ExpandIntoOperator {
             if let Some(edge_id) = store.edge_between(source_id, target_id, et_ref) {
                 let mut new_record = record;
                 if let Some(ref edge_var) = self.edge_binding {
+                    // Try full Edge first, fall back to edge_type_ids for stubs
                     if let Some(edge) = store.get_edge(edge_id) {
                         new_record.bind(
                             edge_var.clone(),
                             Value::EdgeRef(edge_id, edge.source, edge.target, edge.edge_type.clone()),
+                        );
+                    } else if let Some(edge_type) = store.get_edge_type(edge_id) {
+                        new_record.bind(
+                            edge_var.clone(),
+                            Value::EdgeRef(edge_id, source_id, target_id, edge_type),
                         );
                     }
                 }
