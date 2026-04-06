@@ -118,6 +118,24 @@ impl EmbeddedClient {
         let stats = samyama::snapshot::import_tenant(&mut store_guard, reader)?;
         Ok(stats)
     }
+
+    /// Import a snapshot with entity deduplication.
+    ///
+    /// `dedup_keys` specifies which node properties should be used to detect
+    /// duplicates across snapshots. For example, `&["iso_code", "drugbank_id"]`
+    /// will merge Country and Drug nodes that share the same key value.
+    pub async fn import_snapshot_dedup(
+        &self,
+        _tenant: &str,
+        path: &std::path::Path,
+        dedup_keys: &[&str],
+    ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let mut store_guard = self.store.write().await;
+        let stats = samyama::snapshot::import_tenant_with_dedup(&mut store_guard, reader, dedup_keys)?;
+        Ok(stats)
+    }
 }
 
 impl Default for EmbeddedClient {
