@@ -136,7 +136,7 @@ pub fn export_tenant(
         gz.write_all(b"\n")?;
     }
 
-    // Write full edges (from Edge arena -- have properties)
+    // Write full edges (from Edge arena — have properties)
     for edge in &full_edges {
         let mut props = HashMap::new();
         for (key, value) in &edge.properties {
@@ -156,7 +156,7 @@ pub fn export_tenant(
         gz.write_all(b"\n")?;
     }
 
-    // Write stub edges (from adjacency lists -- no properties, just topology + type)
+    // Write stub edges (from adjacency lists — no properties, just topology + type)
     for node in &nodes {
         let src_id = node.id.as_u64();
         let idx = src_id as usize;
@@ -217,9 +217,23 @@ pub fn export_tenant(
 /// Import nodes and edges from a .sgsnap stream into the store.
 /// Node IDs are remapped (old ID -> new ID) so the snapshot can be imported
 /// into a store that already has data.
+///
+/// If `dedup_keys` is non-empty, nodes with matching (label, key, value) will
+/// be merged with existing nodes instead of creating duplicates. This enables
+/// cross-snapshot federation (e.g., Country nodes shared across KGs).
+/// The caller decides which properties are unique identifiers for their domain.
 pub fn import_tenant(
     store: &mut GraphStore,
     reader: impl Read,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    import_tenant_with_dedup(store, reader, &[])
+}
+
+/// Import with entity deduplication on specified property keys.
+pub fn import_tenant_with_dedup(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
     let buf_reader = BufReader::new(decoder);
@@ -250,8 +264,45 @@ pub fn import_tenant(
     let mut id_remap: HashMap<u64, NodeId> = HashMap::new();
     let mut imported_node_count: u64 = 0;
     let mut imported_edge_count: u64 = 0;
+    let mut merged_node_count: u64 = 0;
     let mut imported_labels: HashSet<String> = HashSet::new();
     let mut imported_edge_types: HashSet<String> = HashSet::new();
+
+    // Entity dedup index: (label, dedup_key, value_string) → existing NodeId
+    // When importing a node, if the same label+key+value exists, reuse that NodeId
+    // instead of creating a duplicate. This enables cross-snapshot federation.
+    // Entity dedup index: (label, dedup_key, value_string) → existing NodeId.
+    // Only populated when the caller provides dedup_keys.
+    let mut dedup_index: HashMap<(String, String, String), NodeId> = HashMap::new();
+
+    // Pre-populate dedup index from existing store nodes (only if dedup requested)
+    if !dedup_keys.is_empty() {
+    for node in store.all_nodes() {
+        let label = node.labels.iter().next().map(|l| l.as_str().to_string()).unwrap_or_default();
+        for &key in dedup_keys {
+            // Check node HashMap properties
+            if let Some(val) = node.get_property(key) {
+                let val_str = match val {
+                    PropertyValue::String(s) => s.clone(),
+                    PropertyValue::Integer(i) => i.to_string(),
+                    _ => continue,
+                };
+                dedup_index.insert((label.clone(), key.to_string(), val_str), node.id);
+            }
+            // Also check ColumnStore
+            let col_val = store.node_columns.get_property(node.id.as_u64() as usize, key);
+            match &col_val {
+                PropertyValue::String(s) if !s.is_empty() => {
+                    dedup_index.insert((label.clone(), key.to_string(), s.clone()), node.id);
+                }
+                PropertyValue::Integer(i) => {
+                    dedup_index.insert((label.clone(), key.to_string(), i.to_string()), node.id);
+                }
+                _ => {}
+            }
+        }
+    }
+    } // end if !dedup_keys.is_empty()
 
     for line_result in lines {
         let line = line_result?;
@@ -270,6 +321,69 @@ pub fn import_tenant(
                 .cloned()
                 .unwrap_or_else(|| "".to_string());
 
+            // --- Entity dedup: check if this node already exists (only if dedup requested) ---
+            let mut existing_id: Option<NodeId> = None;
+            for &key in dedup_keys.iter() {
+                if let Some(json_val) = snap_node.props.get(key) {
+                    let val_str = match json_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    let lookup = (first_label.clone(), key.to_string(), val_str);
+                    if let Some(&eid) = dedup_index.get(&lookup) {
+                        existing_id = Some(eid);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(eid) = existing_id {
+                // Reuse existing node — remap the ID AND merge properties
+                id_remap.insert(snap_node.id, eid);
+                merged_node_count += 1;
+
+                // Merge properties from snapshot into existing node (additive only)
+                for (key, json_val) in &snap_node.props {
+                    let pv = json_to_property(json_val);
+                    match &pv {
+                        PropertyValue::String(_) | PropertyValue::Integer(_)
+                        | PropertyValue::Float(_) | PropertyValue::Boolean(_) => {
+                            // Only set if not already present in ColumnStore
+                            let existing = store.node_columns.get_property(eid.as_u64() as usize, key);
+                            match existing {
+                                PropertyValue::Null => {
+                                    store.set_column_property(eid, key, pv);
+                                }
+                                _ => {} // Keep existing value
+                            }
+                        }
+                        _ => {
+                            // Complex types: merge into HashMap if not present
+                            if let Some(node) = store.get_node_mut(eid) {
+                                if node.get_property(key).is_none() {
+                                    node.set_property(key.clone(), pv);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add any new labels
+                if let Some(node) = store.get_node_mut(eid) {
+                    for label in &snap_node.labels {
+                        node.add_label(label.as_str());
+                    }
+                }
+
+                // Track labels
+                for label in &snap_node.labels {
+                    imported_labels.insert(label.clone());
+                }
+                continue; // Skip node creation (but properties are merged)
+            }
+
+            // --- Create new node ---
             if use_stubs {
                 // v2: use lightweight stubs + column properties
                 let new_id = store.create_node_stub(first_label.as_str());
@@ -288,12 +402,21 @@ pub fn import_tenant(
                             store.set_column_property(new_id, &key, pv);
                         }
                         _ => {
-                            // Complex types (Array, Map, Vector, DateTime, Duration)
-                            // stored in Node HashMap since ColumnStore doesn't support them
                             if let Some(node) = store.get_node_mut(new_id) {
                                 node.set_property(key.clone(), pv);
                             }
                         }
+                    }
+                }
+                // Register in dedup index
+                for &key in dedup_keys {
+                    if let Some(json_val) = snap_node.props.get(key) {
+                        let val_str = match json_val {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            _ => continue,
+                        };
+                        dedup_index.insert((first_label.clone(), key.to_string(), val_str), new_id);
                     }
                 }
                 id_remap.insert(snap_node.id, new_id);
@@ -306,6 +429,17 @@ pub fn import_tenant(
                     }
                     for (key, json_val) in &snap_node.props {
                         node.set_property(key.clone(), json_to_property(json_val));
+                    }
+                }
+                // Register in dedup index
+                for &key in dedup_keys {
+                    if let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(key)) {
+                        let val_str = match pv {
+                            PropertyValue::String(s) => s.clone(),
+                            PropertyValue::Integer(i) => i.to_string(),
+                            _ => continue,
+                        };
+                        dedup_index.insert((first_label.clone(), key.to_string(), val_str), new_id);
                     }
                 }
                 id_remap.insert(snap_node.id, new_id);
@@ -367,6 +501,10 @@ pub fn import_tenant(
         store.compact_adjacency();
     }
 
+    if merged_node_count > 0 {
+        eprintln!("[dedup] Merged {} duplicate nodes (reused existing)", merged_node_count);
+    }
+
     let mut labels: Vec<String> = imported_labels.into_iter().collect();
     labels.sort();
     let mut edge_types: Vec<String> = imported_edge_types.into_iter().collect();
@@ -425,7 +563,7 @@ fn property_to_json(pv: &PropertyValue) -> serde_json::Value {
 /// Convert serde_json::Value back to PropertyValue for snapshot import
 fn json_to_property(val: &serde_json::Value) -> PropertyValue {
     match val {
-        serde_json::Value::String(s) => PropertyValue::String(s.clone()),
+        serde_json::Value::String(s) => PropertyValue::String(s.trim().to_string()),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 PropertyValue::Integer(i)
@@ -1193,16 +1331,148 @@ mod nct_bridge_edge_tests {
 
         let engine = QueryEngine::new();
 
-        // Simple cross-KG: Article -> Trial
+        // Simple cross-KG: Article → Trial
         let r = engine.execute(
             "MATCH (a:Article)-[:REFERENCED_IN]->(t:ClinicalTrial) RETURN a.pmid, t.nct_id", &g
         ).unwrap();
-        assert_eq!(r.records.len(), 1, "Should find Article->Trial via REFERENCED_IN");
+        assert_eq!(r.records.len(), 1, "Should find Article→Trial via REFERENCED_IN");
 
-        // Deep cross-KG: MeSH -> Article -> Trial -> Intervention
+        // Deep cross-KG: MeSH → Article → Trial → Intervention
         let r = engine.execute(
             "MATCH (m:MeSHTerm)<-[:ANNOTATED_WITH]-(a:Article)-[:REFERENCED_IN]->(t:ClinicalTrial)-[:TESTS]->(i:Intervention) WHERE m.name = 'Neoplasms' RETURN i.name", &g
         ).unwrap();
-        assert_eq!(r.records.len(), 1, "Should traverse MeSH->Article->Trial->Intervention");
+        assert_eq!(r.records.len(), 1, "Should traverse MeSH→Article→Trial→Intervention");
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+    use crate::graph::store::GraphStore;
+
+    #[test]
+    fn test_index_backfill_on_imported_snapshot() {
+        // Create a store, add a node via stub + column property, create index, query via index
+        let mut store = GraphStore::new();
+        
+        // Simulate snapshot import: stub node + column property
+        let nid = store.create_node_stub("Country");
+        store.set_column_property(nid, "iso_code", PropertyValue::String("IND".to_string()));
+        store.set_column_property(nid, "name", PropertyValue::String("India".to_string()));
+        
+        // Create index (simulates CREATE INDEX ON :Country(iso_code))
+        store.property_index.create_index("Country".into(), "iso_code".to_string());
+        
+        // Backfill (same logic as CreateIndexOperator)
+        let nodes = store.get_nodes_by_label(&"Country".into());
+        let mut entries = Vec::new();
+        for node in &nodes {
+            if let Some(val) = node.get_property("iso_code") {
+                entries.push((node.id, val.clone()));
+            } else {
+                let col_val = store.node_columns.get_property(node.id.as_u64() as usize, "iso_code");
+                if !col_val.is_null() {
+                    entries.push((node.id, col_val));
+                }
+            }
+        }
+        for (node_id, val) in &entries {
+            store.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), val.clone(), *node_id);
+        }
+        
+        // Now query via index
+        let index_lock = store.property_index.get_index(&"Country".into(), &"iso_code".to_string()).unwrap();
+        let index = index_lock.read().unwrap();
+        let results = index.get(&PropertyValue::String("IND".to_string()));
+        
+        assert_eq!(results.len(), 1, "Index should find 1 Country with iso_code='IND'");
+        assert_eq!(results[0], nid);
+    }
+    
+    #[test]
+    fn test_snapshot_import_then_index_then_query() {
+        // Full round-trip: export → import → create index → query via Cypher
+        let mut store1 = GraphStore::new();
+        let nid = store1.create_node("Country");
+        if let Some(n) = store1.get_node_mut(nid) {
+            n.set_property("iso_code", PropertyValue::String("IND".to_string()));
+            n.set_property("name", PropertyValue::String("India".to_string()));
+        }
+        
+        // Export
+        let mut buf = Vec::new();
+        export_tenant(&store1, &mut buf).unwrap();
+        
+        // Import into new store
+        let mut store2 = GraphStore::new();
+        let stats = import_tenant(&mut store2, &buf[..]).unwrap();
+        assert_eq!(stats.node_count, 1);
+        
+        // Create index on imported store
+        store2.property_index.create_index("Country".into(), "iso_code".to_string());
+        
+        // Backfill
+        let nodes = store2.get_nodes_by_label(&"Country".into());
+        let mut found = false;
+        for node in &nodes {
+            // Check HashMap
+            if let Some(val) = node.get_property("iso_code") {
+                store2.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), val.clone(), node.id);
+                found = true;
+            }
+            // Check ColumnStore
+            if !found {
+                let col_val = store2.node_columns.get_property(node.id.as_u64() as usize, "iso_code");
+                if !col_val.is_null() {
+                    store2.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), col_val, node.id);
+                    found = true;
+                }
+            }
+        }
+        
+        assert!(found, "Should have found iso_code in either HashMap or ColumnStore");
+        
+        // Query via index
+        let index_lock = store2.property_index.get_index(&"Country".into(), &"iso_code".to_string()).unwrap();
+        let index = index_lock.read().unwrap();
+        let results = index.get(&PropertyValue::String("IND".to_string()));
+        assert_eq!(results.len(), 1, "Index should find Country after import");
+    }
+
+    #[test]
+    fn test_cypher_query_after_snapshot_import() {
+        use crate::query::parser::parse_query;
+        use crate::query::executor::MutQueryExecutor;
+        use crate::query::executor::QueryExecutor;
+
+        // Create original store with Country node
+        let mut store1 = GraphStore::new();
+        let nid = store1.create_node("Country");
+        if let Some(n) = store1.get_node_mut(nid) {
+            n.set_property("iso_code", PropertyValue::String("IND".to_string()));
+            n.set_property("name", PropertyValue::String("India".to_string()));
+        }
+
+        // Export
+        let mut buf = Vec::new();
+        export_tenant(&store1, &mut buf).unwrap();
+
+        // Import into fresh store
+        let mut store2 = GraphStore::new();
+        import_tenant(&mut store2, &buf[..]).unwrap();
+
+        // Create index via Cypher engine
+        let create_idx = parse_query("CREATE INDEX ON :Country(iso_code)").unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store2, "default".to_string());
+        executor.execute(&create_idx).unwrap();
+
+        // Query via Cypher — this uses IndexScan if index exists
+        let query = parse_query("MATCH (c:Country {iso_code: 'IND'}) RETURN c.name").unwrap();
+        let exec = QueryExecutor::new(&store2);
+        let result = exec.execute(&query).unwrap();
+
+        assert!(!result.records.is_empty(),
+            "Cypher query should find Country with iso_code='IND' after snapshot import + CREATE INDEX. Got {} rows.",
+            result.records.len());
     }
 }
