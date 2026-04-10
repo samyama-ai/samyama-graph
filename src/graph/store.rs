@@ -78,7 +78,7 @@
 //! - REQ-MEM-003: Memory-optimized data structures
 
 use super::catalog::GraphCatalog;
-use super::edge::Edge;
+use super::edge::{Edge, EdgeView};
 use super::node::Node;
 use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
@@ -423,6 +423,14 @@ impl FrozenAdjacency {
     }
 }
 
+/// MVCC version entry for edges. Stores a snapshot of edge properties at a specific version.
+/// Endpoints and type are immutable — only properties are versioned.
+#[derive(Debug, Clone)]
+pub struct EdgeVersionEntry {
+    pub version: u64,
+    pub properties: PropertyMap,
+}
+
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
@@ -438,6 +446,17 @@ pub struct GraphStore {
     /// Compact edge type array: EdgeId → type index. 2 bytes per edge (1B edges = 2 GB).
     /// Populated by create_edge_stub(). Replaces full Edge objects for type lookups.
     edge_type_ids: Vec<u16>,
+
+    /// Edge endpoints: EdgeId → (source, target). 16 bytes per edge.
+    /// Populated by both create_edge() and create_edge_stub(). Enables Edge arena removal (DS-07c).
+    edge_endpoints: Vec<(NodeId, NodeId)>,
+
+    /// Sparse edge properties: only edges that have properties get an entry.
+    /// Replaces the PropertyMap inside the Edge arena (DS-07c).
+    edge_properties: HashMap<EdgeId, PropertyMap>,
+
+    /// MVCC version log for edges. Sparse — only edges that have been updated get entries.
+    edge_version_log: HashMap<EdgeId, Vec<EdgeVersionEntry>>,
 
     /// Outgoing edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     outgoing: Vec<Vec<(NodeId, EdgeId)>>,
@@ -500,6 +519,9 @@ impl GraphStore {
             edge_type_table: Vec::new(),
             edge_type_to_id: HashMap::new(),
             edge_type_ids: Vec::new(),
+            edge_endpoints: Vec::with_capacity(4096),
+            edge_properties: HashMap::new(),
+            edge_version_log: HashMap::new(),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
             frozen_outgoing: FrozenAdjacencyStore::new(),
@@ -1021,12 +1043,40 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let val = value.into();
         let idx = edge_id.as_u64() as usize;
 
+        // MVCC: Snapshot current properties before modification
+        let current_props = self.edge_properties.get(&edge_id).cloned()
+            .or_else(|| self.get_edge(edge_id).map(|e| e.properties.clone()))
+            .unwrap_or_default();
+        let version_log = self.edge_version_log.entry(edge_id).or_insert_with(Vec::new);
+        if version_log.is_empty() || version_log.last().unwrap().version != self.current_version {
+            version_log.push(EdgeVersionEntry {
+                version: self.current_version,
+                properties: current_props,
+            });
+        }
+
         // Update columnar storage
         self.edge_columns.set_property(idx, &key_str, val.clone());
 
-        // Update edge row storage
-        if let Some(edge) = self.get_edge_mut(edge_id) {
-            edge.set_property(key_str, val);
+        // Update DS-07c sparse property map
+        self.set_edge_property_sparse(edge_id, key_str.clone(), val.clone());
+
+        // Update edge row storage with COW (arena — kept for OSS MVCC)
+        let edge_idx = edge_id.as_u64() as usize;
+        if let Some(versions) = self.edges.get_mut(edge_idx) {
+            if let Some(latest) = versions.last() {
+                if latest.version < self.current_version {
+                    // COW: Create new version
+                    let mut new_edge = latest.clone();
+                    new_edge.version = self.current_version;
+                    new_edge.set_property(key_str, val);
+                    versions.push(new_edge);
+                } else {
+                    // Update in place (same version)
+                    let edge = versions.last_mut().unwrap();
+                    edge.set_property(key_str, val);
+                }
+            }
         }
 
         Ok(())
@@ -1172,6 +1222,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_type_ids[idx] = type_id;
 
+        // DS-07c: Edge endpoints
+        if idx >= self.edge_endpoints.len() {
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+        }
+        self.edge_endpoints[idx] = (source, target);
+
         // Size the edges arena for EdgeId allocation (no Edge object stored)
         if idx >= self.edges.len() {
             self.edges.resize(idx + 1, Vec::new());
@@ -1226,6 +1282,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if idx >= self.edges.len() {
             self.edges.resize(idx + 1, Vec::new());
         }
+
+        // DS-07c: Edge endpoints + compact type
+        if idx >= self.edge_endpoints.len() {
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+        }
+        self.edge_endpoints[idx] = (source, target);
+        let type_id = self.intern_edge_type(&edge_type);
+        if idx >= self.edge_type_ids.len() {
+            self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
+        }
+        self.edge_type_ids[idx] = type_id;
 
         // Update edge type index
         self.edge_type_index
@@ -1296,6 +1363,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edges.resize(idx + 1, Vec::new());
         }
 
+        // DS-07c: Edge endpoints + compact type + sparse properties
+        if idx >= self.edge_endpoints.len() {
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+        }
+        self.edge_endpoints[idx] = (source, target);
+        let type_id = self.intern_edge_type(&edge_type);
+        if idx >= self.edge_type_ids.len() {
+            self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
+        }
+        self.edge_type_ids[idx] = type_id;
+        if !edge.properties.is_empty() {
+            self.edge_properties.insert(edge_id, edge.properties.clone());
+        }
+
         // Update edge type index
         self.edge_type_index
             .entry(edge_type.clone())
@@ -1330,6 +1411,38 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get a mutable edge by ID (always latest version)
     pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
         self.edges.get_mut(id.as_u64() as usize).and_then(|v| v.last_mut())
+    }
+
+    /// Get a lightweight edge view reconstructed from DS-07c fields.
+    /// Works for BOTH full edges and stubs (unlike get_edge() which returns None for stubs).
+    pub fn get_edge_view(&self, edge_id: EdgeId) -> Option<EdgeView> {
+        let (source, target) = self.get_edge_endpoints(edge_id)?;
+        let edge_type = self.get_edge_type(edge_id)?;
+        Some(EdgeView { id: edge_id, source, target, edge_type })
+    }
+
+    /// DS-07c: Get edge endpoints from compact storage
+    pub fn get_edge_endpoints(&self, edge_id: EdgeId) -> Option<(NodeId, NodeId)> {
+        let idx = edge_id.as_u64() as usize;
+        if idx < self.edge_endpoints.len() {
+            let (src, tgt) = self.edge_endpoints[idx];
+            if src.as_u64() != 0 || tgt.as_u64() != 0 {
+                return Some((src, tgt));
+            }
+        }
+        // Fallback to edges arena
+        self.get_edge(edge_id).map(|e| (e.source, e.target))
+    }
+
+    /// DS-07c: Get sparse edge properties
+    pub fn get_edge_properties(&self, edge_id: EdgeId) -> Option<&PropertyMap> {
+        self.edge_properties.get(&edge_id)
+    }
+
+    /// DS-07c: Set a property on an edge via sparse map
+    pub fn set_edge_property_sparse(&mut self, edge_id: EdgeId, key: impl Into<String>, value: impl Into<PropertyValue>) {
+        let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
+        props.insert(key.into(), value.into());
     }
 
     /// Check if an edge exists
@@ -2635,6 +2748,116 @@ mod tests {
 
         // Non-existent edge
         assert!(store.get_edge_at_version(EdgeId::new(9999), 0).is_none());
+    }
+
+    #[test]
+    fn test_edge_view_from_create_edge() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Company");
+        let eid = store.create_edge(a, b, "WORKS_AT").unwrap();
+
+        let view = store.get_edge_view(eid).unwrap();
+        assert_eq!(view.id, eid);
+        assert_eq!(view.source, a);
+        assert_eq!(view.target, b);
+        assert_eq!(view.edge_type.as_str(), "WORKS_AT");
+    }
+
+    #[test]
+    fn test_edge_view_from_stub() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge_stub(a, b, "LINKS").unwrap();
+
+        let view = store.get_edge_view(eid).unwrap();
+        assert_eq!(view.id, eid);
+        assert_eq!(view.source, a);
+        assert_eq!(view.target, b);
+        assert_eq!(view.edge_type.as_str(), "LINKS");
+
+        // Stub should not be in the full edge arena
+        assert!(store.get_edge(eid).is_none());
+    }
+
+    #[test]
+    fn test_edge_endpoints_populated() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("X");
+        let b = store.create_node("Y");
+        let eid = store.create_edge(a, b, "REL").unwrap();
+
+        let (src, tgt) = store.get_edge_endpoints(eid).unwrap();
+        assert_eq!(src, a);
+        assert_eq!(tgt, b);
+    }
+
+    #[test]
+    fn test_edge_endpoints_nonexistent() {
+        let store = GraphStore::new();
+        assert!(store.get_edge_endpoints(EdgeId::new(999)).is_none());
+    }
+
+    #[test]
+    fn test_sparse_edge_properties() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+
+        // Edge without properties
+        let e1 = store.create_edge(a, b, "PLAIN").unwrap();
+        assert!(store.get_edge_properties(e1).is_none());
+
+        // Edge with properties
+        let mut props = PropertyMap::new();
+        props.insert("weight".into(), PropertyValue::Float(0.5));
+        let e2 = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
+        let sparse = store.get_edge_properties(e2).unwrap();
+        assert_eq!(sparse.get("weight"), Some(&PropertyValue::Float(0.5)));
+    }
+
+    #[test]
+    fn test_set_edge_property_sparse() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge_stub(a, b, "REL").unwrap();
+
+        // Stub starts with no properties
+        assert!(store.get_edge_properties(eid).is_none());
+
+        // Add property via sparse map
+        store.set_edge_property_sparse(eid, "key", PropertyValue::String("val".into()));
+        let props = store.get_edge_properties(eid).unwrap();
+        assert_eq!(props.get("key"), Some(&PropertyValue::String("val".into())));
+    }
+
+    #[test]
+    fn test_edge_view_nonexistent() {
+        let store = GraphStore::new();
+        assert!(store.get_edge_view(EdgeId::new(42)).is_none());
+    }
+
+    #[test]
+    fn test_edge_view_multiple_types() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+
+        let e1 = store.create_edge(a, b, "KNOWS").unwrap();
+        let e2 = store.create_edge(a, b, "FOLLOWS").unwrap();
+        let e3 = store.create_edge_stub(b, a, "BLOCKS").unwrap();
+
+        let v1 = store.get_edge_view(e1).unwrap();
+        let v2 = store.get_edge_view(e2).unwrap();
+        let v3 = store.get_edge_view(e3).unwrap();
+
+        assert_eq!(v1.edge_type.as_str(), "KNOWS");
+        assert_eq!(v2.edge_type.as_str(), "FOLLOWS");
+        assert_eq!(v3.edge_type.as_str(), "BLOCKS");
+        assert_eq!(v3.source, b);
+        assert_eq!(v3.target, a);
     }
 
     #[test]
