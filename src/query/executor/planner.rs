@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator, LabelCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -743,28 +743,114 @@ impl QueryPlanner {
             }
         }
 
+        let mut anon_counter: usize = 0;
+
         for (match_idx, match_clause) in post_with_clauses.iter().enumerate() {
-            let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), store)?;
+            // WITH Push-Down: If all paths in this MATCH clause have bound start
+            // variables from the WITH output, chain ExpandOperators directly onto the upstream
+            // instead of creating NodeScan + Join. This avoids full label rescans.
+            if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
+                let upstream = operator.take().unwrap();
 
-            let clause_vars = post_match_var_sets[match_idx].clone();
+                // Collect WHERE predicates for this clause
+                let preds = post_per_match_where[match_idx]
+                    .as_ref()
+                    .map(|wc| flatten_and_predicates(&wc.predicate))
+                    .unwrap_or_default();
 
-            operator = Some(match operator {
-                Some(existing) => {
-                    let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
-                    if !shared.is_empty() {
-                        if match_clause.optional {
-                            let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
-                            Box::new(LeftOuterJoinOperator::new(existing, match_op, shared[0].clone(), right_only)) as OperatorBox
-                        } else {
-                            Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                // Plan each path with bound start, chaining onto upstream
+                let mut current_op = upstream;
+                let mut new_vars = HashSet::new();
+
+                for path in &match_clause.pattern.paths {
+                    let start_var = path.start.variable.as_ref().unwrap();
+
+                    // Partition predicates: those for this path vs others
+                    let path_var_set: HashSet<String> = {
+                        let mut vs = HashSet::new();
+                        vs.insert(start_var.clone());
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.node.variable {
+                                vs.insert(v.clone());
+                            }
+                            if let Some(v) = &seg.edge.variable {
+                                vs.insert(v.clone());
+                            }
                         }
-                    } else {
-                        Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
-                    }
+                        vs
+                    };
+                    let path_preds: Vec<Expression> = preds
+                        .iter()
+                        .filter(|p| {
+                            let mut pvars = HashSet::new();
+                            Self::collect_expression_variables(p, &mut pvars);
+                            pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
+                        })
+                        .cloned()
+                        .collect();
+
+                    let (expanded_op, path_vars) = self.plan_path_with_bound_start(
+                        path,
+                        start_var,
+                        path_preds,
+                        current_op,
+                        &mut anon_counter,
+                    )?;
+                    current_op = expanded_op;
+                    new_vars.extend(path_vars);
                 }
-                None => match_op,
-            });
-            known_vars.extend(clause_vars);
+
+                // Apply any cross-path predicates not covered above
+                let remaining_preds: Vec<Expression> = preds
+                    .into_iter()
+                    .filter(|p| {
+                        let mut pvars = HashSet::new();
+                        Self::collect_expression_variables(p, &mut pvars);
+                        // Cross-path: references vars from multiple paths
+                        !pvars.is_empty()
+                            && !post_match_var_sets[match_idx]
+                                .iter()
+                                .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
+                    })
+                    .collect();
+                if !remaining_preds.is_empty() {
+                    let filter_expr = remaining_preds
+                        .into_iter()
+                        .reduce(|acc, pred| Expression::Binary {
+                            left: Box::new(acc),
+                            op: BinaryOp::And,
+                            right: Box::new(pred),
+                        })
+                        .unwrap();
+                    current_op = Box::new(FilterOperator::new(current_op, filter_expr));
+                }
+
+                operator = Some(current_op);
+                known_vars.extend(new_vars);
+            } else {
+                // Fallback: independent plan + join (original behavior)
+                let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), store)?;
+
+                let clause_vars = post_match_var_sets[match_idx].clone();
+
+                operator = Some(match operator {
+                    Some(existing) => {
+                        let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
+                        if !shared.is_empty() {
+                            if match_clause.optional {
+                                let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
+                                Box::new(LeftOuterJoinOperator::new(existing, match_op, shared[0].clone(), right_only)) as OperatorBox
+                            } else {
+                                Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                            }
+                        } else {
+                            Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                        }
+                    }
+                    None => match_op,
+                });
+                known_vars.extend(clause_vars);
+            }
         }
 
         // Apply post-WITH cross-MATCH predicates after all post-WITH MATCH clauses are joined
@@ -847,17 +933,33 @@ impl QueryPlanner {
                 known_vars.insert(unwind.variable.clone());
             }
 
-            // Process post-WITH MATCH clauses for this stage
+            // Process post-WITH MATCH clauses for this stage (with push-down)
             for mc in extra_matches {
-                let call_op = self.plan_match(mc, None, store)?;
-                let call_vars: HashSet<String> = self.extract_match_vars(mc);
-                let shared_vars: Vec<String> = known_vars.intersection(&call_vars).cloned().collect();
-                if !shared_vars.is_empty() {
-                    operator = Box::new(JoinOperator::new(operator, call_op, shared_vars[0].clone()));
+                if Self::can_pushdown_match(mc, &known_vars) {
+                    // WITH Push-Down: expand directly from upstream
+                    for path in &mc.pattern.paths {
+                        let start_var = path.start.variable.as_ref().unwrap();
+                        let (expanded_op, path_vars) = self.plan_path_with_bound_start(
+                            path,
+                            start_var,
+                            Vec::new(),
+                            operator,
+                            &mut anon_counter,
+                        )?;
+                        operator = expanded_op;
+                        known_vars.extend(path_vars);
+                    }
                 } else {
-                    operator = Box::new(CartesianProductOperator::new(operator, call_op));
+                    let call_op = self.plan_match(mc, None, store)?;
+                    let call_vars: HashSet<String> = self.extract_match_vars(mc);
+                    let shared_vars: Vec<String> = known_vars.intersection(&call_vars).cloned().collect();
+                    if !shared_vars.is_empty() {
+                        operator = Box::new(JoinOperator::new(operator, call_op, shared_vars[0].clone()));
+                    } else {
+                        operator = Box::new(CartesianProductOperator::new(operator, call_op));
+                    }
+                    for v in call_vars { known_vars.insert(v); }
                 }
-                for v in call_vars { known_vars.insert(v); }
             }
 
             // Apply post-WITH WHERE for this stage
@@ -1096,7 +1198,30 @@ impl QueryPlanner {
                 }
             }
 
-            if has_aggregation {
+            // Label count cache: O(1) shortcut for MATCH (n:Label) RETURN count(n)
+            // Detect: single count aggregate, no group-by, no WHERE, no edges, single MATCH
+            let use_label_count = has_aggregation
+                && aggregates.len() == 1
+                && group_by.is_empty()
+                && matches!(aggregates[0].func, AggregateType::Count)
+                && !aggregates[0].distinct
+                && query.where_clause.is_none()
+                && query.with_clause.is_none()
+                && query.match_clauses.len() == 1
+                && query.match_clauses[0].pattern.paths.len() == 1
+                && query.match_clauses[0].pattern.paths[0].segments.is_empty()
+                && !query.match_clauses[0].pattern.paths[0].start.labels.is_empty();
+
+            if use_label_count {
+                let labels = query.match_clauses[0].pattern.paths[0]
+                    .start
+                    .labels
+                    .clone();
+                let alias = aggregates[0].alias.clone();
+                operator = Box::new(LabelCountOperator::new(labels, alias));
+                // Apply post-projection to map __agg_0 -> user alias
+                operator = Box::new(ProjectOperator::new(operator, post_projections));
+            } else if has_aggregation {
                 operator = Box::new(AggregateOperator::new(operator, group_by, aggregates));
                 // Post-aggregation projection: compute final expressions from aggregate aliases
                 operator = Box::new(ProjectOperator::new(operator, post_projections));
@@ -1858,6 +1983,128 @@ impl QueryPlanner {
             }
         }
         vars
+    }
+
+    /// Plan a single path where the start variable is already bound from upstream (e.g., WITH output).
+    /// Instead of creating a NodeScanOperator, chains ExpandOperators directly onto `upstream`.
+    /// Returns the operator and the set of variables introduced by this path.
+    fn plan_path_with_bound_start(
+        &self,
+        path: &PathPattern,
+        start_var: &str,
+        predicates: Vec<Expression>,
+        upstream: OperatorBox,
+        anon_counter: &mut usize,
+    ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
+        let mut path_operator = upstream;
+        let mut current_var = start_var.to_string();
+        let mut vars = HashSet::new();
+        vars.insert(start_var.to_string());
+
+        // Split predicates: early (only start_var) vs deferred (references expand targets)
+        let mut deferred_predicates = Vec::new();
+        for pred in predicates {
+            let mut pred_vars = HashSet::new();
+            Self::collect_expression_variables(&pred, &mut pred_vars);
+            // Start-only predicates are redundant (already filtered before WITH),
+            // but predicates on expanded vars must be deferred.
+            if !pred_vars.is_empty() && !pred_vars.iter().all(|v| v == start_var) {
+                deferred_predicates.push(pred);
+            }
+        }
+
+        // Chain ExpandOperators for each segment
+        for segment in &path.segments {
+            let target_var = segment.node.variable.clone().unwrap_or_else(|| {
+                let name = format!("_anon_{}", *anon_counter);
+                *anon_counter += 1;
+                name
+            });
+
+            let edge_var = segment.edge.variable.clone();
+            let edge_types: Vec<String> = segment
+                .edge
+                .types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect();
+
+            let mut expand = ExpandOperator::new(
+                path_operator,
+                current_var.clone(),
+                target_var.clone(),
+                edge_var.clone(),
+                edge_types,
+                segment.edge.direction.clone(),
+            );
+
+            if let Some(ref pv) = path.path_variable {
+                expand = expand.with_path_variable(pv.clone());
+            }
+
+            path_operator = if !segment.node.labels.is_empty() {
+                Box::new(expand.with_target_labels(segment.node.labels.clone()))
+            } else {
+                Box::new(expand)
+            };
+
+            // Add property filter for target node inline properties
+            if let Some(ref props) = segment.node.properties {
+                if !props.is_empty() {
+                    let filter_expr = self.build_property_filter(&target_var, props);
+                    path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                }
+            }
+
+            vars.insert(target_var.clone());
+            if let Some(ref ev) = edge_var {
+                vars.insert(ev.clone());
+            }
+            current_var = target_var;
+        }
+
+        // Apply deferred WHERE predicates
+        if !deferred_predicates.is_empty() {
+            let filter_expr = deferred_predicates
+                .into_iter()
+                .reduce(|acc, pred| Expression::Binary {
+                    left: Box::new(acc),
+                    op: BinaryOp::And,
+                    right: Box::new(pred),
+                })
+                .unwrap();
+            path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+        }
+
+        Ok((path_operator, vars))
+    }
+
+    /// Check if all paths in a match clause have bound start variables and no special path types.
+    /// Returns true if push-down can be applied to the entire clause.
+    fn can_pushdown_match(match_clause: &MatchClause, known_vars: &HashSet<String>) -> bool {
+        if match_clause.optional {
+            return false;
+        }
+        for path in &match_clause.pattern.paths {
+            // Must have a start variable that's bound
+            let start_var = match &path.start.variable {
+                Some(v) => v,
+                None => return false,
+            };
+            if !known_vars.contains(start_var) {
+                return false;
+            }
+            // Skip shortestPath and variable-length patterns
+            if !matches!(path.path_type, PathType::Normal) {
+                return false;
+            }
+            for seg in &path.segments {
+                if seg.edge.length.is_some() {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -3286,5 +3533,303 @@ mod tests {
     fn test_native_distinct() {
         let store = horse_twin_store();
         assert_native_query_ok(&store, "MATCH (h:Horse) RETURN DISTINCT h.breed");
+    }
+
+    // --- WITH Push-Down Tests ---
+
+    fn with_pushdown_store() -> GraphStore {
+        let mut store = GraphStore::new();
+
+        // Create 100 countries
+        let mut country_ids = Vec::new();
+        for i in 0..100 {
+            let id = store.create_node("Country");
+            store
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("name", PropertyValue::String(format!("Country{}", i)));
+            country_ids.push(id);
+        }
+
+        // Create indicators for countries 0-9
+        for i in 0..10 {
+            let ind = store.create_node("Indicator");
+            store
+                .get_node_mut(ind)
+                .unwrap()
+                .set_property("year", PropertyValue::Integer(2020));
+            store
+                .get_node_mut(ind)
+                .unwrap()
+                .set_property("value", PropertyValue::Float(i as f64 * 10.0));
+            store
+                .create_edge(country_ids[i], ind, "HAS_INDICATOR")
+                .unwrap();
+        }
+
+        // Create demographics for only countries 0, 1, 2
+        for i in 0..3 {
+            let dem = store.create_node("Demographic");
+            store
+                .get_node_mut(dem)
+                .unwrap()
+                .set_property("population", PropertyValue::Integer((i as i64 + 1) * 1_000_000));
+            store
+                .create_edge(country_ids[i], dem, "DEMOGRAPHIC_OF")
+                .unwrap();
+        }
+
+        store
+    }
+
+    #[test]
+    fn test_with_pushdown_basic() {
+        let store = with_pushdown_store();
+        let query = parse_query(
+            "MATCH (c:Country)-[:HAS_INDICATOR]->(i:Indicator) \
+             WITH c \
+             MATCH (c)-[:DEMOGRAPHIC_OF]->(d:Demographic) \
+             RETURN c.name, d.population",
+        )
+        .unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(
+            result.is_ok(),
+            "WITH push-down basic should work: {:?}",
+            result.err()
+        );
+        let batch = result.unwrap();
+        assert_eq!(
+            batch.records.len(),
+            3,
+            "Expected 3 results (countries 0,1,2), got {}",
+            batch.records.len()
+        );
+    }
+
+    #[test]
+    fn test_with_pushdown_multi_hop() {
+        let mut store = GraphStore::new();
+        let c = store.create_node("Country");
+        store
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("USA".into()));
+        let r = store.create_node("Region");
+        store
+            .get_node_mut(r)
+            .unwrap()
+            .set_property("name", PropertyValue::String("West".into()));
+        let city = store.create_node("City");
+        store
+            .get_node_mut(city)
+            .unwrap()
+            .set_property("name", PropertyValue::String("LA".into()));
+        store.create_edge(c, r, "HAS_REGION").unwrap();
+        store.create_edge(r, city, "HAS_CITY").unwrap();
+
+        let c2 = store.create_node("Country");
+        store
+            .get_node_mut(c2)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Decoy".into()));
+
+        let query = parse_query(
+            "MATCH (c:Country) WHERE c.name = 'USA' \
+             WITH c \
+             MATCH (c)-[:HAS_REGION]->(r:Region)-[:HAS_CITY]->(city:City) \
+             RETURN c.name, r.name, city.name",
+        )
+        .unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(
+            result.is_ok(),
+            "WITH push-down multi-hop should work: {:?}",
+            result.err()
+        );
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1, "Expected 1 result (USA->West->LA)");
+    }
+
+    #[test]
+    fn test_with_pushdown_unbound_start_no_regression() {
+        let mut store = GraphStore::new();
+        let c = store.create_node("Country");
+        store
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("USA".into()));
+        let org = store.create_node("Org");
+        store
+            .get_node_mut(org)
+            .unwrap()
+            .set_property("name", PropertyValue::String("UN".into()));
+        store.create_edge(org, c, "OPERATES_IN").unwrap();
+
+        let query = parse_query(
+            "MATCH (c:Country) WHERE c.name = 'USA' \
+             WITH c \
+             MATCH (o:Org)-[:OPERATES_IN]->(c) \
+             RETURN o.name, c.name",
+        )
+        .unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(
+            result.is_ok(),
+            "Unbound start should still work: {:?}",
+            result.err()
+        );
+        let batch = result.unwrap();
+        assert_eq!(batch.records.len(), 1);
+    }
+
+    #[test]
+    fn test_with_pushdown_where_on_expanded_node() {
+        let store = with_pushdown_store();
+        let query = parse_query(
+            "MATCH (c:Country)-[:HAS_INDICATOR]->(i:Indicator) \
+             WITH c \
+             MATCH (c)-[:DEMOGRAPHIC_OF]->(d:Demographic) \
+             WHERE d.population > 1500000 \
+             RETURN c.name, d.population",
+        )
+        .unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(
+            result.is_ok(),
+            "WHERE on expanded node should work: {:?}",
+            result.err()
+        );
+        let batch = result.unwrap();
+        assert_eq!(
+            batch.records.len(),
+            2,
+            "Expected 2 results with pop > 1.5M, got {}",
+            batch.records.len()
+        );
+    }
+
+    #[test]
+    fn test_with_pushdown_with_aggregation() {
+        let store = with_pushdown_store();
+        let query = parse_query(
+            "MATCH (c:Country)-[:HAS_INDICATOR]->(i:Indicator) \
+             WITH c, count(i) AS ind_count \
+             MATCH (c)-[:DEMOGRAPHIC_OF]->(d:Demographic) \
+             RETURN c.name, ind_count, d.population",
+        )
+        .unwrap();
+
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan);
+        assert!(
+            result.is_ok(),
+            "Aggregation + push-down should work: {:?}",
+            result.err()
+        );
+        let batch = result.unwrap();
+        assert_eq!(
+            batch.records.len(),
+            3,
+            "Expected 3 results, got {}",
+            batch.records.len()
+        );
+    }
+
+    #[test]
+    fn test_label_count_cache_basic() {
+        let mut store = GraphStore::new();
+        for _ in 0..500 {
+            store.create_node("Article");
+        }
+        for _ in 0..100 {
+            store.create_node("Journal");
+        }
+
+        let query = parse_query("MATCH (n:Article) RETURN count(n) AS total").unwrap();
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("total").unwrap();
+        assert_eq!(
+            val,
+            &crate::query::executor::record::Value::Property(PropertyValue::Integer(500)),
+            "Label count should be 500"
+        );
+    }
+
+    #[test]
+    fn test_label_count_cache_count_star() {
+        let mut store = GraphStore::new();
+        for _ in 0..200 {
+            store.create_node("Person");
+        }
+
+        let query = parse_query("MATCH (n:Person) RETURN count(*) AS total").unwrap();
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("total").unwrap();
+        assert_eq!(
+            val,
+            &crate::query::executor::record::Value::Property(PropertyValue::Integer(200)),
+        );
+    }
+
+    #[test]
+    fn test_label_count_not_used_with_where() {
+        // When there's a WHERE clause, should NOT use label count shortcut
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Person");
+            store
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("age", PropertyValue::Integer(i));
+        }
+
+        let query =
+            parse_query("MATCH (n:Person) WHERE n.age > 50 RETURN count(n) AS total").unwrap();
+        let planner = QueryPlanner::new();
+        let plan = planner.plan(&query, &store).unwrap();
+        use crate::query::QueryExecutor;
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute_plan(plan).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("total").unwrap();
+        // 51..99 = 49 nodes
+        assert_eq!(
+            val,
+            &crate::query::executor::record::Value::Property(PropertyValue::Integer(49)),
+        );
     }
 }

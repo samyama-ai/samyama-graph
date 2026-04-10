@@ -1958,6 +1958,67 @@ impl PhysicalOperator for NodeScanOperator {
     }
 }
 
+/// Label count operator: O(1) shortcut for `MATCH (n:Label) RETURN count(n)`.
+/// Instead of scanning all nodes and counting, reads the count directly from the label index.
+pub struct LabelCountOperator {
+    labels: Vec<Label>,
+    alias: String,
+    emitted: bool,
+}
+
+impl LabelCountOperator {
+    pub fn new(labels: Vec<Label>, alias: String) -> Self {
+        Self {
+            labels,
+            alias,
+            emitted: false,
+        }
+    }
+}
+
+impl PhysicalOperator for LabelCountOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.emitted {
+            return Ok(None);
+        }
+        self.emitted = true;
+
+        let count = if self.labels.is_empty() {
+            store.node_count() as i64
+        } else {
+            self.labels
+                .iter()
+                .map(|l| store.label_node_count(l) as i64)
+                .min()
+                .unwrap_or(0)
+        };
+
+        let mut record = Record::new();
+        record.bind(
+            self.alias.clone(),
+            Value::Property(PropertyValue::Integer(count)),
+        );
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.emitted = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let label_str = if self.labels.is_empty() {
+            "all".to_string()
+        } else {
+            self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        OperatorDescription {
+            name: "LabelCount".to_string(),
+            details: format!("labels=[{}], alias={}", label_str, self.alias),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Filter operator: WHERE n.age > 30
 pub struct FilterOperator {
     /// Input operator
@@ -3119,7 +3180,7 @@ impl AggregateOperator {
         let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
         // Use next_batch from input for performance
-        let batch_size = 1024;
+        let batch_size = 65536;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -3374,7 +3435,7 @@ impl PhysicalOperator for SortOperator {
 impl SortOperator {
     fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Materialize all records in batches
-        let batch_size = 1024;
+        let batch_size = 65536;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             self.records.extend(batch.records);
         }
@@ -6606,7 +6667,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 1024;
+            let batch_size = 65536;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();
@@ -6652,7 +6713,7 @@ impl WithBarrierOperator {
         } else {
             // Non-aggregation path: project each row
             let mut records = Vec::new();
-            let batch_size = 1024;
+            let batch_size = 65536;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut new_record = Record::new();
