@@ -206,6 +206,6 @@ mod tests {
     fn test_version() {
         let ver = version();
         assert!(!ver.is_empty());
-        assert_eq!(ver, "0.7.0");
+        assert_eq!(ver, env!("CARGO_PKG_VERSION"));
     }
 }

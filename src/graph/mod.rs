@@ -62,7 +62,7 @@ pub mod event;
 pub mod storage;
 
 // Re-export main types
-pub use edge::Edge;
+pub use edge::{Edge, EdgeView};
 pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
 pub use store::{GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats};

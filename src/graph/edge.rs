@@ -41,6 +41,16 @@ use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, NodeId};
 use serde::{Deserialize, Serialize};
 
+/// Lightweight edge view reconstructed from adjacency lists + compact type array.
+/// Does not require the full Edge arena (DS-07c). Works for both full and stub edges.
+#[derive(Debug, Clone)]
+pub struct EdgeView {
+    pub id: EdgeId,
+    pub source: NodeId,
+    pub target: NodeId,
+    pub edge_type: EdgeType,
+}
+
 /// A directed edge in the property graph
 ///
 /// Edges have:
