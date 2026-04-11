@@ -219,20 +219,44 @@ impl PersistenceManager {
         node_id: u64,
         properties: &PropertyMap,
     ) -> Result<(), PersistenceError> {
-        // Serialize properties
-        let properties_bytes = bincode::serialize(properties)?;
+        self.persist_update_node_properties_versioned(tenant, node_id, properties, 0)
+    }
 
-        // Write to WAL
+    /// Persist node property update with MVCC version.
+    pub fn persist_update_node_properties_versioned(
+        &self,
+        tenant: &str,
+        node_id: u64,
+        properties: &PropertyMap,
+        version: u64,
+    ) -> Result<(), PersistenceError> {
+        let properties_bytes = bincode::serialize(properties)?;
         let entry = WalEntry::UpdateNodeProperties {
             tenant: tenant.to_string(),
             node_id,
             properties: properties_bytes,
+            version,
         };
         self.wal.lock().unwrap().append(entry)?;
+        Ok(())
+    }
 
-        // Note: Full node update would require getting the node first
-        // This is a simplified implementation
-
+    /// Persist edge property update with MVCC version.
+    pub fn persist_update_edge_properties(
+        &self,
+        tenant: &str,
+        edge_id: u64,
+        properties: &PropertyMap,
+        version: u64,
+    ) -> Result<(), PersistenceError> {
+        let properties_bytes = bincode::serialize(properties)?;
+        let entry = WalEntry::UpdateEdgeProperties {
+            tenant: tenant.to_string(),
+            edge_id,
+            properties: properties_bytes,
+            version,
+        };
+        self.wal.lock().unwrap().append(entry)?;
         Ok(())
     }
 

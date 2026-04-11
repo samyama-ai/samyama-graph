@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator, LabelCountOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -595,277 +595,199 @@ impl QueryPlanner {
             }
         }
 
-        // 1b. Insert WITH barrier if WITH clause is present and has post-WITH clauses
-        if let Some(with_clause) = &query.with_clause {
-            if let Some(op) = operator {
-                // Parse WITH items into projections and aggregations
-                // Uses extract_nested_aggregates to handle aggregates nested in expressions
-                // e.g. round(sum(b.runs) * 100 / sum(b.balls)) / 100 AS strike_rate
-                let mut items = Vec::new();
-                let mut aggregates = Vec::new();
-                let mut group_by = Vec::new();
-                let mut has_aggregation = false;
-                let mut agg_counter = 0usize;
+        // 1b. Build ordered list of WITH stages, then apply barriers + post-WITH matches in sequence.
+        // extra_with_stages contains earlier WITH stages; query.with_clause is the last one.
+        // Each stage: (with_clause, unwind, post_match_clauses, post_where_clause)
+        let mut all_with_stages: Vec<(&WithClause, Option<&UnwindClause>, Vec<&MatchClause>, Option<&WhereClause>)> = Vec::new();
 
-                // First pass: detect aggregates
-                struct WithItemInfo {
-                    alias: String,
-                    original_expr: Expression,
-                    rewritten_expr: Expression,
-                    extracted_aggs: Vec<AggregateFunction>,
-                }
-                let mut item_infos = Vec::new();
-
-                for (idx, item) in with_clause.items.iter().enumerate() {
-                    let alias = item.alias.clone().unwrap_or_else(|| {
-                        match &item.expression {
-                            Expression::Variable(var) => var.clone(),
-                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                            Expression::Function { name, args, distinct } => {
-                                let arg_strs: Vec<String> = args.iter().map(|a| match a {
-                                    Expression::Variable(v) => v.clone(),
-                                    Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                                    _ => "?".to_string(),
-                                }).collect();
-                                if *distinct {
-                                    format!("{}(DISTINCT {})", name, arg_strs.join(", "))
-                                } else {
-                                    format!("{}({})", name, arg_strs.join(", "))
-                                }
-                            },
-                            _ => format!("col_{}", idx),
-                        }
-                    });
-
-                    let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
-                    if !extracted.is_empty() {
-                        has_aggregation = true;
-                    }
-                    item_infos.push(WithItemInfo {
-                        alias,
-                        original_expr: item.expression.clone(),
-                        rewritten_expr: rewritten,
-                        extracted_aggs: extracted,
-                    });
-                }
-
-                // Second pass: build items, group_by, aggregates
-                for info in item_infos {
-                    if has_aggregation {
-                        // Aggregation mode: items get post-projection expressions
-                        if !info.extracted_aggs.is_empty() {
-                            aggregates.extend(info.extracted_aggs);
-                            items.push((info.rewritten_expr, info.alias.clone()));
-                        } else {
-                            group_by.push((info.original_expr, info.alias.clone()));
-                            // Use Variable(alias) since after aggregation only aliases exist
-                            items.push((Expression::Variable(info.alias.clone()), info.alias.clone()));
-                        }
-                    } else {
-                        // No aggregation: items keep original expressions
-                        items.push((info.original_expr, info.alias.clone()));
-                    }
-                }
-
-                // Parse WITH ORDER BY
-                let sort_items: Vec<(Expression, bool)> = with_clause.order_by.as_ref()
-                    .map(|ob| ob.items.iter().map(|i| (i.expression.clone(), i.ascending)).collect())
-                    .unwrap_or_default();
-
-                // Parse WITH WHERE
-                let where_predicate = with_clause.where_clause.as_ref()
-                    .map(|wc| wc.predicate.clone());
-
-                operator = Some(Box::new(WithBarrierOperator::new(
-                    op,
-                    items.clone(),
-                    aggregates,
-                    group_by,
-                    has_aggregation,
-                    with_clause.distinct,
-                    where_predicate,
-                    sort_items,
-                    with_clause.skip,
-                    with_clause.limit,
-                )));
-
-                // Reset known_vars to only WITH output aliases
-                known_vars.clear();
-                for (_, alias) in &items {
-                    known_vars.insert(alias.clone());
-                }
-            }
+        for (wc, uw, mcs, wh) in &query.extra_with_stages {
+            all_with_stages.push((wc, uw.as_ref(), mcs.iter().collect(), wh.as_ref()));
         }
-
-        // 1c. Handle post-WITH MATCH clauses (join on variables from WITH output)
-        // Pre-compute variable sets for post-WITH MATCH clauses
-        let post_match_var_sets: Vec<HashSet<String>> = post_with_clauses.iter().map(|mc| {
-            let mut vars = HashSet::new();
-            for path in &mc.pattern.paths {
-                if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
-                for seg in &path.segments {
-                    if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
-                    if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
-                }
-            }
-            vars
-        }).collect();
-
-        // Decompose post-WITH WHERE clause: assign to MATCH clauses or cross-MATCH
-        let post_where_preds = query.post_with_where_clause.as_ref()
-            .map(|wc| flatten_and_predicates(&wc.predicate))
-            .unwrap_or_default();
-        let mut post_per_match_where: Vec<Option<WhereClause>> = vec![None; post_with_clauses.len()];
-        let mut post_cross_match_preds: Vec<Expression> = Vec::new();
-
-        for pred in post_where_preds {
-            let mut pred_vars = HashSet::new();
-            Self::collect_expression_variables(&pred, &mut pred_vars);
-
-            let target = post_match_var_sets.iter().position(|match_vars| {
-                pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
-            });
-            if let Some(i) = target {
-                match &mut post_per_match_where[i] {
-                    Some(wc) => {
-                        wc.predicate = Expression::Binary {
-                            left: Box::new(wc.predicate.clone()),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        };
-                    }
-                    None => {
-                        post_per_match_where[i] = Some(WhereClause { predicate: pred });
-                    }
-                }
-            } else {
-                post_cross_match_preds.push(pred);
-            }
+        if let Some(wc) = &query.with_clause {
+            all_with_stages.push((wc, query.unwind_clause.as_ref(), post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
         let mut anon_counter: usize = 0;
 
-        for (match_idx, match_clause) in post_with_clauses.iter().enumerate() {
-            // WITH Push-Down: If all paths in this MATCH clause have bound start
-            // variables from the WITH output, chain ExpandOperators directly onto the upstream
-            // instead of creating NodeScan + Join. This avoids full label rescans.
-            if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
-                let upstream = operator.take().unwrap();
+        for (stage_idx, (with_clause, stage_unwind, stage_matches, stage_where)) in all_with_stages.iter().enumerate() {
+            // Apply the WITH barrier
+            if let Some(op) = operator {
+                let barrier = self.build_with_barrier(op, with_clause, store)?;
+                operator = Some(barrier);
 
-                // Collect WHERE predicates for this clause
-                let preds = post_per_match_where[match_idx]
-                    .as_ref()
-                    .map(|wc| flatten_and_predicates(&wc.predicate))
-                    .unwrap_or_default();
-
-                // Plan each path with bound start, chaining onto upstream
-                let mut current_op = upstream;
-                let mut new_vars = HashSet::new();
-
-                for path in &match_clause.pattern.paths {
-                    let start_var = path.start.variable.as_ref().unwrap();
-
-                    // Partition predicates: those for this path vs others
-                    let path_var_set: HashSet<String> = {
-                        let mut vs = HashSet::new();
-                        vs.insert(start_var.clone());
-                        for seg in &path.segments {
-                            if let Some(v) = &seg.node.variable {
-                                vs.insert(v.clone());
-                            }
-                            if let Some(v) = &seg.edge.variable {
-                                vs.insert(v.clone());
-                            }
+                // Reset known_vars to only WITH output aliases
+                known_vars.clear();
+                for item in &with_clause.items {
+                    let alias = item.alias.clone().unwrap_or_else(|| {
+                        match &item.expression {
+                            Expression::Variable(var) => var.clone(),
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                            _ => "?".to_string(),
                         }
-                        vs
-                    };
-                    let path_preds: Vec<Expression> = preds
-                        .iter()
+                    });
+                    known_vars.insert(alias);
+                }
+            }
+
+            // Apply UNWIND for this stage
+            if let Some(unwind) = stage_unwind {
+                if let Some(op) = operator {
+                    operator = Some(Box::new(UnwindOperator::new(
+                        op,
+                        unwind.expression.clone(),
+                        unwind.variable.clone(),
+                    )));
+                    known_vars.insert(unwind.variable.clone());
+                }
+            }
+
+            // Process post-WITH MATCH clauses for this stage
+            // Pre-compute variable sets
+            let match_var_sets: Vec<HashSet<String>> = stage_matches.iter().map(|mc| {
+                self.extract_match_vars(mc)
+            }).collect();
+
+            // Decompose WHERE predicates per MATCH clause
+            let where_preds = stage_where
+                .map(|wc| flatten_and_predicates(&wc.predicate))
+                .unwrap_or_default();
+            let mut per_match_where: Vec<Option<WhereClause>> = vec![None; stage_matches.len()];
+            let mut cross_match_preds: Vec<Expression> = Vec::new();
+
+            for pred in where_preds {
+                let mut pred_vars = HashSet::new();
+                Self::collect_expression_variables(&pred, &mut pred_vars);
+                let target = match_var_sets.iter().position(|match_vars| {
+                    pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
+                });
+                if let Some(i) = target {
+                    match &mut per_match_where[i] {
+                        Some(wc) => {
+                            wc.predicate = Expression::Binary {
+                                left: Box::new(wc.predicate.clone()),
+                                op: BinaryOp::And,
+                                right: Box::new(pred),
+                            };
+                        }
+                        None => {
+                            per_match_where[i] = Some(WhereClause { predicate: pred });
+                        }
+                    }
+                } else {
+                    cross_match_preds.push(pred);
+                }
+            }
+
+            // Plan each MATCH clause
+            for (match_idx, match_clause) in stage_matches.iter().enumerate() {
+                if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
+                    let upstream = operator.take().unwrap();
+                    let preds = per_match_where[match_idx]
+                        .as_ref()
+                        .map(|wc| flatten_and_predicates(&wc.predicate))
+                        .unwrap_or_default();
+
+                    let mut current_op = upstream;
+                    let mut new_vars = HashSet::new();
+
+                    for path in &match_clause.pattern.paths {
+                        let start_var = path.start.variable.as_ref().unwrap();
+                        let path_var_set: HashSet<String> = {
+                            let mut vs = HashSet::new();
+                            vs.insert(start_var.clone());
+                            for seg in &path.segments {
+                                if let Some(v) = &seg.node.variable { vs.insert(v.clone()); }
+                                if let Some(v) = &seg.edge.variable { vs.insert(v.clone()); }
+                            }
+                            vs
+                        };
+                        let path_preds: Vec<Expression> = preds
+                            .iter()
+                            .filter(|p| {
+                                let mut pvars = HashSet::new();
+                                Self::collect_expression_variables(p, &mut pvars);
+                                pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
+                            })
+                            .cloned()
+                            .collect();
+
+                        let (expanded_op, path_vars) = self.plan_path_with_bound_start(
+                            path,
+                            start_var,
+                            path_preds,
+                            current_op,
+                            &mut anon_counter,
+                        )?;
+                        current_op = expanded_op;
+                        new_vars.extend(path_vars);
+                    }
+
+                    // Apply remaining predicates for this MATCH
+                    let remaining_preds: Vec<Expression> = preds
+                        .into_iter()
                         .filter(|p| {
                             let mut pvars = HashSet::new();
                             Self::collect_expression_variables(p, &mut pvars);
-                            pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
+                            !pvars.is_empty()
+                                && !match_var_sets[match_idx]
+                                    .iter()
+                                    .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
                         })
-                        .cloned()
                         .collect();
+                    if !remaining_preds.is_empty() {
+                        let filter_expr = remaining_preds
+                            .into_iter()
+                            .reduce(|acc, pred| Expression::Binary {
+                                left: Box::new(acc),
+                                op: BinaryOp::And,
+                                right: Box::new(pred),
+                            }).unwrap();
+                        current_op = Box::new(FilterOperator::new(current_op, filter_expr));
+                    }
 
-                    let (expanded_op, path_vars) = self.plan_path_with_bound_start(
-                        path,
-                        start_var,
-                        path_preds,
-                        current_op,
-                        &mut anon_counter,
-                    )?;
-                    current_op = expanded_op;
-                    new_vars.extend(path_vars);
+                    operator = Some(current_op);
+                    known_vars.extend(new_vars);
+                } else {
+                    // Fallback: independent plan + join
+                    let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
+                    let clause_vars = match_var_sets[match_idx].clone();
+
+                    operator = Some(match operator {
+                        Some(existing) => {
+                            let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
+                            if !shared.is_empty() {
+                                if match_clause.optional {
+                                    let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
+                                    Box::new(LeftOuterJoinOperator::new(existing, match_op, shared[0].clone(), right_only)) as OperatorBox
+                                } else {
+                                    Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
+                                }
+                            } else {
+                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                            }
+                        }
+                        None => match_op,
+                    });
+                    known_vars.extend(clause_vars);
                 }
+            }
 
-                // Apply any cross-path predicates not covered above
-                let remaining_preds: Vec<Expression> = preds
-                    .into_iter()
-                    .filter(|p| {
-                        let mut pvars = HashSet::new();
-                        Self::collect_expression_variables(p, &mut pvars);
-                        // Cross-path: references vars from multiple paths
-                        !pvars.is_empty()
-                            && !post_match_var_sets[match_idx]
-                                .iter()
-                                .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
-                    })
-                    .collect();
-                if !remaining_preds.is_empty() {
-                    let filter_expr = remaining_preds
-                        .into_iter()
-                        .reduce(|acc, pred| Expression::Binary {
+            // Apply cross-match predicates
+            if !cross_match_preds.is_empty() {
+                if let Some(op) = operator {
+                    let filter_expr = cross_match_preds.into_iter().reduce(|acc, pred| {
+                        Expression::Binary {
                             left: Box::new(acc),
                             op: BinaryOp::And,
                             right: Box::new(pred),
-                        })
-                        .unwrap();
-                    current_op = Box::new(FilterOperator::new(current_op, filter_expr));
-                }
-
-                operator = Some(current_op);
-                known_vars.extend(new_vars);
-            } else {
-                // Fallback: independent plan + join (original behavior)
-                let match_op = self.dispatch_plan_match(match_clause, post_per_match_where[match_idx].as_ref(), store)?;
-
-                let clause_vars = post_match_var_sets[match_idx].clone();
-
-                operator = Some(match operator {
-                    Some(existing) => {
-                        let shared: Vec<String> = known_vars.intersection(&clause_vars).cloned().collect();
-                        if !shared.is_empty() {
-                            if match_clause.optional {
-                                let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
-                                Box::new(LeftOuterJoinOperator::new(existing, match_op, shared[0].clone(), right_only)) as OperatorBox
-                            } else {
-                                Box::new(JoinOperator::new(existing, match_op, shared[0].clone())) as OperatorBox
-                            }
-                        } else {
-                            Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                         }
-                    }
-                    None => match_op,
-                });
-                known_vars.extend(clause_vars);
+                    }).unwrap();
+                    operator = Some(Box::new(FilterOperator::new(op, filter_expr)));
+                }
             }
         }
 
-        // Apply post-WITH cross-MATCH predicates after all post-WITH MATCH clauses are joined
-        if !post_cross_match_preds.is_empty() {
-            if let Some(op) = operator {
-                let filter_expr = post_cross_match_preds.into_iter().reduce(|acc, pred| {
-                    Expression::Binary {
-                        left: Box::new(acc),
-                        op: BinaryOp::And,
-                        right: Box::new(pred),
-                    }
-                }).unwrap();
-                operator = Some(Box::new(FilterOperator::new(op, filter_expr)));
-            }
-        }
+        // (post-WITH MATCH clauses are now handled in the unified WITH stage loop above)
 
         // 2. Handle CALL if present
         if let Some(call_clause) = &query.call_clause {
@@ -918,74 +840,17 @@ impl QueryPlanner {
             }
         }
 
-        // Process extra WITH stages (multi-WITH support)
-        for (extra_with, extra_unwind, extra_matches, extra_where) in &query.extra_with_stages {
-            // Create WithBarrier for this stage
-            operator = self.build_with_barrier(operator, extra_with, store)?;
+        // Extra WITH stages and UNWIND are now handled in the unified loop above.
 
-            // Apply UNWIND for this stage (e.g., UNWIND top_players AS player)
-            if let Some(unwind) = extra_unwind {
+        // Add standalone UNWIND clause (only when no WITH clause handles it)
+        if query.with_clause.is_none() {
+            if let Some(unwind_clause) = &query.unwind_clause {
                 operator = Box::new(UnwindOperator::new(
                     operator,
-                    unwind.expression.clone(),
-                    unwind.variable.clone(),
+                    unwind_clause.expression.clone(),
+                    unwind_clause.variable.clone(),
                 ));
-                known_vars.insert(unwind.variable.clone());
             }
-
-            // Process post-WITH MATCH clauses for this stage (with push-down)
-            for mc in extra_matches {
-                if Self::can_pushdown_match(mc, &known_vars) {
-                    // WITH Push-Down: expand directly from upstream
-                    for path in &mc.pattern.paths {
-                        let start_var = path.start.variable.as_ref().unwrap();
-                        let (expanded_op, path_vars) = self.plan_path_with_bound_start(
-                            path,
-                            start_var,
-                            Vec::new(),
-                            operator,
-                            &mut anon_counter,
-                        )?;
-                        operator = expanded_op;
-                        known_vars.extend(path_vars);
-                    }
-                } else {
-                    let call_op = self.plan_match(mc, None, store)?;
-                    let call_vars: HashSet<String> = self.extract_match_vars(mc);
-                    let shared_vars: Vec<String> = known_vars.intersection(&call_vars).cloned().collect();
-                    if !shared_vars.is_empty() {
-                        operator = Box::new(JoinOperator::new(operator, call_op, shared_vars[0].clone()));
-                    } else {
-                        operator = Box::new(CartesianProductOperator::new(operator, call_op));
-                    }
-                    for v in call_vars { known_vars.insert(v); }
-                }
-            }
-
-            // Apply post-WITH WHERE for this stage
-            if let Some(where_clause) = extra_where {
-                operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
-            }
-
-            // Update known_vars to only include this WITH's outputs
-            known_vars.clear();
-            for item in &extra_with.items {
-                let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
-                    Expression::Variable(v) => v.clone(),
-                    Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                    _ => "?".to_string(),
-                });
-                known_vars.insert(alias);
-            }
-        }
-
-        // Add UNWIND clause if present
-        if let Some(unwind_clause) = &query.unwind_clause {
-            operator = Box::new(UnwindOperator::new(
-                operator,
-                unwind_clause.expression.clone(),
-                unwind_clause.variable.clone(),
-            ));
         }
 
         // Determine output columns
@@ -1212,7 +1077,36 @@ impl QueryPlanner {
                 && query.match_clauses[0].pattern.paths[0].segments.is_empty()
                 && !query.match_clauses[0].pattern.paths[0].start.labels.is_empty();
 
-            if use_label_count {
+            // Edge type count cache: O(1) shortcut for MATCH ()-[r]->() RETURN type(r), count(r)
+            // Detect: one count aggregate, one group-by with type() function, single edge path, no WHERE
+            let use_edge_type_count = has_aggregation
+                && aggregates.len() == 1
+                && group_by.len() == 1
+                && matches!(aggregates[0].func, AggregateType::Count)
+                && !aggregates[0].distinct
+                && query.where_clause.is_none()
+                && query.with_clause.is_none()
+                && query.match_clauses.len() == 1
+                && query.match_clauses[0].pattern.paths.len() == 1
+                && query.match_clauses[0].pattern.paths[0].segments.len() == 1
+                && query.match_clauses[0].pattern.paths[0].start.labels.is_empty()
+                && query.match_clauses[0].pattern.paths[0].segments[0].node.labels.is_empty()
+                && matches!(&group_by[0].0, Expression::Function { name, args, .. }
+                    if name == "type" && args.len() == 1 && matches!(&args[0], Expression::Variable(_)));
+
+            if use_edge_type_count {
+                let type_alias = group_by[0].1.clone();
+                let count_alias = aggregates[0].alias.clone();
+                operator = Box::new(EdgeTypeCountOperator::new(type_alias, count_alias));
+                operator = Box::new(ProjectOperator::new(operator, post_projections));
+
+                // Sort after projection
+                if let Some(order_by) = &query.order_by {
+                    let sort_items: Vec<(Expression, bool)> = order_by.items.iter()
+                        .map(|i| (i.expression.clone(), i.ascending)).collect();
+                    operator = Box::new(SortOperator::new(operator, sort_items));
+                }
+            } else if use_label_count {
                 let labels = query.match_clauses[0].pattern.paths[0]
                     .start
                     .labels

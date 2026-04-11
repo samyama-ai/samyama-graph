@@ -716,7 +716,7 @@ mod tests {
         let eid = store.create_edge_with_properties(a, b, "KNOWS", props).unwrap();
 
         // From Edge
-        let edge = store.get_edge(eid).unwrap().clone();
+        let edge = store.get_edge(eid).unwrap();
         let val = Value::Edge(eid, edge);
         let prop = val.resolve_property("since", &store);
         assert_eq!(prop, PropertyValue::Integer(2020));

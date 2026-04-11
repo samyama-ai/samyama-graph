@@ -313,7 +313,7 @@ impl GraphCatalog {
                     catalog.on_edge_created(
                         node.id,
                         &src_labels,
-                        edge_type,
+                        &edge_type,
                         *target_id,
                         &tgt_labels,
                     );
