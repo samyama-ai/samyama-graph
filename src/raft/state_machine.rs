@@ -60,6 +60,9 @@ pub enum Request {
         node_id: u64,
         /// New properties to set
         properties: PropertyMap,
+        /// MVCC version (0 = unversioned)
+        #[serde(default)]
+        version: u64,
     },
     /// Update edge properties
     UpdateEdgeProperties {
@@ -69,6 +72,9 @@ pub enum Request {
         edge_id: u64,
         /// New properties to set
         properties: PropertyMap,
+        /// MVCC version (0 = unversioned)
+        #[serde(default)]
+        version: u64,
     },
     /// Execute a Cypher query (read-only)
     ExecuteQuery {
@@ -217,13 +223,14 @@ impl GraphStateMachine {
                 tenant,
                 node_id,
                 properties,
+                version,
             } => {
                 match self
                     .persistence
-                    .persist_update_node_properties(&tenant, node_id, &properties)
+                    .persist_update_node_properties_versioned(&tenant, node_id, &properties, version)
                 {
                     Ok(_) => {
-                        info!("Node {} properties updated for tenant {}", node_id, tenant);
+                        info!("Node {} properties updated for tenant {} (v{})", node_id, tenant, version);
                         Response::Ok
                     }
                     Err(e) => Response::Error {
@@ -235,11 +242,21 @@ impl GraphStateMachine {
             Request::UpdateEdgeProperties {
                 tenant,
                 edge_id,
-                properties: _properties,
+                properties,
+                version,
             } => {
-                // Similar to node properties update
-                info!("Edge {} properties updated for tenant {}", edge_id, tenant);
-                Response::Ok
+                match self
+                    .persistence
+                    .persist_update_edge_properties(&tenant, edge_id, &properties, version)
+                {
+                    Ok(_) => {
+                        info!("Edge {} properties updated for tenant {} (v{})", edge_id, tenant, version);
+                        Response::Ok
+                    }
+                    Err(e) => Response::Error {
+                        message: format!("Failed to update edge properties: {}", e),
+                    },
+                }
             }
 
             Request::ExecuteQuery { tenant, query } => {
@@ -477,6 +494,7 @@ mod tests {
             tenant: "default".to_string(),
             edge_id: 1,
             properties: props,
+            version: 0,
         };
 
         let response = sm.apply(request).await;
@@ -504,6 +522,7 @@ mod tests {
             tenant: "default".to_string(),
             node_id: 1,
             properties: props,
+            version: 0,
         }).await;
         // Should succeed or fail gracefully
         assert!(matches!(response, Response::Ok) || matches!(response, Response::Error { .. }));
@@ -610,11 +629,13 @@ mod tests {
                 tenant: "t1".to_string(),
                 node_id: 1,
                 properties: PropertyMap::new(),
+                version: 0,
             },
             Request::UpdateEdgeProperties {
                 tenant: "t1".to_string(),
                 edge_id: 1,
                 properties: PropertyMap::new(),
+                version: 0,
             },
             Request::ExecuteQuery {
                 tenant: "t1".to_string(),

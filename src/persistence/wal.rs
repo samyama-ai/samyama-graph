@@ -101,12 +101,18 @@ pub enum WalEntry {
         tenant: String,
         node_id: u64,
         properties: Vec<u8>,
+        /// MVCC version at which this update was made (0 = legacy entry without version)
+        #[serde(default)]
+        version: u64,
     },
     /// Update edge properties
     UpdateEdgeProperties {
         tenant: String,
         edge_id: u64,
         properties: Vec<u8>,
+        /// MVCC version at which this update was made (0 = legacy entry without version)
+        #[serde(default)]
+        version: u64,
     },
     /// Checkpoint marker
     Checkpoint {
@@ -468,5 +474,82 @@ mod tests {
         }).unwrap();
 
         assert!(found_checkpoint);
+    }
+
+    #[test]
+    fn test_wal_versioned_node_update() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+
+        let entry = WalEntry::UpdateNodeProperties {
+            tenant: "default".to_string(),
+            node_id: 42,
+            properties: vec![1, 2, 3],
+            version: 5,
+        };
+        let seq = wal.append(entry).unwrap();
+        assert_eq!(seq, 1);
+        wal.flush().unwrap();
+
+        let mut found = false;
+        wal.replay(0, |entry| {
+            if let WalEntry::UpdateNodeProperties { node_id, version, .. } = entry {
+                assert_eq!(*node_id, 42);
+                assert_eq!(*version, 5);
+                found = true;
+            }
+            Ok(())
+        }).unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn test_wal_versioned_edge_update() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+
+        let entry = WalEntry::UpdateEdgeProperties {
+            tenant: "default".to_string(),
+            edge_id: 99,
+            properties: vec![4, 5, 6],
+            version: 3,
+        };
+        wal.append(entry).unwrap();
+        wal.flush().unwrap();
+
+        let mut found = false;
+        wal.replay(0, |entry| {
+            if let WalEntry::UpdateEdgeProperties { edge_id, version, .. } = entry {
+                assert_eq!(*edge_id, 99);
+                assert_eq!(*version, 3);
+                found = true;
+            }
+            Ok(())
+        }).unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn test_wal_legacy_entry_defaults_version_zero() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+
+        let entry = WalEntry::UpdateNodeProperties {
+            tenant: "t".to_string(),
+            node_id: 1,
+            properties: vec![],
+            version: 0,
+        };
+        wal.append(entry).unwrap();
+        wal.flush().unwrap();
+
+        let mut found_version = None;
+        wal.replay(0, |entry| {
+            if let WalEntry::UpdateNodeProperties { version, .. } = entry {
+                found_version = Some(*version);
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(found_version, Some(0));
     }
 }

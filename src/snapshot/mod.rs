@@ -1097,8 +1097,8 @@ mod tests {
 
         assert_eq!(store.node_count(), 3);
         assert_eq!(store.edge_count(), 2);
-        // Verify all_edges() returns empty (stubs only in adjacency)
-        assert_eq!(store.all_edges().len(), 0);
+        // With arena removal, stubs are now reconstructed via DS-07c
+        assert_eq!(store.all_edges().len(), 2);
 
         // Export v2
         let mut buf = Vec::new();

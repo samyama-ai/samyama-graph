@@ -1185,7 +1185,7 @@ mod tests {
             let b = store.create_node("Person");
             store.get_node_mut(b).unwrap().set_property("name", "Bob");
             let eid = store.create_edge(a, b, "FRIENDS").unwrap();
-            store.get_edge_mut(eid).unwrap().set_property("since", 2020i64);
+            store.set_edge_property_sparse(eid, "since", PropertyValue::Integer(2020));
         }
 
         let (status, json) = post_query(

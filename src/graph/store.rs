@@ -132,6 +132,15 @@ pub enum GraphError {
 
     #[error("Invalid edge: target node {0} does not exist")]
     InvalidEdgeTarget(NodeId),
+
+    #[error("Transaction {0} not found")]
+    TransactionNotFound(TxnId),
+
+    #[error("Transaction {0} is not active")]
+    TransactionNotActive(TxnId),
+
+    #[error("Write conflict: {0}")]
+    WriteConflict(String),
 }
 
 pub type GraphResult<T> = Result<T, GraphError>;
@@ -423,6 +432,46 @@ impl FrozenAdjacency {
     }
 }
 
+// ============================================================
+// MVCC Transaction Types
+// ============================================================
+
+/// Transaction isolation level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Each read sees the latest committed version at the time of that read.
+    ReadCommitted,
+    /// All reads see the version that was current when the transaction started.
+    SnapshotIsolation,
+}
+
+/// Unique transaction identifier.
+pub type TxnId = u64;
+
+/// Transaction status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxnStatus {
+    Active,
+    Committed,
+    Aborted,
+}
+
+/// An MVCC transaction context.
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    pub id: TxnId,
+    pub isolation: IsolationLevel,
+    pub status: TxnStatus,
+    /// The global version at the time the transaction started (used for snapshot reads).
+    pub start_version: u64,
+    /// The version assigned to this transaction's writes (set at commit time).
+    pub commit_version: Option<u64>,
+    /// Set of node IDs written (created or modified) by this transaction.
+    pub node_write_set: HashSet<NodeId>,
+    /// Set of edge IDs written (created or modified) by this transaction.
+    pub edge_write_set: HashSet<EdgeId>,
+}
+
 /// MVCC version entry for edges. Stores a snapshot of edge properties at a specific version.
 /// Endpoints and type are immutable — only properties are versioned.
 #[derive(Debug, Clone)]
@@ -435,9 +484,6 @@ pub struct EdgeVersionEntry {
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
     nodes: Vec<Vec<Node>>,
-
-    /// Edge storage (Arena with versioning: EdgeId -> [Versions])
-    edges: Vec<Vec<Edge>>,
 
     /// Edge type lookup table: maps type string → u16 index (DS-07c)
     edge_type_table: Vec<EdgeType>,            // index → EdgeType (small, ~6-20 entries)
@@ -470,8 +516,19 @@ pub struct GraphStore {
     /// Frozen incoming adjacency (CSR): bulk-loaded data, immutable, compact
     frozen_incoming: FrozenAdjacencyStore,
 
-    /// Current global version for MVCC
+    /// Current global version for MVCC (monotonically increasing)
     pub current_version: u64,
+
+    /// Next transaction ID (monotonically increasing)
+    next_txn_id: TxnId,
+
+    /// Active transactions keyed by TxnId
+    pub active_transactions: HashMap<TxnId, Transaction>,
+
+    /// Last committed version per entity — used for write conflict detection.
+    /// Maps NodeId/EdgeId → version at which it was last committed.
+    node_last_commit: HashMap<NodeId, u64>,
+    edge_last_commit: HashMap<EdgeId, u64>,
 
     /// Free node IDs for reuse
     free_node_ids: Vec<u64>,
@@ -515,7 +572,6 @@ impl GraphStore {
     pub fn new() -> Self {
         GraphStore {
             nodes: Vec::with_capacity(1024),
-            edges: Vec::with_capacity(4096),
             edge_type_table: Vec::new(),
             edge_type_to_id: HashMap::new(),
             edge_type_ids: Vec::new(),
@@ -527,6 +583,10 @@ impl GraphStore {
             frozen_outgoing: FrozenAdjacencyStore::new(),
             frozen_incoming: FrozenAdjacencyStore::new(),
             current_version: 1,
+            next_txn_id: 1,
+            active_transactions: HashMap::new(),
+            node_last_commit: HashMap::new(),
+            edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
             label_index: HashMap::new(),
@@ -969,15 +1029,13 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     pub fn get_edge_type(&self, edge_id: EdgeId) -> Option<EdgeType> {
         let idx = edge_id.as_u64() as usize;
-        // Check compact type array (populated by create_edge_stub)
         if idx < self.edge_type_ids.len() {
             let type_id = self.edge_type_ids[idx];
             if type_id != Self::EDGE_TYPE_UNSET && (type_id as usize) < self.edge_type_table.len() {
                 return Some(self.edge_type_table[type_id as usize].clone());
             }
         }
-        // Fall back to full Edge store (populated by create_edge)
-        self.get_edge(edge_id).map(|e| e.edge_type.clone())
+        None
     }
 
     /// Set a property on a node and update vector indices if necessary
@@ -1058,26 +1116,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Update columnar storage
         self.edge_columns.set_property(idx, &key_str, val.clone());
 
-        // Update DS-07c sparse property map
-        self.set_edge_property_sparse(edge_id, key_str.clone(), val.clone());
-
-        // Update edge row storage with COW (arena — kept for OSS MVCC)
-        let edge_idx = edge_id.as_u64() as usize;
-        if let Some(versions) = self.edges.get_mut(edge_idx) {
-            if let Some(latest) = versions.last() {
-                if latest.version < self.current_version {
-                    // COW: Create new version
-                    let mut new_edge = latest.clone();
-                    new_edge.version = self.current_version;
-                    new_edge.set_property(key_str, val);
-                    versions.push(new_edge);
-                } else {
-                    // Update in place (same version)
-                    let edge = versions.last_mut().unwrap();
-                    edge.set_property(key_str, val);
-                }
-            }
-        }
+        // Update DS-07c sparse property map (single source of truth)
+        self.set_edge_property_sparse(edge_id, key_str, val);
 
         Ok(())
     }
@@ -1228,11 +1268,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_endpoints[idx] = (source, target);
 
-        // Size the edges arena for EdgeId allocation (no Edge object stored)
-        if idx >= self.edges.len() {
-            self.edges.resize(idx + 1, Vec::new());
-        }
-
         Ok(edge_id)
     }
 
@@ -1278,11 +1313,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             in_list.insert(pos, (source, edge_id));
         }
 
-        // Ensure storage capacity
-        if idx >= self.edges.len() {
-            self.edges.resize(idx + 1, Vec::new());
-        }
-
         // DS-07c: Edge endpoints + compact type
         if idx >= self.edge_endpoints.len() {
             self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
@@ -1305,7 +1335,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
         self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
 
-        self.edges[idx].push(edge);
         Ok(edge_id)
     }
 
@@ -1358,11 +1387,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             in_list.insert(pos, (source, edge_id));
         }
 
-        // Ensure storage capacity
-        if idx >= self.edges.len() {
-            self.edges.resize(idx + 1, Vec::new());
-        }
-
         // DS-07c: Edge endpoints + compact type + sparse properties
         if idx >= self.edge_endpoints.len() {
             self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
@@ -1388,29 +1412,80 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
         self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
 
-        self.edges[idx].push(edge);
         Ok(edge_id)
     }
 
     /// Get an edge by ID at a specific version (MVCC)
-    pub fn get_edge_at_version(&self, id: EdgeId, version: u64) -> Option<&Edge> {
+    pub fn get_edge_at_version(&self, id: EdgeId, version: u64) -> Option<Edge> {
         let idx = id.as_u64() as usize;
-        let versions = self.edges.get(idx)?;
-        
-        // Find the latest version <= requested version
-        versions.iter()
-            .rev()
-            .find(|e| e.version <= version)
+        // Reconstruct from DS-07c fields
+        let (source, target) = {
+            if idx < self.edge_endpoints.len() {
+                let (src, tgt) = self.edge_endpoints[idx];
+                if src.as_u64() == 0 && tgt.as_u64() == 0 {
+                    return None; // deleted or never created
+                }
+                (src, tgt)
+            } else {
+                return None;
+            }
+        };
+        let edge_type = self.get_edge_type(id)?;
+
+        // Resolve properties at the requested version using the version log.
+        // The version log stores snapshots of properties BEFORE mutations.
+        // If a version log entry exists with version <= requested version,
+        // and the requested version < current, use the historical snapshot.
+        let (edge_version, properties) = if let Some(versions) = self.edge_version_log.get(&id) {
+            if let Some(entry) = versions.iter().rev().find(|v| v.version <= version) {
+                // Check if there's a later version that supersedes this snapshot
+                let next_version = versions.iter()
+                    .find(|v| v.version > version)
+                    .map(|v| v.version);
+                if next_version.is_some() || version < self.current_version {
+                    // Historical read — use the snapshot properties
+                    (entry.version, entry.properties.clone())
+                } else {
+                    // Current read — use latest properties
+                    (entry.version, self.edge_properties.get(&id).cloned().unwrap_or_default())
+                }
+            } else {
+                // No version entry <= requested — edge didn't exist yet or default
+                (1, self.edge_properties.get(&id).cloned().unwrap_or_default())
+            }
+        } else {
+            // No version history — use current properties (edge was never updated)
+            (1, self.edge_properties.get(&id).cloned().unwrap_or_default())
+        };
+
+        if edge_version > version {
+            return None; // edge didn't exist at this version
+        }
+
+        Some(Edge {
+            id,
+            version: edge_version,
+            source,
+            target,
+            edge_type,
+            properties,
+            created_at: 0,
+        })
     }
 
     /// Get an edge by ID (uses current version)
-    pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
+    pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
         self.get_edge_at_version(id, self.current_version)
     }
 
-    /// Get a mutable edge by ID (always latest version)
-    pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
-        self.edges.get_mut(id.as_u64() as usize).and_then(|v| v.last_mut())
+    /// Get a mutable reference to edge properties (for COW updates).
+    /// Returns None if edge doesn't exist.
+    pub fn get_edge_properties_mut(&mut self, id: EdgeId) -> Option<&mut PropertyMap> {
+        let idx = id.as_u64() as usize;
+        if idx >= self.edge_endpoints.len() { return None; }
+        let (src, tgt) = self.edge_endpoints[idx];
+        if src.as_u64() == 0 && tgt.as_u64() == 0 { return None; }
+        Some(self.edge_properties.entry(id).or_insert_with(PropertyMap::new))
     }
 
     /// Get a lightweight edge view reconstructed from DS-07c fields.
@@ -1430,8 +1505,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 return Some((src, tgt));
             }
         }
-        // Fallback to edges arena
-        self.get_edge(edge_id).map(|e| (e.source, e.target))
+        None
     }
 
     /// DS-07c: Get sparse edge properties
@@ -1447,22 +1521,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Check if an edge exists
     pub fn has_edge(&self, id: EdgeId) -> bool {
-        self.get_edge(id).is_some()
+        self.get_edge_endpoints(id).is_some()
     }
 
     /// Delete an edge
     pub fn delete_edge(&mut self, id: EdgeId) -> GraphResult<Edge> {
         let idx = id.as_u64() as usize;
 
-        // Collect catalog info before removal
-        let (src_labels, tgt_labels, source_id, target_id, edge_type_clone) = {
-            let edge = self.edges.get(idx).and_then(|v| v.last()).ok_or(GraphError::EdgeNotFound(id))?;
-            let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-            let tgt_labels: Vec<Label> = self.get_node(edge.target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-            (src_labels, tgt_labels, edge.source, edge.target, edge.edge_type.clone())
-        };
+        // Reconstruct edge from DS-07c before deletion
+        let edge = self.get_edge(id).ok_or(GraphError::EdgeNotFound(id))?;
 
-        let edge = self.edges.get_mut(idx).and_then(|v| v.pop()).ok_or(GraphError::EdgeNotFound(id))?;
+        // Collect catalog info
+        let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        let tgt_labels: Vec<Label> = self.get_node(edge.target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
 
         // Add to free list
         self.free_edge_ids.push(id.as_u64());
@@ -1480,16 +1551,26 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             adj.retain(|&(_, eid)| eid != id);
         }
 
+        // Clear DS-07c fields
+        if idx < self.edge_endpoints.len() {
+            self.edge_endpoints[idx] = (NodeId::new(0), NodeId::new(0));
+        }
+        if idx < self.edge_type_ids.len() {
+            self.edge_type_ids[idx] = Self::EDGE_TYPE_UNSET;
+        }
+        self.edge_properties.remove(&id);
+        self.edge_version_log.remove(&id);
+
         // Update catalog triple stats
-        self.catalog.on_edge_deleted(source_id, &src_labels, &edge_type_clone, target_id, &tgt_labels);
+        self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
         Ok(edge)
     }
 
     /// Get all outgoing edges from a node
-    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
+    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<Edge> {
         let idx = node_id.as_u64() as usize;
-        let mut result: Vec<&Edge> = Vec::new();
+        let mut result: Vec<Edge> = Vec::new();
         // Frozen tier (CSR)
         for &(_, eid) in &self.frozen_outgoing.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) { result.push(e); }
@@ -1504,9 +1585,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get all incoming edges to a node
-    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
+    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<Edge> {
         let idx = node_id.as_u64() as usize;
-        let mut result: Vec<&Edge> = Vec::new();
+        let mut result: Vec<Edge> = Vec::new();
         // Frozen tier
         for &(_, eid) in &self.frozen_incoming.neighbors_collected(idx) {
             if let Some(e) = self.get_edge(eid) { result.push(e); }
@@ -1520,26 +1601,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         result
     }
 
-    /// Get outgoing edge targets as lightweight tuples (no Edge clone)
-    /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each outgoing edge
-    pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
-        let idx = node_id.as_u64() as usize;
-        let mut result = Vec::new();
-        // Frozen tier
-        for &(_, eid) in &self.frozen_outgoing.neighbors_collected(idx) {
-            if let Some(e) = self.get_edge(eid) {
-                result.push((eid, e.source, e.target, &e.edge_type));
-            }
-        }
-        // Write buffer
-        if let Some(entries) = self.outgoing.get(idx) {
-            for &(_, eid) in entries {
-                if let Some(e) = self.get_edge(eid) {
-                    result.push((eid, e.source, e.target, &e.edge_type));
-                }
-            }
-        }
-        result
+    /// Get outgoing edge targets as lightweight tuples.
+    /// Returns (EdgeId, source NodeId, target NodeId, EdgeType) for each outgoing edge.
+    /// Delegates to the DS-07c owned version.
+    pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+        self.get_outgoing_edge_targets_owned(node_id)
     }
 
     /// Get outgoing edge targets with owned EdgeType — works for both full and stub edges.
@@ -1587,24 +1653,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get incoming edge sources as lightweight tuples (no Edge clone)
     /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each incoming edge
-    pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, &EdgeType)> {
-        let idx = node_id.as_u64() as usize;
-        let mut result = Vec::new();
-        // Frozen tier
-        for &(_, eid) in &self.frozen_incoming.neighbors_collected(idx) {
-            if let Some(e) = self.get_edge(eid) {
-                result.push((eid, e.source, e.target, &e.edge_type));
-            }
-        }
-        // Write buffer
-        if let Some(entries) = self.incoming.get(idx) {
-            for &(_, eid) in entries {
-                if let Some(e) = self.get_edge(eid) {
-                    result.push((eid, e.source, e.target, &e.edge_type));
-                }
-            }
-        }
-        result
+    /// Get incoming edge sources as owned tuples. Delegates to DS-07c owned version.
+    pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+        self.get_incoming_edge_sources_owned(node_id)
     }
 
     /// Helper: search a sorted slice for edges between source and target
@@ -1698,7 +1749,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get all edges of a specific type
-    pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<&Edge> {
+    pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<Edge> {
         self.edge_type_index
             .get(edge_type)
             .map(|edge_ids| {
@@ -1717,12 +1768,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get total number of edges
     pub fn edge_count(&self) -> usize {
-        // Count full Edge objects in arena
-        let arena_count = self.edges.iter().flatten().count();
-        if arena_count > 0 {
-            return arena_count;
-        }
-        // Fallback: count from frozen adjacency (for stub-loaded graphs)
         let frozen = self.frozen_outgoing.edge_count();
         let buffer: usize = self.outgoing.iter().map(|v| v.len()).sum();
         frozen + buffer
@@ -1733,9 +1778,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.nodes.iter().flatten().collect()
     }
 
-    /// Get all edges in the graph
-    pub fn all_edges(&self) -> Vec<&Edge> {
-        self.edges.iter().flatten().collect()
+    /// Get all edges in the graph (reconstructed from DS-07c)
+    pub fn all_edges(&self) -> Vec<Edge> {
+        let mut result = Vec::new();
+        for idx in 0..self.edge_endpoints.len() {
+            let (src, tgt) = self.edge_endpoints[idx];
+            if src.as_u64() != 0 || tgt.as_u64() != 0 {
+                let edge_id = EdgeId::new(idx as u64);
+                if let Some(edge) = self.get_edge(edge_id) {
+                    result.push(edge);
+                }
+            }
+        }
+        result
     }
 
     // ============================================================
@@ -1920,13 +1975,225 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         );
     }
 
+    // ============================================================
+    // MVCC Transaction API
+    // ============================================================
+
+    /// Begin a new transaction with the specified isolation level.
+    /// Returns the transaction ID.
+    pub fn begin_transaction(&mut self, isolation: IsolationLevel) -> TxnId {
+        let txn_id = self.next_txn_id;
+        self.next_txn_id += 1;
+        let txn = Transaction {
+            id: txn_id,
+            isolation,
+            status: TxnStatus::Active,
+            start_version: self.current_version,
+            commit_version: None,
+            node_write_set: HashSet::new(),
+            edge_write_set: HashSet::new(),
+        };
+        self.active_transactions.insert(txn_id, txn);
+        txn_id
+    }
+
+    /// Get a node visible to the given transaction, respecting its isolation level.
+    /// - ReadCommitted: returns the latest committed version.
+    /// - SnapshotIsolation: returns the version at txn start.
+    pub fn get_node_for_txn(&self, txn_id: TxnId, node_id: NodeId) -> Option<&Node> {
+        let txn = self.active_transactions.get(&txn_id)?;
+        let read_version = match txn.isolation {
+            IsolationLevel::ReadCommitted => self.current_version,
+            IsolationLevel::SnapshotIsolation => txn.start_version,
+        };
+        self.get_node_at_version(node_id, read_version)
+    }
+
+    /// Get an edge visible to the given transaction, respecting its isolation level.
+    pub fn get_edge_for_txn(&self, txn_id: TxnId, edge_id: EdgeId) -> Option<Edge> {
+        let txn = self.active_transactions.get(&txn_id)?;
+        let read_version = match txn.isolation {
+            IsolationLevel::ReadCommitted => self.current_version,
+            IsolationLevel::SnapshotIsolation => txn.start_version,
+        };
+        self.get_edge_at_version(edge_id, read_version)
+    }
+
+    /// Record a node write in the transaction's write set.
+    pub fn txn_write_node(&mut self, txn_id: TxnId, node_id: NodeId) {
+        if let Some(txn) = self.active_transactions.get_mut(&txn_id) {
+            txn.node_write_set.insert(node_id);
+        }
+    }
+
+    /// Record an edge write in the transaction's write set.
+    pub fn txn_write_edge(&mut self, txn_id: TxnId, edge_id: EdgeId) {
+        if let Some(txn) = self.active_transactions.get_mut(&txn_id) {
+            txn.edge_write_set.insert(edge_id);
+        }
+    }
+
+    /// Commit a transaction. Returns Err if a write conflict is detected (first-writer-wins).
+    ///
+    /// Conflict detection: for each entity in the write set, check if it was committed
+    /// by another transaction after this transaction started. If so, abort.
+    pub fn commit_transaction(&mut self, txn_id: TxnId) -> GraphResult<u64> {
+        let txn = self.active_transactions.get(&txn_id)
+            .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?
+            .clone();
+
+        if txn.status != TxnStatus::Active {
+            return Err(GraphError::TransactionNotActive(txn_id));
+        }
+
+        // Write conflict detection: first-writer-wins
+        for &nid in &txn.node_write_set {
+            if let Some(&committed_at) = self.node_last_commit.get(&nid) {
+                if committed_at > txn.start_version {
+                    // Another transaction committed a write to this node after we started
+                    self.active_transactions.get_mut(&txn_id).unwrap().status = TxnStatus::Aborted;
+                    return Err(GraphError::WriteConflict(format!(
+                        "Node {} was modified by another transaction (committed at version {}, txn started at {})",
+                        nid.as_u64(), committed_at, txn.start_version
+                    )));
+                }
+            }
+        }
+        for &eid in &txn.edge_write_set {
+            if let Some(&committed_at) = self.edge_last_commit.get(&eid) {
+                if committed_at > txn.start_version {
+                    self.active_transactions.get_mut(&txn_id).unwrap().status = TxnStatus::Aborted;
+                    return Err(GraphError::WriteConflict(format!(
+                        "Edge {} was modified by another transaction (committed at version {}, txn started at {})",
+                        eid.as_u64(), committed_at, txn.start_version
+                    )));
+                }
+            }
+        }
+
+        // No conflicts — commit. Bump global version.
+        self.current_version += 1;
+        let commit_version = self.current_version;
+
+        // Update last-commit tracking for all written entities
+        for &nid in &txn.node_write_set {
+            self.node_last_commit.insert(nid, commit_version);
+        }
+        for &eid in &txn.edge_write_set {
+            self.edge_last_commit.insert(eid, commit_version);
+        }
+
+        // Mark transaction as committed
+        if let Some(t) = self.active_transactions.get_mut(&txn_id) {
+            t.status = TxnStatus::Committed;
+            t.commit_version = Some(commit_version);
+        }
+
+        Ok(commit_version)
+    }
+
+    /// Abort a transaction, discarding its writes.
+    /// Note: actual rollback of in-place mutations requires version-aware cleanup.
+    /// For now, marks the transaction as aborted so future reads skip its writes.
+    pub fn abort_transaction(&mut self, txn_id: TxnId) -> GraphResult<()> {
+        let txn = self.active_transactions.get_mut(&txn_id)
+            .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?;
+
+        if txn.status != TxnStatus::Active {
+            return Err(GraphError::TransactionNotActive(txn_id));
+        }
+
+        txn.status = TxnStatus::Aborted;
+        Ok(())
+    }
+
+    // ============================================================
+    // MVCC Version Garbage Collection
+    // ============================================================
+
+    /// Garbage-collect old MVCC versions that are no longer needed.
+    ///
+    /// Removes node versions and edge version log entries with version < `min_version`.
+    /// For each node, at least one version (the latest <= min_version) is always kept
+    /// so that current reads still work.
+    ///
+    /// Returns `(nodes_pruned, edge_entries_pruned)`.
+    pub fn gc_versions(&mut self, min_version: u64) -> (usize, usize) {
+        let mut nodes_pruned = 0usize;
+        let mut edges_pruned = 0usize;
+
+        // GC node versions: keep only the latest version <= min_version + all versions > min_version
+        for versions in &mut self.nodes {
+            if versions.len() <= 1 {
+                continue;
+            }
+            // Find the latest version that's <= min_version (the "base" we must keep)
+            let keep_idx = versions.iter().rposition(|n| n.version <= min_version);
+            if let Some(idx) = keep_idx {
+                if idx > 0 {
+                    // Remove all versions before idx (they're superseded by the base)
+                    nodes_pruned += idx;
+                    versions.drain(..idx);
+                }
+            }
+        }
+
+        // GC edge version log: remove entries with version < min_version, keep the latest one
+        let mut empty_logs = Vec::new();
+        for (&edge_id, log) in &mut self.edge_version_log {
+            if log.len() <= 1 {
+                continue;
+            }
+            let keep_idx = log.iter().rposition(|e| e.version <= min_version);
+            if let Some(idx) = keep_idx {
+                if idx > 0 {
+                    edges_pruned += idx;
+                    log.drain(..idx);
+                }
+            }
+            if log.is_empty() {
+                empty_logs.push(edge_id);
+            }
+        }
+        for eid in empty_logs {
+            self.edge_version_log.remove(&eid);
+        }
+
+        // Clean up completed/aborted transactions older than min_version
+        self.active_transactions.retain(|_, txn| {
+            txn.status == TxnStatus::Active || txn.start_version >= min_version
+        });
+
+        (nodes_pruned, edges_pruned)
+    }
+
+    /// Compute the safe GC watermark: the minimum start_version across all active transactions.
+    /// Versions below this watermark are safe to garbage-collect.
+    /// Returns `current_version` if no active transactions exist.
+    pub fn gc_watermark(&self) -> u64 {
+        self.active_transactions.values()
+            .filter(|txn| txn.status == TxnStatus::Active)
+            .map(|txn| txn.start_version)
+            .min()
+            .unwrap_or(self.current_version)
+    }
+
+    /// Run GC using the safe watermark (respects active transactions).
+    /// Returns `(nodes_pruned, edge_entries_pruned)`.
+    pub fn gc_auto(&mut self) -> (usize, usize) {
+        let watermark = self.gc_watermark();
+        self.gc_versions(watermark)
+    }
+
     /// Clear all data from the graph
     pub fn clear(&mut self) {
         self.nodes.clear();
-        self.edges.clear();
         self.edge_type_table.clear();
         self.edge_type_to_id.clear();
         self.edge_type_ids.clear();
+        self.edge_endpoints.clear();
+        self.edge_properties.clear();
+        self.edge_version_log.clear();
         self.outgoing.clear();
         self.incoming.clear();
         self.frozen_outgoing.clear();
@@ -2065,11 +2332,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let source = edge.source;
         let target = edge.target;
 
-        // Ensure capacity
-        if idx >= self.edges.len() {
-            self.edges.resize(idx + 1, Vec::new());
-        }
-
         // Validate nodes exist
         if !self.has_node(source) {
             return Err(GraphError::InvalidEdgeSource(source));
@@ -2092,14 +2354,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             in_list.insert(pos, (source, edge_id));
         }
 
+        // DS-07c: populate endpoints + compact type + properties
+        if idx >= self.edge_endpoints.len() {
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+        }
+        self.edge_endpoints[idx] = (source, target);
+        let type_id = self.intern_edge_type(&edge.edge_type);
+        if idx >= self.edge_type_ids.len() {
+            self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
+        }
+        self.edge_type_ids[idx] = type_id;
+        if !edge.properties.is_empty() {
+            self.edge_properties.insert(edge_id, edge.properties);
+        }
+
         // Update edge type index
         self.edge_type_index
-            .entry(edge.edge_type.clone())
+            .entry(self.edge_type_table[type_id as usize].clone())
             .or_insert_with(HashSet::new)
             .insert(edge_id);
-
-        // Insert the edge
-        self.edges[idx].push(edge);
 
         // Update next_edge_id to be higher than any recovered edge
         if edge_id.as_u64() >= self.next_edge_id {
@@ -2537,20 +2810,20 @@ mod tests {
     }
 
     #[test]
-    fn test_get_edge_mut() {
+    fn test_get_edge_properties_mut() {
         let mut store = GraphStore::new();
         let a = store.create_node("A");
         let b = store.create_node("B");
         let eid = store.create_edge(a, b, "LINKS").unwrap();
 
         {
-            let edge = store.get_edge_mut(eid).unwrap();
-            edge.set_property("weight".to_string(), PropertyValue::Float(1.5));
+            let props = store.get_edge_properties_mut(eid).unwrap();
+            props.insert("weight".to_string(), PropertyValue::Float(1.5));
         }
         let edge = store.get_edge(eid).unwrap();
         assert_eq!(edge.get_property("weight"), Some(&PropertyValue::Float(1.5)));
 
-        assert!(store.get_edge_mut(EdgeId::new(9999)).is_none());
+        assert!(store.get_edge_properties_mut(EdgeId::new(9999)).is_none());
     }
 
     #[test]
@@ -2564,7 +2837,7 @@ mod tests {
 
         let targets = store.get_outgoing_edge_targets(a);
         assert_eq!(targets.len(), 2);
-        // Each tuple is (EdgeId, source, target, &EdgeType)
+        // Each tuple is (EdgeId, source, target, EdgeType)
         let edge_ids: Vec<EdgeId> = targets.iter().map(|t| t.0).collect();
         assert!(edge_ids.contains(&e1));
         assert!(edge_ids.contains(&e2));
@@ -2777,8 +3050,11 @@ mod tests {
         assert_eq!(view.target, b);
         assert_eq!(view.edge_type.as_str(), "LINKS");
 
-        // Stub should not be in the full edge arena
-        assert!(store.get_edge(eid).is_none());
+        // With arena removal, stubs are now fully queryable via DS-07c reconstruction
+        let edge = store.get_edge(eid).unwrap();
+        assert_eq!(edge.source, a);
+        assert_eq!(edge.target, b);
+        assert_eq!(edge.edge_type.as_str(), "LINKS");
     }
 
     #[test]
@@ -3841,5 +4117,316 @@ mod tests {
         let buffer_non_empty: usize = store.outgoing.iter().filter(|v| !v.is_empty()).count();
         assert_eq!(buffer_non_empty, 0, "Write buffer should be empty after compaction");
         assert_eq!(store.frozen_outgoing.edge_count(), 99);
+    }
+
+    // ============================================================
+    // MVCC Transaction Tests
+    // ============================================================
+
+    #[test]
+    fn test_begin_transaction() {
+        let mut store = GraphStore::new();
+        let txn1 = store.begin_transaction(IsolationLevel::ReadCommitted);
+        let txn2 = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        assert_eq!(txn1, 1);
+        assert_eq!(txn2, 2);
+        assert_eq!(store.active_transactions.len(), 2);
+        assert_eq!(store.active_transactions[&txn1].isolation, IsolationLevel::ReadCommitted);
+        assert_eq!(store.active_transactions[&txn2].isolation, IsolationLevel::SnapshotIsolation);
+        assert_eq!(store.active_transactions[&txn1].status, TxnStatus::Active);
+    }
+
+    #[test]
+    fn test_commit_transaction_bumps_version() {
+        let mut store = GraphStore::new();
+        let initial_version = store.current_version;
+        let txn = store.begin_transaction(IsolationLevel::ReadCommitted);
+        let nid = store.create_node("Person");
+        store.txn_write_node(txn, nid);
+        let commit_v = store.commit_transaction(txn).unwrap();
+        assert_eq!(commit_v, initial_version + 1);
+        assert_eq!(store.current_version, initial_version + 1);
+        assert_eq!(store.active_transactions[&txn].status, TxnStatus::Committed);
+    }
+
+    #[test]
+    fn test_abort_transaction() {
+        let mut store = GraphStore::new();
+        let txn = store.begin_transaction(IsolationLevel::ReadCommitted);
+        store.abort_transaction(txn).unwrap();
+        assert_eq!(store.active_transactions[&txn].status, TxnStatus::Aborted);
+        // Can't abort again
+        assert!(store.abort_transaction(txn).is_err());
+    }
+
+    #[test]
+    fn test_snapshot_isolation_reads_start_version() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("Person");
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
+
+        // Start snapshot txn — sees version 1
+        let txn = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+
+        // Another transaction modifies the node
+        store.current_version = 2;
+        store.set_node_property("default", nid, "name", "Bob").unwrap();
+
+        // Snapshot txn should still see "Alice" (version 1)
+        let node = store.get_node_for_txn(txn, nid).unwrap();
+        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
+
+        // Current version sees "Bob"
+        let latest = store.get_node(nid).unwrap();
+        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("Bob"));
+    }
+
+    #[test]
+    fn test_read_committed_sees_latest() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("Person");
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
+
+        // Start read-committed txn
+        let txn = store.begin_transaction(IsolationLevel::ReadCommitted);
+
+        // Modify after txn starts
+        store.current_version = 2;
+        store.set_node_property("default", nid, "name", "Bob").unwrap();
+
+        // Read-committed should see "Bob" (latest)
+        let node = store.get_node_for_txn(txn, nid).unwrap();
+        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Bob"));
+    }
+
+    #[test]
+    fn test_write_conflict_detection() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("Person");
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
+
+        // Txn A starts
+        let txn_a = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_node(txn_a, nid);
+
+        // Txn B starts, writes same node, commits first
+        let txn_b = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_node(txn_b, nid);
+        store.commit_transaction(txn_b).unwrap(); // B commits → nid.last_commit = version 2
+
+        // Txn A tries to commit → should fail (nid was committed after A started)
+        let result = store.commit_transaction(txn_a);
+        assert!(result.is_err());
+        match result {
+            Err(GraphError::WriteConflict(_)) => {} // expected
+            other => panic!("Expected WriteConflict, got {:?}", other),
+        }
+        assert_eq!(store.active_transactions[&txn_a].status, TxnStatus::Aborted);
+    }
+
+    #[test]
+    fn test_no_conflict_on_disjoint_writes() {
+        let mut store = GraphStore::new();
+        let n1 = store.create_node("A");
+        let n2 = store.create_node("B");
+
+        let txn_a = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_node(txn_a, n1);
+
+        let txn_b = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_node(txn_b, n2);
+
+        // Both should commit successfully — no overlap
+        store.commit_transaction(txn_a).unwrap();
+        store.commit_transaction(txn_b).unwrap();
+    }
+
+    #[test]
+    fn test_edge_write_conflict() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge(a, b, "REL").unwrap();
+
+        let txn_a = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_edge(txn_a, eid);
+
+        let txn_b = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store.txn_write_edge(txn_b, eid);
+
+        store.commit_transaction(txn_a).unwrap();
+        // B should conflict on the same edge
+        assert!(store.commit_transaction(txn_b).is_err());
+    }
+
+    #[test]
+    fn test_snapshot_isolation_edge_read() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge(a, b, "REL").unwrap();
+        store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(1.0));
+
+        // Start snapshot txn
+        let txn = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+
+        // Modify edge after txn starts
+        store.current_version = 2;
+        let current_props = store.edge_properties.get(&eid).cloned().unwrap_or_default();
+        store.edge_version_log.entry(eid).or_insert_with(Vec::new).push(
+            EdgeVersionEntry { version: 1, properties: current_props }
+        );
+        store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(9.9));
+
+        // Snapshot sees version-1 properties
+        let edge = store.get_edge_for_txn(txn, eid).unwrap();
+        // The edge should reconstruct with version-1 properties
+        assert_eq!(edge.properties.get("weight"), Some(&PropertyValue::Float(1.0)));
+    }
+
+    #[test]
+    fn test_transaction_not_found() {
+        let mut store = GraphStore::new();
+        assert!(store.commit_transaction(999).is_err());
+        assert!(store.abort_transaction(999).is_err());
+    }
+
+    #[test]
+    fn test_double_commit_fails() {
+        let mut store = GraphStore::new();
+        let txn = store.begin_transaction(IsolationLevel::ReadCommitted);
+        store.commit_transaction(txn).unwrap();
+        assert!(store.commit_transaction(txn).is_err());
+    }
+
+    // ============================================================
+    // Version GC Tests
+    // ============================================================
+
+    #[test]
+    fn test_gc_node_versions() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("Person");
+        store.set_node_property("default", nid, "name", "v1").unwrap();
+
+        store.current_version = 2;
+        store.set_node_property("default", nid, "name", "v2").unwrap();
+
+        store.current_version = 3;
+        store.set_node_property("default", nid, "name", "v3").unwrap();
+
+        // Should have 3 versions
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 3);
+
+        // GC versions < 2: keeps v2 base + v3
+        let (nodes_pruned, _) = store.gc_versions(2);
+        assert_eq!(nodes_pruned, 1); // v1 pruned
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 2);
+
+        // Latest still works
+        let latest = store.get_node(nid).unwrap();
+        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("v3"));
+    }
+
+    #[test]
+    fn test_gc_edge_version_log() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge(a, b, "REL").unwrap();
+        store.set_edge_property_sparse(eid, "w", PropertyValue::Float(1.0));
+
+        // Create version log entries
+        store.edge_version_log.entry(eid).or_default().push(
+            EdgeVersionEntry { version: 1, properties: PropertyMap::new() }
+        );
+        store.current_version = 2;
+        let mut props2 = PropertyMap::new();
+        props2.insert("w".to_string(), PropertyValue::Float(2.0));
+        store.edge_version_log.entry(eid).or_default().push(
+            EdgeVersionEntry { version: 2, properties: props2 }
+        );
+        store.current_version = 3;
+        let mut props3 = PropertyMap::new();
+        props3.insert("w".to_string(), PropertyValue::Float(3.0));
+        store.edge_version_log.entry(eid).or_default().push(
+            EdgeVersionEntry { version: 3, properties: props3 }
+        );
+
+        assert_eq!(store.edge_version_log[&eid].len(), 3);
+
+        let (_, edges_pruned) = store.gc_versions(2);
+        assert_eq!(edges_pruned, 1); // version 1 pruned
+        assert_eq!(store.edge_version_log[&eid].len(), 2);
+    }
+
+    #[test]
+    fn test_gc_watermark_respects_active_txns() {
+        let mut store = GraphStore::new();
+        store.current_version = 10;
+
+        // Active txn started at version 5
+        let txn = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        assert_eq!(store.active_transactions[&txn].start_version, 10);
+
+        store.current_version = 20;
+
+        // Watermark should be 10 (oldest active txn)
+        assert_eq!(store.gc_watermark(), 10);
+
+        // After committing the txn, watermark should be current_version (commit bumped it)
+        store.commit_transaction(txn).unwrap();
+        assert_eq!(store.gc_watermark(), store.current_version);
+    }
+
+    #[test]
+    fn test_gc_auto() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("X");
+        store.set_node_property("default", nid, "v", "a").unwrap();
+
+        store.current_version = 2;
+        store.set_node_property("default", nid, "v", "b").unwrap();
+
+        store.current_version = 3;
+        store.set_node_property("default", nid, "v", "c").unwrap();
+
+        // 3 node versions
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 3);
+
+        // No active txns → watermark = current_version = 3
+        let (pruned, _) = store.gc_auto();
+        assert_eq!(pruned, 2); // v1 and v2 base pruned, only v3 remains
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 1);
+    }
+
+    #[test]
+    fn test_gc_preserves_single_version() {
+        let mut store = GraphStore::new();
+        let nid = store.create_node("X");
+        store.set_node_property("default", nid, "v", "only").unwrap();
+
+        // Single version — GC should be a no-op
+        let (pruned, _) = store.gc_versions(100);
+        assert_eq!(pruned, 0);
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 1);
+    }
+
+    #[test]
+    fn test_gc_cleans_old_transactions() {
+        let mut store = GraphStore::new();
+        let txn1 = store.begin_transaction(IsolationLevel::ReadCommitted);
+        store.commit_transaction(txn1).unwrap();
+
+        store.current_version = 5;
+        let txn2 = store.begin_transaction(IsolationLevel::ReadCommitted);
+        store.commit_transaction(txn2).unwrap();
+
+        assert_eq!(store.active_transactions.len(), 2);
+
+        // GC with min_version=5 should clean txn1 (committed, start_version=1)
+        store.gc_versions(5);
+        assert_eq!(store.active_transactions.len(), 1);
+        assert!(store.active_transactions.contains_key(&txn2));
     }
 }

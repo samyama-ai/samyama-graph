@@ -1,4 +1,4 @@
-use samyama::{GraphStore, NodeId, QueryEngine, RespServer, ServerConfig};
+use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
 use samyama::http::HttpServer;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -206,16 +206,14 @@ fn build_social_network(store: &mut GraphStore) {
         // WORKS_AT edge: person → company
         let company = company_ids[i % company_ids.len()];
         if let Ok(eid) = store.create_edge(id, company, "WORKS_AT") {
-            if let Some(edge) = store.get_edge_mut(eid) {
-                edge.set_property("since", 2015i64 + (i as i64 * 3) % 11);
-                edge.set_property("role", match i % 5 {
-                    0 => "Engineer",
-                    1 => "Manager",
-                    2 => "Analyst",
-                    3 => "Designer",
-                    _ => "Director",
-                });
-            }
+            store.set_edge_property_sparse(eid, "since", PropertyValue::Integer(2015i64 + (i as i64 * 3) % 11));
+            store.set_edge_property_sparse(eid, "role", PropertyValue::String(match i % 5 {
+                0 => "Engineer",
+                1 => "Manager",
+                2 => "Analyst",
+                3 => "Designer",
+                _ => "Director",
+            }.to_string()));
         }
         person_ids.push(id);
     }
@@ -408,9 +406,7 @@ fn load_graphalytics_dataset(
                 if let Ok(eid) = store.create_edge(s, t, edge_type) {
                     if parts.len() >= 3 {
                         if let Ok(w) = parts[2].parse::<f64>() {
-                            if let Some(edge) = store.get_edge_mut(eid) {
-                                edge.set_property("weight", w);
-                            }
+                            store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(w));
                         }
                     }
                     edge_count += 1;

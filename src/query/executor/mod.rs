@@ -3388,6 +3388,41 @@ mod tests {
         assert_eq!(result.records.len(), 2);
     }
 
+    #[test]
+    fn test_contains_null_property_skips_row() {
+        let mut store = GraphStore::new();
+        let id1 = store.create_node("Person");
+        store.set_node_property("default", id1, "name", "Alice").unwrap();
+        let _id2 = store.create_node("Person"); // no name property → null
+        let id3 = store.create_node("Person");
+        store.set_node_property("default", id3, "name", "Bob").unwrap();
+
+        // CONTAINS on null should return null → filtered out, not error
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n.name");
+        assert_eq!(result.records.len(), 1);
+    }
+
+    #[test]
+    fn test_starts_with_null_property_skips_row() {
+        let mut store = GraphStore::new();
+        let id1 = store.create_node("Person");
+        store.set_node_property("default", id1, "name", "Alice").unwrap();
+        let _id2 = store.create_node("Person"); // no name → null
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name STARTS WITH 'Ali' RETURN n.name");
+        assert_eq!(result.records.len(), 1);
+    }
+
+    #[test]
+    fn test_not_on_null_property_skips_row() {
+        let mut store = GraphStore::new();
+        let id1 = store.create_node("Person");
+        store.set_node_property("default", id1, "active", true).unwrap();
+        let _id2 = store.create_node("Person"); // no active property → null
+        // NOT null → null → filtered out
+        let result = exec_read(&store, "MATCH (n:Person) WHERE NOT n.active RETURN n");
+        assert_eq!(result.records.len(), 0);
+    }
+
     // --- IN operator ---
     #[test]
     fn test_in_operator_with_strings() {
@@ -4644,17 +4679,11 @@ mod tests {
         let c = store.create_node("City");
         store.set_node_property("default", c, "name", "C").unwrap();
         let e1 = store.create_edge(a, b, "ROAD").unwrap();
-        if let Some(edge) = store.get_edge_mut(e1) {
-            edge.set_property("distance", PropertyValue::Float(5.0));
-        }
+        store.set_edge_property_sparse(e1, "distance", PropertyValue::Float(5.0));
         let e2 = store.create_edge(b, c, "ROAD").unwrap();
-        if let Some(edge) = store.get_edge_mut(e2) {
-            edge.set_property("distance", PropertyValue::Float(3.0));
-        }
+        store.set_edge_property_sparse(e2, "distance", PropertyValue::Float(3.0));
         let e3 = store.create_edge(a, c, "ROAD").unwrap();
-        if let Some(edge) = store.get_edge_mut(e3) {
-            edge.set_property("distance", PropertyValue::Float(10.0));
-        }
+        store.set_edge_property_sparse(e3, "distance", PropertyValue::Float(10.0));
 
         let a_id = a.as_u64() as i64;
         let c_id = c.as_u64() as i64;
@@ -4674,13 +4703,9 @@ mod tests {
         let b = store.create_node("Node");
         let c = store.create_node("Node");
         let e1 = store.create_edge(a, b, "FLOW").unwrap();
-        if let Some(edge) = store.get_edge_mut(e1) {
-            edge.set_property("capacity", PropertyValue::Float(10.0));
-        }
+        store.set_edge_property_sparse(e1, "capacity", PropertyValue::Float(10.0));
         let e2 = store.create_edge(b, c, "FLOW").unwrap();
-        if let Some(edge) = store.get_edge_mut(e2) {
-            edge.set_property("capacity", PropertyValue::Float(5.0));
-        }
+        store.set_edge_property_sparse(e2, "capacity", PropertyValue::Float(5.0));
 
         let a_id = a.as_u64() as i64;
         let c_id = c.as_u64() as i64;
@@ -4700,17 +4725,11 @@ mod tests {
         let b = store.create_node("Node");
         let c = store.create_node("Node");
         let e1 = store.create_edge(a, b, "EDGE").unwrap();
-        if let Some(edge) = store.get_edge_mut(e1) {
-            edge.set_property("weight", PropertyValue::Float(1.0));
-        }
+        store.set_edge_property_sparse(e1, "weight", PropertyValue::Float(1.0));
         let e2 = store.create_edge(b, c, "EDGE").unwrap();
-        if let Some(edge) = store.get_edge_mut(e2) {
-            edge.set_property("weight", PropertyValue::Float(2.0));
-        }
+        store.set_edge_property_sparse(e2, "weight", PropertyValue::Float(2.0));
         let e3 = store.create_edge(a, c, "EDGE").unwrap();
-        if let Some(edge) = store.get_edge_mut(e3) {
-            edge.set_property("weight", PropertyValue::Float(3.0));
-        }
+        store.set_edge_property_sparse(e3, "weight", PropertyValue::Float(3.0));
 
         let query = parse_query(
             "CALL algo.mst('weight') YIELD total_weight"
@@ -6679,5 +6698,119 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         assert_eq!(*result.records[0].get("city").unwrap(), Value::Property(PropertyValue::String("London".to_string())));
+    }
+
+    #[test]
+    fn test_multi_with_node_reuse_in_expand() {
+        // Reproduces MB069: WITH p MATCH (p)-[:REL]->(x)
+        let mut store = GraphStore::new();
+        let g = store.create_node("Gene");
+        store.set_node_property("default", g, "name", "TP53").unwrap();
+        let p = store.create_node("Protein");
+        store.set_node_property("default", p, "gene_name", "TP53").unwrap();
+        store.set_node_property("default", p, "uid", "P04637").unwrap();
+        let go = store.create_node("GOTerm");
+        store.set_node_property("default", go, "go_id", "GO:0006915").unwrap();
+        store.create_edge(p, go, "HAS_GO_TERM").unwrap();
+
+        let result = exec_read(&store,
+            "MATCH (g:Gene {name: 'TP53'}) WITH g.name AS gn \
+             MATCH (p:Protein) WHERE p.gene_name = gn \
+             WITH p \
+             MATCH (p)-[:HAS_GO_TERM]->(go:GOTerm) \
+             RETURN p.uid, go.go_id"
+        );
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("p.uid").unwrap(), Value::Property(PropertyValue::String("P04637".to_string())));
+        assert_eq!(*result.records[0].get("go.go_id").unwrap(), Value::Property(PropertyValue::String("GO:0006915".to_string())));
+    }
+
+    #[test]
+    fn test_multi_with_aggregation_then_expand() {
+        // Reproduces FA14: WITH d, count(...) AS cases ... MATCH (c2)-[:REL]->(d)
+        let mut store = GraphStore::new();
+        let d = store.create_node("Drug");
+        store.set_node_property("default", d, "name", "Aspirin").unwrap();
+        let c1 = store.create_node("Case");
+        let c2 = store.create_node("Case");
+        let r = store.create_node("Reaction");
+        store.set_node_property("default", r, "term", "Headache").unwrap();
+        store.create_edge(c1, d, "REPORTED_DRUG").unwrap();
+        store.create_edge(c2, d, "REPORTED_DRUG").unwrap();
+        store.create_edge(c2, r, "EXPERIENCED").unwrap();
+
+        let result = exec_read(&store,
+            "MATCH (c:Case)-[:REPORTED_DRUG]->(d:Drug) \
+             WITH d, count(c) AS cases \
+             MATCH (c2:Case)-[:REPORTED_DRUG]->(d) \
+             WITH d, cases, c2 LIMIT 100 \
+             MATCH (c2)-[:EXPERIENCED]->(r:Reaction) \
+             RETURN d.name, cases, r.term"
+        );
+        assert!(result.records.len() >= 1);
+    }
+
+    #[test]
+    fn test_variable_scoping_across_with() {
+        // Reproduces FA15: WITH r, count(c) AS cases ... RETURN r.term, cases
+        let mut store = GraphStore::new();
+        let r = store.create_node("Reaction");
+        store.set_node_property("default", r, "term", "PARKINSON").unwrap();
+        let c1 = store.create_node("Case");
+        let c2 = store.create_node("Case");
+        store.create_edge(c1, r, "EXPERIENCED").unwrap();
+        store.create_edge(c2, r, "EXPERIENCED").unwrap();
+
+        let result = exec_read(&store,
+            "MATCH (r:Reaction) WHERE r.term CONTAINS 'PARKINSON' \
+             WITH r \
+             MATCH (c:Case)-[:EXPERIENCED]->(r) \
+             WITH r, count(c) AS cases \
+             ORDER BY cases DESC LIMIT 10 \
+             RETURN r.term, cases"
+        );
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(*result.records[0].get("cases").unwrap(), Value::Property(PropertyValue::Integer(2)));
+    }
+
+    #[test]
+    fn test_edge_type_count_without_shortcut() {
+        // First verify the basic aggregation works
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Article");
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, c, "AUTHORED").unwrap();
+        store.create_edge(b, c, "AUTHORED").unwrap();
+
+        // Simpler test: just count all edges
+        let r1 = exec_read(&store, "MATCH ()-[r]->() RETURN count(r) AS c");
+        assert_eq!(r1.records.len(), 1);
+        assert_eq!(*r1.records[0].get("c").unwrap(), Value::Property(PropertyValue::Integer(3)));
+    }
+
+    #[test]
+    fn test_edge_type_count_shortcut() {
+        // EX43 pattern: MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Article");
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(a, c, "AUTHORED").unwrap();
+        store.create_edge(b, c, "AUTHORED").unwrap();
+
+        let result = exec_read(&store,
+            "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC"
+        );
+        assert_eq!(result.records.len(), 2);
+        // AUTHORED: 2, KNOWS: 1
+        let first = &result.records[0];
+        assert_eq!(*first.get("edge_type").unwrap(), Value::Property(PropertyValue::String("AUTHORED".to_string())));
+        assert_eq!(*first.get("count").unwrap(), Value::Property(PropertyValue::Integer(2)));
+        let second = &result.records[1];
+        assert_eq!(*second.get("edge_type").unwrap(), Value::Property(PropertyValue::String("KNOWS".to_string())));
+        assert_eq!(*second.get("count").unwrap(), Value::Property(PropertyValue::Integer(1)));
     }
 }

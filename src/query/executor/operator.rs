@@ -214,15 +214,18 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         },
         BinaryOp::StartsWith => match (&left_prop, &right_prop) {
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.starts_with(r.as_str())),
-            _ => return Err(ExecutionError::TypeError("STARTS WITH requires strings".to_string())),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
+            _ => return Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
         },
         BinaryOp::EndsWith => match (&left_prop, &right_prop) {
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.ends_with(r.as_str())),
-            _ => return Err(ExecutionError::TypeError("ENDS WITH requires strings".to_string())),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
+            _ => return Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
         },
         BinaryOp::Contains => match (&left_prop, &right_prop) {
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.contains(r.as_str())),
-            _ => return Err(ExecutionError::TypeError("CONTAINS requires strings".to_string())),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
+            _ => return Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
         },
         BinaryOp::In => match &right_prop {
             PropertyValue::Array(arr) => PropertyValue::Boolean(arr.contains(&left_prop)),
@@ -233,6 +236,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
                 PropertyValue::Boolean(re.is_match(text))
             }
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
         },
     };
@@ -252,6 +256,7 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
         }
         UnaryOp::Not => match val {
             Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
+            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
             _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
         },
         UnaryOp::Minus => match val {
@@ -2019,6 +2024,97 @@ impl PhysicalOperator for LabelCountOperator {
     }
 }
 
+/// Edge type count operator: resolves `MATCH ()-[r]->() RETURN type(r), count(r)` from stats cache.
+/// Returns one row per edge type with its count, avoiding a full edge scan.
+pub struct EdgeTypeCountOperator {
+    type_alias: String,
+    count_alias: String,
+    results: std::vec::IntoIter<Record>,
+    executed: bool,
+}
+
+impl EdgeTypeCountOperator {
+    pub fn new(type_alias: String, count_alias: String) -> Self {
+        Self {
+            type_alias,
+            count_alias,
+            results: Vec::new().into_iter(),
+            executed: false,
+        }
+    }
+}
+
+impl PhysicalOperator for EdgeTypeCountOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            let stats = store.compute_statistics();
+            let mut records = Vec::new();
+            for (edge_type, count) in &stats.edge_type_counts {
+                let mut record = Record::new();
+                record.bind(
+                    self.type_alias.clone(),
+                    Value::Property(PropertyValue::String(edge_type.to_string())),
+                );
+                record.bind(
+                    self.count_alias.clone(),
+                    Value::Property(PropertyValue::Integer(*count as i64)),
+                );
+                records.push(record);
+            }
+            self.results = records.into_iter();
+            self.executed = true;
+        }
+        Ok(self.results.next())
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        if !self.executed {
+            let stats = store.compute_statistics();
+            let mut records = Vec::new();
+            for (edge_type, count) in &stats.edge_type_counts {
+                let mut record = Record::new();
+                record.bind(
+                    self.type_alias.clone(),
+                    Value::Property(PropertyValue::String(edge_type.to_string())),
+                );
+                record.bind(
+                    self.count_alias.clone(),
+                    Value::Property(PropertyValue::Integer(*count as i64)),
+                );
+                records.push(record);
+            }
+            self.results = records.into_iter();
+            self.executed = true;
+        }
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            if let Some(record) = self.results.next() {
+                batch.push(record);
+            } else {
+                break;
+            }
+        }
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+        self.results = Vec::new().into_iter();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "EdgeTypeCount".to_string(),
+            details: format!("type_alias={}, count_alias={}", self.type_alias, self.count_alias),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Filter operator: WHERE n.age > 30
 pub struct FilterOperator {
     /// Input operator
@@ -2081,11 +2177,11 @@ impl FilterOperator {
                         Ok(Value::Property(PropertyValue::Boolean(!is_null)))
                     }
                     UnaryOp::Not => {
-                        let b = match val {
-                            Value::Property(PropertyValue::Boolean(b)) => b,
+                        match val {
+                            Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
+                            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                             _ => return Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
-                        };
-                        Ok(Value::Property(PropertyValue::Boolean(!b)))
+                        }
                     }
                     UnaryOp::Minus => {
                         match val {
@@ -2340,6 +2436,7 @@ impl FilterOperator {
     fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.starts_with(r.as_str()))),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
         }
     }
@@ -2347,6 +2444,7 @@ impl FilterOperator {
     fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.ends_with(r.as_str()))),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
         }
     }
@@ -2354,6 +2452,7 @@ impl FilterOperator {
     fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
         match (left, right) {
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.contains(r.as_str()))),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
         }
     }
@@ -2371,6 +2470,7 @@ impl FilterOperator {
                 let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
                 Ok(PropertyValue::Boolean(re.is_match(text)))
             }
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
         }
     }
@@ -3177,27 +3277,32 @@ impl PhysicalOperator for AggregateOperator {
 
 impl AggregateOperator {
     fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Fast path: single group-by key avoids Vec allocation per record
+        if self.group_by.len() == 1 {
+            return self.execute_all_single_key(store);
+        }
+        // Fast path: no group-by (global aggregate) — avoids HashMap entirely
+        if self.group_by.is_empty() {
+            return self.execute_all_no_group(store);
+        }
+
         let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-        // Use next_batch from input for performance
         let batch_size = 65536;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
             if batch_count % 10 == 0 { check_deadline()?; }
             for record in batch.records {
-                // Evaluate grouping keys
-                let mut key = Vec::new();
+                let mut key = Vec::with_capacity(self.group_by.len());
                 for (expr, _) in &self.group_by {
                     key.push(Self::evaluate_expression(expr, &record, store)?);
                 }
 
-                // Initialize state if new group
                 let states = groups.entry(key).or_insert_with(|| {
                     self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
                 });
 
-                // Update state
                 for (i, agg) in self.aggregates.iter().enumerate() {
                     let val = Self::evaluate_expression(&agg.expr, &record, store)?;
                     states[i].update(&val);
@@ -3205,23 +3310,112 @@ impl AggregateOperator {
             }
         }
 
-        // Generate results
         let mut output_records = Vec::new();
         for (key, states) in groups {
             let mut record = Record::new();
-            
             for (i, (_, alias)) in self.group_by.iter().enumerate() {
                 record.bind(alias.clone(), key[i].clone());
             }
-
             for (i, agg) in self.aggregates.iter().enumerate() {
                 record.bind(agg.alias.clone(), states[i].result());
             }
-            
             output_records.push(record);
         }
 
         self.results = output_records.into_iter();
+        self.executed = true;
+        Ok(())
+    }
+
+    /// Optimized path for single group-by key: uses HashMap<Value, ...> instead of HashMap<Vec<Value>, ...>
+    fn execute_all_single_key(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut groups: HashMap<Value, Vec<AggregatorState>> = HashMap::new();
+        let group_expr = &self.group_by[0].0;
+
+        // Check if all aggregates are simple count (non-distinct) — can skip aggregate expression evaluation
+        let all_simple_count = self.aggregates.iter().all(|a| matches!(a.func, AggregateType::Count) && !a.distinct);
+
+        let batch_size = 65536;
+        let mut batch_count = 0u64;
+        while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            batch_count += 1;
+            if batch_count % 10 == 0 { check_deadline()?; }
+            for record in batch.records {
+                let key = Self::evaluate_expression(group_expr, &record, store)?;
+
+                let states = groups.entry(key).or_insert_with(|| {
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
+                });
+
+                if all_simple_count {
+                    // Fast path: just increment all counters without evaluating aggregate expressions
+                    for state in states.iter_mut() {
+                        if let AggregatorState::Count(c) = state {
+                            *c += 1;
+                        }
+                    }
+                } else {
+                    for (i, agg) in self.aggregates.iter().enumerate() {
+                        let val = Self::evaluate_expression(&agg.expr, &record, store)?;
+                        states[i].update(&val);
+                    }
+                }
+            }
+        }
+
+        let group_alias = &self.group_by[0].1;
+        let mut output_records = Vec::new();
+        for (key, states) in groups {
+            let mut record = Record::new();
+            record.bind(group_alias.clone(), key);
+            for (i, agg) in self.aggregates.iter().enumerate() {
+                record.bind(agg.alias.clone(), states[i].result());
+            }
+            output_records.push(record);
+        }
+
+        self.results = output_records.into_iter();
+        self.executed = true;
+        Ok(())
+    }
+
+    /// Optimized path for no group-by: single global aggregate, no HashMap needed
+    fn execute_all_no_group(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut states: Vec<AggregatorState> = self.aggregates.iter()
+            .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+            .collect();
+
+        let all_simple_count = self.aggregates.iter().all(|a| matches!(a.func, AggregateType::Count) && !a.distinct);
+
+        let batch_size = 65536;
+        let mut batch_count = 0u64;
+        while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            batch_count += 1;
+            if batch_count % 10 == 0 { check_deadline()?; }
+
+            if all_simple_count {
+                // Ultra-fast: just count rows
+                let row_count = batch.records.len() as i64;
+                for state in states.iter_mut() {
+                    if let AggregatorState::Count(c) = state {
+                        *c += row_count;
+                    }
+                }
+            } else {
+                for record in batch.records {
+                    for (i, agg) in self.aggregates.iter().enumerate() {
+                        let val = Self::evaluate_expression(&agg.expr, &record, store)?;
+                        states[i].update(&val);
+                    }
+                }
+            }
+        }
+
+        let mut record = Record::new();
+        for (i, agg) in self.aggregates.iter().enumerate() {
+            record.bind(agg.alias.clone(), states[i].result());
+        }
+        self.results = vec![record].into_iter();
         self.executed = true;
         Ok(())
     }
@@ -4838,11 +5032,9 @@ impl PhysicalOperator for CreateEdgeOperator {
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
                         .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                    // Set properties on edge using Edge's set_property method
-                    if let Some(edge) = store.get_edge_mut(edge_id) {
-                        for (key, value) in properties {
-                            edge.set_property(key.clone(), value.clone());
-                        }
+                    // Set properties on edge via DS-07c sparse map
+                    for (key, value) in properties {
+                        store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
                     }
 
                     self.created_edges.push((edge_id, edge_var.clone()));
@@ -4959,18 +5151,16 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
                     .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                // Set properties on edge
-                if let Some(edge) = store.get_edge_mut(edge_id) {
-                    for (key, value) in properties {
-                        edge.set_property(key.clone(), value.clone());
-                    }
+                // Set properties on edge via DS-07c sparse map
+                for (key, value) in properties {
+                    store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
                 }
 
                 // Always track created edges for persistence (even without variable names)
                 if let Some(edge) = store.get_edge(edge_id) {
-                    self.created_edges.push((edge_id, edge.clone(), edge_var.clone()));
-                    let var_name = edge_var.clone().or_else(|| Some(format!("__created_edge_{}", self.created_edges.len() - 1)));
+                    let var_name = edge_var.clone().or_else(|| Some(format!("__created_edge_{}", self.created_edges.len())));
                     self.results.push((var_name, Value::Edge(edge_id, edge.clone())));
+                    self.created_edges.push((edge_id, edge, edge_var.clone()));
                 }
             }
             self.phase = 2;
@@ -5067,17 +5257,15 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
                         .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                    // Set properties on edge
-                    if let Some(edge) = store.get_edge_mut(edge_id) {
-                        for (key, value) in properties {
-                            edge.set_property(key.clone(), value.clone());
-                        }
+                    // Set properties on edge via DS-07c sparse map
+                    for (key, value) in properties {
+                        store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
                     }
 
                     // Build result record with the created edge
                     let mut result_record = record.clone();
                     if let Some(edge) = store.get_edge(edge_id) {
-                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, edge.clone()));
+                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, edge));
                     }
                     self.results.push(result_record);
                 }
@@ -6031,8 +6219,8 @@ impl PhysicalOperator for RemovePropertyOperator {
                             }
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            if let Some(edge) = store.get_edge_mut(*id) {
-                                edge.remove_property(prop);
+                            if let Some(props) = store.get_edge_properties_mut(*id) {
+                                props.remove(prop);
                             }
                         }
                         _ => {}
@@ -8243,6 +8431,69 @@ mod tests {
     }
 
     #[test]
+    fn test_starts_with_null_left() {
+        let result = eval_binary_op(&BinaryOp::StartsWith,
+            Value::Property(PropertyValue::Null),
+            Value::Property(PropertyValue::String("x".to_string())),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_starts_with_null_right() {
+        let result = eval_binary_op(&BinaryOp::StartsWith,
+            Value::Property(PropertyValue::String("hello".to_string())),
+            Value::Property(PropertyValue::Null),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_ends_with_null() {
+        let result = eval_binary_op(&BinaryOp::EndsWith,
+            Value::Property(PropertyValue::Null),
+            Value::Property(PropertyValue::String("x".to_string())),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_contains_null_left() {
+        let result = eval_binary_op(&BinaryOp::Contains,
+            Value::Property(PropertyValue::Null),
+            Value::Property(PropertyValue::String("x".to_string())),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_contains_null_right() {
+        let result = eval_binary_op(&BinaryOp::Contains,
+            Value::Property(PropertyValue::String("hello".to_string())),
+            Value::Property(PropertyValue::Null),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_contains_both_null() {
+        let result = eval_binary_op(&BinaryOp::Contains,
+            Value::Property(PropertyValue::Null),
+            Value::Property(PropertyValue::Null),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_regex_match_null() {
+        let result = eval_binary_op(&BinaryOp::RegexMatch,
+            Value::Property(PropertyValue::Null),
+            Value::Property(PropertyValue::String(".*".to_string())),
+        ).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
     fn test_binary_op_in_list() {
         let arr = PropertyValue::Array(vec![
             PropertyValue::Integer(1),
@@ -8722,6 +8973,18 @@ mod tests {
     }
 
     #[test]
+    fn test_unary_op_not_null() {
+        let result = eval_unary_op(&UnaryOp::Not, Value::Property(PropertyValue::Null)).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_unary_op_not_value_null() {
+        let result = eval_unary_op(&UnaryOp::Not, Value::Null).unwrap();
+        assert_eq!(result, Value::Property(PropertyValue::Null));
+    }
+
+    #[test]
     fn test_unary_op_minus_int() {
         let result = eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::Integer(42))).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(-42)));
@@ -8977,7 +9240,7 @@ mod tests {
         let n1 = store.create_node("A");
         let n2 = store.create_node("B");
         let eid = store.create_edge(n1, n2, "REL").unwrap();
-        store.get_edge_mut(eid).unwrap().set_property("weight", 1.5f64);
+        store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(1.5));
 
         let edge = store.get_edge(eid).unwrap();
         let result = eval_function("keys", &[

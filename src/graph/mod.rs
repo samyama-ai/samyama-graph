@@ -65,7 +65,7 @@ pub mod storage;
 pub use edge::{Edge, EdgeView};
 pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
-pub use store::{GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats};
+pub use store::{GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats, IsolationLevel, TxnId, TxnStatus, Transaction};
 pub use types::{EdgeId, EdgeType, Label, NodeId};
 pub use catalog::GraphCatalog;
 pub use event::IndexEvent;
