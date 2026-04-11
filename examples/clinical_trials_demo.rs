@@ -555,9 +555,7 @@ async fn main() {
         for (d1, d2, interaction_type) in drug_interaction_pairs() {
             if d1 < drug_ids.len() && d2 < drug_ids.len() {
                 let eid = store.create_edge(drug_ids[d1], drug_ids[d2], EdgeType::new("INTERACTS_WITH")).unwrap();
-                if let Some(edge) = store.get_edge_mut(eid) {
-                    edge.set_property("interaction_type", interaction_type);
-                }
+                store.set_edge_property_sparse(eid, "interaction_type", interaction_type);
                 edge_count += 1;
             }
         }

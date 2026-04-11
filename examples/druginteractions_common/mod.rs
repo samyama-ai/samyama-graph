@@ -339,13 +339,11 @@ fn load_drugbank_dgidb(
 
             let edge_id = graph.create_edge(drug_node, gene_node, "INTERACTS_WITH_GENE")
                 .map_err(|e| format!("Edge creation failed: {}", e))?;
-            if let Some(e) = graph.get_edge_mut(edge_id) {
-                if !int_type.is_empty() && int_type != "NULL" {
-                    e.set_property("interaction_type", PropertyValue::String(int_type));
-                }
-                if !source.is_empty() {
-                    e.set_property("source", PropertyValue::String(source));
-                }
+            if !int_type.is_empty() && int_type != "NULL" {
+                graph.set_edge_property_sparse(edge_id, "interaction_type", PropertyValue::String(int_type));
+            }
+            if !source.is_empty() {
+                graph.set_edge_property_sparse(edge_id, "source", PropertyValue::String(source));
             }
             edge_count += 1;
         }
@@ -500,10 +498,8 @@ fn load_sider(
 
             let edge_id = graph.create_edge(drug_node, ind_node, "HAS_INDICATION")
                 .map_err(|e| format!("Edge creation failed: {}", e))?;
-            if let Some(e) = graph.get_edge_mut(edge_id) {
-                if !method.is_empty() {
-                    e.set_property("method", PropertyValue::String(method.to_string()));
-                }
+            if !method.is_empty() {
+                graph.set_edge_property_sparse(edge_id, "method", PropertyValue::String(method.to_string()));
             }
             ind_edges += 1;
         }
@@ -700,9 +696,7 @@ fn load_openfda(
                 let eid = graph.create_edge(drug_node, ae_node, "HAS_ADVERSE_EVENT")
                     .map_err(|e| format!("Edge creation failed: {}", e))?;
                 if let Ok(count) = count_str.parse::<i64>() {
-                    if let Some(e) = graph.get_edge_mut(eid) {
-                        e.set_property("report_count", PropertyValue::Integer(count));
-                    }
+                    graph.set_edge_property_sparse(eid, "report_count", PropertyValue::Integer(count));
                 }
                 ae_edges += 1;
             }

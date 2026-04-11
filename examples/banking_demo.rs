@@ -441,17 +441,17 @@ fn load_relationship_file(
         if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
             if let (Some(from_node), Some(to_node)) = (mappings.find(&from_id), mappings.find(&to_id)) {
                 if let Ok(edge_id) = graph.create_edge(from_node, to_node, edge_type) {
-                    if let Some(edge) = graph.get_edge_mut(edge_id) {
+                    if let Some(props) = graph.get_edge_properties_mut(edge_id) {
                         for (key, value) in &row {
                             if *key != from_col && *key != to_col && !value.is_empty() {
                                 if let Ok(n) = value.parse::<f64>() {
-                                    edge.set_property(*key, n);
+                                    props.insert((*key).into(), n.into());
                                 } else if let Ok(n) = value.parse::<i64>() {
-                                    edge.set_property(*key, n);
+                                    props.insert((*key).into(), n.into());
                                 } else if *value == "True" || *value == "False" {
-                                    edge.set_property(*key, *value == "True");
+                                    props.insert((*key).into(), (*value == "True").into());
                                 } else {
-                                    edge.set_property(*key, *value);
+                                    props.insert((*key).into(), (*value).into());
                                 }
                             }
                         }
@@ -732,7 +732,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for node in &individual_customers {
             for edge in graph.get_outgoing_edges(node.id) {
                 if edge.edge_type.as_str() == "OWNS" {
-                    persist_mgr.persist_create_edge("retail_banking", edge)?;
+                    persist_mgr.persist_create_edge("retail_banking", &edge)?;
                     retail_edges += 1;
                 }
             }
@@ -742,7 +742,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for node in &corporate_customers {
             for edge in graph.get_outgoing_edges(node.id) {
                 if edge.edge_type.as_str() == "OWNS" {
-                    persist_mgr.persist_create_edge("corporate_banking", edge)?;
+                    persist_mgr.persist_create_edge("corporate_banking", &edge)?;
                     corporate_edges += 1;
                 }
             }
@@ -752,7 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for node in &hnw_customers {
             for edge in graph.get_outgoing_edges(node.id) {
                 if edge.edge_type.as_str() == "OWNS" {
-                    persist_mgr.persist_create_edge("wealth_management", edge)?;
+                    persist_mgr.persist_create_edge("wealth_management", &edge)?;
                     wealth_edges += 1;
                 }
             }
