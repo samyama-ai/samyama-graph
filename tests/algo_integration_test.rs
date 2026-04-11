@@ -21,19 +21,19 @@ fn test_max_flow_mst_integration() {
     let et = EdgeType::new("LINK");
     
     let e1 = store.create_edge(n1, n2, et.clone()).unwrap();
-    store.get_edge_mut(e1).unwrap().set_property("capacity".to_string(), PropertyValue::Float(10.0));
-    
+    store.set_edge_property_sparse(e1, "capacity", PropertyValue::Float(10.0));
+
     let e2 = store.create_edge(n1, n3, et.clone()).unwrap();
-    store.get_edge_mut(e2).unwrap().set_property("capacity".to_string(), PropertyValue::Float(10.0));
-    
+    store.set_edge_property_sparse(e2, "capacity", PropertyValue::Float(10.0));
+
     let e3 = store.create_edge(n2, n3, et.clone()).unwrap();
-    store.get_edge_mut(e3).unwrap().set_property("capacity".to_string(), PropertyValue::Float(1.0));
+    store.set_edge_property_sparse(e3, "capacity", PropertyValue::Float(1.0));
 
     let e4 = store.create_edge(n2, n4, et.clone()).unwrap();
-    store.get_edge_mut(e4).unwrap().set_property("capacity".to_string(), PropertyValue::Float(10.0));
+    store.set_edge_property_sparse(e4, "capacity", PropertyValue::Float(10.0));
 
     let e5 = store.create_edge(n3, n4, et.clone()).unwrap();
-    store.get_edge_mut(e5).unwrap().set_property("capacity".to_string(), PropertyValue::Float(10.0));
+    store.set_edge_property_sparse(e5, "capacity", PropertyValue::Float(10.0));
 
     // 1. Test Max Flow
     let query_str = format!("CALL algo.maxFlow({}, {}, 'capacity') YIELD max_flow", n1.as_u64(), n4.as_u64());

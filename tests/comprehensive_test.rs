@@ -50,16 +50,12 @@ async fn test_all_phases_comprehensive() {
 
     // Create edges with properties
     let knows_edge = graph_store.create_edge(alice_id, bob_id, "KNOWS").unwrap();
-    if let Some(edge) = graph_store.get_edge_mut(knows_edge) {
-        edge.set_property("since", 2020i64);
-        edge.set_property("strength", 0.9);
-    }
+    graph_store.set_edge_property_sparse(knows_edge, "since", 2020i64);
+    graph_store.set_edge_property_sparse(knows_edge, "strength", 0.9);
 
     let works_at_edge = graph_store.create_edge(alice_id, company_id, "WORKS_AT").unwrap();
-    if let Some(edge) = graph_store.get_edge_mut(works_at_edge) {
-        edge.set_property("position", "Senior Engineer");
-        edge.set_property("since", 2018i64);
-    }
+    graph_store.set_edge_property_sparse(works_at_edge, "position", "Senior Engineer");
+    graph_store.set_edge_property_sparse(works_at_edge, "since", 2018i64);
 
     // Verify graph structure
     assert_eq!(graph_store.node_count(), 3);

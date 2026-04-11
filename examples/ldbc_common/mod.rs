@@ -161,9 +161,9 @@ where
             Ok(edge_id) => {
                 let props = parse_props(&headers, &fields);
                 if !props.is_empty() {
-                    if let Some(edge) = graph.get_edge_mut(edge_id) {
+                    if let Some(edge_props) = graph.get_edge_properties_mut(edge_id) {
                         for (key, val) in props {
-                            edge.set_property(key, val);
+                            edge_props.insert(key.to_string(), val);
                         }
                     }
                 }

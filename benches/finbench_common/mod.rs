@@ -160,9 +160,9 @@ where
             Ok(edge_id) => {
                 let props = parse_props(&headers, &fields);
                 if !props.is_empty() {
-                    if let Some(edge) = graph.get_edge_mut(edge_id) {
+                    if let Some(edge_props) = graph.get_edge_properties_mut(edge_id) {
                         for (key, val) in props {
-                            edge.set_property(key, val);
+                            edge_props.insert(key.to_string(), val);
                         }
                     }
                 }
@@ -744,9 +744,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
             let src = ids.person[&pid];
             let tgt = ids.account[&aid];
             if let Ok(eid) = graph.create_edge(src, tgt, "OWN") {
-                if let Some(edge) = graph.get_edge_mut(eid) {
-                    edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                }
+                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
                 own_count += 1;
                 owned_accounts.insert(aid);
             }
@@ -760,9 +758,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
             let src = ids.company[&cid];
             let tgt = ids.account[&aid];
             if let Ok(eid) = graph.create_edge(src, tgt, "OWN") {
-                if let Some(edge) = graph.get_edge_mut(eid) {
-                    edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                }
+                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
                 own_count += 1;
                 owned_accounts.insert(aid);
             }
@@ -783,11 +779,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&src_aid];
         let tgt = ids.account[&tgt_aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "TRANSFER") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                let amount = 10.0 + rng.next_f64() * 50_000.0;
-                edge.set_property("amount", PropertyValue::Float(amount));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            let amount = 10.0 + rng.next_f64() * 50_000.0;
+            graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             transfer_count += 1;
         }
     }
@@ -806,11 +800,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&src_aid];
         let tgt = ids.account[&tgt_aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "WITHDRAW") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                let amount = 50.0 + rng.next_f64() * 20_000.0;
-                edge.set_property("amount", PropertyValue::Float(amount));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            let amount = 50.0 + rng.next_f64() * 20_000.0;
+            graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             withdraw_count += 1;
         }
     }
@@ -826,11 +818,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.loan[&lid];
         let tgt = ids.account[&aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "DEPOSIT") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                let amount = 500.0 + rng.next_f64() * 100_000.0;
-                edge.set_property("amount", PropertyValue::Float(amount));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            let amount = 500.0 + rng.next_f64() * 100_000.0;
+            graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             deposit_count += 1;
         }
     }
@@ -846,11 +836,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&aid];
         let tgt = ids.loan[&lid];
         if let Ok(eid) = graph.create_edge(src, tgt, "REPAY") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                let amount = 100.0 + rng.next_f64() * 50_000.0;
-                edge.set_property("amount", PropertyValue::Float(amount));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            let amount = 100.0 + rng.next_f64() * 50_000.0;
+            graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             repay_count += 1;
         }
     }
@@ -866,9 +854,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&aid];
         let tgt = ids.medium[&mid];
         if let Ok(eid) = graph.create_edge(src, tgt, "SIGN_IN") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
             signin_count += 1;
         }
     }
@@ -889,9 +875,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         };
         let tgt = ids.loan[&lid];
         if let Ok(eid) = graph.create_edge(src, tgt, "APPLY") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
             apply_count += 1;
         }
     }
@@ -914,11 +898,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         };
         let tgt = ids.company[&tgt_cid];
         if let Ok(eid) = graph.create_edge(src, tgt, "INVEST") {
-            if let Some(edge) = graph.get_edge_mut(eid) {
-                edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                let ratio = rng.next_f64();
-                edge.set_property("ratio", PropertyValue::Float(ratio));
-            }
+            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            let ratio = rng.next_f64();
+            graph.set_edge_property_sparse(eid, "ratio", PropertyValue::Float(ratio));
             invest_count += 1;
         }
     }
@@ -938,9 +920,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
             let src = ids.company[&src_cid];
             let tgt = ids.company[&tgt_cid];
             if let Ok(eid) = graph.create_edge(src, tgt, "GUARANTEE") {
-                if let Some(edge) = graph.get_edge_mut(eid) {
-                    edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                }
+                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
                 guarantee_count += 1;
             }
         } else {
@@ -950,9 +930,7 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
             let src = ids.person[&src_pid];
             let tgt = ids.person[&tgt_pid];
             if let Ok(eid) = graph.create_edge(src, tgt, "GUARANTEE") {
-                if let Some(edge) = graph.get_edge_mut(eid) {
-                    edge.set_property("timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
-                }
+                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
                 guarantee_count += 1;
             }
         }
