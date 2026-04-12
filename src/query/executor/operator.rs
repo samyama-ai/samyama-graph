@@ -141,12 +141,17 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 _ => PropertyValue::Boolean(false),
             }
         }
+        // Cypher three-valued logic: false AND x → false, true AND null → null, etc.
         BinaryOp::And => match (&left_prop, &right_prop) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l && *r),
+            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => PropertyValue::Boolean(false),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("AND requires booleans".to_string())),
         },
         BinaryOp::Or => match (&left_prop, &right_prop) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l || *r),
+            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => PropertyValue::Boolean(true),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
         },
         BinaryOp::Add => match (&left_prop, &right_prop) {
@@ -2367,15 +2372,21 @@ impl FilterOperator {
     }
 
     fn logical_and(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        // Cypher three-valued logic: false AND x → false, true AND null → null
         match (left, right) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l && *r)),
+            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => Ok(PropertyValue::Boolean(false)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("AND requires boolean operands".to_string())),
         }
     }
 
     fn logical_or(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
+        // Cypher three-valued logic: true OR x → true, false OR null → null
         match (left, right) {
             (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l || *r)),
+            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => Ok(PropertyValue::Boolean(true)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("OR requires boolean operands".to_string())),
         }
     }
@@ -9455,5 +9466,59 @@ mod tests {
                 children: Vec::new(),
             }
         }
+    }
+
+    // ========== Three-valued logic tests (Cypher AND/OR with nulls) ==========
+
+    fn prop(v: PropertyValue) -> Value { Value::Property(v) }
+
+    #[test]
+    fn test_and_false_short_circuits_null() {
+        // false AND null → false (short-circuit). Previously errored with "AND requires booleans".
+        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Boolean(false)), prop(PropertyValue::Null)).unwrap();
+        assert_eq!(r, prop(PropertyValue::Boolean(false)));
+        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Boolean(false))).unwrap();
+        assert_eq!(r, prop(PropertyValue::Boolean(false)));
+    }
+
+    #[test]
+    fn test_and_true_with_null_is_null() {
+        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Boolean(true)), prop(PropertyValue::Null)).unwrap();
+        assert_eq!(r, prop(PropertyValue::Null));
+        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Boolean(true))).unwrap();
+        assert_eq!(r, prop(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_and_null_null_is_null() {
+        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Null)).unwrap();
+        assert_eq!(r, prop(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_or_true_short_circuits_null() {
+        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Boolean(true)), prop(PropertyValue::Null)).unwrap();
+        assert_eq!(r, prop(PropertyValue::Boolean(true)));
+        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Null), prop(PropertyValue::Boolean(true))).unwrap();
+        assert_eq!(r, prop(PropertyValue::Boolean(true)));
+    }
+
+    #[test]
+    fn test_or_false_with_null_is_null() {
+        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Boolean(false)), prop(PropertyValue::Null)).unwrap();
+        assert_eq!(r, prop(PropertyValue::Null));
+        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Null), prop(PropertyValue::Boolean(false))).unwrap();
+        assert_eq!(r, prop(PropertyValue::Null));
+    }
+
+    #[test]
+    fn test_is_not_null_and_contains_on_null_property() {
+        // Regression: WHERE p.name IS NOT NULL AND p.name CONTAINS 'x'
+        // When p.name is NULL: IS NOT NULL → false, CONTAINS → null.
+        // false AND null must short-circuit to false, not error.
+        let is_not_null = eval_unary_op(&UnaryOp::IsNotNull, Value::Null).unwrap();
+        let contains_on_null = Value::Property(PropertyValue::Null); // CONTAINS on null returns null
+        let r = eval_binary_op(&BinaryOp::And, is_not_null, contains_on_null).unwrap();
+        assert_eq!(r, prop(PropertyValue::Boolean(false)));
     }
 }
