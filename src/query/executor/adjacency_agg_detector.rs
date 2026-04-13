@@ -163,6 +163,15 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
 
     let (count_alias, count_arg_var, count_distinct) = count_info?;
 
+    // Phase 1 cannot safely lower `count(DISTINCT neighbor)` — degree-on-a-node
+    // equals the raw edge count, which differs from the set-size when parallel
+    // edges exist. Reject so the planner keeps the generic aggregate path.
+    // A future phase may lift this constraint either via a parallel-edge
+    // schema check or a dedup helper in the operator.
+    if count_distinct {
+        return None;
+    }
+
     // The counted variable must be one endpoint; the grouped side must be the
     // OTHER endpoint and must provide every group-by variable.
     let (grouped_var, grouped_node, neighbor_var, neighbor_node) =
@@ -325,7 +334,9 @@ mod tests {
         assert!(detect(&q).is_none());
     }
 
-    /// DISTINCT count — set-cardinality semantics diverge from raw degree.
+    /// DISTINCT count — set-cardinality semantics diverge from raw degree
+    /// when parallel edges exist. Phase 1 rejects outright; lift in a later
+    /// phase once we have a parallel-edge check.
     #[test]
     fn rejects_count_distinct_in_phase_1() {
         let q = parse_query(
@@ -333,11 +344,7 @@ mod tests {
              RETURN j.title, count(DISTINCT a) AS articles",
         )
         .unwrap();
-        let p = detect(&q);
-        // Detector still extracts it — Phase 1's lowering will reject on the
-        // `count_distinct` flag. Make sure we faithfully record the modifier.
-        let p = p.expect("detector preserves DISTINCT info");
-        assert!(p.count_distinct);
+        assert!(detect(&q).is_none());
     }
 
     /// Property constraints on endpoints would act as filters; out of scope.
