@@ -89,6 +89,45 @@ pub enum LogicalPlanNode {
         left: Box<LogicalPlanNode>,
         right: Box<LogicalPlanNode>,
     },
+    /// Aggregation that computes `count(neighbor)` grouped by one bound endpoint
+    /// by reading per-node degree from the adjacency list instead of walking
+    /// every edge. See [ADR-017](../../../docs/ADR/ADR-017-adjacency-aware-aggregation-planning.md).
+    ///
+    /// Semantically equivalent to:
+    /// ```text
+    /// Aggregate[group_by=[grouped_var, ...props], count(neighbor)] (
+    ///   Expand[direction, edge_types](
+    ///     LabelScan[grouped_label]
+    ///   )
+    /// )
+    /// ```
+    /// but avoids the O(|edges|) expand. Phase 0 of ADR-017 introduces the
+    /// plan shape; Phase 1 ships the physical operator.
+    AdjacencyCountAggregate {
+        /// Source scan producing the grouped-on endpoint (typically `LabelScan`).
+        input: Box<LogicalPlanNode>,
+        /// Variable bound by `input` — the endpoint the aggregate groups on.
+        grouped_var: String,
+        /// Variable name representing the counted neighbor (appears in `count(neighbor)`).
+        neighbor_var: String,
+        /// Single edge type for the degree lookup.
+        edge_type: EdgeType,
+        /// Direction of the edge relative to `grouped_var`:
+        /// - `Forward`  = out-degree (`grouped_var -[E]-> neighbor`)
+        /// - `Reverse`  = in-degree  (`neighbor -[E]-> grouped_var`)
+        direction: ExpandDirection,
+        /// Optional label constraint on the neighbor side (for Phase 1 this is
+        /// satisfiable only when schema uniqueness guarantees it — see ADR-017).
+        neighbor_label: Option<Label>,
+        /// Whether the count is DISTINCT — present for API symmetry; for a
+        /// count over a single neighbor variable, DISTINCT is always a no-op
+        /// under uniqueness and always set-size otherwise. Phase 1 rejects
+        /// DISTINCT to keep semantics conservative.
+        distinct: bool,
+        /// Alias under which the count result is exposed (e.g. `"articles"`
+        /// for `count(a) AS articles`).
+        count_alias: String,
+    },
 }
 
 impl LogicalPlanNode {
@@ -142,6 +181,20 @@ impl LogicalPlanNode {
             LogicalPlanNode::CartesianProduct { left, right } => {
                 let mut s = left.bound_variables();
                 s.extend(right.bound_variables());
+                s
+            }
+            LogicalPlanNode::AdjacencyCountAggregate {
+                input,
+                grouped_var,
+                count_alias,
+                ..
+            } => {
+                // The neighbor_var is NOT bound downstream — only the grouped
+                // endpoint and the count result alias are visible after this
+                // node. The aggregate collapses the neighbor.
+                let mut s = input.bound_variables();
+                s.insert(grouped_var.clone());
+                s.insert(count_alias.clone());
                 s
             }
         }
@@ -198,6 +251,40 @@ impl LogicalPlanNode {
                 let l = left.display_plan(indent + 1);
                 let r = right.display_plan(indent + 1);
                 format!("{}{}CartesianProduct\n{}\n{}", prefix, connector, l, r)
+            }
+            LogicalPlanNode::AdjacencyCountAggregate {
+                input,
+                grouped_var,
+                neighbor_var,
+                edge_type,
+                direction,
+                neighbor_label,
+                distinct,
+                count_alias,
+            } => {
+                let dir = match direction {
+                    ExpandDirection::Forward => "->",
+                    ExpandDirection::Reverse => "<-",
+                };
+                let nlabel = neighbor_label
+                    .as_ref()
+                    .map(|l| format!(":{}", l.as_str()))
+                    .unwrap_or_default();
+                let distinct_prefix = if *distinct { "DISTINCT " } else { "" };
+                let child = input.display_plan(indent + 1);
+                format!(
+                    "{}{}AdjacencyCountAggregate ({}[:{}]{} {}({}{}) AS {})\n{}",
+                    prefix,
+                    connector,
+                    grouped_var,
+                    edge_type.as_str(),
+                    dir,
+                    nlabel,
+                    distinct_prefix,
+                    neighbor_var,
+                    count_alias,
+                    child
+                )
             }
         }
     }

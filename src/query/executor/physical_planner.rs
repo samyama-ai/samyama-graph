@@ -109,6 +109,18 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             let physical_right = logical_to_physical(right);
             Box::new(CartesianProductOperator::new(physical_left, physical_right))
         }
+
+        LogicalPlanNode::AdjacencyCountAggregate { .. } => {
+            // Phase 0 (ADR-017): the logical variant exists so the detector can
+            // emit it, but the physical operator ships in Phase 1. Until then,
+            // this node must not appear in a plan that reaches the physical
+            // planner. Panicking loudly is preferable to silent wrong output.
+            panic!(
+                "AdjacencyCountAggregate is not yet implemented in the physical planner \
+                 (ADR-017 Phase 0). The detector produces this node but it must be \
+                 lowered to an Expand+Aggregate equivalent until Phase 1 ships."
+            );
+        }
     }
 }
 

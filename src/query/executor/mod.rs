@@ -76,6 +76,7 @@
 //! **runtime polymorphism** -- the alternative to compile-time generics when you need
 //! heterogeneous collections of operators.
 
+pub mod adjacency_agg_detector;
 pub mod cost_model;
 pub mod leapfrog;
 pub mod logical_optimizer;
