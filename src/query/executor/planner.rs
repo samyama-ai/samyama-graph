@@ -384,6 +384,13 @@ impl QueryPlanner {
         if let Some(pat) = super::adjacency_agg_detector::detect(query) {
             return self.plan_adjacency_count_aggregate(query, pat);
         }
+        // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
+        // where an explicit pre-WITH LIMIT caps the work per group but the
+        // second MATCH would otherwise spill billions of edges into the
+        // generic aggregate.
+        if let Some(pat) = super::adjacency_agg_detector::detect_with_binding(query) {
+            return self.plan_adjacency_count_aggregate_with_binding(query, pat);
+        }
 
         // Handle MERGE-only statement (no MATCH needed)
         if query.match_clauses.is_empty() && query.call_clause.is_none() {
@@ -1762,6 +1769,133 @@ impl QueryPlanner {
 
         if let Some(skip) = query.skip {
             operator = Box::new(super::operator::SkipOperator::new(operator, skip));
+        }
+        if let Some(limit) = query.limit {
+            operator = Box::new(LimitOperator::new(operator, limit));
+        }
+
+        Ok(ExecutionPlan {
+            root: operator,
+            output_columns,
+            is_write: false,
+            candidates_evaluated: 1,
+            chosen_plan_cost: 0.0,
+            candidate_costs: Vec::new(),
+        })
+    }
+
+    /// Phase 3a: specialized plan for the WITH-bound adjacency-count shape.
+    /// The pre-WITH MATCH scans the grouped label; any WHERE filter is applied
+    /// as a FilterOperator; the WITH's SKIP/LIMIT bound the scan; the
+    /// AdjacencyCountAggregate operator counts neighbors per surviving row.
+    fn plan_adjacency_count_aggregate_with_binding(
+        &self,
+        query: &Query,
+        pat: super::adjacency_agg_detector::AdjacencyAggWithBindingPattern,
+    ) -> ExecutionResult<ExecutionPlan> {
+        use super::operator::{
+            AdjacencyCountAggregateOperator, FilterOperator, LimitOperator, NodeScanOperator,
+            ProjectOperator, SkipOperator, SortOperator,
+        };
+
+        let physical_direction = match pat.core.direction {
+            super::logical_plan::ExpandDirection::Forward => Direction::Outgoing,
+            super::logical_plan::ExpandDirection::Reverse => Direction::Incoming,
+        };
+
+        // Grouped-side scan. An explicit early_limit on NodeScan lets us stop
+        // iterating after WITH's LIMIT rows — this is the pre-WITH-LIMIT
+        // equivalent of PR #192's streaming idea, applied to the scan itself.
+        let mut scan = NodeScanOperator::new(
+            pat.core.grouped_var.clone(),
+            vec![pat.core.grouped_label.clone()],
+        );
+        // Only push early_limit down when there's no pre-filter — otherwise
+        // we'd stop at the wrong rows. With a filter, we apply LIMIT after.
+        let filter_will_run = pat.prefilter.is_some();
+        if !filter_will_run {
+            if let Some(skip) = pat.grouped_scan_skip {
+                if let Some(lim) = pat.grouped_scan_limit {
+                    scan = scan.with_early_limit(skip + lim);
+                }
+            } else if let Some(lim) = pat.grouped_scan_limit {
+                scan = scan.with_early_limit(lim);
+            }
+        }
+        let mut operator: OperatorBox = Box::new(scan);
+
+        // Pre-filter (WHERE on the grouped side).
+        if let Some(pred) = pat.prefilter {
+            operator = Box::new(FilterOperator::new(operator, pred));
+        }
+
+        // SKIP/LIMIT from the WITH clause. When a filter ran, these are
+        // applied in user order: skip first, then limit of the filtered
+        // stream. When no filter ran, early_limit on the scan already
+        // handled both, so these wrappers are redundant — but harmless.
+        if filter_will_run {
+            if let Some(skip) = pat.grouped_scan_skip {
+                operator = Box::new(SkipOperator::new(operator, skip));
+            }
+            if let Some(lim) = pat.grouped_scan_limit {
+                operator = Box::new(LimitOperator::new(operator, lim));
+            }
+        }
+
+        // The adjacency-count aggregate itself — identical to Phase 1.
+        operator = Box::new(AdjacencyCountAggregateOperator::new(
+            operator,
+            pat.core.grouped_var.clone(),
+            pat.core.count_alias.clone(),
+            pat.core.edge_type.clone(),
+            physical_direction,
+        ));
+
+        // RETURN projections — same logic as the Phase 1 helper.
+        let return_clause = query
+            .return_clause
+            .as_ref()
+            .expect("detector enforces RETURN presence");
+        let mut output_columns = Vec::new();
+        let projections: Vec<(Expression, String)> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| match &item.expression {
+                        Expression::Variable(v) => v.clone(),
+                        Expression::Property { variable, property } => {
+                            format!("{}.{}", variable, property)
+                        }
+                        _ => format!("col_{}", i),
+                    });
+                output_columns.push(alias.clone());
+                let expr = match &item.expression {
+                    Expression::Function { name, .. }
+                        if name.eq_ignore_ascii_case("count") =>
+                    {
+                        Expression::Variable(pat.core.count_alias.clone())
+                    }
+                    other => other.clone(),
+                };
+                (expr, alias)
+            })
+            .collect();
+        operator = Box::new(ProjectOperator::new(operator, projections));
+
+        if let Some(order_by) = &query.order_by {
+            let sort_items: Vec<(Expression, bool)> = order_by
+                .items
+                .iter()
+                .map(|i| (i.expression.clone(), i.ascending))
+                .collect();
+            operator = Box::new(SortOperator::new(operator, sort_items));
+        }
+        if let Some(skip) = query.skip {
+            operator = Box::new(SkipOperator::new(operator, skip));
         }
         if let Some(limit) = query.limit {
             operator = Box::new(LimitOperator::new(operator, limit));

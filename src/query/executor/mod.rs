@@ -6964,6 +6964,117 @@ mod tests {
         assert_eq!(counts, vec![4, 2]);
     }
 
+    /// ADR-017 Phase 3a: MB053 shape end-to-end. Verifies that the WITH-bound
+    /// detector picks up the pattern, the pre-WITH LIMIT 500 is respected,
+    /// and the count matches the generic aggregate on the same data.
+    #[test]
+    fn test_adjacency_count_with_binding_mb053_shape() {
+        let mut store = GraphStore::new();
+        // 7 MeSHTerms. The WITH LIMIT caps us to 3; only those are counted.
+        let mut m_ids = Vec::new();
+        for i in 0..7 {
+            let id = store.create_node("MeSHTerm");
+            store
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("name", format!("term{}", i));
+            m_ids.push(id);
+        }
+        // Articles annotating varying numbers of MeSHTerms.
+        for (i, &m) in m_ids.iter().enumerate() {
+            for _ in 0..(i + 1) {
+                let a = store.create_node("Article");
+                store.create_edge(a, m, "ANNOTATED_WITH").unwrap();
+            }
+        }
+
+        let query = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 3 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             RETURN m.name, count(a) AS articles ORDER BY articles DESC LIMIT 5",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        // NodeScan sorts by NodeId, so we take m_ids[0..3] = term0, term1, term2.
+        // Counts: term0=1, term1=2, term2=3. After ORDER BY DESC: 3, 2, 1.
+        assert_eq!(result.records.len(), 3);
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("articles") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 2, 1]);
+        let names: Vec<String> = result
+            .records
+            .iter()
+            .map(|r| match r.get("m.name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(names, vec!["term2", "term1", "term0"]);
+    }
+
+    /// ADR-017 Phase 3a: EX49 shape — pre-WITH WHERE filter on the grouped side.
+    /// Only Authors whose name starts with 'S' should be counted.
+    #[test]
+    fn test_adjacency_count_with_binding_ex49_shape() {
+        let mut store = GraphStore::new();
+        let alice = store.create_node("Author");
+        store.get_node_mut(alice).unwrap().set_property("name", "Alice");
+        let smith = store.create_node("Author");
+        store.get_node_mut(smith).unwrap().set_property("name", "Smith");
+        let stone = store.create_node("Author");
+        store.get_node_mut(stone).unwrap().set_property("name", "Stone");
+
+        // Alice authors 10, Smith 3, Stone 1 — we expect Smith+Stone, not Alice.
+        for _ in 0..10 {
+            let a = store.create_node("Article");
+            store.create_edge(a, alice, "AUTHORED_BY").unwrap();
+        }
+        for _ in 0..3 {
+            let a = store.create_node("Article");
+            store.create_edge(a, smith, "AUTHORED_BY").unwrap();
+        }
+        let a = store.create_node("Article");
+        store.create_edge(a, stone, "AUTHORED_BY").unwrap();
+
+        let query = parse_query(
+            "MATCH (au:Author) WHERE au.name STARTS WITH 'S' \
+             WITH au LIMIT 10 \
+             MATCH (a:Article)-[:AUTHORED_BY]->(au) \
+             RETURN au.name, count(a) AS articles ORDER BY articles DESC LIMIT 5",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.records.len(), 2); // Smith and Stone, not Alice
+        let names: Vec<String> = result
+            .records
+            .iter()
+            .map(|r| match r.get("au.name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Smith", "Stone"]);
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("articles") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 1]);
+    }
+
     /// Rejected shape (WHERE clause) should fall through to the generic
     /// planner and still produce a correct result. This catches accidental
     /// regression where the detector is too eager.

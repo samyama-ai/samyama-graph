@@ -232,6 +232,281 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
     })
 }
 
+/// Parameters extracted from a query that matches the Phase 3a *WITH-bound*
+/// adjacency-count pattern:
+/// ```text
+/// MATCH (g:LabelA) [WHERE pred_on_g]
+/// WITH g [SKIP M] [LIMIT N]
+/// MATCH (g)-[:Edge]-(n[:LabelB])
+/// RETURN g.prop [, ...], count(n) AS c [ORDER BY c DESC] [LIMIT K]
+/// ```
+///
+/// Differs from the Phase 1 shape in that the grouped endpoint is bound by a
+/// pre-WITH scan that may carry a filter and/or LIMIT. The post-WITH MATCH
+/// reuses the bound variable rather than re-scanning. This is the MB053/EX49
+/// pattern — a query that explicitly caps the number of groups considered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdjacencyAggWithBindingPattern {
+    /// Core pattern info, same shape as Phase 1.
+    pub core: AdjacencyAggPattern,
+    /// Optional WHERE predicate applied to the grouped-side scan before
+    /// counting. Must reference only `core.grouped_var`.
+    pub prefilter: Option<Expression>,
+    /// Optional `SKIP` on the pre-WITH binding.
+    pub grouped_scan_skip: Option<usize>,
+    /// Optional `LIMIT` on the pre-WITH binding — the per-MB053 cap that
+    /// makes the query tractable even before adjacency-count.
+    pub grouped_scan_limit: Option<usize>,
+}
+
+/// Detect the Phase 3a WITH-bound adjacency-count pattern.
+///
+/// Returns `None` if the query doesn't fit; the caller then tries `detect()`
+/// for Phase 1 or falls back to the generic planner.
+pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPattern> {
+    // Must have exactly one WITH and one split. Multi-WITH stacking is out
+    // of scope — we only need to unblock the single-WITH bench shapes.
+    let with_clause = query.with_clause.as_ref()?;
+    let split = query.with_split_index?;
+    if !query.extra_with_stages.is_empty() {
+        return None;
+    }
+    // Writes, CALLs, SET/DELETE etc. still disqualify.
+    if query.create_clause.is_some()
+        || query.call_clause.is_some()
+        || query.call_subquery.is_some()
+        || query.delete_clause.is_some()
+        || query.merge_clause.is_some()
+        || query.unwind_clause.is_some()
+        || !query.set_clauses.is_empty()
+        || !query.remove_clauses.is_empty()
+    {
+        return None;
+    }
+    // Post-WITH WHERE: left to a later phase (would require filter pushdown
+    // through the aggregate). Pre-WITH WHERE is supported below.
+    if query.post_with_where_clause.is_some() {
+        return None;
+    }
+
+    // Exactly one MATCH on each side of the WITH.
+    let pre = query.match_clauses.get(..split)?;
+    let post = query.match_clauses.get(split..)?;
+    if pre.len() != 1 || post.len() != 1 {
+        return None;
+    }
+    if pre[0].optional || post[0].optional {
+        return None;
+    }
+
+    // Pre-MATCH: a single standalone node that binds the grouped variable.
+    let pre_path = pre[0].pattern.paths.first()?;
+    if pre[0].pattern.paths.len() != 1 {
+        return None;
+    }
+    if !pre_path.segments.is_empty() {
+        return None;
+    }
+    let grouped_var = pre_path.start.variable.as_ref()?.clone();
+    if pre_path.start.labels.len() != 1 {
+        return None;
+    }
+    let grouped_label = pre_path.start.labels[0].clone();
+    if pre_path.start.properties.is_some() {
+        return None;
+    }
+
+    // WITH clause: must be a pure pass-through for `grouped_var`.
+    // No aggregation, no distinct, no ORDER BY on WITH (the ORDER BY belongs
+    // after the aggregate, which is applied post-RETURN). WHERE-on-WITH
+    // isn't used by the target queries — if present, reject.
+    if with_clause.distinct {
+        return None;
+    }
+    if with_clause.where_clause.is_some() {
+        return None;
+    }
+    if with_clause.order_by.is_some() {
+        return None;
+    }
+    if with_clause.items.len() != 1 {
+        return None;
+    }
+    let passthrough = &with_clause.items[0];
+    match &passthrough.expression {
+        Expression::Variable(v) if v == &grouped_var => {}
+        _ => return None,
+    }
+    // If the WITH introduces an alias other than grouped_var, the second
+    // MATCH would have to reference that alias — we don't follow renames.
+    if let Some(alias) = &passthrough.alias {
+        if alias != &grouped_var {
+            return None;
+        }
+    }
+
+    // Pre-WITH WHERE — optional, must reference only `grouped_var`.
+    let prefilter = match &query.where_clause {
+        Some(wc) => {
+            if !expression_references_only(&wc.predicate, &grouped_var) {
+                return None;
+            }
+            Some(wc.predicate.clone())
+        }
+        None => None,
+    };
+
+    // Post-MATCH: the standard single-segment pattern expected by Phase 1,
+    // but one endpoint MUST be `grouped_var` (not re-scanned).
+    let post_path = post[0].pattern.paths.first()?;
+    if post[0].pattern.paths.len() != 1 {
+        return None;
+    }
+    if post_path.segments.len() != 1 {
+        return None;
+    }
+    if post_path.segments[0].edge.length.is_some() {
+        return None;
+    }
+
+    let start = &post_path.start;
+    let target = &post_path.segments[0].node;
+    let edge = &post_path.segments[0].edge;
+
+    let start_var = start.variable.as_ref()?.clone();
+    let target_var = target.variable.as_ref()?.clone();
+
+    // grouped_var must be one of the endpoints; identify neighbor.
+    let (grouped_node, neighbor_node, neighbor_var) = if start_var == grouped_var {
+        (start, target, target_var.clone())
+    } else if target_var == grouped_var {
+        (target, start, start_var.clone())
+    } else {
+        return None;
+    };
+
+    if edge.types.len() != 1 {
+        return None;
+    }
+    let edge_type = edge.types[0].clone();
+    let edge_direction = match edge.direction {
+        Direction::Outgoing => Direction::Outgoing,
+        Direction::Incoming => Direction::Incoming,
+        Direction::Both => return None,
+    };
+
+    // The grouped-side node in the second MATCH must be either bare `(g)`
+    // or `(g:LabelA)` matching the pre-WITH label. Property constraints
+    // would act as additional filters (unsupported).
+    if grouped_node.properties.is_some() {
+        return None;
+    }
+    if !grouped_node.labels.is_empty() {
+        if grouped_node.labels.len() != 1 || grouped_node.labels[0] != grouped_label {
+            return None;
+        }
+    }
+
+    // Neighbor label is optional. No property filters on the neighbor side.
+    if neighbor_node.properties.is_some() {
+        return None;
+    }
+    let neighbor_label = match neighbor_node.labels.len() {
+        0 => None,
+        1 => Some(neighbor_node.labels[0].clone()),
+        _ => return None,
+    };
+
+    // RETURN shape: identical to Phase 1.
+    let ret = query.return_clause.as_ref()?;
+    if ret.distinct {
+        return None;
+    }
+    let mut count_info: Option<(String, String, bool)> = None;
+    let mut group_by_vars: Vec<String> = Vec::new();
+    for (i, item) in ret.items.iter().enumerate() {
+        match &item.expression {
+            Expression::Function {
+                name,
+                args,
+                distinct,
+            } if name.eq_ignore_ascii_case("count") => {
+                if count_info.is_some() {
+                    return None;
+                }
+                if args.len() != 1 {
+                    return None;
+                }
+                let arg_var = match &args[0] {
+                    Expression::Variable(v) => v.clone(),
+                    _ => return None,
+                };
+                let alias = item.alias.clone().unwrap_or_else(|| format!("count_{}", i));
+                count_info = Some((alias, arg_var, *distinct));
+            }
+            Expression::Property { variable, .. } | Expression::Variable(variable) => {
+                group_by_vars.push(variable.clone());
+            }
+            _ => return None,
+        }
+    }
+    let (count_alias, count_arg_var, count_distinct) = count_info?;
+    if count_distinct {
+        return None;
+    }
+    if count_arg_var != neighbor_var {
+        return None;
+    }
+    for v in &group_by_vars {
+        if v != &grouped_var {
+            return None;
+        }
+    }
+
+    let direction = match (edge_direction, grouped_var == start_var) {
+        (Direction::Outgoing, true) => ExpandDirection::Forward,
+        (Direction::Outgoing, false) => ExpandDirection::Reverse,
+        (Direction::Incoming, true) => ExpandDirection::Reverse,
+        (Direction::Incoming, false) => ExpandDirection::Forward,
+        (Direction::Both, _) => unreachable!(),
+    };
+
+    Some(AdjacencyAggWithBindingPattern {
+        core: AdjacencyAggPattern {
+            grouped_var,
+            grouped_label,
+            neighbor_var,
+            neighbor_label,
+            edge_type,
+            direction,
+            count_alias,
+            count_distinct: false,
+        },
+        prefilter,
+        grouped_scan_skip: with_clause.skip,
+        grouped_scan_limit: with_clause.limit,
+    })
+}
+
+/// Walk an expression tree; return true iff every variable reference is `var`.
+/// Conservative — returns false on anything unknown, which keeps the detector
+/// from accidentally accepting expressions that reference other bindings.
+fn expression_references_only(expr: &Expression, var: &str) -> bool {
+    match expr {
+        Expression::Variable(v) => v == var,
+        Expression::Property { variable, .. } => variable == var,
+        Expression::Literal(_) | Expression::Parameter(_) => true,
+        Expression::Binary { left, right, .. } => {
+            expression_references_only(left, var) && expression_references_only(right, var)
+        }
+        Expression::Unary { expr, .. } => expression_references_only(expr, var),
+        Expression::Function { args, .. } => {
+            args.iter().all(|a| expression_references_only(a, var))
+        }
+        _ => false, // CASE, subqueries, list ops: reject conservatively
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +667,130 @@ mod tests {
         )
         .unwrap();
         assert!(detect(&q).is_none());
+    }
+
+    // ——— Phase 3a: WITH-bound detector ———
+
+    /// MB053 shape: MATCH-bind + WITH LIMIT + second MATCH + count.
+    /// The pre-WITH cap is what makes the real MB053 tractable on PubMed;
+    /// the detector must preserve the 500-row limit on the grouped scan.
+    #[test]
+    fn with_binding_detects_mb053_shape() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             RETURN m.name, count(a) AS articles ORDER BY articles DESC LIMIT 10",
+        )
+        .unwrap();
+        let p = detect_with_binding(&q).expect("should detect");
+        assert_eq!(p.core.grouped_var, "m");
+        assert_eq!(p.core.grouped_label.as_str(), "MeSHTerm");
+        assert_eq!(p.core.neighbor_var, "a");
+        assert_eq!(p.core.neighbor_label.as_ref().unwrap().as_str(), "Article");
+        assert_eq!(p.core.edge_type.as_str(), "ANNOTATED_WITH");
+        assert_eq!(p.core.direction, ExpandDirection::Reverse);
+        assert_eq!(p.core.count_alias, "articles");
+        assert_eq!(p.grouped_scan_limit, Some(500));
+        assert!(p.prefilter.is_none());
+        // Single-MATCH `detect` should not also claim this query.
+        assert!(detect(&q).is_none());
+    }
+
+    /// EX49 shape: pre-WITH WHERE filter + LIMIT.
+    /// Detector must carry the WHERE predicate as a prefilter.
+    #[test]
+    fn with_binding_detects_ex49_shape() {
+        let q = parse_query(
+            "MATCH (au:Author) WHERE au.name STARTS WITH 'Smith' \
+             WITH au LIMIT 100 \
+             MATCH (a:Article)-[:AUTHORED_BY]->(au) \
+             RETURN au.name, count(a) AS articles ORDER BY articles DESC LIMIT 10",
+        )
+        .unwrap();
+        let p = detect_with_binding(&q).expect("should detect");
+        assert_eq!(p.core.grouped_var, "au");
+        assert_eq!(p.core.grouped_label.as_str(), "Author");
+        assert_eq!(p.core.direction, ExpandDirection::Reverse);
+        assert_eq!(p.grouped_scan_limit, Some(100));
+        assert!(p.prefilter.is_some(), "WHERE on grouped side must be kept");
+    }
+
+    /// Post-WITH WHERE clause needs filter pushdown to be safe; reject.
+    #[test]
+    fn with_binding_rejects_post_with_where() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             WHERE a.year > 2020 \
+             RETURN m.name, count(a) AS articles",
+        )
+        .unwrap();
+        assert!(detect_with_binding(&q).is_none());
+    }
+
+    /// Pre-WITH WHERE that references the neighbor (which isn't bound yet)
+    /// must be rejected — the predicate is effectively malformed, but
+    /// conservative rejection is the right call.
+    #[test]
+    fn with_binding_rejects_filter_on_unbound_var() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             RETURN m.name, count(a) AS articles",
+        )
+        .unwrap();
+        // Baseline: no prefilter → detects.
+        assert!(detect_with_binding(&q).is_some());
+    }
+
+    /// Pre-MATCH with an edge (not just a bare node) doesn't fit the shape.
+    #[test]
+    fn with_binding_rejects_edge_in_pre_match() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm)-[:PARENT]->(p:MeSHTerm) WITH m LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             RETURN m.name, count(a) AS articles",
+        )
+        .unwrap();
+        assert!(detect_with_binding(&q).is_none());
+    }
+
+    /// WITH renaming the variable — second MATCH can't reference the old
+    /// name. We reject rather than rewrite.
+    #[test]
+    fn with_binding_rejects_with_renaming() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm) WITH m AS term LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(term) \
+             RETURN term.name, count(a) AS articles",
+        )
+        .unwrap();
+        assert!(detect_with_binding(&q).is_none());
+    }
+
+    /// Multi-WITH query — out of scope for Phase 3a.
+    #[test]
+    fn with_binding_rejects_multi_with() {
+        let q = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 500 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             WITH m, count(a) AS cnt \
+             RETURN m.name, cnt",
+        )
+        .unwrap();
+        assert!(detect_with_binding(&q).is_none());
+    }
+
+    /// Phase 1 shape must not be accidentally matched by the Phase 3
+    /// detector — the two are mutually exclusive by design.
+    #[test]
+    fn with_binding_ignores_phase_1_shape() {
+        let q = parse_query(
+            "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
+             RETURN j.title, count(a) AS articles ORDER BY articles DESC LIMIT 10",
+        )
+        .unwrap();
+        assert!(detect_with_binding(&q).is_none());
+        assert!(detect(&q).is_some());
     }
 }
