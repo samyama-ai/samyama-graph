@@ -76,7 +76,9 @@
 //! **runtime polymorphism** -- the alternative to compile-time generics when you need
 //! heterogeneous collections of operators.
 
+pub mod adjacency_agg_detector;
 pub mod cost_model;
+pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
@@ -6812,5 +6814,322 @@ mod tests {
         let second = &result.records[1];
         assert_eq!(*second.get("edge_type").unwrap(), Value::Property(PropertyValue::String("KNOWS".to_string())));
         assert_eq!(*second.get("count").unwrap(), Value::Property(PropertyValue::Integer(1)));
+    }
+
+    /// Regression: `WITH x LIMIT N` used to materialize all upstream rows before
+    /// truncating. On 66M-node PubMed this blew past the query timeout even when
+    /// the author clearly wrote `LIMIT 500` to bound the work. After the fix,
+    /// WithBarrier streams input and stops after `skip + limit` rows for the
+    /// simple non-aggregating, non-sorting case.
+    ///
+    /// This test only verifies correctness on a small store; the perf behaviour
+    /// is exercised by the mega benchmark (MB053, EX49).
+    #[test]
+    fn test_with_limit_streams_correctly() {
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("t{}", i));
+            }
+        }
+
+        let query = parse_query("MATCH (t:Tag) WITH t LIMIT 5 RETURN t.name AS n").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 5);
+    }
+
+    /// WITH ... SKIP M LIMIT N must still respect the combined bound when streaming.
+    #[test]
+    fn test_with_skip_limit_streams_correctly() {
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("t{}", i));
+            }
+        }
+
+        let query =
+            parse_query("MATCH (t:Tag) WITH t SKIP 10 LIMIT 3 RETURN t.name AS n").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 3);
+    }
+
+    /// End-to-end ADR-017 Phase 1: the specialized adjacency-count plan must
+    /// produce identical results to the generic aggregate on a small corpus.
+    /// On large graphs, it's the only plan that completes under the timeout;
+    /// here, correctness is the invariant we verify.
+    ///
+    /// Data: 3 Journals (j0, j1, j2), plus Articles publishing into each
+    /// (5, 2, 1 respectively). Expected top-k by count: j0=5, j1=2, j2=1.
+    #[test]
+    fn test_adjacency_count_aggregate_matches_generic() {
+        let mut store = GraphStore::new();
+        let j0 = store.create_node("Journal");
+        let j1 = store.create_node("Journal");
+        let j2 = store.create_node("Journal");
+        if let Some(n) = store.get_node_mut(j0) {
+            n.set_property("title", "A");
+        }
+        if let Some(n) = store.get_node_mut(j1) {
+            n.set_property("title", "B");
+        }
+        if let Some(n) = store.get_node_mut(j2) {
+            n.set_property("title", "C");
+        }
+
+        let create_article_to = |store: &mut GraphStore, journal_id| {
+            let a = store.create_node("Article");
+            store
+                .create_edge(a, journal_id, "PUBLISHED_IN")
+                .expect("edge creation");
+        };
+        for _ in 0..5 {
+            create_article_to(&mut store, j0);
+        }
+        for _ in 0..2 {
+            create_article_to(&mut store, j1);
+        }
+        create_article_to(&mut store, j2);
+
+        let query = parse_query(
+            "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
+             RETURN j.title, count(a) AS articles ORDER BY articles DESC LIMIT 3",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.records.len(), 3);
+        // Expected ordering: A=5, B=2, C=1
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("articles") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                other => panic!("unexpected count shape: {:?}", other),
+            })
+            .collect();
+        assert_eq!(counts, vec![5, 2, 1]);
+
+        let titles: Vec<String> = result
+            .records
+            .iter()
+            .map(|r| match r.get("j.title") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                other => panic!("unexpected title shape: {:?}", other),
+            })
+            .collect();
+        assert_eq!(titles, vec!["A", "B", "C"]);
+    }
+
+    /// The detector must still work with forward direction on a fan-out.
+    /// Here each User authors some Posts; we group on User.
+    #[test]
+    fn test_adjacency_count_aggregate_forward_direction() {
+        let mut store = GraphStore::new();
+        let u_alice = store.create_node("User");
+        let u_bob = store.create_node("User");
+        store.get_node_mut(u_alice).unwrap().set_property("name", "Alice");
+        store.get_node_mut(u_bob).unwrap().set_property("name", "Bob");
+
+        for _ in 0..4 {
+            let p = store.create_node("Post");
+            store.create_edge(u_alice, p, "AUTHORED").unwrap();
+        }
+        for _ in 0..2 {
+            let p = store.create_node("Post");
+            store.create_edge(u_bob, p, "AUTHORED").unwrap();
+        }
+
+        let query = parse_query(
+            "MATCH (u:User)-[:AUTHORED]->(p:Post) \
+             RETURN u.name, count(p) AS posts ORDER BY posts DESC LIMIT 2",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 2);
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("posts") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(counts, vec![4, 2]);
+    }
+
+    /// ADR-017 Phase 3a: MB053 shape end-to-end. Verifies that the WITH-bound
+    /// detector picks up the pattern, the pre-WITH LIMIT 500 is respected,
+    /// and the count matches the generic aggregate on the same data.
+    #[test]
+    fn test_adjacency_count_with_binding_mb053_shape() {
+        let mut store = GraphStore::new();
+        // 7 MeSHTerms. The WITH LIMIT caps us to 3; only those are counted.
+        let mut m_ids = Vec::new();
+        for i in 0..7 {
+            let id = store.create_node("MeSHTerm");
+            store
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("name", format!("term{}", i));
+            m_ids.push(id);
+        }
+        // Articles annotating varying numbers of MeSHTerms.
+        for (i, &m) in m_ids.iter().enumerate() {
+            for _ in 0..(i + 1) {
+                let a = store.create_node("Article");
+                store.create_edge(a, m, "ANNOTATED_WITH").unwrap();
+            }
+        }
+
+        let query = parse_query(
+            "MATCH (m:MeSHTerm) WITH m LIMIT 3 \
+             MATCH (a:Article)-[:ANNOTATED_WITH]->(m) \
+             RETURN m.name, count(a) AS articles ORDER BY articles DESC LIMIT 5",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        // NodeScan sorts by NodeId, so we take m_ids[0..3] = term0, term1, term2.
+        // Counts: term0=1, term1=2, term2=3. After ORDER BY DESC: 3, 2, 1.
+        assert_eq!(result.records.len(), 3);
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("articles") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 2, 1]);
+        let names: Vec<String> = result
+            .records
+            .iter()
+            .map(|r| match r.get("m.name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(names, vec!["term2", "term1", "term0"]);
+    }
+
+    /// ADR-017 Phase 3a: EX49 shape — pre-WITH WHERE filter on the grouped side.
+    /// Only Authors whose name starts with 'S' should be counted.
+    #[test]
+    fn test_adjacency_count_with_binding_ex49_shape() {
+        let mut store = GraphStore::new();
+        let alice = store.create_node("Author");
+        store.get_node_mut(alice).unwrap().set_property("name", "Alice");
+        let smith = store.create_node("Author");
+        store.get_node_mut(smith).unwrap().set_property("name", "Smith");
+        let stone = store.create_node("Author");
+        store.get_node_mut(stone).unwrap().set_property("name", "Stone");
+
+        // Alice authors 10, Smith 3, Stone 1 — we expect Smith+Stone, not Alice.
+        for _ in 0..10 {
+            let a = store.create_node("Article");
+            store.create_edge(a, alice, "AUTHORED_BY").unwrap();
+        }
+        for _ in 0..3 {
+            let a = store.create_node("Article");
+            store.create_edge(a, smith, "AUTHORED_BY").unwrap();
+        }
+        let a = store.create_node("Article");
+        store.create_edge(a, stone, "AUTHORED_BY").unwrap();
+
+        let query = parse_query(
+            "MATCH (au:Author) WHERE au.name STARTS WITH 'S' \
+             WITH au LIMIT 10 \
+             MATCH (a:Article)-[:AUTHORED_BY]->(au) \
+             RETURN au.name, count(a) AS articles ORDER BY articles DESC LIMIT 5",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+
+        assert_eq!(result.records.len(), 2); // Smith and Stone, not Alice
+        let names: Vec<String> = result
+            .records
+            .iter()
+            .map(|r| match r.get("au.name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Smith", "Stone"]);
+        let counts: Vec<i64> = result
+            .records
+            .iter()
+            .map(|r| match r.get("articles") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                _ => panic!("unexpected"),
+            })
+            .collect();
+        assert_eq!(counts, vec![3, 1]);
+    }
+
+    /// Rejected shape (WHERE clause) should fall through to the generic
+    /// planner and still produce a correct result. This catches accidental
+    /// regression where the detector is too eager.
+    #[test]
+    fn test_where_clause_falls_through_to_generic() {
+        let mut store = GraphStore::new();
+        let j = store.create_node("Journal");
+        store.get_node_mut(j).unwrap().set_property("active", true);
+        for _ in 0..3 {
+            let a = store.create_node("Article");
+            store.create_edge(a, j, "PUBLISHED_IN").unwrap();
+        }
+
+        let query = parse_query(
+            "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
+             WHERE j.active = true RETURN count(a) AS articles",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 1);
+        let count = match result.records[0].get("articles") {
+            Some(Value::Property(PropertyValue::Integer(n))) => *n,
+            _ => panic!("unexpected"),
+        };
+        assert_eq!(count, 3);
+    }
+
+    /// When WITH has ORDER BY or DISTINCT, the LIMIT is a post-filter and the
+    /// streaming shortcut must NOT kick in (else we'd bound before sorting).
+    #[test]
+    fn test_with_order_by_limit_still_correct() {
+        let mut store = GraphStore::new();
+        for i in 0..20 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("rank", i as i64);
+            }
+        }
+
+        let query = parse_query(
+            "MATCH (t:Tag) WITH t ORDER BY t.rank DESC LIMIT 3 RETURN t.rank AS r",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 3);
+        // Largest ranks — 19, 18, 17
+        assert_eq!(
+            *result.records[0].get("r").unwrap(),
+            Value::Property(PropertyValue::Integer(19))
+        );
+        assert_eq!(
+            *result.records[2].get("r").unwrap(),
+            Value::Property(PropertyValue::Integer(17))
+        );
     }
 }

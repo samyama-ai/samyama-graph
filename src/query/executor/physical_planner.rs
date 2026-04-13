@@ -109,6 +109,33 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             let physical_right = logical_to_physical(right);
             Box::new(CartesianProductOperator::new(physical_left, physical_right))
         }
+
+        LogicalPlanNode::AdjacencyCountAggregate {
+            input,
+            grouped_var,
+            edge_type,
+            direction,
+            count_alias,
+            ..
+        } => {
+            // ADR-017 Phase 1: lower to the physical operator. The `neighbor_var`,
+            // `neighbor_label`, and `distinct` fields on the logical node are
+            // recorded for diagnostics/EXPLAIN but not needed by the physical
+            // operator — counting uses edge-type alone. The detector already
+            // rejects shapes where neighbor_label filtering would change the count.
+            let physical_input = logical_to_physical(input);
+            let physical_direction = match direction {
+                ExpandDirection::Forward => Direction::Outgoing,
+                ExpandDirection::Reverse => Direction::Incoming,
+            };
+            Box::new(AdjacencyCountAggregateOperator::new(
+                physical_input,
+                grouped_var.clone(),
+                count_alias.clone(),
+                edge_type.clone(),
+                physical_direction,
+            ))
+        }
     }
 }
 

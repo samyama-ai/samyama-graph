@@ -108,6 +108,15 @@ pub fn estimate_plan_cost(plan: &LogicalPlanNode, catalog: &GraphCatalog) -> f64
             let right_cost = estimate_plan_cost(right, catalog);
             left_cost * right_cost
         }
+
+        LogicalPlanNode::AdjacencyCountAggregate { input, .. } => {
+            // Cost = O(|grouped endpoint scan|) — one degree lookup per node.
+            // Degree lookup itself is O(1) amortized on the adjacency list, so
+            // we treat it as a constant-per-row overhead and charge only the
+            // input scan cardinality. The dramatic speedup vs Expand→Aggregate
+            // is exactly this change in the degree factor.
+            estimate_plan_cost(input, catalog)
+        }
     }
 }
 

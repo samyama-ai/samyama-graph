@@ -3432,6 +3432,133 @@ impl AggregateOperator {
     }
 }
 
+/// Adjacency-aware count aggregate (ADR-017 Phase 1).
+///
+/// For patterns like `MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, count(a) AS articles`
+/// this computes each group's count by reading the adjacency list of the
+/// grouped endpoint directly, instead of walking every edge through a generic
+/// aggregate. Input must produce the grouped endpoint nodes.
+///
+/// Output per row: `{ grouped_var: NodeRef(id), count_alias: Integer(degree) }`.
+/// Downstream operators (Project, Sort, Limit) consume these like any other
+/// aggregate result.
+pub struct AdjacencyCountAggregateOperator {
+    input: OperatorBox,
+    grouped_var: String,
+    count_alias: String,
+    edge_type: EdgeType,
+    /// Direction relative to the grouped endpoint:
+    /// - Outgoing = out-degree of the grouped node on this edge type
+    /// - Incoming = in-degree of the grouped node on this edge type
+    direction: Direction,
+}
+
+impl AdjacencyCountAggregateOperator {
+    pub fn new(
+        input: OperatorBox,
+        grouped_var: String,
+        count_alias: String,
+        edge_type: EdgeType,
+        direction: Direction,
+    ) -> Self {
+        Self {
+            input,
+            grouped_var,
+            count_alias,
+            edge_type,
+            direction,
+        }
+    }
+
+    /// Count the incident edges of `node_id` that match `edge_type` in the
+    /// operator's direction. Walks the adjacency list once — no allocation
+    /// beyond what the store already does internally. Uses the
+    /// lightweight `_owned` tuple variants to avoid cloning full `Edge`s.
+    fn degree_filtered(&self, store: &GraphStore, node_id: NodeId) -> usize {
+        match self.direction {
+            Direction::Outgoing => store
+                .get_outgoing_edge_targets_owned(node_id)
+                .into_iter()
+                .filter(|(_, _, _, et)| *et == self.edge_type)
+                .count(),
+            Direction::Incoming => store
+                .get_incoming_edge_sources_owned(node_id)
+                .into_iter()
+                .filter(|(_, _, _, et)| *et == self.edge_type)
+                .count(),
+            Direction::Both => {
+                // Defensive: the planner filters Direction::Both out before
+                // constructing this operator. Falling back to union is cheap
+                // insurance if that guarantee ever slips.
+                let out = store
+                    .get_outgoing_edge_targets_owned(node_id)
+                    .into_iter()
+                    .filter(|(_, _, _, et)| *et == self.edge_type)
+                    .count();
+                let inc = store
+                    .get_incoming_edge_sources_owned(node_id)
+                    .into_iter()
+                    .filter(|(_, _, _, et)| *et == self.edge_type)
+                    .count();
+                out + inc
+            }
+        }
+    }
+}
+
+impl PhysicalOperator for AdjacencyCountAggregateOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            let input_record = match self.input.next(store)? {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+
+            let node_id = match input_record.get(&self.grouped_var) {
+                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
+                _ => {
+                    // Upstream didn't bind the grouped variable to a node —
+                    // indicates a planner bug; skip rather than crash.
+                    continue;
+                }
+            };
+
+            let count = self.degree_filtered(store, node_id);
+
+            let mut out = input_record;
+            out.bind(
+                self.count_alias.clone(),
+                Value::Property(PropertyValue::Integer(count as i64)),
+            );
+            return Ok(Some(out));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let dir = match self.direction {
+            Direction::Outgoing => "->",
+            Direction::Incoming => "<-",
+            Direction::Both => "--",
+        };
+        OperatorDescription {
+            name: "AdjacencyCountAggregate".to_string(),
+            details: format!(
+                "({}){}[:{}]{} count AS {}",
+                self.grouped_var,
+                dir,
+                self.edge_type.as_str(),
+                dir,
+                self.count_alias
+            ),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 /// Limit operator: LIMIT 10
 pub struct LimitOperator {
     /// Input operator
@@ -6910,10 +7037,25 @@ impl WithBarrierOperator {
             }
             projected
         } else {
-            // Non-aggregation path: project each row
+            // Non-aggregation path: project each row.
+            //
+            // Early-termination: when the WITH clause is just `WITH ... LIMIT N` with no
+            // ORDER BY, no WHERE, and no DISTINCT, we can stop pulling from upstream once
+            // we have (skip + limit) records. This turns a full scan into a bounded one
+            // for patterns like `MATCH (m:MeSHTerm) WITH m LIMIT 500 MATCH ...`.
+            let can_stream_limit = self.limit.is_some()
+                && self.sort_items.is_empty()
+                && self.where_predicate.is_none()
+                && !self.distinct;
+            let cap = if can_stream_limit {
+                Some(self.skip.unwrap_or(0) + self.limit.unwrap())
+            } else {
+                None
+            };
+
             let mut records = Vec::new();
             let batch_size = 65536;
-            while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            'outer: while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut new_record = Record::new();
                     for (expr, alias) in &self.items {
@@ -6921,6 +7063,11 @@ impl WithBarrierOperator {
                         new_record.bind(alias.clone(), value);
                     }
                     records.push(new_record);
+                    if let Some(c) = cap {
+                        if records.len() >= c {
+                            break 'outer;
+                        }
+                    }
                 }
             }
             records
