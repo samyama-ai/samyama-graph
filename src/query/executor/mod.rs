@@ -78,6 +78,7 @@
 
 pub mod adjacency_agg_detector;
 pub mod cost_model;
+pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
@@ -6701,7 +6702,6 @@ mod tests {
         assert_eq!(*result.records[0].get("city").unwrap(), Value::Property(PropertyValue::String("London".to_string())));
     }
 
-<<<<<<< HEAD
     #[test]
     fn test_multi_with_node_reuse_in_expand() {
         // Reproduces MB069: WITH p MATCH (p)-[:REL]->(x)

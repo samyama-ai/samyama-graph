@@ -481,11 +481,30 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 }
             }
             Rule::where_clause => {
-                if query.with_split_index.is_some() {
-                    // WHERE clause after WITH ... MATCH ...
-                    query.post_with_where_clause = Some(parse_where_clause(inner)?);
+                // Cypher permits a `WHERE` after each `MATCH`. The planner
+                // expects a single AND-chain in `query.where_clause` (or in
+                // `post_with_where_clause` after a `WITH`), so when multiple
+                // WHEREs appear in the same pre-WITH or post-WITH block, AND
+                // them together rather than silently overwriting the earlier
+                // predicate. Dropping the first WHERE was behind OM27's
+                // timeout + wrong-semantics on the v1.0 mega benchmark.
+                let parsed = parse_where_clause(inner)?;
+                let target = if query.with_split_index.is_some() {
+                    &mut query.post_with_where_clause
                 } else {
-                    query.where_clause = Some(parse_where_clause(inner)?);
+                    &mut query.where_clause
+                };
+                match target.take() {
+                    Some(existing) => {
+                        *target = Some(WhereClause {
+                            predicate: Expression::Binary {
+                                left: Box::new(existing.predicate),
+                                op: BinaryOp::And,
+                                right: Box::new(parsed.predicate),
+                            },
+                        });
+                    }
+                    None => *target = Some(parsed),
                 }
             }
             Rule::with_clause => {
