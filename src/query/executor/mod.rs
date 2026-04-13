@@ -6700,6 +6700,7 @@ mod tests {
         assert_eq!(*result.records[0].get("city").unwrap(), Value::Property(PropertyValue::String("London".to_string())));
     }
 
+<<<<<<< HEAD
     #[test]
     fn test_multi_with_node_reuse_in_expand() {
         // Reproduces MB069: WITH p MATCH (p)-[:REL]->(x)
@@ -6812,5 +6813,77 @@ mod tests {
         let second = &result.records[1];
         assert_eq!(*second.get("edge_type").unwrap(), Value::Property(PropertyValue::String("KNOWS".to_string())));
         assert_eq!(*second.get("count").unwrap(), Value::Property(PropertyValue::Integer(1)));
+    }
+
+    /// Regression: `WITH x LIMIT N` used to materialize all upstream rows before
+    /// truncating. On 66M-node PubMed this blew past the query timeout even when
+    /// the author clearly wrote `LIMIT 500` to bound the work. After the fix,
+    /// WithBarrier streams input and stops after `skip + limit` rows for the
+    /// simple non-aggregating, non-sorting case.
+    ///
+    /// This test only verifies correctness on a small store; the perf behaviour
+    /// is exercised by the mega benchmark (MB053, EX49).
+    #[test]
+    fn test_with_limit_streams_correctly() {
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("t{}", i));
+            }
+        }
+
+        let query = parse_query("MATCH (t:Tag) WITH t LIMIT 5 RETURN t.name AS n").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 5);
+    }
+
+    /// WITH ... SKIP M LIMIT N must still respect the combined bound when streaming.
+    #[test]
+    fn test_with_skip_limit_streams_correctly() {
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("name", format!("t{}", i));
+            }
+        }
+
+        let query =
+            parse_query("MATCH (t:Tag) WITH t SKIP 10 LIMIT 3 RETURN t.name AS n").unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 3);
+    }
+
+    /// When WITH has ORDER BY or DISTINCT, the LIMIT is a post-filter and the
+    /// streaming shortcut must NOT kick in (else we'd bound before sorting).
+    #[test]
+    fn test_with_order_by_limit_still_correct() {
+        let mut store = GraphStore::new();
+        for i in 0..20 {
+            let id = store.create_node("Tag");
+            if let Some(node) = store.get_node_mut(id) {
+                node.set_property("rank", i as i64);
+            }
+        }
+
+        let query = parse_query(
+            "MATCH (t:Tag) WITH t ORDER BY t.rank DESC LIMIT 3 RETURN t.rank AS r",
+        )
+        .unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.records.len(), 3);
+        // Largest ranks — 19, 18, 17
+        assert_eq!(
+            *result.records[0].get("r").unwrap(),
+            Value::Property(PropertyValue::Integer(19))
+        );
+        assert_eq!(
+            *result.records[2].get("r").unwrap(),
+            Value::Property(PropertyValue::Integer(17))
+        );
     }
 }

@@ -6910,10 +6910,25 @@ impl WithBarrierOperator {
             }
             projected
         } else {
-            // Non-aggregation path: project each row
+            // Non-aggregation path: project each row.
+            //
+            // Early-termination: when the WITH clause is just `WITH ... LIMIT N` with no
+            // ORDER BY, no WHERE, and no DISTINCT, we can stop pulling from upstream once
+            // we have (skip + limit) records. This turns a full scan into a bounded one
+            // for patterns like `MATCH (m:MeSHTerm) WITH m LIMIT 500 MATCH ...`.
+            let can_stream_limit = self.limit.is_some()
+                && self.sort_items.is_empty()
+                && self.where_predicate.is_none()
+                && !self.distinct;
+            let cap = if can_stream_limit {
+                Some(self.skip.unwrap_or(0) + self.limit.unwrap())
+            } else {
+                None
+            };
+
             let mut records = Vec::new();
             let batch_size = 65536;
-            while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            'outer: while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut new_record = Record::new();
                     for (expr, alias) in &self.items {
@@ -6921,6 +6936,11 @@ impl WithBarrierOperator {
                         new_record.bind(alias.clone(), value);
                     }
                     records.push(new_record);
+                    if let Some(c) = cap {
+                        if records.len() >= c {
+                            break 'outer;
+                        }
+                    }
                 }
             }
             records
