@@ -603,14 +603,14 @@ pub async fn export_snapshot_handler(
 /// Query parameters for snapshot import
 #[derive(Deserialize, Default)]
 pub struct SnapshotImportParams {
-    /// Property keys for cross-KG entity deduplication (can be repeated).
-    /// e.g. ?dedup_key=name&dedup_key=go_id
+    /// Comma-separated property keys for cross-KG entity deduplication.
+    /// e.g. ?dedup_key=name,go_id
     #[serde(default)]
-    pub dedup_key: Vec<String>,
+    pub dedup_key: Option<String>,
 }
 
 /// POST /api/snapshot/import — import a .sgsnap snapshot
-/// Optional query params: ?dedup_key=name&dedup_key=go_id
+/// Optional query param: ?dedup_key=name,go_id (comma-separated)
 pub async fn restore_snapshot_handler(
     State(state): State<AppState>,
     Query(params): Query<SnapshotImportParams>,
@@ -656,7 +656,11 @@ pub async fn restore_snapshot_handler(
 
     let mut store_guard = state.store.write().await;
     let cursor = std::io::Cursor::new(&data);
-    let dedup_key_refs: Vec<&str> = params.dedup_key.iter().map(|s| s.as_str()).collect();
+    let dedup_keys: Vec<String> = params
+        .dedup_key
+        .map(|s| s.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect())
+        .unwrap_or_default();
+    let dedup_key_refs: Vec<&str> = dedup_keys.iter().map(|s| s.as_str()).collect();
 
     match crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs) {
         Ok(stats) => {
