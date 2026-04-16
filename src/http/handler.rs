@@ -1,7 +1,7 @@
 //! HTTP handlers for the Visualizer API
 
 use axum::{
-    extract::{State, Json, Multipart},
+    extract::{Query, State, Json, Multipart},
     response::IntoResponse,
 };
 use crate::query::Value;
@@ -600,9 +600,20 @@ pub async fn export_snapshot_handler(
     }
 }
 
+/// Query parameters for snapshot import
+#[derive(Deserialize, Default)]
+pub struct SnapshotImportParams {
+    /// Property keys for cross-KG entity deduplication (can be repeated).
+    /// e.g. ?dedup_key=name&dedup_key=go_id
+    #[serde(default)]
+    pub dedup_key: Vec<String>,
+}
+
 /// POST /api/snapshot/import — import a .sgsnap snapshot
+/// Optional query params: ?dedup_key=name&dedup_key=go_id
 pub async fn restore_snapshot_handler(
     State(state): State<AppState>,
+    Query(params): Query<SnapshotImportParams>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     // Read the snapshot file from multipart
@@ -645,8 +656,9 @@ pub async fn restore_snapshot_handler(
 
     let mut store_guard = state.store.write().await;
     let cursor = std::io::Cursor::new(&data);
+    let dedup_key_refs: Vec<&str> = params.dedup_key.iter().map(|s| s.as_str()).collect();
 
-    match crate::snapshot::import_tenant(&mut store_guard, cursor) {
+    match crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs) {
         Ok(stats) => {
             // HA-08: Persist snapshot to disk so it survives server restart
             if let Some(ref data_path) = state.data_path {
@@ -665,6 +677,7 @@ pub async fn restore_snapshot_handler(
             Json(json!({
                 "status": "ok",
                 "nodes_imported": stats.node_count,
+                "nodes_merged": stats.merged_count,
                 "edges_imported": stats.edge_count,
                 "labels": stats.labels,
                 "edge_types": stats.edge_types,
