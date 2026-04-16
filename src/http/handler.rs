@@ -179,30 +179,35 @@ pub async fn schema_handler(
 ) -> impl IntoResponse {
     let store_guard = state.store.read().await;
 
-    let stats = store_guard.compute_statistics();
+    let total_nodes = store_guard.node_count();
+    let total_edges = store_guard.edge_count();
+
+    // Build node types: use label_index for counts, sample 1 node per label for property types
     let mut node_types = Vec::new();
     for label in store_guard.all_labels() {
         let count = store_guard.label_node_count(label);
         let mut properties = BTreeMap::new();
-        for ((l, prop), _pstats) in &stats.property_stats {
-            if l == label {
-                let nodes = store_guard.get_nodes_by_label(label);
-                let mut prop_type = "Unknown".to_string();
-                for node in nodes.iter().take(1) {
-                    if let Some(val) = node.properties.get(prop) {
-                        prop_type = match val {
-                            PropertyValue::String(_) => "String",
-                            PropertyValue::Integer(_) => "Integer",
-                            PropertyValue::Float(_) => "Float",
-                            PropertyValue::Boolean(_) => "Boolean",
-                            PropertyValue::Vector(_) => "Vector",
-                            _ => "Unknown",
-                        }.to_string();
-                    }
+
+        // Sample a single node to discover property names and types (O(1))
+        if let Some(&sample_id) = store_guard
+            .label_index_ids(label)
+            .and_then(|ids| ids.iter().next())
+        {
+            if let Some(node) = store_guard.get_node(sample_id) {
+                for (key, val) in &node.properties {
+                    let prop_type = match val {
+                        PropertyValue::String(_) => "String",
+                        PropertyValue::Integer(_) => "Integer",
+                        PropertyValue::Float(_) => "Float",
+                        PropertyValue::Boolean(_) => "Boolean",
+                        PropertyValue::Vector(_) => "Vector",
+                        _ => "Unknown",
+                    };
+                    properties.insert(key.clone(), prop_type.to_string());
                 }
-                properties.insert(prop.clone(), prop_type);
             }
         }
+
         node_types.push(json!({
             "label": label.as_str(),
             "count": count,
@@ -210,44 +215,33 @@ pub async fn schema_handler(
         }));
     }
 
+    // Build edge types: use catalog triple stats for source/target labels (O(1))
+    let catalog = store_guard.catalog();
+    let triple_stats = catalog.all_triple_stats();
+
+    let mut edge_source_targets: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> =
+        BTreeMap::new();
+    for (pattern, _stats) in triple_stats {
+        let entry = edge_source_targets
+            .entry(pattern.edge_type.as_str().to_string())
+            .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()));
+        entry.0.insert(pattern.source_label.as_str().to_string());
+        entry.1.insert(pattern.target_label.as_str().to_string());
+    }
+
     let mut edge_types = Vec::new();
     for edge_type in store_guard.all_edge_types() {
         let count = store_guard.edge_type_count(edge_type);
-        let edges = store_guard.get_edges_by_type(edge_type);
-        let mut source_labels = BTreeSet::new();
-        let mut target_labels = BTreeSet::new();
-        let mut edge_props = BTreeMap::new();
-
-        for edge in edges.iter().take(1000) {
-            if let Some(src) = store_guard.get_node(edge.source) {
-                for l in &src.labels {
-                    source_labels.insert(l.as_str().to_string());
-                }
-            }
-            if let Some(tgt) = store_guard.get_node(edge.target) {
-                for l in &tgt.labels {
-                    target_labels.insert(l.as_str().to_string());
-                }
-            }
-            for (k, v) in &edge.properties {
-                edge_props.entry(k.clone()).or_insert_with(|| {
-                    match v {
-                        PropertyValue::String(_) => "String".to_string(),
-                        PropertyValue::Integer(_) => "Integer".to_string(),
-                        PropertyValue::Float(_) => "Float".to_string(),
-                        PropertyValue::Boolean(_) => "Boolean".to_string(),
-                        _ => "Unknown".to_string(),
-                    }
-                });
-            }
-        }
+        let (source_labels, target_labels) = edge_source_targets
+            .get(edge_type.as_str())
+            .cloned()
+            .unwrap_or_default();
 
         edge_types.push(json!({
             "type": edge_type.as_str(),
             "count": count,
             "source_labels": source_labels.into_iter().collect::<Vec<_>>(),
             "target_labels": target_labels.into_iter().collect::<Vec<_>>(),
-            "properties": edge_props,
         }));
     }
 
@@ -261,15 +255,21 @@ pub async fn schema_handler(
         json!({ "label": l.as_str(), "property": p, "type": "UNIQUE" })
     }).collect();
 
+    let avg_out_degree = if total_nodes > 0 {
+        total_edges as f64 / total_nodes as f64
+    } else {
+        0.0
+    };
+
     Json(json!({
         "node_types": node_types,
         "edge_types": edge_types,
         "indexes": indexes,
         "constraints": constraints,
         "statistics": {
-            "total_nodes": stats.total_nodes,
-            "total_edges": stats.total_edges,
-            "avg_out_degree": stats.avg_out_degree,
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
+            "avg_out_degree": avg_out_degree,
         }
     }))
 }
