@@ -1874,6 +1874,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.label_index.get(label).map(|s| s.len()).unwrap_or(0)
     }
 
+    /// Get the raw node ID set for a label (for sampling without full materialization)
+    pub fn label_index_ids(&self, label: &Label) -> Option<&HashSet<NodeId>> {
+        self.label_index.get(label)
+    }
+
     /// Get edge count for a specific type (fast, O(1))
     pub fn edge_type_count(&self, edge_type: &EdgeType) -> usize {
         self.edge_type_index.get(edge_type).map(|s| s.len()).unwrap_or(0)
