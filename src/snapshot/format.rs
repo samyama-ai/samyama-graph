@@ -61,6 +61,7 @@ pub struct ExportStats {
 pub struct ImportStats {
     pub node_count: u64,
     pub edge_count: u64,
+    pub merged_count: u64,
     pub labels: Vec<String>,
     pub edge_types: Vec<String>,
 }

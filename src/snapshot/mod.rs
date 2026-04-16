@@ -268,10 +268,10 @@ pub fn import_tenant_with_dedup(
     let mut imported_labels: HashSet<String> = HashSet::new();
     let mut imported_edge_types: HashSet<String> = HashSet::new();
 
-    // Entity dedup index: (label, dedup_key, value_string) → existing NodeId
-    // When importing a node, if the same label+key+value exists, reuse that NodeId
-    // instead of creating a duplicate. This enables cross-snapshot federation.
-    // Entity dedup index: (label, dedup_key, value_string) → existing NodeId.
+    // Normalize dedup values: lowercase + trim for case-insensitive matching
+    let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
+
+    // Entity dedup index: (label, dedup_key, normalized_value) → existing NodeId.
     // Only populated when the caller provides dedup_keys.
     let mut dedup_index: HashMap<(String, String, String), NodeId> = HashMap::new();
 
@@ -283,7 +283,7 @@ pub fn import_tenant_with_dedup(
             // Check node HashMap properties
             if let Some(val) = node.get_property(key) {
                 let val_str = match val {
-                    PropertyValue::String(s) => s.clone(),
+                    PropertyValue::String(s) => normalize_dedup(s),
                     PropertyValue::Integer(i) => i.to_string(),
                     _ => continue,
                 };
@@ -293,7 +293,7 @@ pub fn import_tenant_with_dedup(
             let col_val = store.node_columns.get_property(node.id.as_u64() as usize, key);
             match &col_val {
                 PropertyValue::String(s) if !s.is_empty() => {
-                    dedup_index.insert((label.clone(), key.to_string(), s.clone()), node.id);
+                    dedup_index.insert((label.clone(), key.to_string(), normalize_dedup(s)), node.id);
                 }
                 PropertyValue::Integer(i) => {
                     dedup_index.insert((label.clone(), key.to_string(), i.to_string()), node.id);
@@ -326,7 +326,7 @@ pub fn import_tenant_with_dedup(
             for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
                     let val_str = match json_val {
-                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::String(s) => normalize_dedup(s),
                         serde_json::Value::Number(n) => n.to_string(),
                         _ => continue,
                     };
@@ -412,7 +412,7 @@ pub fn import_tenant_with_dedup(
                 for &key in dedup_keys {
                     if let Some(json_val) = snap_node.props.get(key) {
                         let val_str = match json_val {
-                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::String(s) => normalize_dedup(s),
                             serde_json::Value::Number(n) => n.to_string(),
                             _ => continue,
                         };
@@ -435,7 +435,7 @@ pub fn import_tenant_with_dedup(
                 for &key in dedup_keys {
                     if let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(key)) {
                         let val_str = match pv {
-                            PropertyValue::String(s) => s.clone(),
+                            PropertyValue::String(s) => normalize_dedup(s),
                             PropertyValue::Integer(i) => i.to_string(),
                             _ => continue,
                         };
@@ -513,6 +513,7 @@ pub fn import_tenant_with_dedup(
     Ok(ImportStats {
         node_count: imported_node_count,
         edge_count: imported_edge_count,
+        merged_count: merged_node_count,
         labels,
         edge_types,
     })
@@ -1348,7 +1349,10 @@ mod nct_bridge_edge_tests {
 #[cfg(test)]
 mod dedup_tests {
     use super::*;
+    use std::io::Cursor;
     use crate::graph::store::GraphStore;
+    use crate::graph::PropertyValue;
+    use crate::query::{parser::parse_query, executor::QueryExecutor};
 
     #[test]
     fn test_index_backfill_on_imported_snapshot() {
@@ -1474,5 +1478,139 @@ mod dedup_tests {
         assert!(!result.records.is_empty(),
             "Cypher query should find Country with iso_code='IND' after snapshot import + CREATE INDEX. Got {} rows.",
             result.records.len());
+    }
+
+    #[test]
+    fn test_cross_kg_dedup_merges_shared_nodes() {
+        // Snapshot 1: Drug "Methotrexate" with source=faers
+        let mut store1 = GraphStore::new();
+        let d1 = store1.create_node("Drug");
+        store1.get_node_mut(d1).unwrap().set_property("name", PropertyValue::String("Methotrexate".to_string()));
+        store1.get_node_mut(d1).unwrap().set_property("source", PropertyValue::String("faers".to_string()));
+        let ae = store1.create_node("AdverseEvent");
+        store1.get_node_mut(ae).unwrap().set_property("name", PropertyValue::String("Nausea".to_string()));
+        store1.create_edge(ae, d1, "REPORTED_DRUG").unwrap();
+
+        let mut buf1 = Vec::new();
+        export_tenant(&store1, &mut buf1).unwrap();
+
+        // Snapshot 2: Drug "Methotrexate" with source=clinicaltrials (same name, different case)
+        let mut store2 = GraphStore::new();
+        let d2 = store2.create_node("Drug");
+        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("methotrexate".to_string()));
+        store2.get_node_mut(d2).unwrap().set_property("source", PropertyValue::String("clinicaltrials".to_string()));
+        let ct = store2.create_node("ClinicalTrial");
+        store2.get_node_mut(ct).unwrap().set_property("name", PropertyValue::String("NCT001".to_string()));
+        store2.create_edge(ct, d2, "TESTS").unwrap();
+
+        let mut buf2 = Vec::new();
+        export_tenant(&store2, &mut buf2).unwrap();
+
+        // Import both into a combined store with dedup on "name"
+        let mut combined = GraphStore::new();
+        let s1 = import_tenant_with_dedup(&mut combined, Cursor::new(&buf1), &["name"]).unwrap();
+        assert_eq!(s1.node_count, 2); // Drug + AdverseEvent
+        assert_eq!(s1.merged_count, 0);
+
+        let s2 = import_tenant_with_dedup(&mut combined, Cursor::new(&buf2), &["name"]).unwrap();
+        assert_eq!(s2.node_count, 1); // Only ClinicalTrial is new
+        assert_eq!(s2.merged_count, 1); // Drug "methotrexate" merged with "Methotrexate"
+
+        // Should have 3 nodes total: Drug, AdverseEvent, ClinicalTrial
+        assert_eq!(combined.node_count(), 3);
+        // Should have 2 edges: both pointing to the same Drug node
+        assert_eq!(combined.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_dedup_properties_merged_additively() {
+        let mut store1 = GraphStore::new();
+        let d = store1.create_node("Drug");
+        store1.get_node_mut(d).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
+        store1.get_node_mut(d).unwrap().set_property("source", PropertyValue::String("faers".to_string()));
+
+        let mut buf1 = Vec::new();
+        export_tenant(&store1, &mut buf1).unwrap();
+
+        let mut store2 = GraphStore::new();
+        let d2 = store2.create_node("Drug");
+        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("aspirin".to_string()));
+        store2.get_node_mut(d2).unwrap().set_property("mechanism", PropertyValue::String("COX inhibitor".to_string()));
+
+        let mut buf2 = Vec::new();
+        export_tenant(&store2, &mut buf2).unwrap();
+
+        let mut combined = GraphStore::new();
+        import_tenant_with_dedup(&mut combined, Cursor::new(&buf1), &["name"]).unwrap();
+        import_tenant_with_dedup(&mut combined, Cursor::new(&buf2), &["name"]).unwrap();
+
+        assert_eq!(combined.node_count(), 1);
+
+        // Original property kept
+        let nodes = combined.all_nodes();
+        let nid = nodes[0].id.as_u64() as usize;
+        assert_eq!(
+            combined.node_columns.get_property(nid, "source"),
+            PropertyValue::String("faers".to_string())
+        );
+        // New property added
+        assert_eq!(
+            combined.node_columns.get_property(nid, "mechanism"),
+            PropertyValue::String("COX inhibitor".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dedup_cross_domain_cypher_query() {
+        // Build two KGs with shared Drug, import with dedup, run cross-domain query
+        let mut store1 = GraphStore::new();
+        let d1 = store1.create_node("Drug");
+        store1.get_node_mut(d1).unwrap().set_property("name", PropertyValue::String("Methotrexate".to_string()));
+        let ae = store1.create_node("AdverseEventCase");
+        store1.get_node_mut(ae).unwrap().set_property("case_id", PropertyValue::String("AE001".to_string()));
+        store1.create_edge(ae, d1, "REPORTED_DRUG").unwrap();
+
+        let mut buf1 = Vec::new();
+        export_tenant(&store1, &mut buf1).unwrap();
+
+        let mut store2 = GraphStore::new();
+        let d2 = store2.create_node("Drug");
+        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("  Methotrexate  ".to_string()));
+        let ct = store2.create_node("ClinicalTrial");
+        store2.get_node_mut(ct).unwrap().set_property("nct_id", PropertyValue::String("NCT001".to_string()));
+        store2.create_edge(ct, d2, "TESTS").unwrap();
+
+        let mut buf2 = Vec::new();
+        export_tenant(&store2, &mut buf2).unwrap();
+
+        let mut combined = GraphStore::new();
+        import_tenant_with_dedup(&mut combined, Cursor::new(&buf1), &["name"]).unwrap();
+        import_tenant_with_dedup(&mut combined, Cursor::new(&buf2), &["name"]).unwrap();
+
+        // Cross-domain query: ClinicalTrial -TESTS-> Drug <-REPORTED_DRUG- AdverseEventCase
+        let query = parse_query(
+            "MATCH (ct:ClinicalTrial)-[:TESTS]->(d:Drug)<-[:REPORTED_DRUG]-(aec:AdverseEventCase) RETURN ct.nct_id, aec.case_id"
+        ).unwrap();
+        let exec = QueryExecutor::new(&combined);
+        let result = exec.execute(&query).unwrap();
+
+        assert_eq!(result.records.len(), 1, "Cross-domain query should return 1 result");
+    }
+
+    #[test]
+    fn test_dedup_no_keys_no_merge() {
+        // Without dedup_keys, same-name nodes should NOT be merged
+        let mut store1 = GraphStore::new();
+        let d = store1.create_node("Drug");
+        store1.get_node_mut(d).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
+        let mut buf1 = Vec::new();
+        export_tenant(&store1, &mut buf1).unwrap();
+
+        let mut combined = GraphStore::new();
+        import_tenant(&mut combined, Cursor::new(&buf1)).unwrap();
+        import_tenant(&mut combined, Cursor::new(&buf1)).unwrap();
+
+        // Without dedup, we get 2 Drug nodes
+        assert_eq!(combined.node_count(), 2);
     }
 }
