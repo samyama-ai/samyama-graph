@@ -127,6 +127,10 @@ harness = false
 name = "graph_optimization_benchmark"
 harness = false
 
+[[bench]]
+name = "rao_family_benchmark"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

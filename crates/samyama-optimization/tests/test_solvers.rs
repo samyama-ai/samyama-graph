@@ -216,6 +216,42 @@ fn test_fpa_sphere() {
     assert!(result.best_fitness < 1.0, "FPA failed: fitness {}", result.best_fitness);
 }
 
+#[test]
+fn test_bmwr_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = BMWRSolver::new(config);
+    let result = solver.solve(&problem);
+    assert!(result.best_fitness < 0.1, "BMWR failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_samp_jaya_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = SAMPJayaSolver::new(config);
+    let result = solver.solve(&problem);
+    assert!(result.best_fitness < 0.1, "SAMP-Jaya failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_ehrjaya_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = EHRJayaSolver::new(config);
+    let result = solver.solve(&problem);
+    assert!(result.best_fitness < 0.1, "EHR-Jaya failed: fitness {}", result.best_fitness);
+}
+
+#[test]
+fn test_qo_rao_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = QORaoSolver::new(config, RaoVariant::Rao1);
+    let result = solver.solve(&problem);
+    assert!(result.best_fitness < 0.1, "QO-Rao failed: fitness {}", result.best_fitness);
+}
+
 // --- Multi-Objective Tests ---
 
 struct BiObjectiveProblem;
@@ -268,6 +304,52 @@ fn test_motlbo_biobjective() {
     for ind in &result.pareto_front {
         assert_eq!(ind.rank, 0, "Pareto front members should have rank 0");
     }
+}
+
+#[test]
+fn test_mo_bmr_biobjective() {
+    let problem = BiObjectiveProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 100 };
+    let solver = MOBMWRSolver::new(config, MOBMWRVariant::MOBMR);
+    let result = solver.solve(&problem);
+    assert!(!result.pareto_front.is_empty());
+    for ind in &result.pareto_front { assert_eq!(ind.rank, 0); }
+}
+
+#[test]
+fn test_mo_bwr_biobjective() {
+    let problem = BiObjectiveProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 100 };
+    let solver = MOBMWRSolver::new(config, MOBMWRVariant::MOBWR);
+    let result = solver.solve(&problem);
+    assert!(!result.pareto_front.is_empty());
+}
+
+#[test]
+fn test_mo_bmwr_biobjective() {
+    let problem = BiObjectiveProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 100 };
+    let solver = MOBMWRSolver::new(config, MOBMWRVariant::MOBMWR);
+    let result = solver.solve(&problem);
+    assert!(!result.pareto_front.is_empty());
+}
+
+#[test]
+fn test_mo_rao_de_biobjective() {
+    let problem = BiObjectiveProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 100 };
+    let solver = MORaoDESolver::new(config);
+    let result = solver.solve(&problem);
+    assert!(!result.pareto_front.is_empty());
+}
+
+#[test]
+fn test_saphr_sphere() {
+    let problem = SphereProblem;
+    let config = SolverConfig { population_size: 50, max_iterations: 500 };
+    let solver = SAPHRSolver::new(config);
+    let result = solver.solve(&problem);
+    assert!(result.best_fitness < 0.5, "SAPHR failed: {}", result.best_fitness);
 }
 
 // --- Convergence / History Tests ---
