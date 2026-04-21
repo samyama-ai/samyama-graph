@@ -1,5 +1,6 @@
 pub mod algorithms;
 pub mod common;
+pub mod moo;
 
 /// Re-export common types
 pub use common::*;
