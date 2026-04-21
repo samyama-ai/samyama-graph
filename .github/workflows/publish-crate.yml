@@ -24,31 +24,31 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         shell: bash
         run: |
+          set +e  # Handle errors ourselves so we can surface cargo's output.
           publish_crate() {
               CRATE=$1
               echo "--------------------------------------------------"
               echo "🚀 Processing $CRATE..."
-              
-              # Dry run first to check compilation/packaging
-              # cargo publish --dry-run -p $CRATE
-              
-              # Attempt real publish
-              OUTPUT=$(cargo publish -p $CRATE 2>&1)
-              EXIT_CODE=$?
-              
+
+              # Capture stdout+stderr and tee to the live log so failures are visible.
+              TMPLOG=$(mktemp)
+              cargo publish -p "$CRATE" 2>&1 | tee "$TMPLOG"
+              EXIT_CODE=${PIPESTATUS[0]}
+              OUTPUT=$(cat "$TMPLOG")
+              rm -f "$TMPLOG"
+
               if [ $EXIT_CODE -eq 0 ]; then
                   echo "✅ Success: $CRATE published."
-              elif echo "$OUTPUT" | grep -q "already exists"; then
+                  return 0
+              elif echo "$OUTPUT" | grep -qE "already exists|already uploaded|is already published"; then
                   echo "⚠️  Skipping: Version already exists on crates.io."
-              elif echo "$OUTPUT" | grep -q "already uploaded"; then
-                  echo "⚠️  Skipping: Version already exists on crates.io."
+                  return 0
               else
-                  echo "❌ Error: Failed to publish $CRATE"
-                  echo "$OUTPUT"
+                  echo "❌ Error: Failed to publish $CRATE (exit $EXIT_CODE)"
                   return $EXIT_CODE
               fi
           }
 
           # Publish order matters if there are dependencies
-          publish_crate samyama-graph-algorithms
-          publish_crate samyama-optimization
+          publish_crate samyama-graph-algorithms || exit $?
+          publish_crate samyama-optimization || exit $?
