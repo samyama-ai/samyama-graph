@@ -69,7 +69,9 @@ impl HttpServer {
             data_path: self.data_path.clone(),
         };
 
-        let app = Router::new()
+        let optimize_state = Arc::new(super::optimize::OptimizeState::default());
+
+        let main_router = Router::new()
             .route("/", get(static_handler))
             .route("/api/query", post(query_handler))
             .route("/api/status", get(status_handler))
@@ -80,8 +82,11 @@ impl HttpServer {
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))) // 2 GB
-            .layer(CorsLayer::permissive())
             .with_state(state);
+
+        let app = main_router
+            .merge(super::optimize::router().with_state(optimize_state))
+            .layer(CorsLayer::permissive());
 
         let addr = format!("0.0.0.0:{}", self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -76,7 +76,10 @@ flate2 = "1.0"
 rayon = "1.10"
 
 # Optimization Engine (Phase 7)
-samyama-optimization = { path = "crates/samyama-optimization", version = "1.0.0" }
+samyama-optimization = { path = "crates/samyama-optimization", version = "1.1.0" }
+uuid = { version = "1.8", features = ["v4"] }
+tokio-stream = "0.1"
+futures = "0.3"
 samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.0.0" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
