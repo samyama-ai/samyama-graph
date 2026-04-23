@@ -249,8 +249,13 @@ impl NSGA2Solver {
         for i in 0..vars.len() {
             if rng.gen::<f64>() < self.mutation_rate {
                 let range = upper[i] - lower[i];
-                vars[i] = (vars[i] + (rng.gen::<f64>() - 0.5) * range * 0.1).clamp(lower[i], upper[i]);
+                vars[i] = vars[i] + (rng.gen::<f64>() - 0.5) * range * 0.1;
             }
+            // Always clamp to bounds — BLX-alpha crossover routinely produces
+            // children outside [lower, upper], and unmutated genes were
+            // previously left unclamped, causing problems like ZDT1 to evaluate
+            // sqrt(negative) → NaN.
+            vars[i] = vars[i].clamp(lower[i], upper[i]);
         }
     }
 }
