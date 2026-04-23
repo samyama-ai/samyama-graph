@@ -189,3 +189,148 @@ async fn cancel_endpoint_returns_ok_even_for_unknown_job() {
     let v = body_to_json(res.into_body()).await;
     assert_eq!(v["cancelled"], false);
 }
+
+#[tokio::test]
+async fn nsga2_zdt1_done_event_emits_final_pareto() {
+    // Regression: SGE was emitting only {iter, best_fitness} for multi-objective
+    // runs, leaving the samyama-insight Pareto chart empty. The done event for
+    // an MO solve must include `final_pareto`: a non-empty list of [obj1, obj2]
+    // points so the UI can render the front.
+    let app = router();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/optimize/solve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "algorithm": "nsga2",
+                        "benchmark": "zdt1",
+                        "population_size": 30,
+                        "iterations": 100
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let job_id = body_to_json(res.into_body()).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let stream_res = tokio::time::timeout(Duration::from_secs(30), async {
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/optimize/solve/{}/stream", job_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    })
+    .await
+    .expect("stream request timed out");
+    assert_eq!(stream_res.status(), StatusCode::OK);
+
+    let bytes = stream_res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+
+    let done_line = text
+        .lines()
+        .skip_while(|l| !l.starts_with("event: done"))
+        .nth(1)
+        .expect("done data line");
+    let done: Value = serde_json::from_str(done_line.trim_start_matches("data: ")).unwrap();
+
+    let pareto = done["final_pareto"]
+        .as_array()
+        .expect("done event must include final_pareto array for multi-objective runs");
+    assert!(!pareto.is_empty(), "final_pareto must contain points");
+    let first = pareto[0].as_array().expect("each pareto point is an array");
+    assert_eq!(
+        first.len(),
+        2,
+        "ZDT1 has 2 objectives, point should be [obj1, obj2]"
+    );
+    // Use as_f64() — serde_json stores whole-number f64 values as integers and
+    // is_f64() returns false for those. as_f64() coerces correctly.
+    assert!(
+        first[0].as_f64().is_some() && first[1].as_f64().is_some(),
+        "expected numeric obj values, got {first:?}"
+    );
+}
+
+#[tokio::test]
+async fn nsga2_zdt1_last_iteration_event_carries_pareto_front() {
+    // The samyama-insight hook subscribes to iteration events and reads the
+    // optional `pareto_front` field. To keep the UI working without a separate
+    // event, SGE stamps the final Pareto front onto the last iteration event.
+    let app = router();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/optimize/solve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"algorithm":"nsga2","benchmark":"zdt1","population_size":30,"iterations":50})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let job_id = body_to_json(res.into_body()).await["job_id"].as_str().unwrap().to_string();
+
+    let stream_res = tokio::time::timeout(Duration::from_secs(20), async {
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/optimize/solve/{}/stream", job_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    let bytes = stream_res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+
+    // Collect all iteration data lines.
+    let iter_payloads: Vec<Value> = text
+        .lines()
+        .scan(false, |is_iter, line| {
+            if line.starts_with("event: iteration") { *is_iter = true; return Some(None); }
+            if line.starts_with("event:") { *is_iter = false; return Some(None); }
+            if *is_iter && line.starts_with("data: ") {
+                let v: Value = serde_json::from_str(line.trim_start_matches("data: ")).unwrap();
+                return Some(Some(v));
+            }
+            Some(None)
+        })
+        .flatten()
+        .collect();
+
+    assert!(iter_payloads.len() >= 10, "expected many iteration payloads");
+    // All non-final iterations should have null pareto_front.
+    for p in iter_payloads.iter().take(iter_payloads.len() - 1) {
+        assert!(p["pareto_front"].is_null(),
+            "non-final iteration should not carry pareto_front, got {p}");
+    }
+    // The last iteration should carry the populated pareto_front.
+    let last = iter_payloads.last().unwrap();
+    let front = last["pareto_front"]
+        .as_array()
+        .expect("last iteration must carry pareto_front for multi-objective runs");
+    assert!(!front.is_empty());
+    let pt = front[0].as_array().unwrap();
+    assert_eq!(pt.len(), 2);
+}

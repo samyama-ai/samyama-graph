@@ -364,8 +364,8 @@ struct CancelHandle {
 
 #[derive(Debug, Clone)]
 enum SseEvent {
-    Iteration { iter: usize, best_fitness: f64 },
-    Done { final_fitness: f64, iterations: usize },
+    Iteration { iter: usize, best_fitness: f64, pareto_front: Option<Vec<Vec<f64>>> },
+    Done { final_fitness: f64, iterations: usize, final_pareto: Option<Vec<Vec<f64>>> },
     Error { message: String },
 }
 
@@ -463,14 +463,20 @@ async fn start_solve(
         });
 
         match compute.await {
-            Ok(Ok(SolverOutcome { history, final_fitness })) => {
+            Ok(Ok(SolverOutcome { history, final_fitness, final_pareto })) => {
+                let iterations = history.len();
+                let last_iter = iterations.saturating_sub(1);
                 for (iter, best) in history.iter().enumerate() {
                     if cancelled_flag.load(std::sync::atomic::Ordering::Relaxed) {
                         let _ = event_tx.send(SseEvent::Error { message: "cancelled".into() }).await;
                         return;
                     }
+                    // Stamp the final Pareto front onto the LAST iteration event
+                    // so the samyama-insight hook (which reads pareto_front from
+                    // iteration events, not from done) renders the chart.
+                    let pareto_for_event = if iter == last_iter { final_pareto.clone() } else { None };
                     if event_tx
-                        .send(SseEvent::Iteration { iter, best_fitness: *best })
+                        .send(SseEvent::Iteration { iter, best_fitness: *best, pareto_front: pareto_for_event })
                         .await
                         .is_err()
                     {
@@ -478,7 +484,7 @@ async fn start_solve(
                     }
                 }
                 let _ = event_tx
-                    .send(SseEvent::Done { final_fitness, iterations: history.len() })
+                    .send(SseEvent::Done { final_fitness, iterations, final_pareto })
                     .await;
             }
             Ok(Err(e)) => {
@@ -496,6 +502,9 @@ async fn start_solve(
 struct SolverOutcome {
     history: Vec<f64>,
     final_fitness: f64,
+    /// Final Pareto front, one entry per non-dominated individual, each a vector
+    /// of objective values. None for single-objective runs.
+    final_pareto: Option<Vec<Vec<f64>>>,
 }
 
 fn run_solver(
@@ -507,12 +516,7 @@ fn run_solver(
     cfg: SolverConfig,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
-        // MO problems: track first-objective best across iterations.
-        let run = |hist: Vec<f64>, final_first: f64| SolverOutcome {
-            final_fitness: final_first,
-            history: hist,
-        };
-        let (hist, final_f) = match bench_id {
+        let (hist, final_f, pareto) = match bench_id {
             "zdt1" | "zdt2" | "zdt3" => {
                 let v = bench_id.chars().last().unwrap().to_digit(10).unwrap() as u8;
                 let problem = ZDT { variant: v, dim: 30 };
@@ -527,7 +531,14 @@ fn run_solver(
                 let final_first = r.pareto_front.iter()
                     .map(|ind| ind.fitness[0])
                     .fold(f64::INFINITY, f64::min);
-                (r.history, final_first)
+                // Drop individuals with non-finite objective values — serde_json
+                // serializes NaN/Inf as null, which breaks downstream consumers
+                // (e.g. the samyama-insight Pareto chart).
+                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
+                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
+                    .map(|ind| ind.fitness.clone())
+                    .collect();
+                (r.history, final_first, pareto)
             }
             "dtlz1" => {
                 let problem = DTLZ1 { dim: 7, m: 3 };
@@ -542,11 +553,18 @@ fn run_solver(
                 let final_first = r.pareto_front.iter()
                     .map(|ind| ind.fitness[0])
                     .fold(f64::INFINITY, f64::min);
-                (r.history, final_first)
+                // Drop individuals with non-finite objective values — serde_json
+                // serializes NaN/Inf as null, which breaks downstream consumers
+                // (e.g. the samyama-insight Pareto chart).
+                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
+                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
+                    .map(|ind| ind.fitness.clone())
+                    .collect();
+                (r.history, final_first, pareto)
             }
             other => return Err(format!("benchmark {} is not multi-objective", other)),
         };
-        Ok(run(hist, final_f))
+        Ok(SolverOutcome { history: hist, final_fitness: final_f, final_pareto: Some(pareto) })
     } else {
         let bench = benchmark_catalog().into_iter().find(|b| b.id == bench_id)
             .ok_or_else(|| format!("unknown benchmark: {bench_id}"))?;
@@ -577,6 +595,7 @@ fn run_solver(
         Ok(SolverOutcome {
             final_fitness: result.best_fitness,
             history: result.history,
+            final_pareto: None,
         })
     }
 }
@@ -600,16 +619,21 @@ async fn stream_solve(
 
     let stream = ReceiverStream::new(rx).map(|evt| {
         let ev = match evt {
-            SseEvent::Iteration { iter, best_fitness } => Event::default()
+            SseEvent::Iteration { iter, best_fitness, pareto_front } => Event::default()
                 .event("iteration")
-                .json_data(serde_json::json!({ "iter": iter, "best_fitness": best_fitness }))
+                .json_data(serde_json::json!({
+                    "iter": iter,
+                    "best_fitness": best_fitness,
+                    "pareto_front": pareto_front,
+                }))
                 .unwrap(),
-            SseEvent::Done { final_fitness, iterations } => Event::default()
+            SseEvent::Done { final_fitness, iterations, final_pareto } => Event::default()
                 .event("done")
                 .json_data(serde_json::json!({
                     "final_fitness": final_fitness,
                     "iterations": iterations,
                     "total_time_ms": 0,
+                    "final_pareto": final_pareto,
                 }))
                 .unwrap(),
             SseEvent::Error { message } => Event::default()
