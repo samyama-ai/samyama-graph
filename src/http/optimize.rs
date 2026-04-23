@@ -262,6 +262,7 @@ fn benchmark_catalog() -> Vec<BenchmarkInfo> {
         BenchmarkInfo { id: "zdt2",       name: "ZDT2",       dim: 30, lower: 0.0,      upper: 1.0,     num_objectives: 2, ty: "multi",  optimum: None },
         BenchmarkInfo { id: "zdt3",       name: "ZDT3",       dim: 30, lower: 0.0,      upper: 1.0,     num_objectives: 2, ty: "multi",  optimum: None },
         BenchmarkInfo { id: "dtlz1",      name: "DTLZ1",      dim: 7,  lower: 0.0,      upper: 1.0,     num_objectives: 3, ty: "multi",  optimum: None },
+        BenchmarkInfo { id: "uc2_dosing", name: "UC2 — Drug-combination dosing", dim: 6, lower: 0.0, upper: 1.0, num_objectives: 3, ty: "usecase", optimum: None },
     ]
 }
 
@@ -534,6 +535,25 @@ fn run_solver(
                 // Drop individuals with non-finite objective values — serde_json
                 // serializes NaN/Inf as null, which breaks downstream consumers
                 // (e.g. the samyama-insight Pareto chart).
+                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
+                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
+                    .map(|ind| ind.fitness.clone())
+                    .collect();
+                (r.history, final_first, pareto)
+            }
+            "uc2_dosing" => {
+                let problem = super::uc_problems::UC2DosingProblem::new();
+                let r = match algo_id {
+                    "mo_bmr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR).solve(&problem),
+                    "mo_bwr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR).solve(&problem),
+                    "mo_bmwr"   => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR).solve(&problem),
+                    "mo_rao_de" => MORaoDESolver::new(cfg).solve(&problem),
+                    "nsga2"     => NSGA2Solver::new(cfg).solve(&problem),
+                    _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
+                };
+                let final_first = r.pareto_front.iter()
+                    .map(|ind| ind.fitness[0])
+                    .fold(f64::INFINITY, f64::min);
                 let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
                     .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
                     .map(|ind| ind.fitness.clone())
