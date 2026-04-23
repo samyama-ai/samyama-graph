@@ -129,6 +129,7 @@ pub use samyama_optimization::algorithms::{
     JayaSolver, CuckooSolver, NSGA2Solver,
     RaoSolver, TLBOSolver, PSOSolver, DESolver, GASolver,
     FireflySolver, GWOSolver, SASolver, BatSolver, ABCSolver,
+    BMRSolver,
 };
 
 // ============================================================
