@@ -189,6 +189,14 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 | Cricket | `cargo run --release --example cricket_loader` | 36K nodes, 1.4M edges |
 | FinBench | `cargo run --example finbench_loader` | 7.7K nodes, 42K edges |
 
+### Related Repositories
+
+samyama-graph is the engine. Per-domain KGs and companion projects live separately and can be loaded into it:
+
+- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg) (66M / 1B), [clinicaltrials-kg](https://git.samyama.ai/Samyama.ai/clinicaltrials-kg) (7.8M / 27M), [druginteractions-kg](https://git.samyama.ai/Samyama.ai/druginteractions-kg) (245K / 388K), [pathways-kg](https://git.samyama.ai/Samyama.ai/pathways-kg) (119K / 835K), [cricket-kg](https://git.samyama.ai/Samyama.ai/cricket-kg) (36K / 1.4M), [assetops-kg](https://git.samyama.ai/Samyama.ai/assetops-kg) (13K / 13K)
+- **Benchmarks:** [biomedqa](https://github.com/samyama-ai/biomedqa) — 40-question pharmacology benchmark across three KGs
+- **Companions:** [graphrag-rs](https://github.com/samyama-ai/graphrag-rs) — doc-to-KG + MCP server; [optimization_algorithms](https://github.com/samyama-ai/optimization_algorithms) — PyPI `rao-algorithms` package (PyO3 bindings over `crates/samyama-optimization/`)
+
 ---
 
 ## Architecture
