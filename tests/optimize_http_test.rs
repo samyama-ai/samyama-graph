@@ -334,3 +334,95 @@ async fn nsga2_zdt1_last_iteration_event_carries_pareto_front() {
     let pt = front[0].as_array().unwrap();
     assert_eq!(pt.len(), 2);
 }
+
+#[tokio::test]
+async fn benchmarks_endpoint_exposes_uc2_dosing() {
+    let app = router();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/optimize/benchmarks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_to_json(res.into_body()).await;
+    let arr = v.as_array().unwrap();
+    let uc2 = arr.iter().find(|b| b["id"] == "uc2_dosing")
+        .expect("uc2_dosing must be listed in /optimize/benchmarks");
+    assert_eq!(uc2["num_objectives"], 3);
+    assert_eq!(uc2["type"], "usecase");
+    assert_eq!(uc2["dim"], 6);
+}
+
+#[tokio::test]
+async fn nsga2_uc2_dosing_produces_three_objective_pareto() {
+    // End-to-end: /optimize/solve with uc2_dosing + nsga2 must build the
+    // embedded graph, run the Cypher-driven fitness, and emit a 3-objective
+    // Pareto front on the done event. Same SSE shape as ZDT/DTLZ1 so the
+    // Spec-34 Pareto chart renders it without UI changes.
+    let app = router();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/optimize/solve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "algorithm": "nsga2",
+                        "benchmark": "uc2_dosing",
+                        "population_size": 30,
+                        "iterations": 30
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let job_id = body_to_json(res.into_body()).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let stream_res = tokio::time::timeout(Duration::from_secs(30), async {
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/optimize/solve/{}/stream", job_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    })
+    .await
+    .expect("stream request timed out");
+    assert_eq!(stream_res.status(), StatusCode::OK);
+
+    let bytes = stream_res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    let done_line = text
+        .lines()
+        .skip_while(|l| !l.starts_with("event: done"))
+        .nth(1)
+        .expect("done event line");
+    let done: Value = serde_json::from_str(done_line.trim_start_matches("data: ")).unwrap();
+    let pareto = done["final_pareto"].as_array().expect("final_pareto array");
+    assert!(!pareto.is_empty());
+    let pt0 = pareto[0].as_array().unwrap();
+    assert_eq!(pt0.len(), 3, "uc2_dosing has 3 objectives");
+    // No plan on the front may carry the 1e6 contraindicated-pair penalty.
+    for pt in pareto.iter() {
+        let arr = pt.as_array().unwrap();
+        for v in arr {
+            let f = v.as_f64().unwrap();
+            assert!(f < 1e5, "Pareto point {pt} carries a penalty");
+        }
+    }
+}
