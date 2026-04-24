@@ -273,6 +273,20 @@ impl GraphStatistics {
 // CSR Frozen Adjacency Tier (DS-07)
 // ============================================================================
 
+/// Snapshot of two-tier adjacency memory layout for observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdjacencyStats {
+    /// Edges held in the immutable CSR tier (bulk-loaded, compacted).
+    pub frozen_edges: usize,
+    /// Edges held in the mutable Vec-of-Vec write buffer (recent CREATEs).
+    pub buffer_edges: usize,
+    /// Number of frozen CSR segments (grows by one per compact_adjacency call).
+    pub frozen_segments: usize,
+    /// Approximate bytes saved by storing frozen edges in CSR instead of
+    /// Vec-of-Vec (one u32 offset per node vs one Vec header per node).
+    pub bytes_saved_estimate: usize,
+}
+
 /// Multi-segment frozen CSR — holds one or more immutable CSR segments.
 /// Each `compact_adjacency()` call appends a new segment (no merge, no memory spike).
 /// `neighbors()` iterates all segments.
@@ -354,8 +368,10 @@ impl FrozenAdjacency {
         Self { offsets: vec![0], edges: Vec::new() }
     }
 
-    /// Build frozen tier from Vec-of-Vec adjacency lists, consuming the data.
-    /// After this, the Vec-of-Vec should be cleared (becomes the empty write buffer).
+    /// Build frozen tier from Vec-of-Vec adjacency lists.
+    /// Per-node neighbor lists are sorted by NodeId so binary-search lookups
+    /// (find_neighbor / find_all_neighbors) are correct. `create_edge_stub`
+    /// appends unsorted, so the sort must happen here.
     fn from_vec_of_vec(adj: &[Vec<(NodeId, EdgeId)>]) -> Self {
         let num_nodes = adj.len();
         let total_edges: usize = adj.iter().map(|v| v.len()).sum();
@@ -366,9 +382,12 @@ impl FrozenAdjacency {
         let mut offset: u32 = 0;
         for node_edges in adj {
             offsets.push(offset);
-            for &entry in node_edges {
-                edges.push(entry);
-            }
+            let start = edges.len();
+            edges.extend_from_slice(node_edges);
+            // Stable sort preserves insertion order among parallel edges (same
+            // neighbor, different EdgeId) so find_all_neighbors returns a
+            // deterministic grouped run.
+            edges[start..].sort_by_key(|(nid, _)| *nid);
             offset += node_edges.len() as u32;
         }
         offsets.push(offset); // sentinel
@@ -1786,6 +1805,36 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         frozen + buffer
     }
 
+    /// Snapshot of the two-tier adjacency store: how many edges live in the
+    /// immutable frozen (CSR) tier vs the mutable write buffer, and an estimate
+    /// of the bytes saved by packing edges into CSR rather than Vec-of-Vec.
+    pub fn adjacency_stats(&self) -> AdjacencyStats {
+        let frozen_edges = self.frozen_outgoing.edge_count();
+        let buffer_edges: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        let frozen_segments = self.frozen_outgoing.segments.len();
+
+        // Vec-of-Vec pays ~24 bytes of Vec header per non-empty source node plus
+        // the packed (NodeId, EdgeId) payload; CSR pays one u32 offset per node
+        // plus the payload. The headroom is the Vec overhead we no longer pay.
+        let vec_header_bytes = std::mem::size_of::<Vec<(NodeId, EdgeId)>>();
+        let frozen_source_nodes = self
+            .frozen_outgoing
+            .segments
+            .iter()
+            .map(|s| s.node_capacity())
+            .sum::<usize>();
+        let bytes_saved_estimate = frozen_source_nodes
+            .saturating_mul(vec_header_bytes)
+            .saturating_sub(frozen_source_nodes.saturating_mul(std::mem::size_of::<u32>()));
+
+        AdjacencyStats {
+            frozen_edges,
+            buffer_edges,
+            frozen_segments,
+            bytes_saved_estimate,
+        }
+    }
+
     /// Get all nodes in the graph
     pub fn all_nodes(&self) -> Vec<&Node> {
         self.nodes.iter().flatten().collect()
@@ -1955,6 +2004,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         summary
+    }
+
+    /// Compact only if the write buffer has grown past `threshold` edges.
+    /// Returns true when compaction ran. Opt-in: callers decide when to poll
+    /// this (e.g. after a batch of writes). `threshold == 0` always compacts
+    /// when there's anything to compact.
+    pub fn compact_adjacency_if_needed(&mut self, threshold: usize) -> bool {
+        let buffer_edges: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        if buffer_edges == 0 || buffer_edges < threshold {
+            return false;
+        }
+        self.compact_adjacency();
+        true
     }
 
     /// Compact the write buffer into the frozen CSR tier.
@@ -4135,6 +4197,105 @@ mod tests {
         let buffer_non_empty: usize = store.outgoing.iter().filter(|v| !v.is_empty()).count();
         assert_eq!(buffer_non_empty, 0, "Write buffer should be empty after compaction");
         assert_eq!(store.frozen_outgoing.edge_count(), 99);
+    }
+
+    #[test]
+    fn test_frozen_adjacency_sorted_and_binary_searchable() {
+        // create_edge_stub (used by bulk loaders + snapshot import) appends unsorted
+        // and documents "sorted at compact_adjacency()". Enforce that contract here:
+        // after compaction, per-node neighbor lists must be sorted by NodeId so
+        // binary_search_by_key-based lookups (find_neighbor, find_all_neighbors)
+        // work correctly.
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let targets: Vec<NodeId> = (0..8).map(|_| store.create_node("Person")).collect();
+        // Insert edges in deliberately unsorted target order via the bulk-load path.
+        let order = [5usize, 0, 7, 2, 4, 1, 6, 3];
+        for &i in &order {
+            store.create_edge_stub(a, targets[i], "KNOWS").unwrap();
+        }
+
+        store.compact_adjacency();
+
+        let a_idx = a.0 as usize;
+        assert_eq!(store.frozen_outgoing.segments.len(), 1);
+        let seg = &store.frozen_outgoing.segments[0];
+        let neighbors = seg.neighbors(a_idx);
+        assert_eq!(neighbors.len(), 8);
+
+        for w in neighbors.windows(2) {
+            assert!(w[0].0 <= w[1].0, "frozen neighbors must be sorted by NodeId");
+        }
+
+        for &i in &order {
+            assert!(
+                seg.find_neighbor(a_idx, targets[i]).is_some(),
+                "find_neighbor failed for target {:?}",
+                targets[i]
+            );
+        }
+        let absent = NodeId::new(9999);
+        assert!(seg.find_neighbor(a_idx, absent).is_none());
+    }
+
+    #[test]
+    fn test_compact_if_needed_below_threshold_is_noop() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        store.create_edge_stub(a, b, "KNOWS").unwrap();
+
+        // Threshold is 10, only 1 edge in buffer → no compaction.
+        let ran = store.compact_adjacency_if_needed(10);
+        assert!(!ran, "should not compact below threshold");
+        assert!(store.frozen_outgoing.is_empty());
+        assert_eq!(store.adjacency_stats().buffer_edges, 1);
+    }
+
+    #[test]
+    fn test_compact_if_needed_triggers_at_threshold() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let targets: Vec<NodeId> = (0..5).map(|_| store.create_node("Person")).collect();
+        for t in &targets {
+            store.create_edge_stub(a, *t, "KNOWS").unwrap();
+        }
+
+        let ran = store.compact_adjacency_if_needed(5);
+        assert!(ran, "threshold met → compaction must run");
+        let stats = store.adjacency_stats();
+        assert_eq!(stats.frozen_edges, 5);
+        assert_eq!(stats.buffer_edges, 0);
+    }
+
+    #[test]
+    fn test_compact_if_needed_empty_buffer_is_noop() {
+        let mut store = GraphStore::new();
+        // Threshold 0 + empty buffer → still a no-op (nothing to do).
+        assert!(!store.compact_adjacency_if_needed(0));
+        assert!(store.frozen_outgoing.is_empty());
+    }
+
+    #[test]
+    fn test_frozen_find_all_neighbors_parallel_edges() {
+        // Multiple edges to the same neighbor via the unsorted bulk-load path.
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        let c = store.create_node("Person");
+        store.create_edge_stub(a, c, "KNOWS").unwrap();
+        store.create_edge_stub(a, b, "KNOWS").unwrap();
+        store.create_edge_stub(a, c, "LIKES").unwrap();
+        store.create_edge_stub(a, b, "LIKES").unwrap();
+        store.create_edge_stub(a, c, "FOLLOWS").unwrap();
+
+        store.compact_adjacency();
+
+        let seg = &store.frozen_outgoing.segments[0];
+        let to_b = seg.find_all_neighbors(a.0 as usize, b);
+        let to_c = seg.find_all_neighbors(a.0 as usize, c);
+        assert_eq!(to_b.len(), 2, "expected 2 edges from a to b");
+        assert_eq!(to_c.len(), 3, "expected 3 edges from a to c");
     }
 
     // ============================================================
