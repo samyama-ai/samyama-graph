@@ -1091,6 +1091,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Set a property on an edge, updating both columnar and row storage.
+    ///
+    /// MVCC contract: the version log records POST-mutation state keyed at
+    /// `current_version`. `get_edge_at_version(eid, V)` finds the entry with
+    /// the largest `version <= V`, which then represents the state as of that
+    /// version. Writes at the same `current_version` coalesce onto the last
+    /// entry instead of creating a new one (intra-transaction updates).
     pub fn set_edge_property(
         &mut self,
         edge_id: EdgeId,
@@ -1101,23 +1107,30 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let val = value.into();
         let idx = edge_id.as_u64() as usize;
 
-        // MVCC: Snapshot current properties before modification
-        let current_props = self.edge_properties.get(&edge_id).cloned()
-            .or_else(|| self.get_edge(edge_id).map(|e| e.properties.clone()))
-            .unwrap_or_default();
-        let version_log = self.edge_version_log.entry(edge_id).or_insert_with(Vec::new);
-        if version_log.is_empty() || version_log.last().unwrap().version != self.current_version {
-            version_log.push(EdgeVersionEntry {
-                version: self.current_version,
-                properties: current_props,
-            });
-        }
-
-        // Update columnar storage
+        // Apply the mutation to the live stores first so the snapshot below
+        // captures the new state.
         self.edge_columns.set_property(idx, &key_str, val.clone());
-
-        // Update DS-07c sparse property map (single source of truth)
         self.set_edge_property_sparse(edge_id, key_str, val);
+
+        // Record the POST-mutation properties in the version log.
+        let post_props = self
+            .edge_properties
+            .get(&edge_id)
+            .cloned()
+            .unwrap_or_default();
+        let current_version = self.current_version;
+        let version_log = self.edge_version_log.entry(edge_id).or_insert_with(Vec::new);
+        match version_log.last_mut() {
+            Some(last) if last.version == current_version => {
+                last.properties = post_props;
+            }
+            _ => {
+                version_log.push(EdgeVersionEntry {
+                    version: current_version,
+                    properties: post_props,
+                });
+            }
+        }
 
         Ok(())
     }
