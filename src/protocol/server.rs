@@ -92,6 +92,34 @@ impl RespServer {
         }
     }
 
+    /// HA-09: Create a RESP server that shares a pre-existing `TenantManager`
+    /// with HTTP routes, so tenants created via either path are visible to both.
+    pub fn new_with_tenants(
+        config: ServerConfig,
+        store: Arc<RwLock<GraphStore>>,
+        persistence: Option<Arc<PersistenceManager>>,
+        tenants: Arc<crate::persistence::TenantManager>,
+    ) -> Self {
+        let handler = Arc::new(CommandHandler::new_with_tenants(
+            persistence.as_ref().map(Arc::clone),
+            tenants,
+        ));
+        Self {
+            config,
+            store,
+            handler,
+            persistence,
+            router: None,
+            proxy: None,
+            cluster_manager: None,
+        }
+    }
+
+    /// Access the shared tenant registry (for wiring HTTP routes).
+    pub fn tenant_manager(&self) -> Arc<crate::persistence::TenantManager> {
+        self.handler.tenant_manager()
+    }
+
     /// Enable sharding for this server
     pub fn with_sharding(
         mut self,

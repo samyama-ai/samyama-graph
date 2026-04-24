@@ -664,17 +664,16 @@ pub async fn restore_snapshot_handler(
 
     match crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs) {
         Ok(stats) => {
-            // HA-08: Persist snapshot to disk so it survives server restart
+            // HA-08: Persist snapshot atomically (tmp → fsync → rename → marker)
+            // so it survives server restart. Crash-before-marker = ignored on boot.
             if let Some(ref data_path) = state.data_path {
-                let snap_dir = format!("{}/snapshots", data_path);
-                if let Err(e) = std::fs::create_dir_all(&snap_dir) {
-                    eprintln!("[snapshot-persist] Failed to create dir {}: {}", snap_dir, e);
-                } else {
-                    let snap_path = format!("{}/default.sgsnap", snap_dir);
-                    match std::fs::write(&snap_path, &data) {
-                        Ok(_) => eprintln!("[snapshot-persist] Saved {} ({} bytes)", snap_path, data.len()),
-                        Err(e) => eprintln!("[snapshot-persist] Failed to write {}: {}", snap_path, e),
-                    }
+                match crate::snapshot::persist::persist_snapshot(data_path, &data) {
+                    Ok(_) => eprintln!(
+                        "[snapshot-persist] Committed snapshot to {}/snapshots ({} bytes)",
+                        data_path,
+                        data.len()
+                    ),
+                    Err(e) => eprintln!("[snapshot-persist] Failed to persist: {}", e),
                 }
             }
 
