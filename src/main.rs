@@ -503,11 +503,27 @@ async fn start_server() {
         }
     }
 
+    // HA-08: If no RocksDB recovery happened, replay the last committed .sgsnap
+    // snapshot from <data_path>/snapshots/ so imports survive restart.
+    if !recovered {
+        if let Some(path) = &config.data_path {
+            match samyama::snapshot::persist::restore_persisted_snapshots(path, &mut graph) {
+                Ok(Some(stats)) => println!(
+                    "[snapshot-persist] Restored {} nodes, {} edges from {}/snapshots",
+                    stats.node_count, stats.edge_count, path
+                ),
+                Ok(None) => {}
+                Err(e) => eprintln!("[snapshot-persist] Restore error: {}", e),
+            }
+        }
+    }
+
     println!("\nGraph Statistics:");
     println!("  Total nodes: {}", graph.node_count());
     println!("  Total edges: {}", graph.edge_count());
 
     let store = Arc::new(RwLock::new(graph));
+    let http_data_path = config.data_path.clone();
 
     println!("\nServer starting on {}:{}", config.address, config.port);
 
@@ -519,7 +535,8 @@ async fn start_server() {
     // Start HTTP server for Visualizer API on port 8080
     let http_store = Arc::clone(&store);
     tokio::spawn(async move {
-        let http_server = HttpServer::new(http_store, 8080);
+        let http_server = HttpServer::new(http_store, 8080)
+            .with_data_path(http_data_path);
         println!("HTTP server starting on port 8080 (visualizer + API)");
         if let Err(e) = http_server.start().await {
             eprintln!("HTTP server error: {}", e);

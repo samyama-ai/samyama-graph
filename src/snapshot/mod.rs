@@ -8,6 +8,7 @@
 //! On import, old node IDs are remapped to new IDs via a HashMap.
 
 pub mod format;
+pub mod persist;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
