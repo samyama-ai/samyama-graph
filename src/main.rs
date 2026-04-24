@@ -525,6 +525,13 @@ async fn start_server() {
     let store = Arc::new(RwLock::new(graph));
     let http_data_path = config.data_path.clone();
 
+    // HA-09: one TenantManager shared between RESP and HTTP so a tenant
+    // created via either path is visible to both.
+    let shared_tenants: Arc<samyama::persistence::TenantManager> = persistence
+        .as_ref()
+        .map(|pm| pm.tenants_arc())
+        .unwrap_or_else(|| Arc::new(samyama::persistence::TenantManager::new()));
+
     println!("\nServer starting on {}:{}", config.address, config.port);
 
     // Start background indexer now that store is wrapped in Arc
@@ -534,20 +541,18 @@ async fn start_server() {
 
     // Start HTTP server for Visualizer API on port 8080
     let http_store = Arc::clone(&store);
+    let http_tenants = Arc::clone(&shared_tenants);
     tokio::spawn(async move {
         let http_server = HttpServer::new(http_store, 8080)
-            .with_data_path(http_data_path);
+            .with_data_path(http_data_path)
+            .with_tenant_manager(http_tenants);
         println!("HTTP server starting on port 8080 (visualizer + API)");
         if let Err(e) = http_server.start().await {
             eprintln!("HTTP server error: {}", e);
         }
     });
 
-    let server = if let Some(pm) = persistence {
-        RespServer::new_with_persistence(config, store, pm)
-    } else {
-        RespServer::new(config, store)
-    };
+    let server = RespServer::new_with_tenants(config, store, persistence, shared_tenants);
 
     println!("Server ready. Press Ctrl+C to stop.\n");
 

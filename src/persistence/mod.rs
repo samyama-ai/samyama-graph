@@ -106,6 +106,11 @@ impl PersistenceManager {
         &self.tenants
     }
 
+    /// Get a cloneable handle to the shared tenant registry (HA-09).
+    pub fn tenants_arc(&self) -> Arc<TenantManager> {
+        Arc::clone(&self.tenants)
+    }
+
     /// Start the background indexer for a store
     pub fn start_indexer(&self, store: &GraphStore, receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>) {
         let vector_index = Arc::clone(&store.vector_index);

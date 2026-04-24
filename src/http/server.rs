@@ -6,6 +6,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use crate::graph::GraphStore;
+use crate::persistence::TenantManager;
 use crate::query::QueryEngine;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -17,6 +18,12 @@ use super::handler::{
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
 };
+
+/// HA-09: Build the tenant CRUD sub-router backed by the shared `TenantManager`.
+/// Exposed at the crate level so integration tests can mount it in isolation.
+pub fn build_tenant_router(tenants: Arc<TenantManager>) -> axum::Router {
+    super::tenants::router(tenants)
+}
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -47,17 +54,25 @@ pub struct HttpServer {
     store: Arc<RwLock<GraphStore>>,
     port: u16,
     data_path: Option<String>,
+    tenants: Option<Arc<TenantManager>>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port, data_path: None }
+        Self { store, port, data_path: None, tenants: None }
     }
 
     /// Set the data directory for snapshot persistence (HA-08)
     pub fn with_data_path(mut self, path: Option<String>) -> Self {
         self.data_path = path;
+        self
+    }
+
+    /// HA-09: share a `TenantManager` with the RESP command handler so
+    /// tenants created via HTTP are immediately visible to `GRAPH.LIST`.
+    pub fn with_tenant_manager(mut self, tenants: Arc<TenantManager>) -> Self {
+        self.tenants = Some(tenants);
         self
     }
 
@@ -84,9 +99,14 @@ impl HttpServer {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))) // 2 GB
             .with_state(state);
 
-        let app = main_router
-            .merge(super::optimize::router().with_state(optimize_state))
-            .layer(CorsLayer::permissive());
+        let mut app = main_router
+            .merge(super::optimize::router().with_state(optimize_state));
+
+        if let Some(tm) = self.tenants.as_ref() {
+            app = app.merge(super::tenants::router(Arc::clone(tm)));
+        }
+
+        let app = app.layer(CorsLayer::permissive());
 
         let addr = format!("0.0.0.0:{}", self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;

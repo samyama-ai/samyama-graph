@@ -3,6 +3,7 @@
 pub mod server;
 pub mod handler;
 pub mod optimize;
+pub mod tenants;
 pub mod uc_problems;
 
 pub use server::HttpServer;

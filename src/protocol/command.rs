@@ -4,7 +4,7 @@
 //! Now with persistence support - writes are persisted to disk when enabled
 
 use crate::graph::GraphStore;
-use crate::persistence::PersistenceManager;
+use crate::persistence::{PersistenceManager, TenantManager};
 use crate::protocol::resp::RespValue;
 use crate::query::{QueryEngine, Value};
 use std::sync::Arc;
@@ -16,16 +16,45 @@ pub struct CommandHandler {
     query_engine: QueryEngine,
     /// Optional persistence manager - when Some, writes are persisted to disk
     persistence: Option<Arc<PersistenceManager>>,
+    /// Shared tenant registry — HA-09 unifies HTTP + RESP views
+    tenant_manager: Arc<TenantManager>,
 }
 
 impl CommandHandler {
     /// Create a new command handler
-    /// Pass Some(persistence) to enable persistence, or None for in-memory only
+    /// Pass Some(persistence) to enable persistence, or None for in-memory only.
+    /// When persistence is Some, its TenantManager is reused; otherwise a fresh
+    /// one is created. For tests/integrations that need to share a registry
+    /// across HTTP+RESP, use `new_with_tenants` instead.
     pub fn new(persistence: Option<Arc<PersistenceManager>>) -> Self {
+        let tenant_manager = persistence
+            .as_ref()
+            .map(|p| p.tenants_arc())
+            .unwrap_or_else(|| Arc::new(TenantManager::new()));
         Self {
             query_engine: QueryEngine::new(),
             persistence,
+            tenant_manager,
         }
+    }
+
+    /// Create a command handler that shares a pre-existing `TenantManager`.
+    /// Both the RESP path and the HTTP tenant routes must see the same `Arc`
+    /// to satisfy HA-09 (cross-registry visibility).
+    pub fn new_with_tenants(
+        persistence: Option<Arc<PersistenceManager>>,
+        tenant_manager: Arc<TenantManager>,
+    ) -> Self {
+        Self {
+            query_engine: QueryEngine::new(),
+            persistence,
+            tenant_manager,
+        }
+    }
+
+    /// Access the shared tenant registry (for HTTP wiring in main).
+    pub fn tenant_manager(&self) -> Arc<TenantManager> {
+        Arc::clone(&self.tenant_manager)
     }
 
     /// Handle a RESP command
@@ -202,16 +231,24 @@ impl CommandHandler {
         RespValue::SimpleString("OK".to_string())
     }
 
-    /// Handle GRAPH.LIST command
+    /// Handle GRAPH.LIST command — reads from the shared TenantManager (HA-09).
     async fn handle_graph_list(
         &self,
         _args: &[RespValue],
         _store: &Arc<RwLock<GraphStore>>,
     ) -> RespValue {
-        // For single-graph mode, return a single graph
-        RespValue::Array(vec![
-            RespValue::BulkString(Some(b"default".to_vec())),
-        ])
+        let mut ids: Vec<String> = self
+            .tenant_manager
+            .list_tenants()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        ids.sort();
+        RespValue::Array(
+            ids.into_iter()
+                .map(|id| RespValue::BulkString(Some(id.into_bytes())))
+                .collect(),
+        )
     }
 
     /// Handle PING command
