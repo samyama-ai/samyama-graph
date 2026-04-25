@@ -80,7 +80,8 @@ where
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() <= id_col { continue; }
 
-        let ldbc_id: i64 = fields[id_col].parse()?;
+        let ldbc_id: i64 = parse_ldbc_id(fields[id_col])
+            .ok_or_else(|| format!("invalid id at row {}: {:?}", count + 1, fields[id_col]))?;
 
         let node_id = graph.create_node(label);
 
@@ -139,13 +140,13 @@ where
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 2 { continue; }
 
-        let src_id: i64 = match fields[0].parse() {
-            Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+        let src_id = match parse_ldbc_id(fields[0]) {
+            Some(v) => v,
+            None => { skipped += 1; continue; }
         };
-        let tgt_id: i64 = match fields[1].parse() {
-            Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+        let tgt_id = match parse_ldbc_id(fields[1]) {
+            Some(v) => v,
+            None => { skipped += 1; continue; }
         };
 
         let src_node = match src_map.get(&src_id) {
@@ -181,7 +182,80 @@ where
         eprintln!("  (skipped {} rows for {})", format_num(skipped), edge_type);
     }
 
+    let total = count + skipped;
+    if total > 100 && skipped * 100 / total > 5 {
+        return Err(format!(
+            "loader integrity: skipped {}/{} rows for {} ({}%) — exceeds 5% threshold; \
+             likely a parser/format mismatch (see tolerant `parse_ldbc_id`)",
+            skipped, total, edge_type, skipped * 100 / total
+        ).into());
+    }
+
     Ok(count)
+}
+
+/// Parse an LDBC id field. Some LDBC CSV exports (CsvBasic-LongDateFormatter)
+/// write target ids as floats with a trailing `.0` even though the column is an
+/// integer key. A strict `i64::parse` rejects those, which historically caused
+/// the loader to silently drop millions of REPLY_OF / IS_PART_OF rows.
+///
+/// Accepts: `"123"`, `"  123 "`, `"123.0"`, `"123.000"`, `"-7"`. Rejects
+/// `"123.5"`, `"abc"`, `""`.
+pub fn parse_ldbc_id(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(v);
+    }
+    // Tolerate `<int>.<zeros>`; reject `<int>.<nonzero>`.
+    let (int_part, frac_part) = s.split_once('.')?;
+    if !frac_part.chars().all(|c| c == '0') {
+        return None;
+    }
+    int_part.parse::<i64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ldbc_id;
+
+    #[test]
+    fn plain_int() {
+        assert_eq!(parse_ldbc_id("123"), Some(123));
+        assert_eq!(parse_ldbc_id("0"), Some(0));
+        assert_eq!(parse_ldbc_id("-7"), Some(-7));
+        assert_eq!(parse_ldbc_id("2336462209434"), Some(2336462209434));
+    }
+
+    #[test]
+    fn float_with_zero_fraction() {
+        // Real CSV data: comment_replyOf_*.csv writes target ids as floats.
+        assert_eq!(parse_ldbc_id("2336462209434.0"), Some(2336462209434));
+        assert_eq!(parse_ldbc_id("123.000"), Some(123));
+        assert_eq!(parse_ldbc_id("0.0"), Some(0));
+    }
+
+    #[test]
+    fn float_with_nonzero_fraction_rejected() {
+        assert!(parse_ldbc_id("123.5").is_none());
+        assert!(parse_ldbc_id("1.001").is_none());
+    }
+
+    #[test]
+    fn whitespace_tolerated() {
+        assert_eq!(parse_ldbc_id("  123  "), Some(123));
+        assert_eq!(parse_ldbc_id(" 123.0 "), Some(123));
+    }
+
+    #[test]
+    fn garbage_rejected() {
+        assert!(parse_ldbc_id("").is_none());
+        assert!(parse_ldbc_id("abc").is_none());
+        assert!(parse_ldbc_id(".5").is_none());
+        assert!(parse_ldbc_id("1.2.3").is_none());
+    }
 }
 
 // ============================================================================
