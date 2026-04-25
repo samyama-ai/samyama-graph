@@ -96,7 +96,11 @@ impl HttpServer {
             .route("/api/import/json", post(import_json_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))) // 2 GB
+                // 64 GB cap. PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need
+                // headroom; 64 GB lets per-source snapshots up to ~50 GB through.
+                // Body is buffered in memory by the multipart extractor — see #197
+                // follow-up for streaming-to-disk to drop the RAM ceiling.
+                .layer(DefaultBodyLimit::max(64 * 1024 * 1024 * 1024)))
             .with_state(state);
 
         let mut app = main_router
