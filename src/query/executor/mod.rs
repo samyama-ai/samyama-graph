@@ -6198,6 +6198,29 @@ mod tests {
     }
 
     #[test]
+    fn test_create_edge_return_both_pattern_variables() {
+        // Regression for #196: CREATE (a)-[:KNOWS]->(b) RETURN a.name, b.name
+        // used to error with "Variable not found: b". Both pattern variables
+        // must be in scope after the CREATE clause.
+        let mut store = GraphStore::new();
+        let query = parse_query(
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"}) RETURN a.name, b.name"#,
+        ).unwrap();
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
+        let result = executor.execute(&query).expect("CREATE-RETURN with second variable should succeed");
+        assert_eq!(result.columns, vec!["a.name", "b.name"]);
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(
+            *result.records[0].get("a.name").unwrap(),
+            Value::Property(PropertyValue::String("Alice".to_string()))
+        );
+        assert_eq!(
+            *result.records[0].get("b.name").unwrap(),
+            Value::Property(PropertyValue::String("Bob".to_string()))
+        );
+    }
+
+    #[test]
     fn test_create_return_multiple_properties() {
         let mut store = GraphStore::new();
         let query = parse_query(r#"CREATE (n:Person {name: "Carol", age: 30}) RETURN n.name, n.age"#).unwrap();

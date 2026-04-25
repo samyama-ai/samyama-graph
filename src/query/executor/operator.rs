@@ -5304,19 +5304,23 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
             self.phase = 2;
         }
 
-        // Phase 2: Return results one by one
-        if self.result_index >= self.results.len() {
+        // Phase 2: Emit a single record with ALL pattern bindings.
+        //
+        // openCypher semantics: `CREATE (a)-[r:R]->(b) RETURN a.name, b.name`
+        // produces ONE row where a, r, and b are all in scope. Emitting one
+        // record per created entity used to leave RETURN unable to resolve
+        // the second variable (regression #196).
+        if self.result_index > 0 {
             return Ok(None);
         }
-
-        let (var, value) = &self.results[self.result_index];
-        self.result_index += 1;
+        self.result_index = 1;
 
         let mut record = Record::new();
-        if let Some(v) = var {
-            record.bind(v.clone(), value.clone());
+        for (var, value) in &self.results {
+            if let Some(v) = var {
+                record.bind(v.clone(), value.clone());
+            }
         }
-
         Ok(Some(record))
     }
 
