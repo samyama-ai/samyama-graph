@@ -382,7 +382,7 @@ impl QueryPlanner {
         // correct for the query. The specialized plan short-circuits the
         // Expand→Aggregate path that causes MB049/MB054 to time out.
         if let Some(pat) = super::adjacency_agg_detector::detect(query) {
-            return self.plan_adjacency_count_aggregate(query, pat, store);
+            return self.plan_adjacency_count_aggregate(query, pat);
         }
         // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
         // where an explicit pre-WITH LIMIT caps the work per group but the
@@ -1705,11 +1705,10 @@ impl QueryPlanner {
         &self,
         query: &Query,
         pat: super::adjacency_agg_detector::AdjacencyAggPattern,
-        store: &GraphStore,
     ) -> ExecutionResult<ExecutionPlan> {
         use super::operator::{
-            AdjacencyCountAggregateOperator, FilterOperator, IndexScanOperator, LimitOperator,
-            NodeScanOperator, ProjectOperator, SortOperator,
+            AdjacencyCountAggregateOperator, LimitOperator, NodeScanOperator, ProjectOperator,
+            SortOperator,
         };
 
         let physical_direction = match pat.direction {
@@ -1717,60 +1716,12 @@ impl QueryPlanner {
             super::logical_plan::ExpandDirection::Reverse => Direction::Incoming,
         };
 
-        // Build the grouped-side scan. Three cases:
-        //   1. No WHERE → NodeScan(grouped_label).
-        //   2. WHERE has an indexed equality clause on grouped_label →
-        //      IndexScan + (optional) Filter for remaining clauses.
-        //   3. WHERE present but not index-eligible → NodeScan + Filter.
-        let scan: OperatorBox = if let Some(pred) = &pat.where_on_grouped {
-            // Decompose AND-chain so we can route one clause to the index
-            // and keep the rest as a residual filter. The common case is a
-            // single equality on an indexed property (one IndexScan, no
-            // residuals); compound predicates fall back to NodeScan + Filter
-            // for the parts that can't index.
-            let clauses = flatten_and_predicates(pred);
-            let mut index_op: Option<OperatorBox> = None;
-            let mut residuals: Vec<Expression> = Vec::new();
-            for c in clauses {
-                if index_op.is_none() {
-                    if let Some(op) = build_index_scan_for_clause(
-                        &c,
-                        &pat.grouped_var,
-                        &pat.grouped_label,
-                        store,
-                    ) {
-                        index_op = Some(op);
-                        continue;
-                    }
-                }
-                residuals.push(c);
-            }
-            let base: OperatorBox = index_op.unwrap_or_else(|| {
-                Box::new(NodeScanOperator::new(
-                    pat.grouped_var.clone(),
-                    vec![pat.grouped_label.clone()],
-                ))
-            });
-            if residuals.is_empty() {
-                base
-            } else {
-                // Combine residuals back into a single AND-chain.
-                let combined = residuals
-                    .into_iter()
-                    .reduce(|a, b| Expression::Binary {
-                        left: Box::new(a),
-                        op: BinaryOp::And,
-                        right: Box::new(b),
-                    })
-                    .expect("non-empty checked above");
-                Box::new(FilterOperator::new(base, combined))
-            }
-        } else {
-            Box::new(NodeScanOperator::new(
-                pat.grouped_var.clone(),
-                vec![pat.grouped_label.clone()],
-            ))
-        };
+        // Scan + count. The scan binds the grouped endpoint; the adjacency
+        // count operator adds `count_alias` to each record.
+        let scan: OperatorBox = Box::new(NodeScanOperator::new(
+            pat.grouped_var.clone(),
+            vec![pat.grouped_label.clone()],
+        ));
         let mut operator: OperatorBox = Box::new(AdjacencyCountAggregateOperator::new(
             scan,
             pat.grouped_var.clone(),
@@ -2083,50 +2034,6 @@ fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
         }
         _ => vec![expr.clone()],
     }
-}
-
-/// If `clause` is an indexable equality/range on `var.prop` against a literal
-/// and the store has an index on `(label, prop)`, return an `IndexScanOperator`
-/// for it. Otherwise return `None`. Mirrors the logic in `plan_match` so the
-/// adjacency-aware path picks up the same indexes as the generic plan.
-fn build_index_scan_for_clause(
-    clause: &Expression,
-    var: &str,
-    label: &Label,
-    store: &GraphStore,
-) -> Option<OperatorBox> {
-    use super::operator::IndexScanOperator;
-    let (left, op, right) = match clause {
-        Expression::Binary { left, op, right } => (left.as_ref(), op.clone(), right.as_ref()),
-        _ => return None,
-    };
-    let (variable, property) = match left {
-        Expression::Property { variable, property } => (variable, property),
-        _ => return None,
-    };
-    if variable != var {
-        return None;
-    }
-    let val = match right {
-        Expression::Literal(v) => v.clone(),
-        _ => return None,
-    };
-    if !store.property_index.has_index(label, property) {
-        return None;
-    }
-    if !matches!(
-        op,
-        BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le
-    ) {
-        return None;
-    }
-    Some(Box::new(IndexScanOperator::new(
-        var.to_string(),
-        label.clone(),
-        property.clone(),
-        op,
-        val,
-    )))
 }
 
 impl QueryPlanner {
