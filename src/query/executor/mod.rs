@@ -7020,27 +7020,41 @@ mod tests {
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
 
-        // NodeScan sorts by NodeId, so we take m_ids[0..3] = term0, term1, term2.
-        // Counts: term0=1, term1=2, term2=3. After ORDER BY DESC: 3, 2, 1.
+        // WITH m LIMIT 3 picks any 3 of the 7 MeSHTerms (Cypher leaves the
+        // selection unspecified without ORDER BY). Assert the invariants that
+        // hold regardless of which 3:
+        //   1. Exactly 3 results.
+        //   2. Result is sorted DESC by `articles`.
+        //   3. For each row, `articles` matches the term's true article count
+        //      (term `i` has `i+1` articles by construction above).
         assert_eq!(result.records.len(), 3);
-        let counts: Vec<i64> = result
+        let pairs: Vec<(String, i64)> = result
             .records
             .iter()
-            .map(|r| match r.get("articles") {
-                Some(Value::Property(PropertyValue::Integer(n))) => *n,
-                _ => panic!("unexpected"),
+            .map(|r| {
+                let name = match r.get("m.name") {
+                    Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                    _ => panic!("unexpected name"),
+                };
+                let count = match r.get("articles") {
+                    Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                    _ => panic!("unexpected count"),
+                };
+                (name, count)
             })
             .collect();
-        assert_eq!(counts, vec![3, 2, 1]);
-        let names: Vec<String> = result
-            .records
-            .iter()
-            .map(|r| match r.get("m.name") {
-                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
-                _ => panic!("unexpected"),
-            })
-            .collect();
-        assert_eq!(names, vec!["term2", "term1", "term0"]);
+        // Invariant 2: sorted DESC by articles
+        for win in pairs.windows(2) {
+            assert!(win[0].1 >= win[1].1, "not sorted DESC: {:?}", pairs);
+        }
+        // Invariant 3: each count equals (term_index + 1)
+        for (name, count) in &pairs {
+            let idx: i64 = name
+                .strip_prefix("term")
+                .and_then(|s| s.parse().ok())
+                .expect("term name");
+            assert_eq!(*count, idx + 1, "count mismatch for {}: {:?}", name, pairs);
+        }
     }
 
     /// ADR-017 Phase 3a: EX49 shape — pre-WITH WHERE filter on the grouped side.
