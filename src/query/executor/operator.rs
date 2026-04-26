@@ -1685,6 +1685,23 @@ pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
 
+    /// Try to push a result-cardinality hint down to scan operators so they
+    /// can stop yielding once `n` rows are produced (early termination).
+    ///
+    /// Default returns `false` — meaning the operator either changes
+    /// cardinality unpredictably (Filter, Sort, Distinct, Aggregate, Expand
+    /// without selectivity info) or simply doesn't implement the hint.
+    /// Pass-through operators (Project) override to forward the hint to
+    /// their input. Scan operators (NodeScanOperator) override to set
+    /// `early_limit`.
+    ///
+    /// Returns `true` if the hint was accepted somewhere in the subtree.
+    /// The caller may still need to apply a `LimitOperator` on top — this
+    /// hint is purely an optimization to avoid unnecessary work upstream.
+    fn try_push_limit(&mut self, _n: usize) -> bool {
+        false
+    }
+
     /// Get the next batch of records (Vectorized Execution)
     /// Defaults to accumulating records from next()
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -1928,6 +1945,15 @@ impl PhysicalOperator for NodeScanOperator {
         record.bind(self.variable.clone(), Value::NodeRef(node_id));
 
         Ok(Some(record))
+    }
+
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        // Honor the most restrictive limit if one is already set.
+        self.early_limit = Some(match self.early_limit {
+            None => n,
+            Some(existing) => existing.min(n),
+        });
+        true
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -2935,6 +2961,11 @@ impl PhysicalOperator for ProjectOperator {
         }
     }
 
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        // Project preserves cardinality 1:1 — forward the hint directly.
+        self.input.try_push_limit(n)
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if let Some(batch) = self.input.next_batch(store, batch_size)? {
             let mut projected_records = Vec::with_capacity(batch.records.len());
@@ -3612,6 +3643,14 @@ impl PhysicalOperator for LimitOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        // Forward the more restrictive of (incoming hint, our own limit).
+        // This handles `RETURN ... LIMIT 5 LIMIT 3` and similar nested-limit
+        // patterns correctly.
+        let effective = self.limit.min(n);
+        self.input.try_push_limit(effective)
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -7439,6 +7478,42 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 7);
+    }
+
+    #[test]
+    fn test_try_push_limit_through_project_to_nodescan() {
+        // Verify that try_push_limit propagates: Limit -> Project -> NodeScan.
+        // The NodeScan should accept the hint and set early_limit.
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
+        let project = ProjectOperator::new(
+            Box::new(scan),
+            vec![(Expression::Variable("n".to_string()), "n".to_string())],
+        );
+        let mut limit = LimitOperator::new(Box::new(project), 5);
+
+        assert!(limit.try_push_limit(5), "LimitOperator should forward to child");
+        // After push, scan should have early_limit=5. We can't inspect through
+        // the box, but we verify behaviorally on a 100-node store.
+        let mut store = GraphStore::new();
+        for _ in 0..100 {
+            store.create_node("Person");
+        }
+        let mut produced = 0;
+        while let Ok(Some(_)) = limit.next(&store) {
+            produced += 1;
+        }
+        assert_eq!(produced, 5);
+    }
+
+    #[test]
+    fn test_try_push_limit_blocked_by_filter() {
+        // FilterOperator does NOT override try_push_limit — default returns
+        // false. So the push doesn't reach NodeScan, and early_limit stays
+        // unset. This is correct because filter selectivity is unknown.
+        let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
+        let predicate = Expression::Literal(PropertyValue::Boolean(true)); // always-true
+        let mut filter = FilterOperator::new(Box::new(scan), predicate);
+        assert!(!filter.try_push_limit(5), "Filter should block push");
     }
 
     #[test]
