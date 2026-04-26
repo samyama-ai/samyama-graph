@@ -43,16 +43,6 @@ pub struct AdjacencyAggPattern {
     pub count_alias: String,
     /// Whether `count(DISTINCT neighbor)` was used. Phase 1 rejects this.
     pub count_distinct: bool,
-    /// Optional WHERE predicate that filters the **grouped** endpoint only.
-    /// When `Some`, the planner builds an indexed scan if any clause matches
-    /// `grouped_var.prop = literal` against an existing index, then wraps a
-    /// FilterOperator with the remaining predicates. When `None`, the
-    /// existing Phase 1 path runs unchanged.
-    ///
-    /// Predicates that reference the neighbor or any other variable are
-    /// rejected by the detector — those would change which edges are
-    /// counted, breaking the per-node degree shortcut.
-    pub where_on_grouped: Option<Expression>,
 }
 
 /// Try to detect the adjacency-count pattern in `query`.
@@ -71,10 +61,8 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
     if query.with_clause.is_some() {
         return None;
     }
-    // post_with_where_clause is still rejected — that would filter aggregated
-    // groups, requiring HAVING-style handling we don't do yet. The pre-MATCH
-    // WHERE is allowed below if it references only the grouped endpoint.
-    if query.post_with_where_clause.is_some() {
+    // No WHERE in Phase 1 — predicate interaction needs careful design.
+    if query.where_clause.is_some() || query.post_with_where_clause.is_some() {
         return None;
     }
     // Writes, CALLs, SET/DELETE etc. disqualify.
@@ -232,19 +220,6 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
         (Direction::Both, _) => unreachable!(), // filtered above
     };
 
-    // Phase 3: WHERE on grouped endpoint. The predicate must reference only
-    // `grouped_var` — anything touching the neighbor would change which edges
-    // are counted, breaking the per-node degree shortcut.
-    let where_on_grouped = match query.where_clause.as_ref() {
-        None => None,
-        Some(wc) => {
-            if !expression_only_references(&wc.predicate, &grouped_var) {
-                return None;
-            }
-            Some(wc.predicate.clone())
-        }
-    };
-
     Some(AdjacencyAggPattern {
         grouped_var,
         grouped_label,
@@ -254,49 +229,7 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
         direction,
         count_alias,
         count_distinct,
-        where_on_grouped,
     })
-}
-
-/// Returns true iff `expr` references no Variable other than `var` and
-/// `expr` does not contain aggregate function calls. Used by Phase 3 to
-/// verify a WHERE predicate filters only the grouped endpoint.
-fn expression_only_references(expr: &Expression, var: &str) -> bool {
-    use Expression::*;
-    match expr {
-        Variable(v) => v == var,
-        Property { variable, .. } => variable == var,
-        Literal(_) | Parameter(_) => true,
-        Binary { left, right, .. } => {
-            expression_only_references(left, var) && expression_only_references(right, var)
-        }
-        Unary { expr, .. } => expression_only_references(expr, var),
-        Function { name, args, .. } => {
-            // Reject aggregate functions in a WHERE predicate (would change
-            // the operator's semantic; HAVING is not what we're handling).
-            let lname = name.to_ascii_lowercase();
-            if matches!(lname.as_str(), "count" | "sum" | "avg" | "min" | "max" | "collect") {
-                return false;
-            }
-            args.iter().all(|a| expression_only_references(a, var))
-        }
-        Case { operand, when_clauses, else_result } => {
-            operand
-                .as_ref()
-                .map(|o| expression_only_references(o, var))
-                .unwrap_or(true)
-                && when_clauses
-                    .iter()
-                    .all(|(c, v)| expression_only_references(c, var) && expression_only_references(v, var))
-                && else_result
-                    .as_ref()
-                    .map(|d| expression_only_references(d, var))
-                    .unwrap_or(true)
-        }
-        // Anything else (lists, maps, path expressions, exists subqueries,
-        // pattern comprehensions...) is conservatively rejected.
-        _ => false,
-    }
 }
 
 /// Parameters extracted from a query that matches the Phase 3a *WITH-bound*
@@ -548,7 +481,6 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             direction,
             count_alias,
             count_distinct: false,
-            where_on_grouped: None, // Phase 3a uses core.prefilter instead
         },
         prefilter,
         grouped_scan_skip: with_clause.skip,
@@ -579,35 +511,6 @@ fn expression_references_only(expr: &Expression, var: &str) -> bool {
 mod tests {
     use super::*;
     use crate::query::parser::parse_query;
-
-    /// Phase 3: WHERE filtering on the grouped endpoint should be detected
-    /// and the predicate captured for the planner to apply.
-    #[test]
-    fn detects_with_where_on_grouped() {
-        let q = parse_query(
-            "MATCH (t:ClinicalTrial)-[:CONDUCTED_AT]->(s:Site) \
-             WHERE s.country = 'United States' \
-             RETURN s.name, count(t) AS trials ORDER BY trials DESC LIMIT 10",
-        )
-        .unwrap();
-        let p = detect(&q).expect("should detect WHERE-on-grouped");
-        assert_eq!(p.grouped_var, "s");
-        assert!(p.where_on_grouped.is_some(), "WHERE should be captured");
-    }
-
-    /// WHERE that touches the neighbor (counted) side must be rejected —
-    /// it would change which edges count, breaking the per-node degree
-    /// shortcut.
-    #[test]
-    fn rejects_where_on_neighbor() {
-        let q = parse_query(
-            "MATCH (t:ClinicalTrial)-[:CONDUCTED_AT]->(s:Site) \
-             WHERE t.phase = '3' \
-             RETURN s.name, count(t) AS trials",
-        )
-        .unwrap();
-        assert!(detect(&q).is_none(), "neighbor-side WHERE must be rejected");
-    }
 
     /// MB049 shape — the motivating case for ADR-017.
     /// `MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, count(a) AS articles`
@@ -662,19 +565,14 @@ mod tests {
     // ——— Rejection cases ———
 
     /// WHERE clause not supported in Phase 1.
-    /// Phase 3 lifted the unconditional WHERE rejection: a WHERE that
-    /// touches only the grouped endpoint is now accepted (the planner
-    /// applies it as a pre-filter on the scan). This test now confirms
-    /// the WHERE is detected and captured.
     #[test]
-    fn accepts_where_on_grouped() {
+    fn rejects_when_where_clause_present() {
         let q = parse_query(
             "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
              WHERE j.active = true RETURN j.title, count(a) AS articles",
         )
         .unwrap();
-        let p = detect(&q).expect("WHERE-on-grouped should now be detected");
-        assert!(p.where_on_grouped.is_some());
+        assert!(detect(&q).is_none());
     }
 
     /// Multi-hop paths use a different plan shape.
