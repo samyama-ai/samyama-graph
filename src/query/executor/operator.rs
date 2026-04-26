@@ -3048,7 +3048,13 @@ pub struct AggregateFunction {
 enum AggregatorState {
     Count(i64),
     CountDistinct(BTreeSet<PropertyValue>),
-    Sum(f64),
+    /// Sum tracks both an integer accumulator and a float accumulator;
+    /// `int_only` flips false the first time a non-integer input is seen.
+    /// At finalize time, `int_only=true` returns Integer, otherwise Float.
+    /// This preserves type fidelity for `SUM(integer_column)` which is the
+    /// expected outcome of merging integer counts (e.g. ADR-017's
+    /// per-node count post-aggregation).
+    Sum { int_acc: i64, float_acc: f64, int_only: bool },
     Avg { sum: f64, count: i64 },
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
@@ -3063,7 +3069,7 @@ impl AggregatorState {
         match (func, distinct) {
             (AggregateType::Count, true) => AggregatorState::CountDistinct(BTreeSet::new()),
             (AggregateType::Count, false) => AggregatorState::Count(0),
-            (AggregateType::Sum, _) => AggregatorState::Sum(0.0),
+            (AggregateType::Sum, _) => AggregatorState::Sum { int_acc: 0, float_acc: 0.0, int_only: true },
             (AggregateType::Avg, _) => AggregatorState::Avg { sum: 0.0, count: 0 },
             (AggregateType::Min, _) => AggregatorState::Min(None),
             (AggregateType::Max, _) => AggregatorState::Max(None),
@@ -3102,10 +3108,27 @@ impl AggregatorState {
                     Value::Null => {}
                 }
             }
-            AggregatorState::Sum(s) => {
+            AggregatorState::Sum { int_acc, float_acc, int_only } => {
                 if let Some(prop) = value.as_property() {
-                    if let Some(f) = prop.as_float() { *s += f; }
-                    else if let Some(i) = prop.as_integer() { *s += i as f64; }
+                    // Try integer path first to preserve type. If we ever see
+                    // a non-integer numeric value, flip int_only false and
+                    // start accumulating floats (after promoting the existing
+                    // integer accumulator into float space).
+                    if let PropertyValue::Integer(i) = prop {
+                        let i = *i;
+                        if *int_only {
+                            *int_acc += i;
+                        } else {
+                            *float_acc += i as f64;
+                        }
+                    } else if let Some(f) = prop.as_float() {
+                        if *int_only {
+                            *int_only = false;
+                            *float_acc = *int_acc as f64;
+                        }
+                        *float_acc += f;
+                    }
+                    // Non-numeric values silently skipped (matches pre-existing behaviour).
                 }
             }
             AggregatorState::Avg { sum, count } => {
@@ -3159,7 +3182,13 @@ impl AggregatorState {
         match self {
             AggregatorState::Count(c) => Value::Property(PropertyValue::Integer(*c)),
             AggregatorState::CountDistinct(set) => Value::Property(PropertyValue::Integer(set.len() as i64)),
-            AggregatorState::Sum(s) => Value::Property(PropertyValue::Float(*s)),
+            AggregatorState::Sum { int_acc, float_acc, int_only } => {
+                if *int_only {
+                    Value::Property(PropertyValue::Integer(*int_acc))
+                } else {
+                    Value::Property(PropertyValue::Float(*float_acc))
+                }
+            }
             AggregatorState::Avg { sum, count } => {
                 if *count == 0 { Value::Null }
                 else { Value::Property(PropertyValue::Float(*sum / *count as f64)) }

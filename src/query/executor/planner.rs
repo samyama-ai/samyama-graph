@@ -381,7 +381,7 @@ impl QueryPlanner {
         // enough that when it returns Some, the specialized plan is always
         // correct for the query. The specialized plan short-circuits the
         // Expand→Aggregate path that causes MB049/MB054 to time out.
-        if let Some(pat) = super::adjacency_agg_detector::detect(query) {
+        if let Some(pat) = super::adjacency_agg_detector::detect(query, store) {
             return self.plan_adjacency_count_aggregate(query, pat);
         }
         // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
@@ -1768,6 +1768,55 @@ impl QueryPlanner {
             })
             .collect();
         operator = Box::new(ProjectOperator::new(operator, projections));
+
+        // GROUP BY safety: the AdjacencyCountAggregateOperator emits one
+        // record per grouped node — for property-based GROUP BY this is
+        // per-node, not per-group. When the user wrote `RETURN g.prop, count(n)`
+        // and multiple grouped nodes share the same prop value, the per-node
+        // emission would give multiple rows where there should be one.
+        // Insert a hash-aggregate that SUMs the per-node counts grouped by
+        // the user's projected non-count keys. For variable-only GROUP BY
+        // (`RETURN g, count(n)`), per-node = per-group already, so skip this
+        // step to avoid the extra HashMap pass.
+        let needs_post_group = pat
+            .group_by_items
+            .iter()
+            .any(|(_, prop)| prop.is_some());
+        if needs_post_group {
+            use super::operator::{AggregateFunction, AggregateOperator, AggregateType};
+            // GROUP BY the projected aliases of the non-count items (in
+            // RETURN order). Aggregate is SUM(count_alias) → count_alias
+            // (re-using the same name so downstream ORDER BY / LIMIT keeps
+            // working without further renaming).
+            let mut group_by: Vec<(Expression, String)> = Vec::new();
+            for item in &return_clause.items {
+                let is_count = matches!(
+                    &item.expression,
+                    Expression::Function { name, .. } if name.eq_ignore_ascii_case("count")
+                );
+                if is_count {
+                    continue;
+                }
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| match &item.expression {
+                        Expression::Variable(v) => v.clone(),
+                        Expression::Property { variable, property } => {
+                            format!("{}.{}", variable, property)
+                        }
+                        _ => String::new(),
+                    });
+                group_by.push((Expression::Variable(alias.clone()), alias));
+            }
+            let aggregates = vec![AggregateFunction {
+                func: AggregateType::Sum,
+                expr: Expression::Variable(pat.count_alias.clone()),
+                alias: pat.count_alias.clone(),
+                distinct: false,
+            }];
+            operator = Box::new(AggregateOperator::new(operator, group_by, aggregates));
+        }
 
         // ORDER BY — the count alias is already bound, so any ORDER BY
         // expression the detector accepted evaluates cheaply.

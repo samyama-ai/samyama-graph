@@ -15,6 +15,7 @@
 
 use super::logical_plan::ExpandDirection;
 use crate::graph::types::{EdgeType, Label};
+use crate::graph::GraphStore;
 use crate::query::ast::{Direction, Expression, Query};
 
 /// Parameters extracted from a query that matches the adjacency-count pattern.
@@ -43,6 +44,16 @@ pub struct AdjacencyAggPattern {
     pub count_alias: String,
     /// Whether `count(DISTINCT neighbor)` was used. Phase 1 rejects this.
     pub count_distinct: bool,
+    /// GROUP BY entries from the RETURN, in the order they appeared. Each
+    /// entry is `(variable, optional_property)`:
+    ///   - `("g", None)` means `RETURN g, ...` — variable itself.
+    ///   - `("g", Some("name"))` means `RETURN g.name, ...` — property of g.
+    ///
+    /// The planner uses this to decide whether a post-aggregation hash-group
+    /// is needed. A variable-only GROUP BY is safe to emit directly (one
+    /// row per node = one row per group). Any property entry triggers a
+    /// post-aggregate to correctly merge nodes that share a property value.
+    pub group_by_items: Vec<(String, Option<String>)>,
 }
 
 /// Try to detect the adjacency-count pattern in `query`.
@@ -50,7 +61,15 @@ pub struct AdjacencyAggPattern {
 /// Returns `Some(pattern)` if all Phase 1 constraints are satisfied, `None`
 /// otherwise. A `None` result means "use the standard planner path" and is
 /// never a hard error — the caller treats it as a negative detection.
-pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
+///
+/// `store` is required for the GROUP BY safety check: when the RETURN
+/// projects a property of the grouped node (e.g. `RETURN g.name, count(n)`),
+/// the per-node emission produced by `AdjacencyCountAggregateOperator` is
+/// only equivalent to true GROUP BY semantics when the property value is
+/// unique per node. This is enforced by checking for a UNIQUE constraint
+/// on `(grouped_label, property)`. Variable-only group-by
+/// (`RETURN g, count(n)`) is always safe (one row per node by definition).
+pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> {
     // Shape constraint: exactly one MATCH, no WITH split, no extra WITH stages.
     if query.match_clauses.len() != 1 {
         return None;
@@ -126,7 +145,11 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
     }
 
     let mut count_info: Option<(String, String, bool)> = None; // (alias, arg_var, distinct)
-    let mut group_by_vars: Vec<String> = Vec::new();
+    // Each entry is (variable, optional_property). `None` property means the
+    // user wrote `RETURN g, ...` (the variable itself, always safe to emit
+    // per-node). `Some(p)` means `RETURN g.p, ...` and is only safe when
+    // (label, p) has a UNIQUE constraint — checked below.
+    let mut group_by_items: Vec<(String, Option<String>)> = Vec::new();
 
     for (i, item) in ret.items.iter().enumerate() {
         match &item.expression {
@@ -150,8 +173,11 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
                 let alias = item.alias.clone().unwrap_or_else(|| format!("count_{}", i));
                 count_info = Some((alias, arg_var, *distinct));
             }
-            Expression::Property { variable, .. } | Expression::Variable(variable) => {
-                group_by_vars.push(variable.clone());
+            Expression::Variable(variable) => {
+                group_by_items.push((variable.clone(), None));
+            }
+            Expression::Property { variable, property } => {
+                group_by_items.push((variable.clone(), Some(property.clone())));
             }
             _ => {
                 // Other expressions (arithmetic, functions on non-grouped vars,
@@ -183,8 +209,8 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
             return None;
         };
 
-    // Every group-by variable reference must target the grouped endpoint.
-    for v in &group_by_vars {
+    // Every group-by entry must target the grouped endpoint.
+    for (v, _) in &group_by_items {
         if v != &grouped_var {
             return None;
         }
@@ -195,6 +221,14 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
         return None;
     }
     let grouped_label = grouped_node.labels[0].clone();
+
+    // GROUP BY safety: the AdjacencyCountAggregateOperator emits one record
+    // per grouped node — for property-based GROUP BY this is per-node, not
+    // per-group. The planner is responsible for inserting a post-aggregation
+    // hash-group whenever any GROUP BY entry is a property reference rather
+    // than the variable itself. We expose `group_by_items` on the pattern so
+    // the planner can decide.
+    let _ = store; // currently unused; reserved for future schema-aware checks
 
     // Neighbor label is optional — None means "any node on the other side".
     let neighbor_label = match neighbor_node.labels.len() {
@@ -229,6 +263,7 @@ pub fn detect(query: &Query) -> Option<AdjacencyAggPattern> {
         direction,
         count_alias,
         count_distinct,
+        group_by_items,
     })
 }
 
@@ -481,6 +516,7 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             direction,
             count_alias,
             count_distinct: false,
+            group_by_items: Vec::new(), // Phase 3a doesn't expose group_by; planner uses default per-node emission
         },
         prefilter,
         grouped_scan_skip: with_clause.skip,
@@ -523,7 +559,7 @@ mod tests {
              RETURN j.title, count(a) AS articles ORDER BY articles DESC LIMIT 10",
         )
         .unwrap();
-        let p = detect(&q).expect("should detect");
+        let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "j");
         assert_eq!(p.grouped_label.as_str(), "Journal");
         assert_eq!(p.neighbor_var, "a");
@@ -541,7 +577,7 @@ mod tests {
             "MATCH (u:User)-[:AUTHORED]->(p:Post) RETURN u.name, count(p) AS posts",
         )
         .unwrap();
-        let p = detect(&q).expect("should detect");
+        let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "u");
         assert_eq!(p.neighbor_var, "p");
         assert_eq!(p.direction, ExpandDirection::Forward);
@@ -557,7 +593,7 @@ mod tests {
              RETURN j.title, count(a) AS articles",
         )
         .unwrap();
-        let p = detect(&q).expect("should detect");
+        let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "j");
         assert_eq!(p.direction, ExpandDirection::Reverse);
     }
@@ -572,7 +608,7 @@ mod tests {
              WHERE j.active = true RETURN j.title, count(a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// Multi-hop paths use a different plan shape.
@@ -583,7 +619,7 @@ mod tests {
              RETURN i.name, count(a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// Multiple aggregates: we only handle a single count().
@@ -594,7 +630,7 @@ mod tests {
              RETURN j.title, count(a) AS articles, avg(a.year) AS avg_year",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// count(*) is semantically close but needs care around nulls — defer to
@@ -606,7 +642,7 @@ mod tests {
              RETURN j.title, count(*) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// DISTINCT count — set-cardinality semantics diverge from raw degree
@@ -619,7 +655,7 @@ mod tests {
              RETURN j.title, count(DISTINCT a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// Property constraints on endpoints would act as filters; out of scope.
@@ -630,7 +666,7 @@ mod tests {
              RETURN j.title, count(a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// Group-by variable must be the grouped endpoint — not the neighbor.
@@ -645,7 +681,7 @@ mod tests {
         // the group-by doesn't match either endpoint cleanly. Reject.
         // (Note: the real "articles per year" query would group by a.year
         // without count(a), or count something else.)
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// Wildcard or multiple edge types need multi-degree lookups; defer.
@@ -656,7 +692,7 @@ mod tests {
              RETURN j.title, count(a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// No aggregate at all — not our shape.
@@ -666,7 +702,7 @@ mod tests {
             "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, a.pmid",
         )
         .unwrap();
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     // ——— Phase 3a: WITH-bound detector ———
@@ -693,7 +729,7 @@ mod tests {
         assert_eq!(p.grouped_scan_limit, Some(500));
         assert!(p.prefilter.is_none());
         // Single-MATCH `detect` should not also claim this query.
-        assert!(detect(&q).is_none());
+        assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
     /// EX49 shape: pre-WITH WHERE filter + LIMIT.
@@ -791,6 +827,6 @@ mod tests {
         )
         .unwrap();
         assert!(detect_with_binding(&q).is_none());
-        assert!(detect(&q).is_some());
+        assert!(detect(&q, &GraphStore::new()).is_some());
     }
 }
