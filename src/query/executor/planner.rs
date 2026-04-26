@@ -1186,6 +1186,19 @@ impl QueryPlanner {
         // Add LIMIT if present
         if let Some(limit) = query.limit {
             operator = Box::new(LimitOperator::new(operator, limit));
+
+            // QP-04: push the limit down through pass-through operators
+            // (Project, Limit) so leaf NodeScans can stop iterating early.
+            // Operators that change cardinality (Filter, Sort, Distinct,
+            // Aggregate, Expand) implement the default `try_push_limit`
+            // returning false, so the push stops there. SKIP changes the
+            // hint — when SKIP=k and LIMIT=n, the scan must yield k+n rows
+            // for SKIP to drop the first k.
+            let push_n = match query.skip {
+                Some(skip) => skip.saturating_add(limit),
+                None => limit,
+            };
+            operator.try_push_limit(push_n);
         }
 
         // QP-01: Predicate pushdown is handled inline during plan_match() via AND-chain decomposition
