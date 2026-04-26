@@ -71,6 +71,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         load_start.elapsed()
     );
 
+    // Create indexes (mirror unified_benchmark Phase 3 for the PW + DI + CT subset).
+    // This is the single most important methodological fix: without these, the engine
+    // does full label scans for `WHERE x.prop = literal` filters.
+    eprintln!("[b3] creating indexes...");
+    let idx_start = Instant::now();
+    let indexes: &[&str] = &[
+        // Pathways KG
+        "CREATE INDEX ON :Protein(name)",
+        "CREATE INDEX ON :Protein(gene_name)",
+        "CREATE INDEX ON :Protein(uniprot_id)",
+        "CREATE INDEX ON :Pathway(name)",
+        "CREATE INDEX ON :GOTerm(name)",
+        // Drug Interactions KG
+        "CREATE INDEX ON :Drug(name)",
+        "CREATE INDEX ON :Drug(drugbank_id)",
+        "CREATE INDEX ON :Gene(gene_name)",
+        "CREATE INDEX ON :Gene(name)",
+        "CREATE INDEX ON :SideEffect(name)",
+        "CREATE INDEX ON :Indication(name)",
+        "CREATE INDEX ON :AdverseEvent(name)",
+        // Clinical Trials KG
+        "CREATE INDEX ON :ClinicalTrial(nct_id)",
+        "CREATE INDEX ON :Condition(name)",
+        "CREATE INDEX ON :Intervention(name)",
+        "CREATE INDEX ON :Sponsor(name)",
+        "CREATE INDEX ON :Site(country)",
+    ];
+    let idx_engine = QueryEngine::new();
+    let mut idx_ok = 0;
+    for idx_stmt in indexes {
+        match idx_engine.execute_mut(idx_stmt, &mut store, "default") {
+            Ok(_) => idx_ok += 1,
+            Err(e) => eprintln!("[b3]   skip: {} ({})", idx_stmt, e),
+        }
+    }
+    eprintln!(
+        "[b3] {} of {} indexes created in {:?}",
+        idx_ok,
+        indexes.len(),
+        idx_start.elapsed()
+    );
+
+    // Graph-native planner is opt-in via SAMYAMA_GRAPH_NATIVE=true. We let the
+    // caller control it rather than forcing it on, so we can A/B test the planner's
+    // impact independently of the index fix.
+
     // Read queries CSV
     let qreader = BufReader::new(File::open(&queries_path)?);
     let mut queries: Vec<(String, String, String)> = Vec::new(); // (id, kg, cypher)
