@@ -3615,8 +3615,37 @@ mod tests {
         let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("total").unwrap().as_property().unwrap();
-        // sum() returns Float
-        assert_eq!(val, &PropertyValue::Float(60.0));
+        // sum() preserves Integer type when all inputs are Integer (OpenCypher
+        // convention; previously Samyama always returned Float, which broke
+        // adjacency-aware aggregation's post-grouping merge of integer counts).
+        assert_eq!(val, &PropertyValue::Integer(60));
+    }
+
+    #[test]
+    fn test_sum_aggregation_float() {
+        let mut store = GraphStore::new();
+        for v in &[10.5f64, 20.0, 30.5] {
+            let id = store.create_node("Item");
+            store.set_node_property("default", id, "val", PropertyValue::Float(*v)).unwrap();
+        }
+        let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
+        assert_eq!(val, &PropertyValue::Float(61.0));
+    }
+
+    #[test]
+    fn test_sum_aggregation_mixed() {
+        let mut store = GraphStore::new();
+        for v in &[PropertyValue::Integer(10), PropertyValue::Float(20.5), PropertyValue::Integer(30)] {
+            let id = store.create_node("Item");
+            store.set_node_property("default", id, "val", v.clone()).unwrap();
+        }
+        let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
+        assert_eq!(result.records.len(), 1);
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
+        // Once any input is Float, the result is Float — promote-on-mix.
+        assert_eq!(val, &PropertyValue::Float(60.5));
     }
 
     #[test]
