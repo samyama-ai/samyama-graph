@@ -1780,6 +1780,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             .unwrap_or_default()
     }
 
+    /// Get NodeIds for a label without resolving each `&Node`. Optionally takes
+    /// only the first `limit` ids (`None` = all). No sort is applied — order
+    /// is HashMap-iteration order, which is stable within a process but
+    /// otherwise unspecified.
+    ///
+    /// Used by `NodeScanOperator` for the streaming LIMIT pushdown path:
+    /// when downstream has `LIMIT k` and there's no `ORDER BY`, the planner
+    /// can request only `k` ids rather than the full label set.
+    pub fn node_ids_by_label(&self, label: &Label, limit: Option<usize>) -> Vec<NodeId> {
+        match self.label_index.get(label) {
+            None => Vec::new(),
+            Some(set) => match limit {
+                Some(n) => set.iter().copied().take(n).collect(),
+                None => set.iter().copied().collect(),
+            },
+        }
+    }
+
     /// Get all edges of a specific type
     pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<Edge> {
         self.edge_type_index
