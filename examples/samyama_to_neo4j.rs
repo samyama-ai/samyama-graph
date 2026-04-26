@@ -15,12 +15,19 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: {} <snapshot.sgsnap> <output_dir>", args[0]);
+        eprintln!("usage: {} <snapshot.sgsnap> <output_dir> [id_offset]", args[0]);
+        eprintln!("  id_offset (u64): added to every NodeId — use to merge multiple snapshots");
+        eprintln!("                   into one Neo4j graph without ID collisions (default 0)");
         std::process::exit(1);
     }
     let snap_path = &args[1];
     let out_dir = PathBuf::from(&args[2]);
+    let id_offset: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     std::fs::create_dir_all(&out_dir)?;
+    eprintln!("[convert] id_offset = {}", id_offset);
 
     eprintln!("[convert] loading snapshot: {}", snap_path);
     let mut store = GraphStore::new();
@@ -70,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(n) => n,
                 None => continue,
             };
-            write!(w, "{}", nid.as_u64())?;
+            write!(w, "{}", nid.as_u64() + id_offset)?;
             for k in &keys {
                 let cell = node
                     .properties
@@ -104,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut w = BufWriter::new(File::create(&path)?);
         writeln!(w, ":START_ID,:END_ID,:TYPE")?;
         for (src, tgt) in edges {
-            writeln!(w, "{},{},{}", src.as_u64(), tgt.as_u64(), etype)?;
+            writeln!(w, "{},{},{}", src.as_u64() + id_offset, tgt.as_u64() + id_offset, etype)?;
         }
         eprintln!("[convert] wrote {} ({} rows)", path.display(), edges.len());
     }
