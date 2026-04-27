@@ -8,6 +8,7 @@
     <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-1877_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://samyama-ai.github.io/samyama-graph-book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
+[![SafeSkill 89/100](https://img.shields.io/badge/SafeSkill-89%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/samyama-ai-samyama-graph)
   </p>
 </p>
 
