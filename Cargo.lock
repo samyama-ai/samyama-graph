@@ -2687,6 +2687,7 @@ dependencies = [
  "rio_xml",
  "rocksdb",
  "rust-embed",
+ "rustc-hash 2.1.1",
  "samyama-graph-algorithms",
  "samyama-optimization",
  "samyama-sdk",
