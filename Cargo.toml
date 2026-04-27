@@ -23,6 +23,10 @@ serde_json = "1.0"
 indexmap = "2.1"
 thiserror = "1.0"
 anyhow = "1.0"
+# Faster non-cryptographic hash for performance-critical hot paths
+# (aggregation hash-group, dedup sets). 2-3x throughput on simple
+# integer keys vs std SipHash. Already a transitive dependency.
+rustc-hash = "2"
 
 # Query parsing
 pest = "2.7"

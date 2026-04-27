@@ -3077,7 +3077,7 @@ enum CountDistinctSet {
     /// No values seen yet.
     Empty,
     /// Fast path: only Node/Edge IDs (u64) have been inserted.
-    Ids(HashSet<u64>),
+    Ids(rustc_hash::FxHashSet<u64>),
     /// Slow path: arbitrary `PropertyValue` (covers strings, floats, mixed
     /// types). Used when the input column is property-typed or when we see
     /// a property value after starting on the Ids path.
@@ -3092,7 +3092,7 @@ impl CountDistinctSet {
     fn insert_id(&mut self, id: u64) {
         match self {
             Self::Empty => {
-                let mut s = HashSet::new();
+                let mut s = rustc_hash::FxHashSet::default();
                 s.insert(id);
                 *self = Self::Ids(s);
             }
@@ -3457,7 +3457,11 @@ impl AggregateOperator {
             return self.execute_all_no_group(store);
         }
 
-        let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
+        // FxHashMap is 2-3x faster than std HashMap on simple keys (no
+        // SipHash overhead). Aggregation is a hot path on B3 — CT08, CT10
+        // each insert ~1M (group_key, aggregator) pairs.
+        let mut groups: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
+            rustc_hash::FxHashMap::default();
 
         let batch_size = 65536;
         let mut batch_count = 0u64;
@@ -3498,9 +3502,10 @@ impl AggregateOperator {
         Ok(())
     }
 
-    /// Optimized path for single group-by key: uses HashMap<Value, ...> instead of HashMap<Vec<Value>, ...>
+    /// Optimized path for single group-by key: uses FxHashMap<Value, ...> instead of FxHashMap<Vec<Value>, ...>
     fn execute_all_single_key(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        let mut groups: HashMap<Value, Vec<AggregatorState>> = HashMap::new();
+        let mut groups: rustc_hash::FxHashMap<Value, Vec<AggregatorState>> =
+            rustc_hash::FxHashMap::default();
         let group_expr = &self.group_by[0].0;
 
         // Check if all aggregates are simple count (non-distinct) — can skip aggregate expression evaluation
