@@ -3047,7 +3047,12 @@ pub struct AggregateFunction {
 #[derive(Debug, Clone)]
 enum AggregatorState {
     Count(i64),
-    CountDistinct(BTreeSet<PropertyValue>),
+    /// CountDistinct uses a hybrid set: a `HashSet<u64>` fast path for
+    /// Node/Edge IDs (the common `count(DISTINCT node_var)` case where each
+    /// insert is a single u64), promoting to `BTreeSet<PropertyValue>` only
+    /// if a non-ID Property value is seen. The fast path avoids both the
+    /// `PropertyValue` wrapping and the O(log n) tree comparisons.
+    CountDistinct(CountDistinctSet),
     /// Sum tracks both an integer accumulator and a float accumulator;
     /// `int_only` flips false the first time a non-integer input is seen.
     /// At finalize time, `int_only=true` returns Integer, otherwise Float.
@@ -3064,10 +3069,81 @@ enum AggregatorState {
     StDev { values: Vec<f64>, population: bool },
 }
 
+/// Backing storage for COUNT DISTINCT. Starts empty, picks the appropriate
+/// representation on first insert, and promotes to the slow path only if a
+/// non-ID property value arrives.
+#[derive(Debug, Clone)]
+enum CountDistinctSet {
+    /// No values seen yet.
+    Empty,
+    /// Fast path: only Node/Edge IDs (u64) have been inserted.
+    Ids(HashSet<u64>),
+    /// Slow path: arbitrary `PropertyValue` (covers strings, floats, mixed
+    /// types). Used when the input column is property-typed or when we see
+    /// a property value after starting on the Ids path.
+    Props(BTreeSet<PropertyValue>),
+}
+
+impl CountDistinctSet {
+    fn new() -> Self {
+        Self::Empty
+    }
+
+    fn insert_id(&mut self, id: u64) {
+        match self {
+            Self::Empty => {
+                let mut s = HashSet::new();
+                s.insert(id);
+                *self = Self::Ids(s);
+            }
+            Self::Ids(s) => {
+                s.insert(id);
+            }
+            Self::Props(s) => {
+                // Mixed input — keep using the slow path with consistent
+                // wrapping so cardinality reflects all unique values seen.
+                s.insert(PropertyValue::Integer(id as i64));
+            }
+        }
+    }
+
+    fn insert_prop(&mut self, p: PropertyValue) {
+        match self {
+            Self::Empty => {
+                let mut s = BTreeSet::new();
+                s.insert(p);
+                *self = Self::Props(s);
+            }
+            Self::Props(s) => {
+                s.insert(p);
+            }
+            Self::Ids(ids) => {
+                // Promote: a non-id Property arrived after we started on
+                // the fast path. Drain ids into a Props set wrapped as
+                // Integer, then add the new property.
+                let mut s = BTreeSet::new();
+                for id in ids.drain() {
+                    s.insert(PropertyValue::Integer(id as i64));
+                }
+                s.insert(p);
+                *self = Self::Props(s);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Ids(s) => s.len(),
+            Self::Props(s) => s.len(),
+        }
+    }
+}
+
 impl AggregatorState {
     fn new(func: &AggregateType, distinct: bool) -> Self {
         match (func, distinct) {
-            (AggregateType::Count, true) => AggregatorState::CountDistinct(BTreeSet::new()),
+            (AggregateType::Count, true) => AggregatorState::CountDistinct(CountDistinctSet::new()),
             (AggregateType::Count, false) => AggregatorState::Count(0),
             (AggregateType::Sum, _) => AggregatorState::Sum { int_acc: 0, float_acc: 0.0, int_only: true },
             (AggregateType::Avg, _) => AggregatorState::Avg { sum: 0.0, count: 0 },
@@ -3093,14 +3169,14 @@ impl AggregatorState {
                 match value {
                     Value::Property(prop) => {
                         if !prop.is_null() {
-                            set.insert(prop.clone());
+                            set.insert_prop(prop.clone());
                         }
                     }
                     Value::NodeRef(id) | Value::Node(id, _) => {
-                        set.insert(PropertyValue::Integer(id.0 as i64));
+                        set.insert_id(id.0);
                     }
                     Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                        set.insert(PropertyValue::Integer(id.0 as i64));
+                        set.insert_id(id.0);
                     }
                     Value::Path { .. } => {
                         // Paths are not countable as distinct — ignore
