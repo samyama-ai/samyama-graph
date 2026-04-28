@@ -54,6 +54,10 @@ pub struct AdjacencyAggPattern {
     /// row per node = one row per group). Any property entry triggers a
     /// post-aggregate to correctly merge nodes that share a property value.
     pub group_by_items: Vec<(String, Option<String>)>,
+    /// Optional WHERE predicate referencing only `grouped_var`. Planner
+    /// applies it as FilterOperator on the grouped scan before the
+    /// adjacency walk.
+    pub prefilter: Option<Expression>,
 }
 
 /// Try to detect the adjacency-count pattern in `query`.
@@ -80,8 +84,10 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
     if query.with_clause.is_some() {
         return None;
     }
-    // No WHERE in Phase 1 — predicate interaction needs careful design.
-    if query.where_clause.is_some() || query.post_with_where_clause.is_some() {
+    // post_with_where doesn't apply (no WITH in Phase 1) — reject if set.
+    // WHERE is deferred until grouped_var is identified; accepted only if
+    // it references the grouped side exclusively.
+    if query.post_with_where_clause.is_some() {
         return None;
     }
     // Writes, CALLs, SET/DELETE etc. disqualify.
@@ -249,6 +255,17 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
         (Direction::Both, _) => unreachable!(), // filtered above
     };
 
+    // WHERE: accept iff predicate references only the grouped variable.
+    let prefilter = match &query.where_clause {
+        Some(wc) => {
+            if !expression_references_only(&wc.predicate, &grouped_var) {
+                return None;
+            }
+            Some(wc.predicate.clone())
+        }
+        None => None,
+    };
+
     Some(AdjacencyAggPattern {
         grouped_var,
         grouped_label,
@@ -259,6 +276,7 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
         count_alias,
         count_distinct,
         group_by_items,
+        prefilter,
     })
 }
 
@@ -527,6 +545,10 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             count_alias,
             count_distinct,
             group_by_items,
+            // Phase 3a stores its WHERE in `prefilter` on the outer
+            // pattern (sibling field), not on `core` — keep `core`
+            // unfiltered to preserve the existing planner contract.
+            prefilter: None,
         },
         prefilter,
         grouped_scan_skip: with_clause.skip,
@@ -610,12 +632,24 @@ mod tests {
 
     // ——— Rejection cases ———
 
-    /// WHERE clause not supported in Phase 1.
+    /// WHERE on the grouped side is now accepted as a prefilter.
     #[test]
-    fn rejects_when_where_clause_present() {
+    fn accepts_where_on_grouped_side() {
         let q = parse_query(
             "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
              WHERE j.active = true RETURN j.title, count(a) AS articles",
+        )
+        .unwrap();
+        let p = detect(&q, &GraphStore::new()).expect("WHERE on grouped side should be accepted");
+        assert!(p.prefilter.is_some());
+    }
+
+    /// WHERE referencing the neighbor (counted) side still disqualifies.
+    #[test]
+    fn rejects_where_on_neighbor_side() {
+        let q = parse_query(
+            "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
+             WHERE a.year = 2024 RETURN j.title, count(a) AS articles",
         )
         .unwrap();
         assert!(detect(&q, &GraphStore::new()).is_none());

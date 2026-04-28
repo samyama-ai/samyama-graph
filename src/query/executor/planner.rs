@@ -1716,12 +1716,17 @@ impl QueryPlanner {
             super::logical_plan::ExpandDirection::Reverse => Direction::Incoming,
         };
 
-        // Scan + count. The scan binds the grouped endpoint; the adjacency
-        // count operator adds `count_alias` to each record.
+        // Scan + optional WHERE filter on grouped side + count.
         let scan: OperatorBox = Box::new(NodeScanOperator::new(
             pat.grouped_var.clone(),
             vec![pat.grouped_label.clone()],
         ));
+        let scan: OperatorBox = if let Some(pred) = &pat.prefilter {
+            use super::operator::FilterOperator;
+            Box::new(FilterOperator::new(scan, pred.clone()))
+        } else {
+            scan
+        };
         // Push GROUP BY into the operator: it accumulates per-(prop_values)
         // counts in an internal HashMap during the per-node walk, emitting
         // one row per group rather than per node. Replaces the earlier
