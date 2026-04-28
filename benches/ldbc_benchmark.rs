@@ -624,6 +624,32 @@ async fn main() -> Result<(), Error> {
         format_num(load_result.total_nodes),
         format_num(load_result.total_edges),
         format_duration(load_time));
+
+    // Build property indexes on `id` for the labels the bench queries
+    // anchor on. Without these, `MATCH (m:Post {id: ...})` triggers a
+    // full label scan (1.19M Posts on SF1, ~5–9s per IS4–7). With them
+    // the inline-property MATCH lowers to an IndexScan.
+    let idx_start = Instant::now();
+    for (label, prop) in &[
+        ("Person", "id"),
+        ("Post", "id"),
+        ("Comment", "id"),
+        ("Forum", "id"),
+        ("Place", "id"),
+        ("Organisation", "id"),
+        ("Tag", "id"),
+        ("TagClass", "id"),
+    ] {
+        let stmt = format!("CREATE INDEX ON :{}({})", label, prop);
+        if let Err(e) = client.query("default", &stmt).await {
+            eprintln!("  WARN: index {}({}) failed: {}", label, prop, e);
+        }
+    }
+    eprintln!(
+        "Indexes built in {} (Person/Post/Comment/Forum/Place/Org/Tag/TagClass on id)",
+        format_duration(idx_start.elapsed())
+    );
+
     eprintln!("Runs per query: {}", runs);
     eprintln!();
 
