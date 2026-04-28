@@ -1750,6 +1750,9 @@ impl QueryPlanner {
         if !group_by_props.is_empty() {
             adj_op = adj_op.with_group_by_props(group_by_props);
         }
+        if pat.count_distinct {
+            adj_op = adj_op.with_count_distinct(true);
+        }
         let mut operator: OperatorBox = Box::new(adj_op);
 
         // RETURN projections — the detector guarantees each item is either a
@@ -1907,6 +1910,9 @@ impl QueryPlanner {
         );
         if !group_by_props.is_empty() {
             adj_op = adj_op.with_group_by_props(group_by_props);
+        }
+        if pat.core.count_distinct {
+            adj_op = adj_op.with_count_distinct(true);
         }
         operator = Box::new(adj_op);
 

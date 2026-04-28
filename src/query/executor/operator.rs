@@ -3623,6 +3623,12 @@ pub struct AdjacencyCountAggregateOperator {
     /// and emit one record per distinct property-value combination —
     /// avoids the planner-side post-aggregate hash-group entirely.
     group_by_props: Vec<String>,
+    /// `count(DISTINCT neighbor)` semantics. When true, build_grouped_iter
+    /// accumulates a HashSet of neighbor NodeIds per group instead of
+    /// summing degrees — required when the same neighbor may appear under
+    /// multiple grouped nodes that share a group key, or when parallel
+    /// edges of the same type exist between the same pair.
+    count_distinct: bool,
     /// Lazy-built grouped output, populated on first `next()` when
     /// `group_by_props` is non-empty.
     grouped_iter: Option<std::vec::IntoIter<GroupedRow>>,
@@ -3656,6 +3662,7 @@ impl AdjacencyCountAggregateOperator {
             edge_type,
             direction,
             group_by_props: Vec::new(),
+            count_distinct: false,
             grouped_iter: None,
         }
     }
@@ -3670,10 +3677,23 @@ impl AdjacencyCountAggregateOperator {
         self
     }
 
+    /// Switch to `count(DISTINCT neighbor)` semantics. Forces the grouped
+    /// path even with variable-only GROUP BY (so per-node parallel edges
+    /// dedupe correctly).
+    pub fn with_count_distinct(mut self, distinct: bool) -> Self {
+        self.count_distinct = distinct;
+        self
+    }
+
     fn build_grouped_iter(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        // Accumulate per-(prop_values) counts. FxHashMap for the same
-        // reason it's used in AggregateOperator — SipHash overhead matters
-        // when the input is millions of nodes.
+        if self.count_distinct {
+            self.build_grouped_iter_distinct(store)
+        } else {
+            self.build_grouped_iter_sum(store)
+        }
+    }
+
+    fn build_grouped_iter_sum(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let mut groups: rustc_hash::FxHashMap<Vec<PropertyValue>, (NodeId, i64)> =
             rustc_hash::FxHashMap::default();
 
@@ -3688,12 +3708,6 @@ impl AdjacencyCountAggregateOperator {
                 _ => continue,
             };
 
-            // Resolve each group-by property of this node. NULL is a valid
-            // group key (all NULL values collapse together — matches Cypher).
-            // Use the canonical Value::resolve_property accessor — it checks
-            // the columnar store first (where snapshot-imported properties
-            // live; node.properties is empty post-import per the columnar
-            // storage design), then falls back to the in-memory node map.
             let value_for_lookup = Value::NodeRef(node_id);
             let key: Vec<PropertyValue> = self
                 .group_by_props
@@ -3716,6 +3730,84 @@ impl AdjacencyCountAggregateOperator {
             .collect();
         self.grouped_iter = Some(rows.into_iter());
         Ok(())
+    }
+
+    fn build_grouped_iter_distinct(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut groups: rustc_hash::FxHashMap<
+            Vec<PropertyValue>,
+            (NodeId, rustc_hash::FxHashSet<NodeId>),
+        > = rustc_hash::FxHashMap::default();
+
+        loop {
+            let input_record = match self.input.next(store)? {
+                Some(r) => r,
+                None => break,
+            };
+            let node_id = match input_record.get(&self.grouped_var) {
+                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
+                _ => continue,
+            };
+            let key: Vec<PropertyValue> = if self.group_by_props.is_empty() {
+                vec![PropertyValue::Integer(node_id.as_u64() as i64)]
+            } else {
+                let v = Value::NodeRef(node_id);
+                self.group_by_props
+                    .iter()
+                    .map(|p| v.resolve_property(p, store))
+                    .collect()
+            };
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (node_id, rustc_hash::FxHashSet::default()));
+            self.collect_neighbors_into(store, node_id, &mut entry.1);
+        }
+
+        let rows: Vec<GroupedRow> = groups
+            .into_iter()
+            .map(|(prop_values, (sample_node, neighbor_set))| GroupedRow {
+                prop_values,
+                count: neighbor_set.len() as i64,
+                sample_node,
+            })
+            .collect();
+        self.grouped_iter = Some(rows.into_iter());
+        Ok(())
+    }
+
+    fn collect_neighbors_into(
+        &self,
+        store: &GraphStore,
+        node_id: NodeId,
+        set: &mut rustc_hash::FxHashSet<NodeId>,
+    ) {
+        match self.direction {
+            Direction::Outgoing => {
+                for (_, _, tgt, et) in store.get_outgoing_edge_targets_owned(node_id) {
+                    if et == self.edge_type {
+                        set.insert(tgt);
+                    }
+                }
+            }
+            Direction::Incoming => {
+                for (_, src, _, et) in store.get_incoming_edge_sources_owned(node_id) {
+                    if et == self.edge_type {
+                        set.insert(src);
+                    }
+                }
+            }
+            Direction::Both => {
+                for (_, _, tgt, et) in store.get_outgoing_edge_targets_owned(node_id) {
+                    if et == self.edge_type {
+                        set.insert(tgt);
+                    }
+                }
+                for (_, src, _, et) in store.get_incoming_edge_sources_owned(node_id) {
+                    if et == self.edge_type {
+                        set.insert(src);
+                    }
+                }
+            }
+        }
     }
 
     /// Count the incident edges of `node_id` that match `edge_type` in the
@@ -3760,7 +3852,9 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
         // then emit one record per group. Correctness-preserving fast path
         // for `RETURN n.prop, count(...)` patterns where multiple nodes may
         // share the same property value (NULL collapse, non-unique attrs).
-        if !self.group_by_props.is_empty() {
+        // Also activates for `count(DISTINCT)` so parallel-edge dedup is
+        // honored even with variable-only GROUP BY.
+        if !self.group_by_props.is_empty() || self.count_distinct {
             if self.grouped_iter.is_none() {
                 self.build_grouped_iter(store)?;
             }

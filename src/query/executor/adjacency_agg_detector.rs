@@ -189,14 +189,9 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
 
     let (count_alias, count_arg_var, count_distinct) = count_info?;
 
-    // Phase 1 cannot safely lower `count(DISTINCT neighbor)` — degree-on-a-node
-    // equals the raw edge count, which differs from the set-size when parallel
-    // edges exist. Reject so the planner keeps the generic aggregate path.
-    // A future phase may lift this constraint either via a parallel-edge
-    // schema check or a dedup helper in the operator.
-    if count_distinct {
-        return None;
-    }
+    // count(DISTINCT neighbor) is now supported via the operator's
+    // with_count_distinct mode (per-group FxHashSet<NodeId> dedup,
+    // handles parallel edges + same-neighbor-across-grouped-nodes).
 
     // The counted variable must be one endpoint; the grouped side must be the
     // OTHER endpoint and must provide every group-by variable.
@@ -504,9 +499,6 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
     }
 
     let (count_alias, count_arg_var, count_distinct) = count_info?;
-    if count_distinct {
-        return None;
-    }
     if count_arg_var != neighbor_var {
         return None;
     }
@@ -533,7 +525,7 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             edge_type,
             direction,
             count_alias,
-            count_distinct: false,
+            count_distinct,
             group_by_items,
         },
         prefilter,
@@ -663,17 +655,18 @@ mod tests {
         assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
-    /// DISTINCT count — set-cardinality semantics diverge from raw degree
-    /// when parallel edges exist. Phase 1 rejects outright; lift in a later
-    /// phase once we have a parallel-edge check.
+    /// DISTINCT count is now supported via the operator's per-group
+    /// FxHashSet<NodeId> mode (handles parallel edges + same-neighbor-
+    /// across-grouped-nodes correctly).
     #[test]
-    fn rejects_count_distinct_in_phase_1() {
+    fn accepts_count_distinct_in_phase_1() {
         let q = parse_query(
             "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
              RETURN j.title, count(DISTINCT a) AS articles",
         )
         .unwrap();
-        assert!(detect(&q, &GraphStore::new()).is_none());
+        let p = detect(&q, &GraphStore::new()).expect("count(DISTINCT) should now be detected");
+        assert!(p.count_distinct);
     }
 
     /// Property constraints on endpoints would act as filters; out of scope.
