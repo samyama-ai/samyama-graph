@@ -203,7 +203,7 @@ impl<'a> QueryExecutor<'a> {
             let result = self.execute_plan(plan)?;
             let elapsed = start.elapsed();
 
-            let stats = self.store.compute_statistics();
+            let stats = self.store.statistics();
             let profile_text = format!(
                 "{}\n\n--- Profile ---\nRows: {}, Execution time: {:.3}ms\n\n--- Statistics ---\n{}",
                 plan_text, result.records.len(), elapsed.as_secs_f64() * 1000.0, stats.format()
@@ -258,7 +258,7 @@ impl<'a> QueryExecutor<'a> {
 
         // Append statistics summary if store is available
         if let Some(store) = store {
-            let stats = store.compute_statistics();
+            let stats = store.statistics();
             plan_text.push_str("\n--- Statistics ---\n");
             plan_text.push_str(&stats.format());
         }
@@ -1339,7 +1339,7 @@ mod tests {
             }
         }
 
-        let stats = store.compute_statistics();
+        let stats = store.statistics();
         assert_eq!(stats.total_nodes, 120);
         assert_eq!(*stats.label_counts.get(&Label::new("Person")).unwrap(), 100);
         assert_eq!(*stats.label_counts.get(&Label::new("Company")).unwrap(), 20);
