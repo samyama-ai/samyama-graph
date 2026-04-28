@@ -1722,13 +1722,35 @@ impl QueryPlanner {
             pat.grouped_var.clone(),
             vec![pat.grouped_label.clone()],
         ));
-        let mut operator: OperatorBox = Box::new(AdjacencyCountAggregateOperator::new(
+        // Push GROUP BY into the operator: it accumulates per-(prop_values)
+        // counts in an internal HashMap during the per-node walk, emitting
+        // one row per group rather than per node. Replaces the earlier
+        // post-aggregate hash-group (which on PubMed-scale workloads cost
+        // ~76 minutes across the 500-query mega-bench, per ADR-017 bug doc).
+        // Variable-only GROUP BY leaves `group_by_props` empty — per-node =
+        // per-group for that case, no hashing needed.
+        let group_by_props: Vec<String> = pat
+            .group_by_items
+            .iter()
+            .filter_map(|(var, prop)| {
+                if var == &pat.grouped_var {
+                    prop.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut adj_op = AdjacencyCountAggregateOperator::new(
             scan,
             pat.grouped_var.clone(),
             pat.count_alias.clone(),
             pat.edge_type.clone(),
             physical_direction,
-        ));
+        );
+        if !group_by_props.is_empty() {
+            adj_op = adj_op.with_group_by_props(group_by_props);
+        }
+        let mut operator: OperatorBox = Box::new(adj_op);
 
         // RETURN projections — the detector guarantees each item is either a
         // Property/Variable on the grouped side or the single count() aggregate,
@@ -1769,54 +1791,8 @@ impl QueryPlanner {
             .collect();
         operator = Box::new(ProjectOperator::new(operator, projections));
 
-        // GROUP BY safety: the AdjacencyCountAggregateOperator emits one
-        // record per grouped node — for property-based GROUP BY this is
-        // per-node, not per-group. When the user wrote `RETURN g.prop, count(n)`
-        // and multiple grouped nodes share the same prop value, the per-node
-        // emission would give multiple rows where there should be one.
-        // Insert a hash-aggregate that SUMs the per-node counts grouped by
-        // the user's projected non-count keys. For variable-only GROUP BY
-        // (`RETURN g, count(n)`), per-node = per-group already, so skip this
-        // step to avoid the extra HashMap pass.
-        let needs_post_group = pat
-            .group_by_items
-            .iter()
-            .any(|(_, prop)| prop.is_some());
-        if needs_post_group {
-            use super::operator::{AggregateFunction, AggregateOperator, AggregateType};
-            // GROUP BY the projected aliases of the non-count items (in
-            // RETURN order). Aggregate is SUM(count_alias) → count_alias
-            // (re-using the same name so downstream ORDER BY / LIMIT keeps
-            // working without further renaming).
-            let mut group_by: Vec<(Expression, String)> = Vec::new();
-            for item in &return_clause.items {
-                let is_count = matches!(
-                    &item.expression,
-                    Expression::Function { name, .. } if name.eq_ignore_ascii_case("count")
-                );
-                if is_count {
-                    continue;
-                }
-                let alias = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => {
-                            format!("{}.{}", variable, property)
-                        }
-                        _ => String::new(),
-                    });
-                group_by.push((Expression::Variable(alias.clone()), alias));
-            }
-            let aggregates = vec![AggregateFunction {
-                func: AggregateType::Sum,
-                expr: Expression::Variable(pat.count_alias.clone()),
-                alias: pat.count_alias.clone(),
-                distinct: false,
-            }];
-            operator = Box::new(AggregateOperator::new(operator, group_by, aggregates));
-        }
+        // (GROUP BY is now handled inside AdjacencyCountAggregateOperator
+        // via `with_group_by_props` above — no post-aggregate step needed.)
 
         // ORDER BY — the count alias is already bound, so any ORDER BY
         // expression the detector accepted evaluates cheaply.
@@ -1904,14 +1880,35 @@ impl QueryPlanner {
             }
         }
 
-        // The adjacency-count aggregate itself — identical to Phase 1.
-        operator = Box::new(AdjacencyCountAggregateOperator::new(
+        // Adjacency-count aggregate. Like Phase 1 (P8.5), push any
+        // property-based GROUP BY into the operator so it accumulates
+        // per-group counts in an internal HashMap during the per-node walk
+        // — avoids a post-step that would re-traverse the bound rows on
+        // PubMed-scale inputs (root cause of MB053/MB111/MB113 35s–407s
+        // under the post-aggregate plan).
+        let group_by_props: Vec<String> = pat
+            .core
+            .group_by_items
+            .iter()
+            .filter_map(|(var, prop)| {
+                if var == &pat.core.grouped_var {
+                    prop.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut adj_op = AdjacencyCountAggregateOperator::new(
             operator,
             pat.core.grouped_var.clone(),
             pat.core.count_alias.clone(),
             pat.core.edge_type.clone(),
             physical_direction,
-        ));
+        );
+        if !group_by_props.is_empty() {
+            adj_op = adj_op.with_group_by_props(group_by_props);
+        }
+        operator = Box::new(adj_op);
 
         // RETURN projections — same logic as the Phase 1 helper.
         let return_clause = query

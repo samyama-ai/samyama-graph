@@ -485,6 +485,24 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             _ => return None,
         }
     }
+    // Re-walk the RETURN items to also capture each GROUP BY entry as
+    // (variable, optional_property). Phase 3a previously discarded the
+    // property name; the in-operator group-by (P8.5) needs it to build
+    // per-group counts during the per-node walk.
+    let mut group_by_items: Vec<(String, Option<String>)> = Vec::new();
+    for item in &ret.items {
+        match &item.expression {
+            Expression::Function { name, .. } if name.eq_ignore_ascii_case("count") => continue,
+            Expression::Variable(variable) => {
+                group_by_items.push((variable.clone(), None));
+            }
+            Expression::Property { variable, property } => {
+                group_by_items.push((variable.clone(), Some(property.clone())));
+            }
+            _ => {}
+        }
+    }
+
     let (count_alias, count_arg_var, count_distinct) = count_info?;
     if count_distinct {
         return None;
@@ -516,7 +534,7 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
             direction,
             count_alias,
             count_distinct: false,
-            group_by_items: Vec::new(), // Phase 3a doesn't expose group_by; planner uses default per-node emission
+            group_by_items,
         },
         prefilter,
         grouped_scan_skip: with_clause.skip,

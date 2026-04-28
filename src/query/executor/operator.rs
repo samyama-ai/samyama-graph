@@ -3616,6 +3616,29 @@ pub struct AdjacencyCountAggregateOperator {
     /// - Outgoing = out-degree of the grouped node on this edge type
     /// - Incoming = in-degree of the grouped node on this edge type
     direction: Direction,
+    /// Optional property names to group on, in user-RETURN order.
+    /// When empty, emit one record per input node (per-node mode — fast,
+    /// correct only when downstream cannot collapse rows).
+    /// When non-empty, accumulate per-group counts in an internal HashMap
+    /// and emit one record per distinct property-value combination —
+    /// avoids the planner-side post-aggregate hash-group entirely.
+    group_by_props: Vec<String>,
+    /// Lazy-built grouped output, populated on first `next()` when
+    /// `group_by_props` is non-empty.
+    grouped_iter: Option<std::vec::IntoIter<GroupedRow>>,
+}
+
+/// One pre-aggregated row for the in-operator group-by mode.
+struct GroupedRow {
+    /// Property values in the order of `group_by_props` (used by the
+    /// downstream Project to look up `g.prop` directly).
+    prop_values: Vec<PropertyValue>,
+    /// Sum of per-node degrees across all nodes in this group.
+    count: i64,
+    /// One representative node from this group. Used by Project so that
+    /// expressions like `g` (the variable itself) still bind to a real
+    /// NodeRef. All nodes in the group share the same `prop_values`.
+    sample_node: NodeId,
 }
 
 impl AdjacencyCountAggregateOperator {
@@ -3632,7 +3655,67 @@ impl AdjacencyCountAggregateOperator {
             count_alias,
             edge_type,
             direction,
+            group_by_props: Vec::new(),
+            grouped_iter: None,
         }
+    }
+
+    /// Enable the in-operator group-by path. When non-empty, the operator
+    /// accumulates per-group counts in a HashMap keyed on the listed
+    /// property values of the grouped node, then emits one record per
+    /// group rather than per node. This is the correctness-preserving
+    /// fast path that replaces the planner-side post-aggregate.
+    pub fn with_group_by_props(mut self, props: Vec<String>) -> Self {
+        self.group_by_props = props;
+        self
+    }
+
+    fn build_grouped_iter(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Accumulate per-(prop_values) counts. FxHashMap for the same
+        // reason it's used in AggregateOperator — SipHash overhead matters
+        // when the input is millions of nodes.
+        let mut groups: rustc_hash::FxHashMap<Vec<PropertyValue>, (NodeId, i64)> =
+            rustc_hash::FxHashMap::default();
+
+        loop {
+            let input_record = match self.input.next(store)? {
+                Some(r) => r,
+                None => break,
+            };
+
+            let node_id = match input_record.get(&self.grouped_var) {
+                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
+                _ => continue,
+            };
+
+            // Resolve each group-by property of this node. NULL is a valid
+            // group key (all NULL values collapse together — matches Cypher).
+            // Use the canonical Value::resolve_property accessor — it checks
+            // the columnar store first (where snapshot-imported properties
+            // live; node.properties is empty post-import per the columnar
+            // storage design), then falls back to the in-memory node map.
+            let value_for_lookup = Value::NodeRef(node_id);
+            let key: Vec<PropertyValue> = self
+                .group_by_props
+                .iter()
+                .map(|p| value_for_lookup.resolve_property(p, store))
+                .collect();
+
+            let degree = self.degree_filtered(store, node_id) as i64;
+            let entry = groups.entry(key).or_insert((node_id, 0));
+            entry.1 += degree;
+        }
+
+        let rows: Vec<GroupedRow> = groups
+            .into_iter()
+            .map(|(prop_values, (sample_node, count))| GroupedRow {
+                prop_values,
+                count,
+                sample_node,
+            })
+            .collect();
+        self.grouped_iter = Some(rows.into_iter());
+        Ok(())
     }
 
     /// Count the incident edges of `node_id` that match `edge_type` in the
@@ -3673,6 +3756,31 @@ impl AdjacencyCountAggregateOperator {
 
 impl PhysicalOperator for AdjacencyCountAggregateOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        // Grouped path: accumulate per-(prop_values) counts on first call,
+        // then emit one record per group. Correctness-preserving fast path
+        // for `RETURN n.prop, count(...)` patterns where multiple nodes may
+        // share the same property value (NULL collapse, non-unique attrs).
+        if !self.group_by_props.is_empty() {
+            if self.grouped_iter.is_none() {
+                self.build_grouped_iter(store)?;
+            }
+            let row = match self.grouped_iter.as_mut().and_then(|it| it.next()) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            // Bind the sample node — downstream Project will resolve
+            // properties from it. All nodes in the group share the same
+            // values for `group_by_props`, so any group member is correct.
+            let _ = row.prop_values;
+            let mut out = Record::new();
+            out.bind(self.grouped_var.clone(), Value::NodeRef(row.sample_node));
+            out.bind(
+                self.count_alias.clone(),
+                Value::Property(PropertyValue::Integer(row.count)),
+            );
+            return Ok(Some(out));
+        }
+
         loop {
             let input_record = match self.input.next(store)? {
                 Some(r) => r,
@@ -3701,6 +3809,7 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+        self.grouped_iter = None;
     }
 
     fn describe(&self) -> OperatorDescription {
