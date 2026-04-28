@@ -139,13 +139,19 @@ where
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 2 { continue; }
 
-        let src_id: i64 = match fields[0].parse() {
-            Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+        // LDBC datagen sometimes writes integer IDs with a trailing `.0`
+        // (e.g. `2336462209434.0` in comment_replyOf_*.csv). Strip
+        // trailing decimals before parsing.
+        fn parse_id(s: &str) -> Option<i64> {
+            s.parse().ok().or_else(|| s.split('.').next()?.parse().ok())
+        }
+        let src_id = match parse_id(fields[0]) {
+            Some(v) => v,
+            None => { skipped += 1; continue; }
         };
-        let tgt_id: i64 = match fields[1].parse() {
-            Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+        let tgt_id = match parse_id(fields[1]) {
+            Some(v) => v,
+            None => { skipped += 1; continue; }
         };
 
         let src_node = match src_map.get(&src_id) {
