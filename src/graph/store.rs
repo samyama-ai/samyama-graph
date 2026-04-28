@@ -1701,6 +1701,91 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         result
     }
 
+    /// Count incoming edges of `node_id` whose type matches `edge_type`,
+    /// without allocating a Vec or cloning EdgeType.
+    pub fn incoming_degree_for_type(&self, node_id: NodeId, edge_type: &EdgeType) -> usize {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return 0 };
+        let idx = node_id.as_u64() as usize;
+        let mut count = 0usize;
+        for seg in &self.frozen_incoming.segments {
+            for &(_src, eid) in seg.neighbors(idx) {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    count += 1;
+                }
+            }
+        }
+        if let Some(entries) = self.incoming.get(idx) {
+            for &(_src, eid) in entries {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Outgoing-direction analogue.
+    pub fn outgoing_degree_for_type(&self, node_id: NodeId, edge_type: &EdgeType) -> usize {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return 0 };
+        let idx = node_id.as_u64() as usize;
+        let mut count = 0usize;
+        for seg in &self.frozen_outgoing.segments {
+            for &(_tgt, eid) in seg.neighbors(idx) {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    count += 1;
+                }
+            }
+        }
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(_tgt, eid) in entries {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Visit every incoming neighbor reachable through an edge of `edge_type`.
+    pub fn for_each_incoming_neighbor_of_type<F: FnMut(NodeId)>(&self, node_id: NodeId, edge_type: &EdgeType, mut f: F) {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return };
+        let idx = node_id.as_u64() as usize;
+        for seg in &self.frozen_incoming.segments {
+            for &(src, eid) in seg.neighbors(idx) {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    f(src);
+                }
+            }
+        }
+        if let Some(entries) = self.incoming.get(idx) {
+            for &(src, eid) in entries {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    f(src);
+                }
+            }
+        }
+    }
+
+    /// Outgoing-direction analogue.
+    pub fn for_each_outgoing_neighbor_of_type<F: FnMut(NodeId)>(&self, node_id: NodeId, edge_type: &EdgeType, mut f: F) {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return };
+        let idx = node_id.as_u64() as usize;
+        for seg in &self.frozen_outgoing.segments {
+            for &(tgt, eid) in seg.neighbors(idx) {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    f(tgt);
+                }
+            }
+        }
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(tgt, eid) in entries {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
+                    f(tgt);
+                }
+            }
+        }
+    }
+
     /// Get incoming edge sources as lightweight tuples (no Edge clone)
     /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each incoming edge
     /// Get incoming edge sources as owned tuples. Delegates to DS-07c owned version.
