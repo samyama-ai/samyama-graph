@@ -3774,6 +3774,9 @@ impl AdjacencyCountAggregateOperator {
         Ok(())
     }
 
+    /// Append every neighbor of `node_id` reachable via `edge_type` in
+    /// the operator's direction to `set`. Uses the typed-walk closures
+    /// for the same allocation-/clone-free reasons as `degree_filtered`.
     fn collect_neighbors_into(
         &self,
         store: &GraphStore,
@@ -3782,65 +3785,37 @@ impl AdjacencyCountAggregateOperator {
     ) {
         match self.direction {
             Direction::Outgoing => {
-                for (_, _, tgt, et) in store.get_outgoing_edge_targets_owned(node_id) {
-                    if et == self.edge_type {
-                        set.insert(tgt);
-                    }
-                }
+                store.for_each_outgoing_neighbor_of_type(node_id, &self.edge_type, |tgt| {
+                    set.insert(tgt);
+                });
             }
             Direction::Incoming => {
-                for (_, src, _, et) in store.get_incoming_edge_sources_owned(node_id) {
-                    if et == self.edge_type {
-                        set.insert(src);
-                    }
-                }
+                store.for_each_incoming_neighbor_of_type(node_id, &self.edge_type, |src| {
+                    set.insert(src);
+                });
             }
             Direction::Both => {
-                for (_, _, tgt, et) in store.get_outgoing_edge_targets_owned(node_id) {
-                    if et == self.edge_type {
-                        set.insert(tgt);
-                    }
-                }
-                for (_, src, _, et) in store.get_incoming_edge_sources_owned(node_id) {
-                    if et == self.edge_type {
-                        set.insert(src);
-                    }
-                }
+                store.for_each_outgoing_neighbor_of_type(node_id, &self.edge_type, |tgt| {
+                    set.insert(tgt);
+                });
+                store.for_each_incoming_neighbor_of_type(node_id, &self.edge_type, |src| {
+                    set.insert(src);
+                });
             }
         }
     }
 
-    /// Count the incident edges of `node_id` that match `edge_type` in the
-    /// operator's direction. Walks the adjacency list once — no allocation
-    /// beyond what the store already does internally. Uses the
-    /// lightweight `_owned` tuple variants to avoid cloning full `Edge`s.
+    /// Count the incident edges of `node_id` whose type matches
+    /// `edge_type` in the operator's direction. Uses the typed-walk
+    /// helpers (`incoming_degree_for_type` / `outgoing_degree_for_type`)
+    /// which avoid Vec alloc + per-edge EdgeType clone.
     fn degree_filtered(&self, store: &GraphStore, node_id: NodeId) -> usize {
         match self.direction {
-            Direction::Outgoing => store
-                .get_outgoing_edge_targets_owned(node_id)
-                .into_iter()
-                .filter(|(_, _, _, et)| *et == self.edge_type)
-                .count(),
-            Direction::Incoming => store
-                .get_incoming_edge_sources_owned(node_id)
-                .into_iter()
-                .filter(|(_, _, _, et)| *et == self.edge_type)
-                .count(),
+            Direction::Outgoing => store.outgoing_degree_for_type(node_id, &self.edge_type),
+            Direction::Incoming => store.incoming_degree_for_type(node_id, &self.edge_type),
             Direction::Both => {
-                // Defensive: the planner filters Direction::Both out before
-                // constructing this operator. Falling back to union is cheap
-                // insurance if that guarantee ever slips.
-                let out = store
-                    .get_outgoing_edge_targets_owned(node_id)
-                    .into_iter()
-                    .filter(|(_, _, _, et)| *et == self.edge_type)
-                    .count();
-                let inc = store
-                    .get_incoming_edge_sources_owned(node_id)
-                    .into_iter()
-                    .filter(|(_, _, _, et)| *et == self.edge_type)
-                    .count();
-                out + inc
+                store.outgoing_degree_for_type(node_id, &self.edge_type)
+                    + store.incoming_degree_for_type(node_id, &self.edge_type)
             }
         }
     }
