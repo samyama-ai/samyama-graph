@@ -16,7 +16,7 @@
 use super::logical_plan::ExpandDirection;
 use crate::graph::types::{EdgeType, Label};
 use crate::graph::GraphStore;
-use crate::query::ast::{Direction, Expression, Query};
+use crate::query::ast::{Direction, Expression, MatchClause, Query};
 
 /// Parameters extracted from a query that matches the adjacency-count pattern.
 ///
@@ -573,6 +573,214 @@ fn expression_references_only(expr: &Expression, var: &str) -> bool {
         }
         _ => false, // CASE, subqueries, list ops: reject conservatively
     }
+}
+
+// ============================================================================
+// Phase 4: aggregate-then-expand (PR-P2.8). See SGE PR for design notes.
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct AggregateThenExpandPattern {
+    pub core: AdjacencyAggPattern,
+    pub post_aggregate_filter: Option<Expression>,
+    pub post_aggregate_order_by: Option<Vec<(Expression, bool)>>,
+    pub post_aggregate_skip: Option<usize>,
+    pub post_aggregate_limit: Option<usize>,
+    pub expand_neighbor_var: String,
+    pub expand_neighbor_label: Option<crate::graph::Label>,
+    pub expand_edge_type: crate::graph::EdgeType,
+    pub expand_direction: Direction,
+}
+
+pub fn detect_aggregate_then_expand(
+    query: &Query,
+    store: &GraphStore,
+) -> Option<AggregateThenExpandPattern> {
+    let split = query.with_split_index?;
+    let _final_with = query.with_clause.as_ref()?;
+    if query.post_with_where_clause.is_some() {
+        return None;
+    }
+    if query.create_clause.is_some()
+        || query.call_clause.is_some()
+        || query.call_subquery.is_some()
+        || query.delete_clause.is_some()
+        || query.merge_clause.is_some()
+        || query.unwind_clause.is_some()
+        || !query.set_clauses.is_empty()
+        || !query.remove_clauses.is_empty()
+    {
+        return None;
+    }
+
+    let (agg_with, passthrough_with) = match query.extra_with_stages.len() {
+        0 => (query.with_clause.as_ref()?, None),
+        1 => (
+            &query.extra_with_stages[0].0,
+            Some(query.with_clause.as_ref()?),
+        ),
+        _ => return None,
+    };
+    if agg_with.distinct {
+        return None;
+    }
+    if let Some(pt) = passthrough_with {
+        if pt.distinct {
+            return None;
+        }
+        if !query.extra_with_stages[0].2.is_empty() {
+            return None;
+        }
+        if query.extra_with_stages[0].3.is_some() {
+            return None;
+        }
+        if query.extra_with_stages[0].1.is_some() {
+            return None;
+        }
+    }
+
+    let pre_match = query.match_clauses.get(..split)?;
+    if pre_match.len() != 1 {
+        return None;
+    }
+    if query.where_clause.is_some() {
+        return None;
+    }
+    let mut probe = Query::new();
+    probe.match_clauses = pre_match.to_vec();
+    probe.return_clause = Some(crate::query::ast::ReturnClause {
+        items: agg_with.items.clone(),
+        distinct: false,
+    });
+    let core = detect(&probe, store)?;
+
+    let post_aggregate_filter = agg_with.where_clause.as_ref().map(|wc| wc.predicate.clone());
+    if let Some(pred) = &post_aggregate_filter {
+        if !expression_references_only(pred, &core.count_alias) {
+            return None;
+        }
+    }
+
+    let order_by_src;
+    let skip_src;
+    let limit_src;
+    if let Some(pt) = passthrough_with {
+        if pt.items.len() != 2 {
+            return None;
+        }
+        let allowed: std::collections::HashSet<String> =
+            [core.grouped_var.clone(), core.count_alias.clone()]
+                .into_iter()
+                .collect();
+        for it in &pt.items {
+            match &it.expression {
+                Expression::Variable(v) if allowed.contains(v) => {}
+                _ => return None,
+            }
+            if let (Some(alias), Expression::Variable(v)) = (&it.alias, &it.expression) {
+                if alias != v {
+                    return None;
+                }
+            }
+        }
+        if pt.where_clause.is_some() {
+            return None;
+        }
+        if agg_with.order_by.is_some() && pt.order_by.is_some() {
+            return None;
+        }
+        if agg_with.skip.is_some() && pt.skip.is_some() {
+            return None;
+        }
+        if agg_with.limit.is_some() && pt.limit.is_some() {
+            return None;
+        }
+        order_by_src = agg_with.order_by.as_ref().or(pt.order_by.as_ref());
+        skip_src = agg_with.skip.or(pt.skip);
+        limit_src = agg_with.limit.or(pt.limit);
+    } else {
+        order_by_src = agg_with.order_by.as_ref();
+        skip_src = agg_with.skip;
+        limit_src = agg_with.limit;
+    }
+
+    let post_match_clauses: &[MatchClause] = query.match_clauses.get(split..)?;
+    if post_match_clauses.len() != 1 {
+        return None;
+    }
+    let post_match = &post_match_clauses[0];
+    if post_match.optional {
+        return None;
+    }
+    if post_match.pattern.paths.len() != 1 {
+        return None;
+    }
+    let post_path = &post_match.pattern.paths[0];
+    if post_path.segments.len() != 1 {
+        return None;
+    }
+    let seg = &post_path.segments[0];
+    if seg.edge.length.is_some() || seg.edge.types.len() != 1 {
+        return None;
+    }
+    let post_edge_type = seg.edge.types[0].clone();
+    let post_edge_dir = match seg.edge.direction {
+        Direction::Outgoing => Direction::Outgoing,
+        Direction::Incoming => Direction::Incoming,
+        Direction::Both => return None,
+    };
+    let start_var = post_path.start.variable.as_ref()?.clone();
+    let target_var = seg.node.variable.as_ref()?.clone();
+    let (bound_is_start, neighbor_var, neighbor_node) = if start_var == core.grouped_var {
+        (true, target_var.clone(), &seg.node)
+    } else if target_var == core.grouped_var {
+        (false, start_var.clone(), &post_path.start)
+    } else {
+        return None;
+    };
+    let bound_node = if bound_is_start { &post_path.start } else { &seg.node };
+    if bound_node.properties.is_some() {
+        return None;
+    }
+    if !bound_node.labels.is_empty()
+        && (bound_node.labels.len() != 1 || bound_node.labels[0] != core.grouped_label)
+    {
+        return None;
+    }
+    if neighbor_node.properties.is_some() {
+        return None;
+    }
+    let neighbor_label = match neighbor_node.labels.len() {
+        0 => None,
+        1 => Some(neighbor_node.labels[0].clone()),
+        _ => return None,
+    };
+    let expand_direction = match (post_edge_dir, bound_is_start) {
+        (Direction::Outgoing, true) => Direction::Outgoing,
+        (Direction::Outgoing, false) => Direction::Incoming,
+        (Direction::Incoming, true) => Direction::Incoming,
+        (Direction::Incoming, false) => Direction::Outgoing,
+        (Direction::Both, _) => unreachable!(),
+    };
+
+    let post_aggregate_order_by = order_by_src.map(|ob| {
+        ob.items
+            .iter()
+            .map(|i| (i.expression.clone(), i.ascending))
+            .collect()
+    });
+
+    Some(AggregateThenExpandPattern {
+        core,
+        post_aggregate_filter,
+        post_aggregate_order_by,
+        post_aggregate_skip: skip_src,
+        post_aggregate_limit: limit_src,
+        expand_neighbor_var: neighbor_var,
+        expand_neighbor_label: neighbor_label,
+        expand_edge_type: post_edge_type,
+        expand_direction,
+    })
 }
 
 #[cfg(test)]
