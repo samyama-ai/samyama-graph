@@ -2102,7 +2102,7 @@ impl EdgeTypeCountOperator {
 impl PhysicalOperator for EdgeTypeCountOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
-            let stats = store.compute_statistics();
+            let stats = store.statistics();
             let mut records = Vec::new();
             for (edge_type, count) in &stats.edge_type_counts {
                 let mut record = Record::new();
@@ -2124,7 +2124,7 @@ impl PhysicalOperator for EdgeTypeCountOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
-            let stats = store.compute_statistics();
+            let stats = store.statistics();
             let mut records = Vec::new();
             for (edge_type, count) in &stats.edge_type_counts {
                 let mut record = Record::new();
@@ -5301,7 +5301,7 @@ impl PhysicalOperator for ShowPropertyKeysOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
             let mut keys = std::collections::BTreeSet::new();
-            let stats = store.compute_statistics();
+            let stats = store.statistics();
             for ((_, prop), _) in &stats.property_stats {
                 keys.insert(prop.clone());
             }

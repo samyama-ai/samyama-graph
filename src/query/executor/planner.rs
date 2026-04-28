@@ -1350,7 +1350,7 @@ impl QueryPlanner {
         }
 
         // QP-02/QP-03: Cost-based optimization — reorder paths by estimated cardinality (smallest first)
-        let stats = store.compute_statistics();
+        let stats = store.statistics();
         let mut paths_with_cost: Vec<(usize, f64)> = pattern.paths.iter().enumerate().map(|(i, path)| {
             let cost = if let Some(label) = path.start.labels.first() {
                 stats.estimate_label_scan(label) as f64

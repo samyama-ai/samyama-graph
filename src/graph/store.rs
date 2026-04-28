@@ -584,6 +584,11 @@ pub struct GraphStore {
 
     /// Triple-level statistics catalog for graph-native query planning (ADR-015)
     catalog: GraphCatalog,
+
+    /// Cached compute_statistics() result. Built lazily; invalidated by
+    /// any write that affects label counts, edge counts, or property
+    /// distributions. Saves ~5ms of sampling+hashing per planner call.
+    statistics_cache: std::sync::RwLock<Option<std::sync::Arc<GraphStatistics>>>,
 }
 
 impl GraphStore {
@@ -618,6 +623,7 @@ impl GraphStore {
             next_node_id: 1,
             next_edge_id: 1,
             catalog: GraphCatalog::new(),
+            statistics_cache: std::sync::RwLock::new(None),
         }
     }
 
@@ -834,6 +840,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Create a node with auto-generated ID and single label
     pub fn create_node(&mut self, label: impl Into<Label>) -> NodeId {
+        self.invalidate_statistics_cache();
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
         } else {
@@ -888,6 +895,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         labels: Vec<Label>,
         properties: PropertyMap,
     ) -> NodeId {
+        self.invalidate_statistics_cache();
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
         } else {
@@ -992,6 +1000,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Create a lightweight node stub: label + identity only, no properties, no index events.
     /// Properties should be set via `set_column_property()` for two-phase bulk loading.
     pub fn create_node_stub(&mut self, label: impl Into<Label>) -> NodeId {
+        self.invalidate_statistics_cache();
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
         } else {
@@ -1065,6 +1074,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         key: impl Into<String>,
         value: impl Into<PropertyValue>,
     ) -> GraphResult<()> {
+        self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
         let idx = node_id.as_u64() as usize;
@@ -1122,6 +1132,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         key: impl Into<String>,
         value: impl Into<PropertyValue>,
     ) -> GraphResult<()> {
+        self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
         let idx = edge_id.as_u64() as usize;
@@ -1160,6 +1171,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         tenant_id: &str,
         id: NodeId
     ) -> GraphResult<Node> {
+        self.invalidate_statistics_cache();
         let idx = id.as_u64() as usize;
         let latest_node = self.get_node(id).ok_or(GraphError::NodeNotFound(id))?.clone();
 
@@ -1229,6 +1241,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         node_id: NodeId,
         label: impl Into<Label>
     ) -> GraphResult<()> {
+        self.invalidate_statistics_cache();
         let label = label.into();
         let idx = node_id.as_u64() as usize;
 
@@ -1271,6 +1284,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         target: NodeId,
         edge_type: impl Into<EdgeType>,
     ) -> GraphResult<EdgeId> {
+        self.invalidate_statistics_cache();
         let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
             id
         } else {
@@ -1309,6 +1323,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         target: NodeId,
         edge_type: impl Into<EdgeType>,
     ) -> GraphResult<EdgeId> {
+        self.invalidate_statistics_cache();
         // Validate nodes exist
         if !self.has_node(source) {
             return Err(GraphError::InvalidEdgeSource(source));
@@ -1378,6 +1393,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         edge_type: impl Into<EdgeType>,
         properties: PropertyMap,
     ) -> GraphResult<EdgeId> {
+        self.invalidate_statistics_cache();
         // Validate nodes exist
         if !self.has_node(source) {
             return Err(GraphError::InvalidEdgeSource(source));
@@ -1547,6 +1563,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// DS-07c: Set a property on an edge via sparse map
     pub fn set_edge_property_sparse(&mut self, edge_id: EdgeId, key: impl Into<String>, value: impl Into<PropertyValue>) {
+        self.invalidate_statistics_cache();
         let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
         props.insert(key.into(), value.into());
     }
@@ -1558,6 +1575,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Delete an edge
     pub fn delete_edge(&mut self, id: EdgeId) -> GraphResult<Edge> {
+        self.invalidate_statistics_cache();
         let idx = id.as_u64() as usize;
 
         // Reconstruct edge from DS-07c before deletion
@@ -1878,6 +1896,21 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     // ============================================================
 
     /// Compute statistics for the current graph state
+    /// Cached statistics — Arc-wrapped so callers share without re-cloning.
+    pub fn statistics(&self) -> std::sync::Arc<GraphStatistics> {
+        if let Some(cached) = self.statistics_cache.read().unwrap().as_ref() {
+            return cached.clone();
+        }
+        let stats = std::sync::Arc::new(self.compute_statistics());
+        *self.statistics_cache.write().unwrap() = Some(stats.clone());
+        stats
+    }
+
+    /// Invalidate the cached statistics. Called from every mutation path.
+    pub fn invalidate_statistics_cache(&self) {
+        *self.statistics_cache.write().unwrap() = None;
+    }
+
     pub fn compute_statistics(&self) -> GraphStatistics {
         let total_nodes = self.node_count();
         let total_edges = self.edge_count();
@@ -2285,6 +2318,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Clear all data from the graph
     pub fn clear(&mut self) {
+        self.invalidate_statistics_cache();
         self.nodes.clear();
         self.edge_type_table.clear();
         self.edge_type_to_id.clear();
