@@ -17,7 +17,7 @@ use std::time::Instant;
 use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, Label};
 
 mod hgnc_ensembl_common;
-use hgnc_ensembl_common::{format_duration, format_num, load_hgnc_tsv};
+use hgnc_ensembl_common::{format_duration, format_num, load_ensembl_gff3, load_hgnc_tsv};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -28,8 +28,9 @@ async fn main() -> Result<(), Error> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("Usage: cargo run --release --example hgnc_ensembl_loader [OPTIONS]");
         eprintln!("  --hgnc PATH       HGNC TSV (hgnc_complete_set.txt) [required]");
+        eprintln!("  --gff3 PATH       Ensembl GRCh38 GFF3 (.gff3 or .gff3.gz)");
         eprintln!("  --snapshot PATH   Export snapshot after loading");
-        eprintln!("  --max-rows N      Limit input rows (0=all, default 0)");
+        eprintln!("  --max-rows N      Limit input rows per source (0=all, default 0)");
         std::process::exit(0);
     }
 
@@ -39,6 +40,12 @@ async fn main() -> Result<(), Error> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .ok_or("--hgnc PATH is required")?;
+
+    let gff3_path = args
+        .iter()
+        .position(|a| a == "--gff3")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
 
     let snapshot_path = args
         .iter()
@@ -52,8 +59,11 @@ async fn main() -> Result<(), Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    eprintln!("HGNC + Ensembl Loader (Phase 1b)");
+    eprintln!("HGNC + Ensembl Loader");
     eprintln!("  HGNC: {}", hgnc_path.display());
+    if let Some(ref p) = gff3_path {
+        eprintln!("  GFF3: {}", p.display());
+    }
     if max_rows > 0 {
         eprintln!("  Max rows: {}", format_num(max_rows));
     }
@@ -62,7 +72,7 @@ async fn main() -> Result<(), Error> {
     let client = EmbeddedClient::new();
     let total_start = Instant::now();
 
-    let result = {
+    let mut result = {
         let mut graph = client.store_write().await;
         // Build UniProt accession -> :Protein NodeId map by walking the existing
         // store. Empty on a fresh DB, populated when chained after the UniProt
@@ -84,13 +94,28 @@ async fn main() -> Result<(), Error> {
         )?
     };
 
+    if let Some(ref gff_path) = gff3_path {
+        let mut graph = client.store_write().await;
+        let ensembl_map = build_ensembl_gene_index(&graph);
+        eprintln!(
+            "  Ensembl gene bridge:    {} ENSG IDs",
+            format_num(ensembl_map.len())
+        );
+        let (transcripts, edges) =
+            load_ensembl_gff3(&mut graph, gff_path, &ensembl_map, max_rows)?;
+        result.transcript_nodes = transcripts;
+        result.has_transcript_edges = edges;
+    }
+
     let total_elapsed = total_start.elapsed();
     eprintln!();
     eprintln!("========================================");
     eprintln!("HGNC load complete.");
-    eprintln!("  Gene nodes:    {}", format_num(result.gene_nodes));
-    eprintln!("  SAME_AS edges: {}", format_num(result.same_as_edges));
-    eprintln!("  Time:          {}", format_duration(total_elapsed));
+    eprintln!("  Gene nodes:           {}", format_num(result.gene_nodes));
+    eprintln!("  SAME_AS edges:        {}", format_num(result.same_as_edges));
+    eprintln!("  Transcript nodes:     {}", format_num(result.transcript_nodes));
+    eprintln!("  HAS_TRANSCRIPT edges: {}", format_num(result.has_transcript_edges));
+    eprintln!("  Time:                 {}", format_duration(total_elapsed));
     eprintln!("========================================");
 
     if let Some(ref snap_path) = snapshot_path {
@@ -117,6 +142,21 @@ fn build_uniprot_index(graph: &samyama_sdk::GraphStore) -> HashMap<String, NodeI
     for node in graph.get_nodes_by_label(&label) {
         if let Some(PropertyValue::String(acc)) = node.get_property("accession") {
             out.insert(acc.clone(), node.id);
+        }
+    }
+    out
+}
+
+/// Walk all :Gene nodes (just loaded from HGNC) and index by Ensembl gene ID
+/// so the GFF3 pass can resolve `Parent=gene:ENSG...` to a NodeId.
+fn build_ensembl_gene_index(graph: &samyama_sdk::GraphStore) -> HashMap<String, NodeId> {
+    let mut out = HashMap::new();
+    let label: Label = "Gene".into();
+    for node in graph.get_nodes_by_label(&label) {
+        if let Some(PropertyValue::String(eid)) = node.get_property("ensembl_gene_id") {
+            if !eid.is_empty() {
+                out.insert(eid.clone(), node.id);
+            }
         }
     }
     out

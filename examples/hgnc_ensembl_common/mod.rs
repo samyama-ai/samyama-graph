@@ -24,6 +24,8 @@ pub type Error = Box<dyn std::error::Error>;
 pub struct LoadResult {
     pub gene_nodes: usize,
     pub same_as_edges: usize,
+    pub transcript_nodes: usize,
+    pub has_transcript_edges: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,6 +37,23 @@ pub struct HgncRow {
     pub locus_type: String,
     pub chromosome: String,
     pub uniprot_ids: Vec<String>,
+    pub ensembl_gene_id: String,
+}
+
+/// A single mRNA-typed feature line from an Ensembl GFF3 file. We only model
+/// the transcript layer needed to bridge HGNC genes to downstream variant /
+/// evidence loaders; exons and CDS are out of scope for the canonical
+/// identity layer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GffMrnaRow {
+    pub transcript_id: String,
+    pub parent_gene_id: String,
+    pub biotype: String,
+    pub is_canonical: bool,
+    pub chromosome: String,
+    pub start: i64,
+    pub end: i64,
+    pub strand: String,
 }
 
 pub fn format_num(n: usize) -> String {
@@ -115,6 +134,58 @@ pub fn parse_row(headers: &HashMap<&str, usize>, fields: &[&str]) -> Option<Hgnc
         locus_type: get("locus_type").to_string(),
         chromosome: parse_chromosome(get("location")),
         uniprot_ids,
+        ensembl_gene_id: get("ensembl_gene_id").to_string(),
+    })
+}
+
+/// Parse a GFF3 attributes column ("key=value;key=value") into a map.
+/// Trailing semicolons and surrounding whitespace are tolerated.
+pub fn parse_gff3_attributes(s: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for part in s.trim().split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(eq) = part.find('=') {
+            out.insert(part[..eq].to_string(), part[eq + 1..].to_string());
+        }
+    }
+    out
+}
+
+/// Parse a single GFF3 line. Returns Some(row) only for `mRNA` features with
+/// a parsable Parent gene ID; returns None for comments, non-mRNA features,
+/// or malformed lines.
+pub fn parse_gff3_mrna_line(line: &str) -> Option<GffMrnaRow> {
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() < 9 || cols[2] != "mRNA" {
+        return None;
+    }
+    let attrs = parse_gff3_attributes(cols[8]);
+    let raw_id = attrs.get("ID")?.clone();
+    let raw_parent = attrs.get("Parent")?.clone();
+    // Strip Ensembl "transcript:" / "gene:" prefixes if present.
+    let transcript_id = raw_id.trim_start_matches("transcript:").to_string();
+    let parent_gene_id = raw_parent.trim_start_matches("gene:").to_string();
+    let is_canonical = attrs
+        .get("tag")
+        .map(|t| t.split(',').any(|x| x.trim() == "Ensembl_canonical"))
+        .unwrap_or(false);
+    let start = cols[3].parse::<i64>().ok()?;
+    let end = cols[4].parse::<i64>().ok()?;
+    Some(GffMrnaRow {
+        transcript_id,
+        parent_gene_id,
+        biotype: attrs.get("biotype").cloned().unwrap_or_default(),
+        is_canonical,
+        chromosome: cols[0].to_string(),
+        start,
+        end,
+        strand: cols[6].to_string(),
     })
 }
 
@@ -128,6 +199,18 @@ fn set_str(g: &mut GraphStore, id: NodeId, k: &str, v: &str) {
         if let Some(n) = g.get_node_mut(id) {
             n.set_property(k, PropertyValue::String(v.to_string()));
         }
+    }
+}
+
+fn set_int(g: &mut GraphStore, id: NodeId, k: &str, v: i64) {
+    if let Some(n) = g.get_node_mut(id) {
+        n.set_property(k, PropertyValue::Integer(v));
+    }
+}
+
+fn set_bool(g: &mut GraphStore, id: NodeId, k: &str, v: bool) {
+    if let Some(n) = g.get_node_mut(id) {
+        n.set_property(k, PropertyValue::Boolean(v));
     }
 }
 
@@ -148,6 +231,7 @@ pub fn upsert_gene(
     set_str(graph, id, "locus_group", &row.locus_group);
     set_str(graph, id, "locus_type", &row.locus_type);
     set_str(graph, id, "chromosome", &row.chromosome);
+    set_str(graph, id, "ensembl_gene_id", &row.ensembl_gene_id);
     hgnc_to_node.insert(row.hgnc_id.clone(), id);
     (id, true)
 }
@@ -209,16 +293,101 @@ pub fn load_hgnc_tsv(
     Ok(result)
 }
 
+/// Stream an Ensembl GFF3 file, creating :Transcript nodes for every `mRNA`
+/// feature whose Parent gene resolves through the supplied
+/// `ensembl_gene_to_node` map (built by the HGNC pass). Each transcript is
+/// linked to its parent :Gene with a HAS_TRANSCRIPT edge carrying
+/// `is_canonical` and `biotype` properties.
+///
+/// The file may be plain text or gzip-compressed; the caller passes a path
+/// to either. Decompression is handled via `flate2`.
+pub fn load_ensembl_gff3(
+    graph: &mut GraphStore,
+    path: &Path,
+    ensembl_gene_to_node: &HashMap<String, NodeId>,
+    max_rows: usize,
+) -> Result<(usize, usize), Error> {
+    use std::io::Read;
+    let file = File::open(path)?;
+    let reader: Box<dyn BufRead> = if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e == "gz")
+        .unwrap_or(false)
+    {
+        let gz = flate2::read::GzDecoder::new(file);
+        Box::new(BufReader::with_capacity(4 * 1024 * 1024, gz))
+    } else {
+        Box::new(BufReader::with_capacity(4 * 1024 * 1024, file))
+    };
+    // Silence unused-import lint for Read in non-gz paths.
+    let _ = std::marker::PhantomData::<Box<dyn Read>>;
+
+    let mut transcript_to_node: HashMap<String, NodeId> = HashMap::with_capacity(250_000);
+    let mut transcripts = 0usize;
+    let mut edges = 0usize;
+    let mut count = 0usize;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let row = match parse_gff3_mrna_line(&line) {
+            Some(r) => r,
+            None => continue,
+        };
+        let parent_node = match ensembl_gene_to_node.get(&row.parent_gene_id) {
+            Some(id) => *id,
+            None => continue, // gene not in our HGNC index — skip
+        };
+        if transcript_to_node.contains_key(&row.transcript_id) {
+            continue;
+        }
+        let tid = graph.create_node("Transcript");
+        set_str(graph, tid, "ensembl_transcript_id", &row.transcript_id);
+        set_str(graph, tid, "biotype", &row.biotype);
+        set_str(graph, tid, "chromosome", &row.chromosome);
+        set_str(graph, tid, "strand", &row.strand);
+        set_int(graph, tid, "start", row.start);
+        set_int(graph, tid, "end", row.end);
+        set_bool(graph, tid, "is_canonical", row.is_canonical);
+        transcript_to_node.insert(row.transcript_id.clone(), tid);
+        transcripts += 1;
+        if graph.create_edge(parent_node, tid, "HAS_TRANSCRIPT").is_ok() {
+            edges += 1;
+        }
+        count += 1;
+        if max_rows > 0 && count >= max_rows {
+            break;
+        }
+        if count % 50_000 == 0 {
+            eprint!("\r  Ensembl mRNA rows: {}", format_num(count));
+        }
+    }
+    eprintln!("\r  Ensembl mRNA rows: {} (done)", format_num(count));
+    Ok((transcripts, edges))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use samyama_sdk::GraphStore;
 
-    const FIXTURE: &str = "hgnc_id\tsymbol\tname\tlocus_group\tlocus_type\tlocation\tuniprot_ids\n\
-        HGNC:1100\tBRCA1\tBRCA1 DNA repair associated\tprotein-coding gene\tgene with protein product\t17q21.31\tP38398\n\
-        HGNC:1101\tBRCA2\tBRCA2 DNA repair associated\tprotein-coding gene\tgene with protein product\t13q13.1\tP51587\n\
-        HGNC:11998\tTP53\ttumor protein p53\tprotein-coding gene\tgene with protein product\t17p13.1\tP04637|Q53GA5\n\
-        HGNC:9999\t\tno-symbol-row\tprotein-coding gene\tgene with protein product\t1q21\tQ12345\n";
+    const FIXTURE: &str = "hgnc_id\tsymbol\tname\tlocus_group\tlocus_type\tlocation\tuniprot_ids\tensembl_gene_id\n\
+        HGNC:1100\tBRCA1\tBRCA1 DNA repair associated\tprotein-coding gene\tgene with protein product\t17q21.31\tP38398\tENSG00000012048\n\
+        HGNC:1101\tBRCA2\tBRCA2 DNA repair associated\tprotein-coding gene\tgene with protein product\t13q13.1\tP51587\tENSG00000139618\n\
+        HGNC:11998\tTP53\ttumor protein p53\tprotein-coding gene\tgene with protein product\t17p13.1\tP04637|Q53GA5\tENSG00000141510\n\
+        HGNC:9999\t\tno-symbol-row\tprotein-coding gene\tgene with protein product\t1q21\tQ12345\tENSG00000999999\n";
+
+    const GFF_FIXTURE: &str = "##gff-version 3\n\
+        # comment line\n\
+        17\tensembl_havana\tgene\t43044295\t43125483\t.\t-\t.\tID=gene:ENSG00000012048;Name=BRCA1;biotype=protein_coding\n\
+        17\tensembl_havana\tmRNA\t43044295\t43125483\t.\t-\t.\tID=transcript:ENST00000357654;Parent=gene:ENSG00000012048;biotype=protein_coding;tag=Ensembl_canonical\n\
+        17\tensembl_havana\tmRNA\t43045802\t43125483\t.\t-\t.\tID=transcript:ENST00000471181;Parent=gene:ENSG00000012048;biotype=protein_coding\n\
+        17\tensembl_havana\texon\t43044295\t43045802\t.\t-\t.\tParent=transcript:ENST00000357654\n\
+        13\tensembl_havana\tmRNA\t32315086\t32400266\t.\t+\t.\tID=transcript:ENST00000380152;Parent=gene:ENSG00000139618;biotype=protein_coding;tag=Ensembl_canonical\n\
+        99\tensembl_havana\tmRNA\t1\t100\t.\t+\t.\tID=transcript:ENST00000999999;Parent=gene:ENSG_NOT_IN_HGNC;biotype=protein_coding\n";
 
     #[test]
     fn parses_chromosome_from_location() {
@@ -279,6 +448,7 @@ mod tests {
             locus_type: "gene with protein product".into(),
             chromosome: "17".into(),
             uniprot_ids: vec!["P38398".into()],
+            ensembl_gene_id: "ENSG00000012048".into(),
         };
         let (id1, new1) = upsert_gene(&mut g, &row, &mut map);
         let (id2, new2) = upsert_gene(&mut g, &row, &mut map);
@@ -308,6 +478,62 @@ mod tests {
         assert_eq!(result.gene_nodes, 3);
         // Only BRCA1's UniProt accession is in the bridge map.
         assert_eq!(result.same_as_edges, 1);
+    }
+
+    #[test]
+    fn parses_gff3_attributes_into_map() {
+        let m = parse_gff3_attributes("ID=transcript:ENST00000357654;Parent=gene:ENSG00000012048;biotype=protein_coding;tag=Ensembl_canonical");
+        assert_eq!(m.get("ID").map(String::as_str), Some("transcript:ENST00000357654"));
+        assert_eq!(m.get("Parent").map(String::as_str), Some("gene:ENSG00000012048"));
+        assert_eq!(m.get("biotype").map(String::as_str), Some("protein_coding"));
+        assert_eq!(m.get("tag").map(String::as_str), Some("Ensembl_canonical"));
+    }
+
+    #[test]
+    fn parses_mrna_line_strips_prefixes_and_detects_canonical() {
+        let line = "17\tensembl_havana\tmRNA\t43044295\t43125483\t.\t-\t.\tID=transcript:ENST00000357654;Parent=gene:ENSG00000012048;biotype=protein_coding;tag=Ensembl_canonical";
+        let row = parse_gff3_mrna_line(line).expect("mRNA row");
+        assert_eq!(row.transcript_id, "ENST00000357654");
+        assert_eq!(row.parent_gene_id, "ENSG00000012048");
+        assert_eq!(row.biotype, "protein_coding");
+        assert!(row.is_canonical);
+        assert_eq!(row.chromosome, "17");
+        assert_eq!(row.start, 43044295);
+        assert_eq!(row.end, 43125483);
+        assert_eq!(row.strand, "-");
+    }
+
+    #[test]
+    fn skips_non_mrna_and_comment_lines() {
+        assert!(parse_gff3_mrna_line("##gff-version 3").is_none());
+        assert!(parse_gff3_mrna_line("# comment").is_none());
+        assert!(parse_gff3_mrna_line("").is_none());
+        let gene_line = "17\tensembl\tgene\t1\t100\t.\t+\t.\tID=gene:ENSG00000012048";
+        assert!(parse_gff3_mrna_line(gene_line).is_none());
+        let exon_line = "17\tensembl\texon\t1\t100\t.\t+\t.\tParent=transcript:ENST00000357654";
+        assert!(parse_gff3_mrna_line(exon_line).is_none());
+    }
+
+    #[test]
+    fn load_ensembl_creates_transcripts_and_skips_unmapped_genes() {
+        let dir = tempdir();
+        let gff_path = dir.join("Homo_sapiens.GRCh38.gff3");
+        std::fs::write(&gff_path, GFF_FIXTURE).unwrap();
+
+        let mut g = GraphStore::new();
+        // Pre-create two :Gene nodes mirroring HGNC pass for BRCA1 and BRCA2.
+        let brca1 = g.create_node("Gene");
+        g.get_node_mut(brca1).unwrap().set_property("symbol", PropertyValue::String("BRCA1".into()));
+        let brca2 = g.create_node("Gene");
+        g.get_node_mut(brca2).unwrap().set_property("symbol", PropertyValue::String("BRCA2".into()));
+        let mut ensembl_map = HashMap::new();
+        ensembl_map.insert("ENSG00000012048".to_string(), brca1);
+        ensembl_map.insert("ENSG00000139618".to_string(), brca2);
+
+        let (transcripts, edges) = load_ensembl_gff3(&mut g, &gff_path, &ensembl_map, 0).unwrap();
+        // BRCA1 has 2 mRNAs, BRCA2 has 1, ENSG_NOT_IN_HGNC is skipped.
+        assert_eq!(transcripts, 3);
+        assert_eq!(edges, 3);
     }
 
     fn tempdir() -> std::path::PathBuf {
