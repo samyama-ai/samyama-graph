@@ -134,13 +134,22 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-/// Walk all :Protein nodes in the store and index them by `accession` property.
-/// Used to build the bridge map for HGNC :SAME_AS edges.
+/// Walk all :Protein nodes in the store and index them by their UniProt
+/// identifier. v1.0 snapshots persist this as `uniprot_id`; older loaders
+/// used `accession`. Both are supported.
+///
+/// Caveat: post-snapshot-import, properties live in the columnar store and
+/// `Node.get_property` returns None — for a chain that starts from an
+/// imported baseline, build the bridge via Cypher (see
+/// `examples/phase1b_smoke.rs::build_index_via_cypher`).
 fn build_uniprot_index(graph: &samyama_sdk::GraphStore) -> HashMap<String, NodeId> {
     let mut out = HashMap::new();
     let label: Label = "Protein".into();
     for node in graph.get_nodes_by_label(&label) {
-        if let Some(PropertyValue::String(acc)) = node.get_property("accession") {
+        let acc = node
+            .get_property("uniprot_id")
+            .or_else(|| node.get_property("accession"));
+        if let Some(PropertyValue::String(acc)) = acc {
             out.insert(acc.clone(), node.id);
         }
     }
