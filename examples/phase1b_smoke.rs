@@ -10,6 +10,16 @@
 //!     --gff3 data/ensembl/Homo_sapiens.GRCh38.111.chr.gff3.gz \
 //!     --civic-variants data/civic/nightly-VariantSummaries.tsv \
 //!     --snapshot data/phase1b.sgsnap
+//!
+//! Optionally chain after one or more baseline snapshots (e.g. UniProt,
+//! ClinVar) so the cross-KG SAME_AS bridges actually fire. Repeat
+//! --import for each snapshot:
+//!
+//!   cargo run --release --example phase1b_smoke -- \
+//!     --import data/baseline/uniprot.sgsnap \
+//!     --import data/baseline/clinvar_dbsnp.sgsnap \
+//!     --hgnc data/hgnc/hgnc_complete_set.txt \
+//!     --civic-variants data/civic/nightly-VariantSummaries.tsv
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,6 +51,33 @@ fn arg(args: &[String], name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Build a property->NodeId index by running Cypher. Works uniformly for
+/// imported nodes (columnar props) and freshly-loaded nodes (Node.properties),
+/// since the query engine handles both paths.
+async fn build_index_via_cypher(
+    client: &EmbeddedClient,
+    query: &str,
+) -> Result<HashMap<String, NodeId>, Error> {
+    let r = client.query("default", query).await?;
+    let mut out = HashMap::new();
+    for row in &r.records {
+        if row.len() < 2 {
+            continue;
+        }
+        let key = format!("{}", row[0]);
+        // Strip quotes the Display impl wraps strings in.
+        let key = key.trim_matches('"').to_string();
+        if key.is_empty() || key == "null" {
+            continue;
+        }
+        let id_str = format!("{}", row[1]);
+        if let Ok(id) = id_str.parse::<u64>() {
+            out.insert(key, NodeId::from(id));
+        }
+    }
+    Ok(out)
+}
+
 fn build_ensembl_gene_index(graph: &samyama_sdk::GraphStore) -> HashMap<String, NodeId> {
     let mut out = HashMap::new();
     let label: samyama_sdk::Label = "Gene".into();
@@ -58,12 +95,22 @@ fn build_ensembl_gene_index(graph: &samyama_sdk::GraphStore) -> HashMap<String, 
 async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
 
+    let imports: Vec<PathBuf> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| (a == "--import").then(|| args.get(i + 1)))
+        .flatten()
+        .map(PathBuf::from)
+        .collect();
     let hgnc = arg(&args, "--hgnc").ok_or("--hgnc PATH required")?;
     let gff3 = arg(&args, "--gff3");
     let civic = arg(&args, "--civic-variants");
     let snapshot = arg(&args, "--snapshot");
 
     eprintln!("Phase 1b smoke runner");
+    for p in &imports {
+        eprintln!("  Pre-import:     {}", p.display());
+    }
     eprintln!("  HGNC:           {}", hgnc.display());
     if let Some(p) = &gff3 {
         eprintln!("  Ensembl GFF3:   {}", p.display());
@@ -76,13 +123,47 @@ async fn main() -> Result<(), Error> {
     let client = EmbeddedClient::new();
     let total = Instant::now();
 
+    // ── Phase 0: import baseline snapshots ───────────────────────────
+    for path in &imports {
+        let t = Instant::now();
+        let stats = client.import_snapshot("default", path).await?;
+        eprintln!(
+            "Imported {}: {} nodes, {} edges in {:.1}s",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            fmt_num(stats.node_count as usize),
+            fmt_num(stats.edge_count as usize),
+            t.elapsed().as_secs_f64()
+        );
+    }
+
     // ── Phase 1: HGNC + Ensembl ──────────────────────────────────────
+    // v1.0 UniProt snapshots key proteins by `uniprot_id`. Older / freshly-
+    // loaded loaders may use `accession`; fall back to that if the first
+    // query returns nothing.
+    let mut uniprot_idx = build_index_via_cypher(
+        &client,
+        "MATCH (p:Protein) WHERE p.uniprot_id IS NOT NULL RETURN p.uniprot_id AS k, id(p) AS v",
+    )
+    .await?;
+    if uniprot_idx.is_empty() {
+        uniprot_idx = build_index_via_cypher(
+            &client,
+            "MATCH (p:Protein) WHERE p.accession IS NOT NULL RETURN p.accession AS k, id(p) AS v",
+        )
+        .await?;
+    }
+    eprintln!(
+        "HGNC bridge to imported UniProt: {} accessions",
+        fmt_num(uniprot_idx.len())
+    );
     {
         let mut graph = client.store_write().await;
-        let res = hgnc_ensembl_common::load_hgnc_tsv(&mut graph, &hgnc, None, 0)?;
+        let bridge = if uniprot_idx.is_empty() { None } else { Some(&uniprot_idx) };
+        let res = hgnc_ensembl_common::load_hgnc_tsv(&mut graph, &hgnc, bridge, 0)?;
         eprintln!(
-            "HGNC: {} :Gene nodes",
-            fmt_num(res.gene_nodes)
+            "HGNC: {} :Gene nodes, {} SAME_AS edges to :Protein",
+            fmt_num(res.gene_nodes),
+            fmt_num(res.same_as_edges)
         );
         if let Some(ref p) = gff3 {
             let ensembl_idx = build_ensembl_gene_index(&graph);
@@ -102,14 +183,39 @@ async fn main() -> Result<(), Error> {
 
     // ── Phase 2: CIViC ───────────────────────────────────────────────
     if let Some(ref p) = civic {
-        let mut graph = client.store_write().await;
-        let gene_idx = civic_common::build_gene_symbol_index(&graph);
-        let clinvar_idx = civic_common::build_clinvar_index(&graph);
+        // Bridges built via Cypher so they pick up nodes from imported
+        // baselines (whose properties live in the columnar store) as well
+        // as freshly-loaded HGNC genes.
+        let gene_idx = build_index_via_cypher(
+            &client,
+            "MATCH (g:Gene) WHERE g.symbol IS NOT NULL RETURN g.symbol AS k, id(g) AS v",
+        )
+        .await?;
+        // v1.0 clinvar_dbsnp snapshots store ClinVar identity on :Evidence
+        // nodes (clinvar_allele_id), linked back to the underlying :Variant
+        // via SUPPORTED_BY. Phase 1a's older path put it on :Variant directly
+        // (clinvar_id); try the Evidence path first, then fall back.
+        let mut clinvar_idx = build_index_via_cypher(
+            &client,
+            "MATCH (e:Evidence)<-[:SUPPORTED_BY]-(var:Variant) \
+             WHERE e.clinvar_allele_id IS NOT NULL \
+             RETURN toString(e.clinvar_allele_id) AS k, id(var) AS v",
+        )
+        .await?;
+        if clinvar_idx.is_empty() {
+            clinvar_idx = build_index_via_cypher(
+                &client,
+                "MATCH (var:Variant) WHERE var.clinvar_id IS NOT NULL \
+                 RETURN var.clinvar_id AS k, id(var) AS v",
+            )
+            .await?;
+        }
         eprintln!(
             "CIViC bridges in store: {} :Gene symbols, {} :Variant clinvar_ids",
             fmt_num(gene_idx.len()),
             fmt_num(clinvar_idx.len())
         );
+        let mut graph = client.store_write().await;
         let res = civic_common::load_civic_variants_tsv(
             &mut graph,
             p,
