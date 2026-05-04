@@ -29,6 +29,7 @@ use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, SamyamaClient};
 
 mod hgnc_ensembl_common;
 mod civic_common;
+mod aact_biomarker_common;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -105,6 +106,7 @@ async fn main() -> Result<(), Error> {
     let hgnc = arg(&args, "--hgnc").ok_or("--hgnc PATH required")?;
     let gff3 = arg(&args, "--gff3");
     let civic = arg(&args, "--civic-variants");
+    let aact_elig = arg(&args, "--aact-eligibilities");
     let snapshot = arg(&args, "--snapshot");
 
     eprintln!("Phase 1b smoke runner");
@@ -117,6 +119,9 @@ async fn main() -> Result<(), Error> {
     }
     if let Some(p) = &civic {
         eprintln!("  CIViC variants: {}", p.display());
+    }
+    if let Some(p) = &aact_elig {
+        eprintln!("  AACT elig.:     {}", p.display());
     }
     eprintln!();
 
@@ -231,6 +236,50 @@ async fn main() -> Result<(), Error> {
         );
     }
 
+    // ── Phase 3: AACT biomarker extraction ────────────────────────────
+    if let Some(ref p) = aact_elig {
+        // Trial index keyed by nct_id (from imported AACT snapshot or
+        // freshly-loaded :ClinicalTrial nodes).
+        let trial_pairs = build_index_via_cypher(
+            &client,
+            "MATCH (t:ClinicalTrial) WHERE t.nct_id IS NOT NULL \
+             RETURN t.nct_id AS k, id(t) AS v",
+        )
+        .await?;
+        // Gene set + index — both keyed on uppercase symbol.
+        let gene_pairs = build_index_via_cypher(
+            &client,
+            "MATCH (g:Gene) WHERE g.symbol IS NOT NULL \
+             RETURN toUpper(g.symbol) AS k, id(g) AS v",
+        )
+        .await?;
+        let gene_set: std::collections::HashSet<String> =
+            gene_pairs.keys().cloned().collect();
+        eprintln!(
+            "AACT bridges in store: {} :ClinicalTrial nct_ids, {} :Gene symbols",
+            fmt_num(trial_pairs.len()),
+            fmt_num(gene_set.len())
+        );
+        let mut graph = client.store_write().await;
+        let res = aact_biomarker_common::load_eligibilities(
+            &mut graph,
+            p,
+            &trial_pairs,
+            &gene_set,
+            &gene_pairs,
+            0,
+        )?;
+        eprintln!(
+            "AACT biomarkers: {} trials processed, {} with biomarkers, {} :Biomarker nodes, \
+             {} REQUIRES_BIOMARKER edges, {} TARGETS_GENE edges",
+            fmt_num(res.trials_processed),
+            fmt_num(res.trials_with_biomarkers),
+            fmt_num(res.biomarker_nodes),
+            fmt_num(res.requires_edges),
+            fmt_num(res.targets_gene_edges)
+        );
+    }
+
     eprintln!();
     eprintln!("Total wall: {:.1}s", total.elapsed().as_secs_f64());
     eprintln!();
@@ -271,6 +320,24 @@ async fn main() -> Result<(), Error> {
             "Sample: TP53 -> Transcripts (canonical first)",
             "MATCH (g:Gene {symbol:'TP53'})-[:HAS_TRANSCRIPT]->(t:Transcript) \
              RETURN count(t) AS transcripts",
+        ),
+        (
+            "Total :Biomarker nodes",
+            "MATCH (b:Biomarker) RETURN count(b) AS n",
+        ),
+        (
+            "Total REQUIRES_BIOMARKER edges",
+            "MATCH ()-[r:REQUIRES_BIOMARKER]->() RETURN count(r) AS n",
+        ),
+        (
+            "Trials requiring a BRCA1 biomarker",
+            "MATCH (g:Gene {symbol:'BRCA1'})<-[:TARGETS_GENE]-(:Biomarker)<-[:REQUIRES_BIOMARKER]-(t:ClinicalTrial) \
+             RETURN count(DISTINCT t) AS trials",
+        ),
+        (
+            "Trials requiring an EGFR biomarker",
+            "MATCH (g:Gene {symbol:'EGFR'})<-[:TARGETS_GENE]-(:Biomarker)<-[:REQUIRES_BIOMARKER]-(t:ClinicalTrial) \
+             RETURN count(DISTINCT t) AS trials",
         ),
     ] {
         match client.query("default", q).await {
