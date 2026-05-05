@@ -174,3 +174,17 @@ Switch to a parser that handles keyword boundaries natively (e.g., LALR parser l
 
 **Last Updated**: 2025-12-20
 **Status**: Accepted and Implemented
+
+---
+
+## Revision Note (2026-05-05)
+
+Three additional discoveries since the original ADR:
+
+1. **Multi-WITH grammar is correct; the executor was the bug.** Through v0.6 we suspected the grammar didn't fully express multi-`WITH` chains. It did. The bug was at the planner / executor scope-resolution layer (variables from earlier patterns leaked across WITH barriers); fixed in v1.0. The atomic-keyword convention codified in this ADR was not the cause and remains the right rule. See [[topics/query-multi-with-batching.md]].
+
+2. **Whitespace skipping interacts with atomic rules.** The `WHITESPACE = _{ ... }` global rule auto-skips between tokens at every non-atomic rule boundary. A few rules that *should* be atomic (e.g., `n.prop` must not allow whitespace around the dot) got the whitespace-skip behaviour by default and accepted invalid syntax. Three production bugs over the project lifetime trace to this; all fixed by marking the affected rules atomic with `@{ }`. New rules touching tokenisation must explicitly decide whether whitespace skipping is appropriate.
+
+3. **Ordered-choice failure modes.** The `with_return_stmt | return_stmt` ordering correctly biases toward the more specific rule first. PEG ordered choice is *not* the same as backtracking — once a choice has consumed input and committed past a fail point, the alternative is not retried. We have fixed at least one rule (in v0.5) that was over-consuming and then failing without giving the next alternative a chance. The convention "rules should fail early or fully consume on success" is now part of grammar-review checklist.
+
+The atomic-keyword catalogue (every Cypher keyword explicitly atomic, ordering of overlapping operator tokens) is unchanged and continues to be the right rule. The full v1.0 parser engineering view is in [[topics/query-pest-parser.md]] in the Engineering Compendium.
