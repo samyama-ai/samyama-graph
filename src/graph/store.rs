@@ -1996,6 +1996,46 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         *self.statistics_cache.write().unwrap() = None;
     }
 
+    /// Rebuild `edge_type_index` from the compact `edge_type_ids` array.
+    ///
+    /// `create_edge_stub` (the bulk-load fast path used by snapshot import)
+    /// only writes to `edge_type_ids` for memory efficiency — it does not
+    /// touch `edge_type_index`. Without this index, the planner reports
+    /// 0 edges for every imported edge type and falls back to
+    /// `NodeScan(all labels)` for OPTIONAL MATCH expansions, producing
+    /// pathological plans on snapshot-imported graphs.
+    ///
+    /// Snapshot import calls this after `compact_adjacency()`.
+    pub fn rebuild_edge_type_index(&mut self) {
+        self.edge_type_index.clear();
+        let len = self.edge_type_ids.len();
+        for idx in 0..len {
+            let type_id = self.edge_type_ids[idx];
+            if type_id == Self::EDGE_TYPE_UNSET {
+                continue;
+            }
+            // Skip free-listed (deleted) edges — their endpoints are zeroed.
+            // edge_endpoints is grown in lockstep with edge_type_ids; absence
+            // implies the edge has not been allocated.
+            if idx >= self.edge_endpoints.len() {
+                continue;
+            }
+            let (src, tgt) = self.edge_endpoints[idx];
+            if src.as_u64() == 0 && tgt.as_u64() == 0 {
+                continue;
+            }
+            if (type_id as usize) >= self.edge_type_table.len() {
+                continue;
+            }
+            let edge_type = self.edge_type_table[type_id as usize].clone();
+            self.edge_type_index
+                .entry(edge_type)
+                .or_insert_with(HashSet::new)
+                .insert(EdgeId::new(idx as u64));
+        }
+        self.invalidate_statistics_cache();
+    }
+
     pub fn compute_statistics(&self) -> GraphStatistics {
         let total_nodes = self.node_count();
         let total_edges = self.edge_count();
