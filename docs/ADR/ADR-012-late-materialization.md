@@ -151,3 +151,15 @@ Materialize nodes before filtering so filters can access properties directly.
 
 **Last Updated**: 2025-12-15
 **Status**: Accepted and Implemented
+
+---
+
+## Revision Note (2026-05-05)
+
+The original ADR was written before the columnar property store (ADR-021) shipped. Two updates to the contract:
+
+1. **`resolve_property` is now backed by the column store, not the per-node `PropertyMap`.** For nodes created via stub-loaders (cricket, biomed, ldbc, finbench) the per-node map is empty post-import; properties live exclusively in `ColumnStore`. The "O(1) HashMap lookup" claim still holds — it is now `(label_index lookup) → (column_store.get_property)`, two HashMaps but still O(1) — but the underlying storage is different. The legacy `PropertyMap` path remains for nodes created via `create_node_with_properties` and is the residual ground truth for those nodes.
+
+2. **Per-call hashmap lookup overhead.** `resolve_property("foo", store)` does a `HashMap<String, Column>` lookup *every call*. For a query touching three properties per record over 10 M records, that's 30 M outer-map lookups. Caching the column reference on the `Record` for the lifetime of a `RecordBatch` would close most of this. Filed as a follow-up; not yet implemented.
+
+Identity-based equality (`NodeRef(id) == Node(id, _)`) is unchanged and remains load-bearing for join correctness. The full v1.0 mechanics, costs, and pending optimisations are documented in [[topics/query-late-materialization.md]] in the Engineering Compendium.

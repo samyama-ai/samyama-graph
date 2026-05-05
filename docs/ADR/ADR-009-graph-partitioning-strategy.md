@@ -167,3 +167,18 @@ JanusGraph delegates partitioning to Cassandra/HBase:
 
 **Last Updated**: 2025-10-14
 **Status**: Proposed (Phase 4+, High Risk)
+
+---
+
+## Revision Note (2026-05-05)
+
+This ADR predates ADR-016 (Billion-Node Distributed Architecture) and reflects an earlier phase-gated plan. As of v1.0.0:
+
+- **No within-tenant partitioning has been implemented.** The skeleton in `src/sharding/` defines the surface but has no partition-aware execution path. The hero-scale milestone (187 M nodes / 1.29 B edges, 2026-04-30) was achieved on a single-node deploy; vertical scaling continues to suffice for current customer workloads.
+- **Multi-tenant partitioning** happens only at the tenant boundary (one tenant per Raft group, per-tenant column-family-prefixed keys). This is documented in ADR-008 and §6.4 of the Engineering Compendium.
+- **The "Go/No-Go" decision in this ADR has not been formally made.** Practically, we have stayed with replication and optimised elsewhere — DS-07c edge-arena removal, columnar property store (ADR-021), late materialisation refinements — and these have pushed the single-node ceiling far enough that within-tenant partitioning has not yet been gating.
+- **ADR-016 supersedes the long-range plan** outlined here for billion-node deploys: per-tenant Raft groups + within-tenant edge-cut partitioning + distributed-join execution. ADR-016 remains "Proposed" and most of its work is unstarted.
+
+This ADR's sketch of edge-cut vs vertex-cut partitioning, the rejected alternatives, and the operational concerns remain valid as the design framework. The "verdict" rows still hold; the "Go/No-Go" is deferred indefinitely pending a customer workload that exceeds vertical scaling.
+
+For the current honest state, see [[topics/distributed-partitioning.md]] in the Engineering Compendium.
