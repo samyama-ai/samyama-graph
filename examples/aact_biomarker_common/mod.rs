@@ -82,6 +82,18 @@ const HIGH_CONFIDENCE_MODIFIERS: &[&str] = &[
 /// genuine biomarker; "HIV positive" is not). Confidence reflects this.
 const MEDIUM_CONFIDENCE_MODIFIERS: &[&str] = &["positive", "negative", "expression"];
 
+/// Gene symbols that are also extremely common English words. The gene-set
+/// filter alone can't reject these because they ARE real HGNC symbols
+/// (e.g. WAS = Wiskott-Aldrich Syndrome). Without this blocklist, AACT
+/// eligibility text like "Patient was treated…" would emit a `WAS mutation`
+/// biomarker. Discovered via real-data smoke v3 (top-genes report showed
+/// WAS at 616 trials, an obvious false positive).
+const ENGLISH_FALSE_POSITIVE_SYMBOLS: &[&str] = &[
+    "WAS", "IS", "HAS", "OR", "AND", "NOT", "ALL", "ANY", "ARE", "BE", "DO",
+    "GO", "HE", "IF", "IN", "IT", "ME", "MY", "NO", "OF", "ON", "SO", "THE",
+    "TO", "UP", "WE", "AS", "AT", "BY", "FOR", "OUT",
+];
+
 /// Normalise a raw modifier string to a canonical form for the
 /// `Biomarker.canonical_form` PK and `modifier` property.
 pub fn normalise_modifier(m: &str) -> String {
@@ -184,9 +196,19 @@ impl Default for BiomarkerPatterns {
     }
 }
 
+/// Returns true if the symbol is a real HGNC gene that's also too common
+/// as an English word to be safely extracted from free-text eligibility
+/// criteria. See `ENGLISH_FALSE_POSITIVE_SYMBOLS`.
+pub fn is_english_false_positive(symbol: &str) -> bool {
+    let upper = symbol.to_ascii_uppercase();
+    ENGLISH_FALSE_POSITIVE_SYMBOLS.iter().any(|s| *s == upper)
+}
+
 /// Extract biomarker mentions from a single segment of eligibility text.
 /// Mentions whose gene token isn't in `known_genes` are dropped to avoid
 /// matching common English words that happen to look like uppercase tokens.
+/// Mentions whose gene token is in the English-word blocklist are dropped
+/// even when present in `known_genes`.
 pub fn extract_from_segment(
     text: &str,
     requirement: Requirement,
@@ -198,7 +220,7 @@ pub fn extract_from_segment(
 
     for cap in patterns.high.captures_iter(text) {
         let gene = cap[1].to_ascii_uppercase();
-        if !known_genes.contains(&gene) {
+        if !known_genes.contains(&gene) || is_english_false_positive(&gene) {
             continue;
         }
         let modifier = normalise_modifier(&cap[2]);
@@ -217,7 +239,7 @@ pub fn extract_from_segment(
     }
     for cap in patterns.medium.captures_iter(text) {
         let gene = cap[1].to_ascii_uppercase();
-        if !known_genes.contains(&gene) {
+        if !known_genes.contains(&gene) || is_english_false_positive(&gene) {
             continue;
         }
         let modifier = normalise_modifier(&cap[2]);
@@ -417,10 +439,39 @@ mod tests {
     use super::*;
 
     fn known_oncogenes() -> HashSet<String> {
-        ["BRCA1", "BRCA2", "TP53", "EGFR", "KRAS", "HER2", "PD-L1", "PDL1", "ALK", "BRAF"]
+        // Includes WAS deliberately so blocklist tests have a real
+        // overlap with `known_genes`.
+        ["BRCA1", "BRCA2", "TP53", "EGFR", "KRAS", "HER2", "PD-L1", "PDL1", "ALK", "BRAF", "WAS"]
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    #[test]
+    fn blocklist_drops_english_word_symbols_even_when_in_known_genes() {
+        let p = BiomarkerPatterns::new();
+        let genes = known_oncogenes();
+        // "WAS" is a real HGNC symbol (Wiskott-Aldrich Syndrome), but in
+        // free-text eligibility criteria it almost always means the
+        // English verb. Same for "OR", "IS", etc.
+        let m = extract_from_segment(
+            "Patient was treated with prior chemo. EGFR mutation required.",
+            Requirement::Inclusion,
+            &p,
+            &genes,
+        );
+        let symbols: HashSet<_> = m.iter().map(|x| x.gene_symbol.as_str()).collect();
+        assert!(!symbols.contains("WAS"), "WAS must be blocklisted");
+        assert!(symbols.contains("EGFR"));
+    }
+
+    #[test]
+    fn is_english_false_positive_recognises_common_words() {
+        assert!(is_english_false_positive("WAS"));
+        assert!(is_english_false_positive("was"));
+        assert!(is_english_false_positive("Or"));
+        assert!(!is_english_false_positive("BRCA1"));
+        assert!(!is_english_false_positive("EGFR"));
     }
 
     #[test]
