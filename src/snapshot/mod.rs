@@ -500,6 +500,12 @@ pub fn import_tenant_with_dedup(
     // Compact adjacency lists to CSR for memory efficiency (DS-07)
     if imported_edge_count > 0 {
         store.compact_adjacency();
+        // Bulk-loaded edges go through create_edge_stub which intentionally
+        // skips edge_type_index updates for speed. Rebuild the index so the
+        // planner can see the imported edge types — without this, OPTIONAL
+        // MATCH plans against imported snapshots fall back to NodeScan(all)
+        // and time out on multi-million-node stores.
+        store.rebuild_edge_type_index();
     }
 
     if merged_node_count > 0 {
@@ -1147,6 +1153,38 @@ mod tests {
             let targets2 = store2.get_outgoing_edge_targets_owned(articles[1].id);
             !targets2.is_empty()
         }, "At least one article should have outgoing edges after v2 import");
+    }
+
+    #[test]
+    fn test_import_rebuilds_edge_type_index() {
+        // Regression: snapshot import previously used create_edge_stub which
+        // skipped edge_type_index, leaving the planner blind to imported
+        // edge types. The fix calls rebuild_edge_type_index after compact.
+        use crate::graph::EdgeType;
+
+        let mut producer = GraphStore::new();
+        let a = producer.create_node_stub("Person");
+        let b = producer.create_node_stub("Person");
+        let c = producer.create_node_stub("City");
+        producer.set_column_property(a, "name", PropertyValue::String("Alice".into()));
+        producer.set_column_property(b, "name", PropertyValue::String("Bob".into()));
+        producer.set_column_property(c, "name", PropertyValue::String("NYC".into()));
+        producer.create_edge_stub(a, b, "KNOWS").unwrap();
+        producer.create_edge_stub(b, a, "KNOWS").unwrap();
+        producer.create_edge_stub(a, c, "LIVES_IN").unwrap();
+        producer.compact_adjacency();
+
+        let mut buf = Vec::new();
+        export_tenant(&producer, &mut buf).unwrap();
+
+        let mut consumer = GraphStore::new();
+        import_tenant(&mut consumer, std::io::Cursor::new(&buf)).unwrap();
+
+        assert_eq!(consumer.edge_type_count(&EdgeType::new("KNOWS")), 2);
+        assert_eq!(consumer.edge_type_count(&EdgeType::new("LIVES_IN")), 1);
+        let stats = consumer.compute_statistics();
+        assert_eq!(stats.edge_type_counts.get(&EdgeType::new("KNOWS")), Some(&2));
+        assert_eq!(stats.edge_type_counts.get(&EdgeType::new("LIVES_IN")), Some(&1));
     }
 }
 
