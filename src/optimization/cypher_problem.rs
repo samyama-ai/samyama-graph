@@ -27,6 +27,8 @@ pub struct CypherProblemStats {
 ///
 /// `penalty_template` is optional and, if present, is evaluated the same
 /// way; its return value is added to the objective via [`Problem::fitness`].
+pub type CustomSubsFn = Box<dyn Fn(&Array1<f64>) -> Vec<(String, String)> + Send + Sync>;
+
 pub struct CypherProblem {
     pub dim: usize,
     pub lower: Array1<f64>,
@@ -37,6 +39,12 @@ pub struct CypherProblem {
     pub engine: Arc<QueryEngine>,
     /// Quantization resolution for cache-key formation. Default 1e-10.
     pub quantize: f64,
+    /// Optional user hook to compute custom (placeholder, value) substitutions
+    /// from the decision vector. Applied BEFORE the standard `$x0..$xN`
+    /// substitution, so callers can map decision vars to e.g. selected-item
+    /// lists. Useful for discrete / mixed problems where embedding CASE
+    /// expressions in `sum()` is awkward.
+    pub custom_subs: Option<CustomSubsFn>,
     /// Memoization cache: quantized vector hash -> (objective, optional penalty).
     cache: Mutex<HashMap<u64, (f64, Option<f64>)>>,
     stats: Mutex<CypherProblemStats>,
@@ -57,6 +65,7 @@ impl CypherProblem {
             penalty_template: None,
             graph, engine,
             quantize: 1e-10,
+            custom_subs: None,
             cache: Mutex::new(HashMap::new()),
             stats: Mutex::new(CypherProblemStats::default()),
         }
@@ -64,6 +73,12 @@ impl CypherProblem {
 
     pub fn with_penalty(mut self, template: impl Into<String>) -> Self {
         self.penalty_template = Some(template.into());
+        self
+    }
+
+    pub fn with_subs<F>(mut self, f: F) -> Self
+    where F: Fn(&Array1<f64>) -> Vec<(String, String)> + Send + Sync + 'static {
+        self.custom_subs = Some(Box::new(f));
         self
     }
 
@@ -79,8 +94,13 @@ impl CypherProblem {
 /// Substitute `$x0`, `$x1`, ..., `$xN` with f64 values formatted as full
 /// decimals (no thousand separators, no scientific notation for typical
 /// ranges, deterministic locale-independent).
-fn substitute(template: &str, x: &Array1<f64>) -> String {
+fn substitute(template: &str, x: &Array1<f64>, custom: Option<&CustomSubsFn>) -> String {
     let mut out = template.to_string();
+    if let Some(f) = custom {
+        for (pat, val) in f(x) {
+            out = out.replace(&pat, &val);
+        }
+    }
     // Reverse iteration so $x10 is replaced before $x1.
     for i in (0..x.len()).rev() {
         let pat = format!("$x{}", i);
@@ -126,7 +146,7 @@ impl Problem for CypherProblem {
             return obj;
         }
         let t0 = std::time::Instant::now();
-        let query = substitute(&self.objective_template, variables);
+        let query = substitute(&self.objective_template, variables, self.custom_subs.as_ref());
         let store = self.graph.read().unwrap();
         let val = match self.engine.execute(&query, &store) {
             Ok(batch) => scalar_from_batch(&batch).unwrap_or(f64::INFINITY),
@@ -151,7 +171,7 @@ impl Problem for CypherProblem {
             self.stats.lock().unwrap().hits += 1;
             return pen;
         }
-        let query = substitute(tmpl, variables);
+        let query = substitute(tmpl, variables, self.custom_subs.as_ref());
         let store = self.graph.read().unwrap();
         let val = match self.engine.execute(&query, &store) {
             Ok(batch) => scalar_from_batch(&batch).unwrap_or(0.0),
@@ -221,7 +241,7 @@ impl MultiObjectiveProblem for CypherMOProblem {
         let store = self.graph.read().unwrap();
         let mut out = Vec::with_capacity(self.objective_templates.len());
         for tmpl in &self.objective_templates {
-            let q = substitute(tmpl, variables);
+            let q = substitute(tmpl, variables, None);
             let v = match self.engine.execute(&q, &store) {
                 Ok(b) => scalar_from_batch(&b).unwrap_or(f64::INFINITY),
                 Err(_) => f64::INFINITY,
