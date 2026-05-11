@@ -131,6 +131,7 @@ pub mod embed;
 pub mod nlq;
 pub mod agent;
 pub mod snapshot;
+pub mod optimization;
 
 // Re-export main types for convenience
 pub use graph::{
