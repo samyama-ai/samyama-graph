@@ -1,4 +1,5 @@
 pub mod algorithms;
+pub mod benchmarks;
 pub mod common;
 pub mod moo;
 
