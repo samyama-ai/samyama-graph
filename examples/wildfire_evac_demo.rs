@@ -52,6 +52,7 @@ struct Args {
     speed_kmh: f64,
     out: PathBuf,
     export_spec: Option<PathBuf>,
+    export_snapshot: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -67,6 +68,7 @@ impl Default for Args {
             speed_kmh: 40.0,
             out: PathBuf::from("/tmp/p8-wildfire-evac"),
             export_spec: None,
+            export_snapshot: None,
         }
     }
 }
@@ -87,6 +89,7 @@ fn parse_args() -> Args {
             "--speed-kmh" => { a.speed_kmh = argv[i + 1].parse().unwrap(); i += 2; }
             "--out" => { a.out = PathBuf::from(&argv[i + 1]); i += 2; }
             "--export-spec" => { a.export_spec = Some(PathBuf::from(&argv[i + 1])); i += 2; }
+            "--export-snapshot" => { a.export_snapshot = Some(PathBuf::from(&argv[i + 1])); i += 2; }
             other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
         }
     }
@@ -224,6 +227,13 @@ fn main() {
         Some(Value::Property(PropertyValue::Integer(i))) => *i, _ => -1,
     };
     eprintln!("Cypher sanity: count(:RoadNode) = {}", n_count);
+
+    if let Some(path) = &a.export_snapshot {
+        let f = File::create(path).expect("snapshot file");
+        let stats = samyama::snapshot::export_tenant(&store, f).expect("export");
+        eprintln!("snapshot -> {} ({} nodes, {} edges)", path.display(),
+            stats.node_count, stats.edge_count);
+    }
 
     // Pick centroids: top-N by degree (busy intersections).
     let mut ranked_by_deg: Vec<(&OsmNode, usize)> = nodes.iter()

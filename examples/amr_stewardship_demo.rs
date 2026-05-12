@@ -54,6 +54,7 @@ struct Args {
     resistance_weight: f64,
     out: PathBuf,
     export_spec: Option<PathBuf>,
+    export_snapshot: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -67,6 +68,7 @@ impl Default for Args {
             resistance_weight: 0.001,
             out: PathBuf::from("/tmp/p8-amr-stewardship"),
             export_spec: None,
+            export_snapshot: None,
         }
     }
 }
@@ -85,6 +87,7 @@ fn parse_args() -> Args {
             "--resistance-weight" => { a.resistance_weight = argv[i + 1].parse().unwrap(); i += 2; }
             "--out" => { a.out = PathBuf::from(&argv[i + 1]); i += 2; }
             "--export-spec" => { a.export_spec = Some(PathBuf::from(&argv[i + 1])); i += 2; }
+            "--export-snapshot" => { a.export_snapshot = Some(PathBuf::from(&argv[i + 1])); i += 2; }
             other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
         }
     }
@@ -210,6 +213,13 @@ fn main() {
             _ => -1,
         };
         eprintln!("KG sanity — {} = {}", label, n);
+    }
+
+    if let Some(path) = &a.export_snapshot {
+        let f = File::create(path).expect("snapshot file");
+        let stats = samyama::snapshot::export_tenant(&store, f).expect("export");
+        eprintln!("snapshot -> {} ({} nodes, {} edges)", path.display(),
+            stats.node_count, stats.edge_count);
     }
 
     // Pre-materialise: count of genes per (subclass, pathogen).
