@@ -1,7 +1,7 @@
 # Cypher Compatibility Matrix
 
-**Last Updated:** 2026-03-04
-**Version:** Samyama v0.5.12
+**Last Updated:** 2026-05-19
+**Version:** Samyama v1.0.0
 
 This document tracks the compatibility of Samyama's OpenCypher implementation against the industry standard (Neo4j) and modern competitors (FalkorDB).
 
