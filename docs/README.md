@@ -26,7 +26,6 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 
 ### Sub-directories
 - **[ADR/](./ADR/)** — Architecture Decision Records (30 ADRs).
-- **[performance/](./performance/)** — historical performance reports and roadmap (may be partially stale; the current benchmark of record is the [Mega Benchmark in the book](https://graph.samyama.cloud/book/mega_benchmark.html), 500/500 on 11 KGs).
 - **[product/](./product/)** — product management artifacts (personas, workflows, test cases).
 - **[test-results/](./test-results/)** — test execution reports.
 - **[optimization/](./optimization/)** — optimization case study + workflow notes (see also `crates/samyama-optimization/` and ADR-026).
