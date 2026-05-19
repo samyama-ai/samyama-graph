@@ -1,7 +1,7 @@
 # ADR-017: Adjacency-Aware Aggregation Planning
 
 ## Status
-**Proposed** — design for review. Not yet implemented.
+**Shipped** (v1.0.0, 2026-04-11) — AdjacencyCountAggregate operator + planner hook fully implemented in `src/query/executor/logical_plan.rs` and `cost_model.rs`. Phase 1-3a + perf P2.5-P2.8 series all merged.
 
 ## Date
 2026-04-13
