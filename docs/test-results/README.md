@@ -129,7 +129,7 @@ python3 test_resp_basic.py
 ### Vector Search
 - HNSW search (10k vectors, 64d): ~1.33ms avg
 
-See [performance/BENCHMARK_RESULTS_v0.5.0.md](../performance/BENCHMARK_RESULTS_v0.5.0.md) for full details.
+See [archive/BENCHMARK_RESULTS_v0.5.0.md](../archive/BENCHMARK_RESULTS_v0.5.0.md) (archived — current benchmarks live at [graph.samyama.cloud/book/mega_benchmark.html](https://graph.samyama.cloud/book/mega_benchmark.html)) for full details.
 
 ## Continuous Integration
 
