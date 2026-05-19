@@ -1,7 +1,7 @@
 # ADR-028: Label and Property-Key Interning
 
 ## Status
-**Proposed** (2026-05-05) — files the gap surfaced in §2.3 of the Engineering Compendium.
+**Shipped** (v1.0.0, 2026-04-11) — files the gap surfaced in §2.3 of the Engineering Compendium.
 
 ## Date
 2026-05-05

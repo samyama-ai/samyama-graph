@@ -1,7 +1,7 @@
 # ADR-023: WAL Versioning, Recovery, and Double-WAL Reconciliation
 
 ## Status
-**Proposed** (2026-05-05)
+**Partially Shipped** (v1.0.0, 2026-04-11) — per-variant version field landed; CRC32C upgrade (replacing the XOR-of-bytes "checksum" in `wal.rs`) and segment rotation are still open.
 
 ## Date
 2026-05-05

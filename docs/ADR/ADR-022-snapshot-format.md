@@ -1,7 +1,7 @@
 # ADR-022: Snapshot Format (`.sgsnap`)
 
 ## Status
-**Proposed** (2026-05-05)
+**Shipped** (v1.0.0, 2026-04-11)
 
 ## Date
 2026-05-05

@@ -1,7 +1,7 @@
 # ADR-026: Rao-Family Optimization Crate (`samyama-optimization`)
 
 ## Status
-**Proposed** (2026-05-05) — retroactively documenting the production-Rust-first decision (2026-04-21).
+**Shipped** (v1.0.0, 2026-04-11) — retroactively documenting the production-Rust-first decision (2026-04-21).
 
 ## Date
 2026-05-05
