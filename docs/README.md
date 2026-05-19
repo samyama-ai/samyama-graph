@@ -1,49 +1,46 @@
-# Samyama Graph Database Documentation
+# Samyama Graph — Documentation Index
 
-## Core Documentation
-- [Architecture](./ARCHITECTURE.md) - High-level system architecture and component interactions.
-- [Requirements](./REQUIREMENTS.md) - Functional and non-functional requirements.
-- [Tech Stack](./TECH_STACK.md) - Technology choices (Rust, RocksDB, Tokio, etc.).
-- [Technology Comparisons](./TECHNOLOGY_COMPARISONS.md) - Benchmarks and trade-off analysis vs alternatives.
-- [ACID Guarantees](./ACID_GUARANTEES.md) - Transactional consistency and durability details.
-- [Glossary](./GLOSSARY.md) - Key terms and definitions.
+**Last Updated:** 2026-05-19 · **Engine version:** v1.0.0 (shipped 2026-04-11)
 
-## Roadmap & Features
-- [Architecture Roadmap](./ARCHITECTURE_ROADMAP.md) - Modularization and expansion plans.
-- [Cypher Compatibility](./CYPHER_COMPATIBILITY.md) - Status of OpenCypher implementation vs Neo4j/FalkorDB.
-- [GNN Proposal](./GNN_PROPOSAL.md) - Strategy for Graph Neural Network integration (Inference).
-- [Agentic Enrichment](./AGENCY_ENRICHMENT_PROPOSAL.md) - AI-driven graph enrichment (Implemented).
+## Primary sources
 
-## Performance
-- [Benchmarks](./performance/BENCHMARKS.md) - Performance metrics and test results.
-- [Benchmark Results v0.5.0](./performance/BENCHMARK_RESULTS_v0.5.0.md) - Latest benchmark numbers (2026-02-07).
-- [Progress](./performance/PROGRESS.md) - Performance optimization progress log.
-- [Performance Roadmap](./performance/PERFORMANCE_ROADMAP.md) - Optimization plans (CSR, JIT, etc.).
-- [Benchmark Comparison](./performance/BENCHMARK_COMPARISON.md) - Comparison vs Neo4j and FalkorDB.
+Most architectural and design information now lives outside this directory:
 
-## Examples (15 demos)
-- `banking_demo.rs` - Banking use case with NLQ
-- `supply_chain_demo.rs` - Supply chain graph
-- `clinical_trials_demo.rs` - Clinical trials knowledge graph
-- `enterprise_soc_demo.rs` - Enterprise SOC security monitoring
-- `knowledge_graph_demo.rs` - General knowledge graph
-- `smart_manufacturing_demo.rs` - Smart manufacturing IoT
-- `social_network_demo.rs` - Social network analysis
-- `agentic_enrichment_demo.rs` - Agent-based graph enrichment
-- `persistence_demo.rs` - RocksDB persistence & multi-tenancy
-- `cluster_demo.rs` - Raft clustering
-- `full_benchmark.rs` - Full performance benchmark
-- `vector_benchmark.rs` - Vector search benchmark
-- `mvcc_benchmark.rs` - MVCC concurrency benchmark
-- `late_materialization_bench.rs` - Late materialization benchmark
-- `graph_optimization_benchmark.rs` - Optimization solver benchmark
+| Source | What it covers |
+|---|---|
+| **[The book](https://graph.samyama.cloud/book)** | Narrative architecture, benchmarks, papers, deployment. Sources in `samyama-cloud/book/src/`. |
+| **[Engineering Compendium](https://graph.samyama.cloud/book/) → `samyama-cloud/wiki/topics/engineering-compendium.md`** | 38-topic master technical reference (storage, in-memory layout, indexing, query engine, concurrency, distributed, compute). Each entry: where used → how it works → alternatives → honest evaluation → ADR linkage. |
+| **[ADR/](./ADR/)** | 30 Architecture Decision Records — the "why" behind every architectural choice (numbered, dated, status-tracked). |
 
-## Demos & Tutorials
-- [Supply Chain Demo](./SUPPLY_CHAIN_GUARDIAN_DEMO.md) - Comprehensive demo scenario.
+If you're new to the codebase, start with the book; if you're touching a subsystem, read its ADR and the matching Engineering Compendium topic.
 
-## Sub-Directories
-- **[ADR/](./ADR/)**: Architecture Decision Records.
-- **[product/](./product/)**: Product management artifacts (Personas, Workflows, Test Cases).
-- **[test-results/](./test-results/)**: Detailed test execution reports.
-- **[optimization/](./optimization/)**: Optimization case study and workflow.
-- **[archive/](./archive/)**: Historical documents and earlier phase records.
+## Files in this directory
+
+### Core
+- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — ACID model in v1.0.0: MVCC (RC + SI + conflict detection), Samyama logical WAL, Raft replication.
+- **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage (~90%) vs Neo4j and FalkorDB; supported clauses, functions, remaining gaps.
+- **[REQUIREMENTS.md](./REQUIREMENTS.md)** — functional and non-functional requirements specification.
+- **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK, etc.).
+- **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how Python / TypeScript SDKs, the CLI, and HTTP / RESP clients connect.
+- **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — end-to-end demo combining ingestion, federation, NLQ, and optimization.
+
+### Sub-directories
+- **[ADR/](./ADR/)** — Architecture Decision Records (30 ADRs).
+- **[performance/](./performance/)** — historical performance reports and roadmap (may be partially stale; the current benchmark of record is the [Mega Benchmark in the book](https://graph.samyama.cloud/book/mega_benchmark.html), 500/500 on 11 KGs).
+- **[product/](./product/)** — product management artifacts (personas, workflows, test cases).
+- **[test-results/](./test-results/)** — test execution reports.
+- **[optimization/](./optimization/)** — optimization case study + workflow notes (see also `crates/samyama-optimization/` and ADR-026).
+- **[ldbc/](./ldbc/)** — LDBC benchmark results (SNB Interactive, FinBench, Graphalytics).
+- **[archive/](./archive/)** — historical documents and earlier-phase records.
+
+### Retired
+
+The following documents were retired in 2026-05-19 because their content is now better maintained in the Engineering Compendium and the book:
+
+| Retired | Where to look now |
+|---|---|
+| `ARCHITECTURE.md` | Book Part III (chapters 9–16) + Engineering Compendium §1–§5 |
+| `TECH_STACK.md` | Book *Technology Choices* + ADR-001 (Rust), ADR-002 (RocksDB), ADR-003 (RESP), ADR-004 (Raft), ADR-006 (Tokio) |
+| `TECHNOLOGY_COMPARISONS.md` | Engineering Compendium *alternatives we considered* sections per topic |
+
+The retirements were content-redundancy cleanups, not architectural changes — see git history for the prior versions.
