@@ -1,7 +1,7 @@
 # ADR-027: Aggregation Push-Down and WITH Push-Down
 
 ## Status
-**Proposed** (2026-05-05) — retroactively formalising the v0.7 / v0.8 shipped rewrites.
+**Shipped** (v1.0.0, 2026-04-11) — retroactively formalising the v0.7 / v0.8 shipped rewrites.
 
 ## Date
 2026-05-05

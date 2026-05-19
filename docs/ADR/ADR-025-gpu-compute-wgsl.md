@@ -1,7 +1,7 @@
 # ADR-025: GPU Compute — `samyama-gpu` crate, WGSL by default, CUDA opt-in
 
 ## Status
-**Proposed** (2026-05-05) — retroactively documenting the v0.7+ shipped crate.
+**Shipped** (v1.0.0, 2026-04-11) — retroactively documenting the v0.7+ shipped crate.
 
 ## Date
 2026-05-05

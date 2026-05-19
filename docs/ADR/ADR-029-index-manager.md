@@ -1,7 +1,7 @@
 # ADR-029: Index Manager — Property, Unique, Composite Indexes
 
 ## Status
-**Proposed** (2026-05-05) — retroactively documenting the shipped IndexManager.
+**Shipped** (v1.0.0, 2026-04-11) — retroactively documenting the shipped IndexManager.
 
 ## Date
 2026-05-05

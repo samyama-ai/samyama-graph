@@ -1,7 +1,7 @@
 # ADR-024: Edge Arena Removal (DS-07c)
 
 ## Status
-**Proposed** (2026-05-05) — retroactively documenting the v0.8.0 / v0.9.0 / v1.0.0 shipped change.
+**Shipped** (v1.0.0, 2026-04-11) — retroactively documenting the v0.8.0 / v0.9.0 / v1.0.0 shipped change.
 
 ## Date
 2026-05-05 (decision originally made 2026-03 in the DS-07 plan).
