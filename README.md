@@ -7,7 +7,7 @@
     <a href="https://github.com/samyama-ai/samyama-graph/releases/tag/v0.7.0"><img src="https://img.shields.io/badge/version-0.7.0-blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-1877_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
-    <a href="https://samyama-ai.github.io/samyama-graph-book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
+    <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
   </p>
 </p>
 
@@ -35,7 +35,7 @@ ORDER BY trials DESC LIMIT 5
 
 **5.2 seconds.** One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
 
-[See all 100 benchmark queries →](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html)
+[See all 100 benchmark queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
 
 ---
 
@@ -66,7 +66,7 @@ GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
 | What | How |
 |------|-----|
 | **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge ($2.50 spot) |
-| **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html) |
+| **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | **Parallel everything** | Rayon: PageRank 3.1x, LCC 9.1x, Triangle Count 6x. Parallel scan, filter, compaction |
 | **975 QPS concurrent** | 16-client read workload, p99 < 25ms, zero errors across 67K queries |
 | **LDBC certified** | SNB Interactive 21/21, FinBench 40/40, Graphalytics 12/12 |
@@ -124,7 +124,7 @@ samyama-mcp-serve --demo cricket    # Instant AI agent tools for any graph
 | Pathways | Reactome | 119K | 835K |
 | Drug Interactions | DrugBank + ChEMBL + SIDER | 245K | 388K |
 
-Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all four KGs. [Full results →](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html)
+Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all four KGs. [Full results →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
 
 ### Cross-KG Query Highlights
 
@@ -227,8 +227,8 @@ samyama
 
 | Resource | Link |
 |----------|------|
-| **The Book** | [samyama-ai.github.io/samyama-graph-book](https://samyama-ai.github.io/samyama-graph-book/) |
-| Biomedical Benchmark | [100 queries, 96 pass](https://samyama-ai.github.io/samyama-graph-book/biomedical_benchmark.html) |
+| **The Book** | [graph.samyama.cloud/book](https://graph.samyama.cloud/book/) |
+| Biomedical Benchmark | [100 queries, 96 pass](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
 | LDBC Results | [docs/ldbc/](docs/ldbc/) |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
