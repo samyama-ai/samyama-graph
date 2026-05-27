@@ -164,6 +164,16 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 
 *Click for full demo (1:56)*
 
+### Infrastructure failure-propagation
+
+One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Below: real IEEE 14-bus power grid (pglib-opf) and the GÉANT 2012 telecom backbone (Internet Topology Zoo), both **CC BY 4.0**.
+
+| Power Grid (IEEE 14-bus) | Telecom (GÉANT 2012) |
+|---|---|
+| ![Power grid demo](docs/demos/powergrid.gif) | ![Telecom demo](docs/demos/telecom.gif) |
+
+*N-1 contingency: drop each line/link → recompute reachability → find single points of failure. GÉANT 2012 exposes 8 PoPs that a single link failure would isolate.*
+
 ---
 
 ## Examples
@@ -193,7 +203,7 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 
 samyama-graph is the engine. Per-domain KGs and companion projects live separately and can be loaded into it:
 
-- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg) (66M / 1B), [clinicaltrials-kg](https://git.samyama.ai/Samyama.ai/clinicaltrials-kg) (7.8M / 27M), [druginteractions-kg](https://git.samyama.ai/Samyama.ai/druginteractions-kg) (245K / 388K), [pathways-kg](https://git.samyama.ai/Samyama.ai/pathways-kg) (119K / 835K), [cricket-kg](https://git.samyama.ai/Samyama.ai/cricket-kg) (36K / 1.4M), [assetops-kg](https://git.samyama.ai/Samyama.ai/assetops-kg) (13K / 13K)
+- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg) (66M / 1B), [clinicaltrials-kg](https://git.samyama.ai/Samyama.ai/clinicaltrials-kg) (7.8M / 27M), [druginteractions-kg](https://git.samyama.ai/Samyama.ai/druginteractions-kg) (245K / 388K), [pathways-kg](https://git.samyama.ai/Samyama.ai/pathways-kg) (119K / 835K), [cricket-kg](https://git.samyama.ai/Samyama.ai/cricket-kg) (36K / 1.4M), [assetops-kg](https://git.samyama.ai/Samyama.ai/assetops-kg) (13K / 13K), [powergrid-kg](https://git.samyama.ai/Samyama.ai/powergrid-kg) (pglib-opf — infrastructure), [telecom-kg](https://git.samyama.ai/Samyama.ai/telecom-kg) (Internet Topology Zoo — infrastructure)
 - **Benchmarks:** [biomedqa](https://github.com/samyama-ai/biomedqa) — 40-question pharmacology benchmark across three KGs
 - **Companions:** [graphrag-rs](https://github.com/samyama-ai/graphrag-rs) — doc-to-KG + MCP server; [optimization_algorithms](https://github.com/samyama-ai/optimization_algorithms) — PyPI `rao-algorithms` package (PyO3 bindings over `crates/samyama-optimization/`)
 
