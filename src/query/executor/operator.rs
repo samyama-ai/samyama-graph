@@ -2846,6 +2846,240 @@ impl PhysicalOperator for ExpandOperator {
     }
 }
 
+/// Variable-length expand operator: `(a)-[:R*min..max]-(b)`.
+///
+/// For each input record it performs a breadth-first traversal from the source
+/// node along the given direction/edge-types and emits one output record per
+/// **distinct** target node reachable in `[min, max]` hops (BFS guarantees the
+/// shortest depth is seen first, so each target is emitted once). This is the
+/// node-reachability semantics relied on by traversal/failure-propagation
+/// queries; enumerating every distinct path is the job of `shortestPath` /
+/// `allShortestPaths` instead.
+///
+/// `target_labels` restrict only the *emitted* endpoint (intermediate nodes are
+/// unrestricted, matching Cypher). An optional `path_variable` is materialized
+/// with the BFS route (shortest path source→target).
+pub struct VarLengthExpandOperator {
+    input: OperatorBox,
+    source_var: String,
+    target_var: String,
+    edge_types: Vec<String>,
+    target_labels: Vec<Label>,
+    direction: Direction,
+    min_hops: usize,
+    max_hops: usize,
+    path_variable: Option<String>,
+    /// Output records buffered for the current input record.
+    pending: std::collections::VecDeque<Record>,
+}
+
+impl VarLengthExpandOperator {
+    /// Create a new variable-length expand operator. `max_hops == usize::MAX`
+    /// means unbounded (BFS still terminates via the visited set).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input: OperatorBox,
+        source_var: String,
+        target_var: String,
+        edge_types: Vec<String>,
+        direction: Direction,
+        min_hops: usize,
+        max_hops: usize,
+    ) -> Self {
+        Self {
+            input,
+            source_var,
+            target_var,
+            edge_types,
+            target_labels: Vec::new(),
+            direction,
+            min_hops,
+            max_hops,
+            path_variable: None,
+            pending: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Set target node labels to filter the emitted endpoint.
+    pub fn with_target_labels(mut self, labels: Vec<Label>) -> Self {
+        self.target_labels = labels;
+        self
+    }
+
+    /// Set path variable for named-path materialization.
+    pub fn with_path_variable(mut self, var: String) -> Self {
+        self.path_variable = Some(var);
+        self
+    }
+
+    /// One-hop neighbours of `node` honouring direction + edge-type filter,
+    /// returned as `(neighbour_node, edge_id)` pairs.
+    fn neighbors(&self, node: NodeId, store: &GraphStore) -> Vec<(NodeId, crate::graph::EdgeId)> {
+        let raw: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)> = match self.direction {
+            Direction::Outgoing => store.get_outgoing_edge_targets_owned(node),
+            Direction::Incoming => store.get_incoming_edge_sources_owned(node),
+            Direction::Both => {
+                let mut all = store.get_outgoing_edge_targets_owned(node);
+                all.extend(store.get_incoming_edge_sources_owned(node));
+                all
+            }
+        };
+        raw.into_iter()
+            .filter(|(_, _, _, et)| {
+                self.edge_types.is_empty() || self.edge_types.iter().any(|t| et.as_str() == t)
+            })
+            .map(|(eid, src, tgt, _)| {
+                let other = match self.direction {
+                    Direction::Outgoing => tgt,
+                    Direction::Incoming => src,
+                    Direction::Both => {
+                        if src == node {
+                            tgt
+                        } else {
+                            src
+                        }
+                    }
+                };
+                (other, eid)
+            })
+            .collect()
+    }
+
+    /// BFS from the source bound in `record`, buffering one output record per
+    /// distinct reachable target in `[min_hops, max_hops]`.
+    fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        let source_id = record
+            .get(&self.source_var)
+            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?
+            .node_id()
+            .ok_or_else(|| {
+                ExecutionError::TypeError(format!("{} is not a node", self.source_var))
+            })?;
+
+        // parent[node] = (predecessor, edge used) for path reconstruction.
+        let mut parent: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
+            std::collections::HashMap::new();
+        let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        visited.insert(source_id);
+
+        // Depth 0 endpoint (only relevant when min_hops == 0).
+        if self.min_hops == 0 && self.emit_ok(source_id, store) {
+            self.buffer(record, source_id, &parent, source_id);
+        }
+
+        let mut frontier = vec![source_id];
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < self.max_hops {
+            depth += 1;
+            let mut next = Vec::new();
+            for &cur in &frontier {
+                for (nb, eid) in self.neighbors(cur, store) {
+                    if visited.insert(nb) {
+                        parent.insert(nb, (cur, eid));
+                        next.push(nb);
+                        if depth >= self.min_hops && self.emit_ok(nb, store) {
+                            self.buffer(record, nb, &parent, source_id);
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(())
+    }
+
+    /// Whether `node` qualifies as an emitted endpoint (target-label filter).
+    fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
+        if self.target_labels.is_empty() {
+            return true;
+        }
+        match store.get_node(node) {
+            Some(n) => self.target_labels.iter().all(|l| n.has_label(l)),
+            None => false,
+        }
+    }
+
+    /// Build and buffer an output record binding the target (and optional path).
+    fn buffer(
+        &mut self,
+        base: &Record,
+        target: NodeId,
+        parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
+        source: NodeId,
+    ) {
+        let mut rec = base.clone();
+        rec.bind(self.target_var.clone(), Value::NodeRef(target));
+        if let Some(ref pv) = self.path_variable {
+            let (nodes, edges) = reconstruct_path(parent, source, target);
+            rec.bind(pv.clone(), Value::Path { nodes, edges });
+        }
+        self.pending.push_back(rec);
+    }
+}
+
+/// Reconstruct the BFS path source→target from a parent map.
+fn reconstruct_path(
+    parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
+    source: NodeId,
+    target: NodeId,
+) -> (Vec<NodeId>, Vec<crate::graph::EdgeId>) {
+    let mut nodes = vec![target];
+    let mut edges = Vec::new();
+    let mut cur = target;
+    while cur != source {
+        if let Some(&(prev, eid)) = parent.get(&cur) {
+            edges.push(eid);
+            nodes.push(prev);
+            cur = prev;
+        } else {
+            break;
+        }
+    }
+    nodes.reverse();
+    edges.reverse();
+    (nodes, edges)
+}
+
+impl PhysicalOperator for VarLengthExpandOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(rec) = self.pending.pop_front() {
+                return Ok(Some(rec));
+            }
+            match self.input.next(store)? {
+                Some(record) => self.expand_from(&record, store)?,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.pending.clear();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let types = if self.edge_types.is_empty() {
+            "*".to_string()
+        } else {
+            self.edge_types.join("|")
+        };
+        let max = if self.max_hops == usize::MAX {
+            String::new()
+        } else {
+            self.max_hops.to_string()
+        };
+        OperatorDescription {
+            name: "VarLengthExpand".to_string(),
+            details: format!(
+                "({})-[:{}*{}..{}]-({})",
+                self.source_var, types, self.min_hops, max, self.target_var
+            ),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 /// Project operator: RETURN n.name, n.age
 pub struct ProjectOperator {
     /// Input operator

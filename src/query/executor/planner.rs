@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -1565,6 +1565,37 @@ impl QueryPlanner {
                     let edge_types: Vec<String> = segment.edge.types.iter()
                         .map(|t| t.as_str().to_string())
                         .collect();
+
+                    if let Some(ref length) = segment.edge.length {
+                        // Variable-length traversal: BFS expand over [min, max] hops.
+                        let min_hops = length.min.unwrap_or(1);
+                        let max_hops = length.max.unwrap_or(usize::MAX);
+                        let mut expand = VarLengthExpandOperator::new(
+                            path_operator,
+                            current_var.clone(),
+                            target_var.clone(),
+                            edge_types,
+                            segment.edge.direction.clone(),
+                            min_hops,
+                            max_hops,
+                        );
+                        if let Some(ref pv) = path.path_variable {
+                            expand = expand.with_path_variable(pv.clone());
+                        }
+                        path_operator = if !segment.node.labels.is_empty() {
+                            Box::new(expand.with_target_labels(segment.node.labels.clone()))
+                        } else {
+                            Box::new(expand)
+                        };
+                        if let Some(ref props) = segment.node.properties {
+                            if !props.is_empty() {
+                                let filter_expr = self.build_property_filter(&target_var, props);
+                                path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                            }
+                        }
+                        current_var = target_var;
+                        continue;
+                    }
 
                     let mut expand = ExpandOperator::new(
                         path_operator,
@@ -3949,6 +3980,48 @@ mod tests {
             "Expected 3 results (countries 0,1,2), got {}",
             batch.records.len()
         );
+    }
+
+    #[test]
+    fn test_variable_length_expand_reachability() {
+        use crate::query::QueryExecutor;
+        // Path graph: a -> b -> c -> d (KNOWS chain) plus a branch a -> e.
+        let mut store = GraphStore::new();
+        let mk = |s: &mut GraphStore, name: &str| {
+            let n = s.create_node("Person");
+            s.get_node_mut(n)
+                .unwrap()
+                .set_property("name", PropertyValue::String(name.to_string()));
+            n
+        };
+        let a = mk(&mut store, "a");
+        let b = mk(&mut store, "b");
+        let c = mk(&mut store, "c");
+        let d = mk(&mut store, "d");
+        let e = mk(&mut store, "e");
+        store.create_edge(a, b, "KNOWS").unwrap();
+        store.create_edge(b, c, "KNOWS").unwrap();
+        store.create_edge(c, d, "KNOWS").unwrap();
+        store.create_edge(a, e, "KNOWS").unwrap();
+
+        let count = |cypher: &str| {
+            let q = parse_query(cypher).unwrap();
+            QueryExecutor::new(&store).execute(&q).unwrap().records.len()
+        };
+
+        // Outgoing reachability from a within k hops (distinct endpoints):
+        //   *1..1 -> {b,e}            (2)
+        //   *1..2 -> {b,e,c}          (3)
+        //   *1..3 -> {b,e,c,d}        (4)
+        //   *2..2 -> {c}              (1)   (regression guard: NOT the 1-hop set)
+        //   *2..3 -> {c,d}            (2)
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..1]->(o:Person) RETURN o.name"), 2);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..2]->(o:Person) RETURN o.name"), 3);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..3]->(o:Person) RETURN o.name"), 4);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*2..2]->(o:Person) RETURN o.name"), 1);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*2..3]->(o:Person) RETURN o.name"), 2);
+        // Undirected expansion reaches the whole component from any node.
+        assert_eq!(count("MATCH (d:Person {name:'d'})-[:KNOWS*1..9]-(o:Person) RETURN o.name"), 4);
     }
 
     #[test]
