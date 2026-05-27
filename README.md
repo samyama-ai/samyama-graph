@@ -166,13 +166,15 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 
 ### Infrastructure failure-propagation
 
-One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Below: real IEEE 14-bus power grid (pglib-opf) and the GÉANT 2012 telecom backbone (Internet Topology Zoo), both **CC BY 4.0**.
+One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Both demos use real **CC BY 4.0** data.
 
-| Power Grid (IEEE 14-bus) | Telecom (GÉANT 2012) |
-|---|---|
-| ![Power grid demo](docs/demos/powergrid.gif) | ![Telecom demo](docs/demos/telecom.gif) |
+**Power Grid** — IEEE 14-bus system (pglib-opf): degree centrality → connectivity → N-1 line contingency.
 
-*N-1 contingency: drop each line/link → recompute reachability → find single points of failure. GÉANT 2012 exposes 8 PoPs that a single link failure would isolate.*
+![Power grid failure-propagation demo](docs/demos/powergrid.gif)
+
+**Telecom** — GÉANT 2012 pan-European backbone (Internet Topology Zoo): 40 PoPs across 37 countries; N-1 link contingency exposes 8 single points of failure.
+
+![Telecom failure-propagation demo](docs/demos/telecom.gif)
 
 ---
 
