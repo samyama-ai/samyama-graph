@@ -39,7 +39,15 @@ ORDER BY trials DESC LIMIT 5
 
 ---
 
-## See it run
+## Demo
+
+> Cricket KG — 36K nodes, 1.4M edges, live graph simulation
+
+[![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
+
+*Click for full demo (1:56)*
+
+### Infrastructure failure-propagation
 
 One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Both demos use real **CC BY 4.0** data.
 
@@ -167,16 +175,6 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 | Pure read | 145 QPS | 975 QPS | 6.7x |
 | Mixed 80/20 | 181 QPS | 722 QPS | 4.0x |
 | Write-heavy | 279 QPS | 482 QPS | 1.7x |
-
----
-
-## Demo
-
-> Cricket KG — 36K nodes, 1.4M edges, live graph simulation
-
-[![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
-
-*Click for full demo (1:56)*
 
 ---
 
