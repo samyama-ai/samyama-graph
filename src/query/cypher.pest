@@ -188,7 +188,9 @@ value = {
 null = { ^"NULL" }
 boolean = { ^"TRUE" | ^"FALSE" }
 integer = @{ "-"? ~ ASCII_DIGIT+ }
-float = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)? }
+// Float: digits.digits, leading-dot (.5), or exponent-without-decimal (1e-07),
+// each with an optional exponent. f64::parse handles all of these forms.
+float = @{ "-"? ~ ( (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)?) | (ASCII_DIGIT+ ~ ^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+) | ("." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)?) ) }
 string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" | "'" ~ (!"'" ~ ANY)* ~ "'" }
 list = { "[" ~ (value ~ ("," ~ value)*)? ~ "]" }
 map = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
