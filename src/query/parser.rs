@@ -3113,6 +3113,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_scientific_notation_float() {
+        // Exponent without a decimal point (1e-07), uppercase E, explicit +,
+        // and leading-dot forms must all parse as floats and round-trip via f64.
+        for (q, expected) in [
+            ("CREATE (n {r: 1e-07}) RETURN n", 1e-07_f64),
+            ("CREATE (n {x: 1.5E10}) RETURN n", 1.5E10_f64),
+            ("CREATE (n {y: 6e+3}) RETURN n", 6e+3_f64),
+            ("CREATE (n {z: .5}) RETURN n", 0.5_f64),
+            ("CREATE (n {w: 0.015}) RETURN n", 0.015_f64),
+        ] {
+            let parsed = parse_query(q);
+            assert!(parsed.is_ok(), "Failed to parse {q:?}: {:?}", parsed.err());
+            let props = parsed.unwrap().create_clause.unwrap().pattern.paths[0]
+                .start
+                .properties
+                .clone()
+                .expect("node should have properties");
+            let val = props.values().next().unwrap();
+            match val {
+                PropertyValue::Float(f) => assert!(
+                    (f - expected).abs() < 1e-12 * expected.abs().max(1.0),
+                    "{q}: got {f}, expected {expected}"
+                ),
+                other => panic!("{q}: expected Float, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_negative_integer() {
         let query = "MATCH (n) WHERE n.temperature < -10 RETURN n";
         let result = parse_query(query);
