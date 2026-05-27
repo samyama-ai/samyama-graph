@@ -39,6 +39,20 @@ ORDER BY trials DESC LIMIT 5
 
 ---
 
+## See it run
+
+One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Both demos use real **CC BY 4.0** data.
+
+**Power Grid** — IEEE 14-bus system (pglib-opf): degree centrality → connectivity → N-1 line contingency.
+
+![Power grid failure-propagation demo](docs/demos/powergrid.gif)
+
+**Telecom** — GÉANT 2012 pan-European backbone (Internet Topology Zoo): 40 PoPs across 37 countries; N-1 link contingency exposes 8 single points of failure.
+
+![Telecom failure-propagation demo](docs/demos/telecom.gif)
+
+---
+
 ## What is Samyama?
 
 A graph-vector database written in Rust. OpenCypher queries, Redis protocol, vector search, graph algorithms — one binary, no JVM, no GC pauses.
@@ -163,18 +177,6 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 [![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
 
 *Click for full demo (1:56)*
-
-### Infrastructure failure-propagation
-
-One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Both demos use real **CC BY 4.0** data.
-
-**Power Grid** — IEEE 14-bus system (pglib-opf): degree centrality → connectivity → N-1 line contingency.
-
-![Power grid failure-propagation demo](docs/demos/powergrid.gif)
-
-**Telecom** — GÉANT 2012 pan-European backbone (Internet Topology Zoo): 40 PoPs across 37 countries; N-1 link contingency exposes 8 single points of failure.
-
-![Telecom failure-propagation demo](docs/demos/telecom.gif)
 
 ---
 
