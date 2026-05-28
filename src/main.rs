@@ -546,7 +546,7 @@ async fn start_server() {
         let http_server = HttpServer::new(http_store, 8080)
             .with_data_path(http_data_path)
             .with_tenant_manager(http_tenants);
-        println!("HTTP server starting on port 8080 (visualizer + API)");
+        println!("HTTP server starting on port 8080 (REST API; bundled visualizer deprecated — use https://graph.samyama.cloud)");
         if let Err(e) = http_server.start().await {
             eprintln!("HTTP server error: {}", e);
         }
