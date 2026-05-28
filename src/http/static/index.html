@@ -3,442 +3,110 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Samyama Graph Visualizer</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/force-graph"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>Samyama Graph — Visualizer moved</title>
     <style>
-        body { margin: 0; background-color: #0f172a; color: white; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        .graph-container { height: calc(100vh - 64px); width: 100%; position: relative; }
-        #graph { width: 100%; height: 100%; }
-        .glass { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.1); }
-        .sidebar { background: #1e293b; border-left: 1px solid rgba(255,255,255,0.1); }
-        
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #0f172a; }
-        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at 50% 30%, #1e293b 0%, #0f172a 70%);
+            color: #e2e8f0;
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 24px;
+        }
+        .card {
+            max-width: 560px;
+            width: 100%;
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+        }
+        .logo {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 20px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #6366f1, #a855f7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+        }
+        h1 { font-size: 22px; margin: 0 0 8px; color: #f1f5f9; }
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #fca5a5;
+            background: rgba(248, 113, 113, 0.12);
+            border: 1px solid rgba(248, 113, 113, 0.3);
+            border-radius: 999px;
+            padding: 4px 12px;
+            margin-bottom: 18px;
+        }
+        p { font-size: 15px; line-height: 1.6; color: #94a3b8; margin: 0 0 16px; }
+        a.cta {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 12px 28px;
+            background: linear-gradient(135deg, #6366f1, #a855f7);
+            color: #fff;
+            text-decoration: none;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 15px;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            box-shadow: 0 8px 24px rgba(99, 102, 241, 0.3);
+        }
+        a.cta:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(99, 102, 241, 0.45); }
+        .note {
+            margin-top: 24px;
+            font-size: 13px;
+            color: #64748b;
+            line-height: 1.6;
+        }
+        code {
+            background: rgba(15, 23, 42, 0.8);
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px;
+            color: #c4b5fd;
+        }
     </style>
 </head>
-<body class="overflow-hidden h-screen flex flex-col">
-    <!-- Navigation -->
-    <nav class="h-16 flex items-center px-6 justify-between glass z-50 shadow-lg">
-        <div class="flex items-center gap-3">
-            <div class="w-9 h-9 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center font-bold shadow-indigo-500/20 shadow-lg text-white">S</div>
-            <h1 class="text-xl font-bold tracking-tight text-slate-100">Samyama <span class="text-indigo-400 font-light">Visualizer</span></h1>
+<body>
+    <div class="card">
+        <div class="logo">S</div>
+        <div class="badge">Deprecated</div>
+        <h1>The bundled visualizer has moved</h1>
+        <p>
+            This built-in web visualizer is deprecated and will be removed in an
+            upcoming release. The hosted Samyama Graph studio is a richer superset
+            with schema-aware visualization, query plans, and more.
+        </p>
+        <p>
+            Your data stays put: the studio connects to this database through your
+            browser. Apart from anonymous usage metrics, nothing leaves your network.
+        </p>
+        <a class="cta" href="https://graph.samyama.cloud" target="_blank" rel="noopener">
+            Open Samyama Graph Studio &rarr;
+        </a>
+        <div class="note">
+            Sign up free at <a href="https://graph.samyama.cloud" target="_blank" rel="noopener" style="color:#a5b4fc;">graph.samyama.cloud</a>,
+            then point it at this server's API endpoint (default <code>http://localhost:8080</code>).
+            The REST API on this port continues to work unchanged.
         </div>
-        
-        <div class="flex-1 max-w-3xl px-8">
-            <div class="relative group">
-                <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <svg class="h-4 w-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
-                    </svg>
-                </div>
-                <input id="query-input" type="text" 
-                    placeholder="Enter Cypher query (e.g., MATCH (n) RETURN n)" 
-                    class="w-full bg-slate-800/50 border border-slate-700/50 rounded-full py-2.5 pl-10 pr-24 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:bg-slate-800 focus:border-indigo-500/50 text-sm transition-all placeholder:text-slate-600 text-slate-200 font-mono">
-                <button id="run-btn" class="absolute right-1.5 top-1.5 bottom-1.5 px-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 active:scale-95">Run</button>
-            </div>
-        </div>
-
-        <div id="status" class="text-xs text-slate-400 font-mono bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-700/50 flex items-center gap-2">
-            <span class="relative flex h-2 w-2">
-              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-            Connecting...
-        </div>
-    </nav>
-
-    <main class="flex flex-1 overflow-hidden">
-        <!-- Graph Area -->
-        <div class="graph-container flex-1 bg-gradient-to-b from-slate-900 to-slate-950">
-            <div id="graph"></div>
-            
-            <!-- Floating Controls -->
-            <div class="absolute bottom-6 left-6 flex flex-col gap-2">
-                <div class="glass px-4 py-2 rounded-lg text-xs text-slate-400 border border-slate-700/50">
-                    <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-[#f43f5e]"></div> Port / Factory</div>
-                    <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-[#3b82f6]"></div> Supplier</div>
-                    <div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full bg-[#10b981]"></div> Shipment / Material</div>
-                </div>
-            </div>
-
-            <!-- Overlay for empty state -->
-            <div id="empty-state" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none transition-opacity duration-500 bg-slate-900/50 backdrop-blur-sm">
-                <div class="text-center space-y-4 p-8 rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl">
-                    <div class="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                    </div>
-                    <h3 class="text-xl font-bold text-slate-200">Ready to Explore</h3>
-                    <p class="text-slate-500 text-sm max-w-xs mx-auto">Run a query to visualize nodes and relationships. Try <code class="bg-slate-800 px-1.5 py-0.5 rounded text-indigo-400 font-mono text-xs">MATCH (n) RETURN n</code></p>
-                </div>
-            </div>
-        </div>
-
-        <!-- Sidebar -->
-        <aside class="w-96 sidebar overflow-y-auto z-40 shadow-xl flex flex-col">
-            <!-- Sidebar Tabs -->
-            <div class="flex border-b border-slate-700/50">
-                <button id="tab-selection" class="flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30">Selection</button>
-                <button id="tab-results" class="flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors">Results</button>
-            </div>
-
-            <div class="flex-1 overflow-y-auto">
-                <!-- Selection Details -->
-                <div id="selection-panel" class="p-6 space-y-6">
-                    <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        Selection Details
-                    </h2>
-                    <div id="properties" class="space-y-4">
-                        <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
-                            <p class="text-sm">Select a node or link<br>to view properties</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Query Results -->
-                <div id="results-panel" class="p-6 space-y-6 hidden">
-                    <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                        Tabular Results
-                    </h2>
-                    
-                    <!-- Optimization Chart Container -->
-                    <div id="chart-container" class="hidden space-y-4">
-                        <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
-                            <canvas id="convergence-chart"></canvas>
-                        </div>
-                    </div>
-
-                    <div id="table-results" class="overflow-x-auto">
-                        <div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl">
-                            <p class="text-sm">No results to show</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </aside>
-    </main>
-
-    <script>
-        // Auto-color generation based on string hash
-        const stringToColor = (str) => {
-            let hash = 0;
-            for (let i = 0; i < str.length; i++) {
-                hash = str.charCodeAt(i) + ((hash << 5) - hash);
-            }
-            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-            return '#' + '00000'.substring(0, 6 - c.length) + c;
-        };
-
-        const getColorForLabel = (label) => {
-            const colors = {
-                'Person': '#6366f1',    // Indigo
-                'Supplier': '#3b82f6',  // Blue
-                'Port': '#f43f5e',      // Rose
-                'Factory': '#f43f5e',   // Rose
-                'Shipment': '#10b981',  // Emerald
-                'Material': '#10b981',  // Emerald
-                'Disease': '#ef4444',   // Red
-                'Drug': '#06b6d4',      // Cyan
-                'Compound': '#8b5cf6',  // Violet
-            };
-            return colors[label] || stringToColor(label || 'Unknown');
-        };
-
-        const graph = ForceGraph()(document.getElementById('graph'))
-            .backgroundColor('#0f172a')
-            .nodeId('id')
-            .nodeLabel(node => {
-                const label = node.labels[0] || 'Node';
-                const name = node.properties.name || node.properties.id || node.id;
-                return `<div class="px-2 py-1 bg-slate-900 text-xs rounded border border-slate-700 shadow-xl">
-                    <span class="text-indigo-400 font-bold">${label}</span>
-                    <span class="text-white ml-1">${name}</span>
-                </div>`;
-            })
-            .nodeColor(node => getColorForLabel(node.labels[0]))
-            .nodeVal(node => node.val || 5)
-            .nodeRelSize(4)
-            .linkDirectionalArrowLength(5)
-            .linkDirectionalArrowRelPos(1)
-            .linkCurvature(0.25)
-            .linkWidth(2)
-            .linkColor(() => '#94a3b8') // Slate-400 for higher contrast
-            .linkLabel(link => `<div class="px-2 py-1 bg-slate-900 text-[10px] rounded border border-slate-700 shadow-xl text-indigo-300 font-bold">${link.type}</div>`)
-            .onNodeClick(node => showProperties(node))
-            .onLinkClick(link => showProperties(link))
-            .cooldownTicks(100);
-
-        function showProperties(element) {
-            const propsDiv = document.getElementById('properties');
-            const type = element.__typename === 'node' ? 'Node' : 'Edge';
-            const title = type === 'Node' 
-                ? (element.labels[0] || 'Unknown') 
-                : (element.type || 'Relationship');
-            
-            const id = element.id;
-
-            let content = `
-                <div class="bg-slate-800/50 rounded-xl p-5 border border-slate-700 shadow-inner">
-                    <div class="flex items-center justify-between mb-4 pb-4 border-b border-slate-700/50">
-                        <div>
-                            <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">${type}</div>
-                            <div class="text-lg font-bold text-white">${title}</div>
-                        </div>
-                        <div class="text-xs font-mono text-slate-500 bg-slate-900 px-2 py-1 rounded">#${id}</div>
-                    </div>
-                    <div class="space-y-3">
-            `;
-
-            const props = element.properties || {};
-            if (Object.keys(props).length === 0) {
-                content += `<div class="text-sm text-slate-500 italic">No properties</div>`;
-            } else {
-                for (const [k, v] of Object.entries(props)) {
-                    let displayValue = v;
-                    if (typeof v === 'object' && v !== null) {
-                        if (Array.isArray(v) && typeof v[0] === 'number') {
-                            // Vector - truncate
-                            displayValue = `<span class="font-mono text-xs text-emerald-400">[Vector dim=${v.length}]</span>`;
-                        } else {
-                            displayValue = `<pre class="text-[10px] bg-slate-900 p-2 rounded overflow-x-auto text-slate-300">${JSON.stringify(v, null, 2)}</pre>`;
-                        }
-                    } else {
-                        displayValue = `<span class="text-slate-200 font-medium">${v}</span>`;
-                    }
-
-                    content += `
-                        <div class="group">
-                            <div class="text-[10px] text-indigo-400 uppercase font-bold mb-0.5">${k}</div>
-                            <div class="text-sm breaking-words">${displayValue}</div>
-                        </div>
-                    `;
-                }
-            }
-            
-            // Add Agent Actions if relevant (Mock)
-            if (type === 'Node' && (element.labels.includes('Port') || element.labels.includes('Supplier'))) {
-                 content += `
-                    <div class="mt-6 pt-4 border-t border-slate-700/50">
-                        <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-2">Agent Insights</div>
-                        <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-                            <div class="flex items-center gap-2 mb-1">
-                                <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
-                                <span class="text-xs text-emerald-400 font-bold">News Agent Active</span>
-                            </div>
-                            <p class="text-xs text-slate-400 leading-relaxed">
-                                Last enrichment: Just now.<br>
-                                No anomalies detected for this entity in global news feeds.
-                            </p>
-                        </div>
-                    </div>
-                 `;
-            }
-
-            content += `</div></div>`;
-            propsDiv.innerHTML = content;
-        }
-
-                document.getElementById('run-btn').onclick = runQuery;
-                document.getElementById('query-input').onkeypress = (e) => {
-                    if (e.key === 'Enter') runQuery();
-                };
-        
-                // Tab Logic
-                const tabSelection = document.getElementById('tab-selection');
-                const tabResults = document.getElementById('tab-results');
-                const panelSelection = document.getElementById('selection-panel');
-                const panelResults = document.getElementById('results-panel');
-        
-                tabSelection.onclick = () => {
-                    tabSelection.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30";
-                    tabResults.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors";
-                    panelSelection.classList.remove('hidden');
-                    panelResults.classList.add('hidden');
-                };
-        
-                tabResults.onclick = () => {
-                    tabResults.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/30";
-                    tabSelection.className = "flex-1 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors";
-                    panelResults.classList.remove('hidden');
-                    panelSelection.classList.add('hidden');
-                };
-        
-                let convergenceChart = null;
-        
-                function updateResults(data) {
-                    const tableDiv = document.getElementById('table-results');
-                    const chartContainer = document.getElementById('chart-container');
-                    
-                    if (!data.records || data.records.length === 0) {
-                        tableDiv.innerHTML = `<div class="text-center py-12 text-slate-600 border-2 border-dashed border-slate-800 rounded-xl"><p class="text-sm">No tabular results</p></div>`;
-                        chartContainer.classList.add('hidden');
-                        return;
-                    }
-        
-                    // Check for optimization history
-                    const historyIdx = data.columns.indexOf('history');
-                    if (historyIdx !== -1 && data.records[0][historyIdx]) {
-                        const history = data.records[0][historyIdx];
-                        if (Array.isArray(history)) {
-                            renderChart(history, data.records[0][data.columns.indexOf('algorithm')] || 'Solver');
-                            chartContainer.classList.remove('hidden');
-                        }
-                    } else {
-                        chartContainer.classList.add('hidden');
-                    }
-        
-                    // Build Table
-                    let html = `<table class="w-full text-left text-xs border-collapse">
-                        <thead>
-                            <tr class="border-b border-slate-700 text-slate-500 font-bold uppercase tracking-wider">
-                                ${data.columns.map(c => `<th class="py-2 pr-4">${c}</th>`).join('')}
-                            </tr>
-                        </thead>
-                        <tbody class="text-slate-300">
-                            ${data.records.map(row => `
-                                <tr class="border-b border-slate-800/50 hover:bg-slate-800/20">
-                                    ${row.map(val => {
-                                        let display = val;
-                                        if (val && typeof val === 'object') {
-                                            if (val.id) display = `<span class="text-indigo-400 font-mono">#${val.id}</span>`;
-                                            else display = JSON.stringify(val).substring(0, 20) + '...';
-                                        }
-                                        return `<td class="py-3 pr-4 truncate max-w-[150px]">${display}</td>`;
-                                    }).join('')}
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                    </table>`;
-                    
-                    tableDiv.innerHTML = html;
-                    
-                    // Auto-switch to results tab
-                    tabResults.click();
-                }
-        
-                function renderChart(history, algoName) {
-                    const ctx = document.getElementById('convergence-chart').getContext('2d');
-                    
-                    if (convergenceChart) {
-                        convergenceChart.destroy();
-                    }
-        
-                    convergenceChart = new Chart(ctx, {
-                        type: 'line',
-                        data: {
-                            labels: history.map((_, i) => i),
-                            datasets: [{
-                                label: `${algoName} Convergence`,
-                                data: history,
-                                borderColor: '#6366f1',
-                                backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                                borderWidth: 2,
-                                pointRadius: 0,
-                                fill: true,
-                                tension: 0.4
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            plugins: {
-                                legend: { display: false },
-                                tooltip: { mode: 'index', intersect: false }
-                            },
-                            scales: {
-                                x: { display: false },
-                                y: { 
-                                    grid: { color: 'rgba(255,255,255,0.05)' },
-                                    ticks: { color: '#64748b', font: { size: 10 } }
-                                }
-                            }
-                        }
-                    });
-                }
-        
-                async function runQuery() {
-                    const input = document.getElementById('query-input');
-                    const query = input.value || "MATCH (n) RETURN n LIMIT 50";
-                    const btn = document.getElementById('run-btn');
-                    
-                    btn.innerHTML = `<svg class="animate-spin h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
-                    btn.disabled = true;
-                    input.disabled = true;
-        
-                    try {
-                        const response = await fetch('/api/query', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ query })
-                        });
-                        
-                        const data = await response.json();
-                        
-                        if (data.error) {
-                            showToast(data.error, 'error');
-                        } else {
-                            document.getElementById('empty-state').style.opacity = '0';
-                            
-                            // Transform for force-graph
-                            const nodes = data.nodes.map(n => ({
-                                ...n,
-                                __typename: 'node',
-                                val: n.labels.includes('Port') ? 10 : 5 // Size
-                            }));
-                            const links = data.edges.map(e => ({
-                                ...e,
-                                __typename: 'edge',
-                                source: e.source,
-                                target: e.target
-                            }));
-        
-                            graph.graphData({ nodes, links });
-                            
-                            // Update Table & Chart
-                            updateResults(data);
-                            
-                            showToast(`Found ${nodes.length} nodes, ${links.length} edges`, 'success');
-                        }
-                    } catch (err) {
-                        console.error(err);
-                        showToast("Failed to connect to server", 'error');
-                    } finally {
-                        btn.innerText = "Run";
-                        btn.disabled = false;
-                        input.disabled = false;
-                        input.focus();
-                    }
-                }
-        // Initial status check
-        const checkStatus = () => {
-            fetch('/api/status')
-                .then(res => res.json())
-                .then(data => {
-                    document.getElementById('status').innerHTML = `
-                        <span class="relative flex h-2 w-2">
-                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                        </span>
-                        <span class="text-emerald-400">Online</span> 
-                        <span class="text-slate-600 mx-1">|</span> 
-                        ${data.storage.nodes} nodes
-                    `;
-                })
-                .catch(() => {
-                    document.getElementById('status').innerHTML = `
-                        <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                        <span class="text-red-400">Offline</span>
-                    `;
-                });
-        };
-        
-        checkStatus();
-        setInterval(checkStatus, 5000);
-    </script>
+    </div>
 </body>
 </html>
