@@ -70,7 +70,12 @@ One query family — reachability, criticality, N-1 contingency — runs identic
 A graph-vector database written in Rust. OpenCypher queries, Redis protocol, vector search, graph algorithms — one binary, no JVM, no GC pauses.
 
 ```bash
-# Install and run (30 seconds)
+# Run with Docker (no Rust toolchain needed)
+docker run -d -p 6379:6379 -p 8080:8080 ghcr.io/samyama-ai/samyama-graph:latest
+```
+
+```bash
+# Or build from source
 git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
 cargo build --release
 ./target/release/samyama    # RESP on :6379, HTTP on :8080
