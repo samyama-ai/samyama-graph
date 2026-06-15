@@ -2036,6 +2036,70 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
     }
 
+    /// Rebuild all HNSW vector indices from node HashMap properties.
+    ///
+    /// Snapshot import (create_node_stub / create_node) bypasses the event loop
+    /// that normally calls add_vector, so Vector properties land in node.properties
+    /// but the HNSW graph stays empty — queryNodes returns 0 rows even though the
+    /// vectors are present and readable via Cypher. This is the vector equivalent
+    /// of rebuild_edge_type_index: a post-import scan that brings the HNSW indices
+    /// into sync with the node data. No-op when no vector indices are registered.
+    pub fn rebuild_vector_index(&mut self) {
+        let index_keys = self.vector_index.list_indices();
+        if index_keys.is_empty() {
+            return;
+        }
+        for key in &index_keys {
+            let nodes = self.get_nodes_by_label(&crate::graph::types::Label::new(&key.label));
+            let mut vectors: Vec<(crate::graph::types::NodeId, Vec<f32>)> = Vec::new();
+            for node in &nodes {
+                if let Some(crate::graph::property::PropertyValue::Vector(vec)) =
+                    node.get_property(&key.property_key)
+                {
+                    vectors.push((node.id, vec.clone()));
+                }
+            }
+            let _ = self.vector_index.rebuild_for_label(
+                &key.label,
+                &key.property_key,
+                &vectors,
+            );
+        }
+    }
+
+    /// Discover all (label, property_key, dims) tuples from node Vector properties,
+    /// register any missing HNSW indices, then populate them.
+    /// This is the correct post-import call when no indices were pre-registered.
+    pub fn rebuild_vector_index_full(&mut self) -> usize {
+        use std::collections::HashMap as HMap;
+
+        // Pass 1: collect (label, property_key, dims) — immutable scan ends before mutations
+        let mut discovered: HMap<(String, String), usize> = HMap::new();
+        for node in self.all_nodes() {
+            let label = node.labels.iter().next().map(|l| l.as_str().to_string()).unwrap_or_default();
+            if label.is_empty() {
+                continue;
+            }
+            for (k, v) in node.properties.iter() {
+                if let PropertyValue::Vector(vec) = v {
+                    discovered.entry((label.clone(), k.clone())).or_insert(vec.len());
+                }
+            }
+        }
+
+        // Pass 2: register missing HNSW indices (mutable only on vector_index)
+        for ((label, prop), dims) in &discovered {
+            if self.vector_index.get_index(label, prop).is_none() {
+                let _ = self.vector_index.create_index(label, prop, *dims, DistanceMetric::Cosine);
+            }
+        }
+
+        let count = discovered.len();
+        // Pass 3: populate using the existing rebuild logic
+        self.rebuild_vector_index();
+        count
+    }
+
     pub fn compute_statistics(&self) -> GraphStatistics {
         let total_nodes = self.node_count();
         let total_edges = self.edge_count();
