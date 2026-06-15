@@ -508,6 +508,15 @@ pub fn import_tenant_with_dedup(
         store.rebuild_edge_type_index();
     }
 
+    // Backfill HNSW vector indices from imported node properties.
+    // create_node_stub / create_node bypass the event loop that normally calls
+    // add_vector, so Vector properties are readable via Cypher but invisible to
+    // queryNodes. Rebuild here mirrors rebuild_edge_type_index above.
+    // No-op when no vector indices are registered (common case).
+    if imported_node_count > 0 {
+        store.rebuild_vector_index();
+    }
+
     if merged_node_count > 0 {
         eprintln!("[dedup] Merged {} duplicate nodes (reused existing)", merged_node_count);
     }
@@ -881,6 +890,57 @@ mod tests {
         assert_eq!(
             nodes[0].get_property("embedding"),
             Some(&PropertyValue::Vector(vec![1.0, 2.5, 3.0]))
+        );
+    }
+
+    #[test]
+    fn test_vector_index_populated_after_import() {
+        // Regression: snapshot import stored Vector props in node.properties but
+        // never called add_vector, so queryNodes returned 0 rows even when the
+        // vector index existed. rebuild_vector_index() at import end fixes this.
+        use crate::vector::index::DistanceMetric;
+
+        // Source store: vector index + one Problem node with a 4-dim embedding
+        let mut src = GraphStore::new();
+        src.vector_index
+            .create_index("Problem", "embedding", 4, DistanceMetric::Cosine)
+            .unwrap();
+        let nid = src.create_node("Problem");
+        src.get_node_mut(nid)
+            .unwrap()
+            .set_property("embedding", PropertyValue::Vector(vec![1.0, 0.0, 0.0, 0.0]));
+        src.get_node_mut(nid)
+            .unwrap()
+            .set_property("title", PropertyValue::String("Test Problem".into()));
+
+        // Export to snapshot
+        let mut buf = Vec::new();
+        export_tenant(&src, &mut buf).unwrap();
+
+        // Import into a fresh store that has the same index pre-registered
+        let mut dst = GraphStore::new();
+        dst.vector_index
+            .create_index("Problem", "embedding", 4, DistanceMetric::Cosine)
+            .unwrap();
+        let stats = import_tenant(&mut dst, Cursor::new(&buf)).unwrap();
+        assert_eq!(stats.node_count, 1);
+
+        // Vector property must be readable (was already working before the fix)
+        let nodes = dst.all_nodes();
+        assert_eq!(
+            nodes[0].get_property("embedding"),
+            Some(&PropertyValue::Vector(vec![1.0, 0.0, 0.0, 0.0]))
+        );
+
+        // HNSW index must now be populated — this was the bug (returned 0 results)
+        let results = dst
+            .vector_index
+            .search("Problem", "embedding", &[1.0, 0.0, 0.0, 0.0], 1)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "queryNodes must return 1 hit after import — HNSW index was empty before fix"
         );
     }
 

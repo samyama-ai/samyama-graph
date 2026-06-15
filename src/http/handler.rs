@@ -677,6 +677,11 @@ pub async fn restore_snapshot_handler(
                 }
             }
 
+            // Automatically rebuild HNSW indices from any Vector properties in the snapshot.
+            // Snapshot import bypasses the add_vector event loop, so without this call
+            // vector search would return empty results even when embeddings are present.
+            let vector_indices_rebuilt = store_guard.rebuild_vector_index_full();
+
             Json(json!({
                 "status": "ok",
                 "nodes_imported": stats.node_count,
@@ -684,6 +689,7 @@ pub async fn restore_snapshot_handler(
                 "edges_imported": stats.edge_count,
                 "labels": stats.labels,
                 "edge_types": stats.edge_types,
+                "vector_indices_rebuilt": vector_indices_rebuilt,
             }))
             .into_response()
         }

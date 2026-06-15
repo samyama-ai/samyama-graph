@@ -95,6 +95,48 @@ impl VectorIndexManager {
         indices.keys().cloned().collect()
     }
 
+    /// Drop and rebuild a specific HNSW index from a caller-supplied vector list.
+    ///
+    /// Snapshot import (create_node_stub / create_node) bypasses the event loop
+    /// that normally calls add_vector, leaving the HNSW empty even though node
+    /// properties carry Vector values. Rebuilding from scratch is idempotent and
+    /// avoids the duplicate entries that would occur if add_vector were called on
+    /// top of a partially-populated index.
+    pub fn rebuild_for_label(
+        &self,
+        label: &str,
+        property_key: &str,
+        vectors: &[(NodeId, Vec<f32>)],
+    ) -> VectorResult<()> {
+        let key = IndexKey {
+            label: label.to_string(),
+            property_key: property_key.to_string(),
+        };
+        // Read dims + metric under a short read lock, then release before building.
+        let (dims, metric) = {
+            let indices = self.indices.read().unwrap();
+            match indices.get(&key) {
+                Some(idx_lock) => {
+                    let idx = idx_lock.read().unwrap();
+                    (idx.dimensions(), idx.metric())
+                }
+                None => return Ok(()), // no index registered for this key — nothing to do
+            }
+        };
+        // Build a fresh HNSW outside any lock (potentially expensive for large datasets).
+        let mut new_index = VectorIndex::new(dims, metric);
+        for (node_id, vec) in vectors {
+            new_index.add(*node_id, vec)?;
+        }
+        // Swap in via write lock on the existing Arc so concurrent readers see
+        // the updated index without needing to re-acquire the outer map lock.
+        let indices = self.indices.read().unwrap();
+        if let Some(idx_lock) = indices.get(&key) {
+            *idx_lock.write().unwrap() = new_index;
+        }
+        Ok(())
+    }
+
     /// Save all indices to a directory
     pub fn dump_all(&self, path: &std::path::Path) -> VectorResult<()> {
         if !path.exists() {

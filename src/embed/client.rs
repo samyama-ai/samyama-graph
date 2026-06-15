@@ -13,6 +13,7 @@ pub struct EmbeddingClient {
     model: String,
     api_key: Option<String>,
     api_base_url: String,
+    dimensions: Option<usize>,
 }
 
 impl EmbeddingClient {
@@ -39,12 +40,17 @@ impl EmbeddingClient {
              return Err(EmbedError::ConfigError("AzureOpenAI requires api_base_url".to_string()));
         }
 
+        // Only pass dimensions when not using the model's native default (1536 for text-embedding-3-small).
+        // OpenAI ignores the field for models that don't support it (e.g. ada-002).
+        let dimensions = if config.vector_dimension > 0 { Some(config.vector_dimension) } else { None };
+
         Ok(Self {
             client,
             provider: config.provider.clone(),
             model: config.embedding_model.clone(),
             api_key: config.api_key.clone(),
             api_base_url,
+            dimensions,
         })
     }
 
@@ -78,6 +84,8 @@ impl EmbeddingClient {
         struct OpenAIRequest<'a> {
             input: &'a [String],
             model: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            dimensions: Option<usize>,
         }
 
         #[derive(Deserialize)]
@@ -98,6 +106,7 @@ impl EmbeddingClient {
             .json(&OpenAIRequest {
                 input: texts,
                 model: &self.model,
+                dimensions: self.dimensions,
             })
             .send()
             .await
