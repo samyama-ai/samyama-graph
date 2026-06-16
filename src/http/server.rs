@@ -10,6 +10,7 @@ use crate::persistence::TenantManager;
 use crate::query::QueryEngine;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::embed::EmbedPipeline;
 use axum::extract::DefaultBodyLimit;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -18,6 +19,7 @@ use super::handler::{
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
 };
+use super::vector::{list_indexes_handler, create_index_handler, search_handler};
 
 /// HA-09: Build the tenant CRUD sub-router backed by the shared `TenantManager`.
 /// Exposed at the crate level so integration tests can mount it in isolation.
@@ -47,6 +49,10 @@ pub struct AppState {
     pub engine: Arc<QueryEngine>,
     /// Data directory for persisting snapshots (HA-08)
     pub data_path: Option<String>,
+    /// Tenant manager for multi-tenancy support
+    pub tenant_manager: Option<Arc<TenantManager>>,
+    /// Global embed pipeline (fallback when tenant has no embed_config)
+    pub embed_pipeline: Option<Arc<EmbedPipeline>>,
 }
 
 /// HTTP server managing the Visualizer API and static assets
@@ -82,6 +88,8 @@ impl HttpServer {
             store: Arc::clone(&self.store),
             engine: Arc::new(QueryEngine::new()),
             data_path: self.data_path.clone(),
+            tenant_manager: self.tenants.clone(),
+            embed_pipeline: None,
         };
 
         let optimize_state = Arc::new(super::optimize::OptimizeState::default());
@@ -94,6 +102,9 @@ impl HttpServer {
             .route("/api/sample", post(sample_handler))
             .route("/api/import/csv", post(import_csv_handler))
             .route("/api/import/json", post(import_json_handler))
+            .route("/api/vector/indexes", get(list_indexes_handler))
+            .route("/api/vector/indexes", post(create_index_handler))
+            .route("/api/vector-search", post(search_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 // 64 GB cap. PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need
@@ -159,6 +170,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         let cloned = state.clone();
@@ -174,6 +187,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         let cloned = state.clone();
@@ -195,6 +210,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         let c1 = state.clone();
@@ -214,6 +231,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         // Write through the state
@@ -249,6 +268,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         let _app: Router = Router::new()
@@ -265,6 +286,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
 
         let app = Router::new()

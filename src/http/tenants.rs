@@ -13,14 +13,14 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::persistence::{ResourceQuotas, TenantError, TenantManager};
+use crate::persistence::{AutoEmbedConfig, ResourceQuotas, TenantError, TenantManager};
 
 #[derive(Clone)]
 pub struct TenantState {
@@ -121,6 +121,39 @@ pub async fn delete_tenant(
     }
 }
 
+/// Request body for PATCH /api/tenants/:id — update embed_config
+#[derive(Deserialize)]
+pub struct PatchTenantBody {
+    pub embed_config: Option<AutoEmbedConfig>,
+}
+
+pub async fn patch_tenant(
+    State(state): State<TenantState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchTenantBody>,
+) -> impl IntoResponse {
+    match state.tenants.update_embed_config(&id, body.embed_config) {
+        Ok(()) => match state.tenants.get_tenant(&id) {
+            Ok(t) => (StatusCode::OK, Json(tenant_to_json(&t))).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        Err(TenantError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("Tenant '{}' not found", id) })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// Build the tenant CRUD router, parameterised on the shared `TenantManager`.
 pub fn router(tenants: Arc<TenantManager>) -> Router {
     let state = TenantState { tenants };
@@ -128,7 +161,7 @@ pub fn router(tenants: Arc<TenantManager>) -> Router {
         .route("/api/tenants", post(create_tenant).get(list_tenants))
         .route(
             "/api/tenants/:id",
-            get(get_tenant).delete(delete_tenant),
+            get(get_tenant).delete(delete_tenant).patch(patch_tenant),
         )
         .with_state(state)
 }

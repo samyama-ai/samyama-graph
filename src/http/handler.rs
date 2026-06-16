@@ -723,6 +723,8 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
