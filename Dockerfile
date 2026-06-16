@@ -28,6 +28,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libstdc++6 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -46,9 +47,9 @@ EXPOSE 8080
 # Set environment variables
 ENV RUST_LOG=info
 
-# Healthcheck via RESP PING
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD echo "PING" | nc -w1 localhost 6379 | grep -q PONG || exit 1
+# Healthcheck via HTTP status endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:8080/api/status || exit 1
 
 # Run the server, binding to 0.0.0.0 so it's reachable from outside the container
 CMD ["samyama", "--host", "0.0.0.0"]
