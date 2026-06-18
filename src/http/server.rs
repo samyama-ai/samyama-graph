@@ -1,16 +1,18 @@
 //! HTTP server implementation for the Visualizer
 
 use axum::{
+    extract::DefaultBodyLimit,
+    response::{Html, IntoResponse},
     routing::{get, post},
     Router,
-    response::{Html, IntoResponse},
 };
+use crate::embed::EmbedPipeline;
 use crate::graph::GraphStore;
 use crate::persistence::TenantManager;
 use crate::query::QueryEngine;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use axum::extract::DefaultBodyLimit;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
@@ -18,11 +20,13 @@ use super::handler::{
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
 };
+use super::vector::{list_indexes_handler, create_index_handler, search_handler};
 
 /// HA-09: Build the tenant CRUD sub-router backed by the shared `TenantManager`.
 /// Exposed at the crate level so integration tests can mount it in isolation.
 pub fn build_tenant_router(tenants: Arc<TenantManager>) -> axum::Router {
-    super::tenants::router(tenants)
+    let cache = Arc::new(RwLock::new(HashMap::<String, Arc<EmbedPipeline>>::new()));
+    super::tenants::router(tenants, cache)
 }
 use rust_embed::RustEmbed;
 
@@ -47,6 +51,12 @@ pub struct AppState {
     pub engine: Arc<QueryEngine>,
     /// Data directory for persisting snapshots (HA-08)
     pub data_path: Option<String>,
+    /// Tenant manager for multi-tenancy support
+    pub tenant_manager: Option<Arc<TenantManager>>,
+    /// Global embed pipeline (fallback when tenant has no embed_config)
+    pub embed_pipeline: Option<Arc<EmbedPipeline>>,
+    /// Per-tenant EmbedPipeline cache; invalidated on PATCH /api/tenants/:id
+    pub embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>>,
 }
 
 /// HTTP server managing the Visualizer API and static assets
@@ -78,10 +88,16 @@ impl HttpServer {
 
     /// Start the HTTP server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
         let state = AppState {
             store: Arc::clone(&self.store),
             engine: Arc::new(QueryEngine::new()),
             data_path: self.data_path.clone(),
+            tenant_manager: self.tenants.clone(),
+            embed_pipeline: None,
+            embed_cache: Arc::clone(&embed_cache),
         };
 
         let optimize_state = Arc::new(super::optimize::OptimizeState::default());
@@ -94,6 +110,9 @@ impl HttpServer {
             .route("/api/sample", post(sample_handler))
             .route("/api/import/csv", post(import_csv_handler))
             .route("/api/import/json", post(import_json_handler))
+            .route("/api/vector/indexes", get(list_indexes_handler))
+            .route("/api/vector/indexes", post(create_index_handler))
+            .route("/api/vector-search", post(search_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 // 64 GB cap. PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need
@@ -107,7 +126,7 @@ impl HttpServer {
             .merge(super::optimize::router().with_state(optimize_state));
 
         if let Some(tm) = self.tenants.as_ref() {
-            app = app.merge(super::tenants::router(Arc::clone(tm)));
+            app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
         }
 
         let app = app.layer(CorsLayer::permissive());
@@ -159,6 +178,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let cloned = state.clone();
@@ -174,6 +196,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let cloned = state.clone();
@@ -195,6 +220,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let c1 = state.clone();
@@ -214,6 +242,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Write through the state
@@ -249,6 +280,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let _app: Router = Router::new()
@@ -265,6 +299,9 @@ mod tests {
             store: Arc::new(RwLock::new(GraphStore::new())),
             engine: Arc::new(QueryEngine::new()),
             data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let app = Router::new()

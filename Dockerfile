@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build stage
 FROM rust:1.85-bookworm AS builder
 
@@ -18,8 +19,13 @@ COPY cli ./cli
 COPY benches ./benches
 COPY examples ./examples
 
-# Build the application
-RUN cargo build --release
+# Build the application — cache mounts keep the Cargo registry and build
+# artifacts across rebuilds so only changed crates recompile (~2 min vs ~15 min).
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp target/release/samyama /samyama-bin
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -33,8 +39,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the binary from builder
-COPY --from=builder /app/target/release/samyama /usr/local/bin/samyama
+# Copy the binary from builder (extracted outside the cache-mounted target dir)
+COPY --from=builder /samyama-bin /usr/local/bin/samyama
 
 # Create data directory for persistence
 RUN mkdir -p /data
