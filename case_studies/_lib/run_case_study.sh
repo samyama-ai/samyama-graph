@@ -60,9 +60,9 @@ if curl -fsS "$BASE_URL/api/status" >/dev/null 2>&1; then
   pkill -f "release/samyama" 2>/dev/null; sleep 2
 fi
 say "starting server (HTTP :$PORT_HTTP, RESP :$PORT_RESP)…"
-# Run from a clean temp CWD: the server persists to ./samyama_data relative to
-# CWD and auto-recovers it on boot, so an isolated CWD guarantees an empty store.
-( cd "$DATA_DIR" && RUST_LOG=warn exec "$BIN" --host 127.0.0.1 --port "$PORT_RESP" ) \
+# --ephemeral guarantees an empty in-memory store (no CWD-relative ./samyama_data
+# recovery). Run from the temp CWD too, as a fallback for older binaries.
+( cd "$DATA_DIR" && RUST_LOG=warn exec "$BIN" --host 127.0.0.1 --port "$PORT_RESP" --ephemeral ) \
   >"$DATA_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 60); do
@@ -83,8 +83,9 @@ for _ in $(seq 1 30); do
   [[ "${N:-0}" -gt 0 ]] && { say "ready: $N nodes"; break; }
   sleep 1
 done
-# Let any HNSW vector-index rebuild kicked off by import settle before we query —
-# a search that races the rebuild can currently disrupt the server (see backlog).
+# Settle after import: the HNSW rebuild runs synchronously in the import handler,
+# but async edge compaction (DS-07) and indexing drain just after — a query that
+# races them can still disrupt the server (backlog SK-29), so wait briefly.
 sleep 3
 
 # ---- 5. DoD gate: every query must return rows ------------------------------
