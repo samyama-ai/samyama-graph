@@ -59,6 +59,9 @@ pub enum VectorError {
 
     #[error("Dimension mismatch: expected {expected}, got {got}")]
     DimensionMismatch { expected: usize, got: usize },
+
+    #[error("Search failed: {0}")]
+    SearchFailed(String),
 }
 
 pub type VectorResult<T> = Result<T, VectorError>;
@@ -208,14 +211,48 @@ impl VectorIndex {
             return Ok(Vec::new());
         }
         let ef_search = (k * 2).max(64).min(n);
-        let results = self.hnsw.search(query, k.min(n), ef_search);
-        
+        // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
+        // `return_points.peek().unwrap()`) on certain graphs. A panic here would
+        // unwind across the await point and take the whole server down, so a single
+        // HTTP search must never be able to crash the process — contain it and
+        // surface a clean error instead.
+        let results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.hnsw.search(query, k.min(n), ef_search)
+        })) {
+            Ok(r) => r,
+            Err(_) => {
+                // hnsw_rs 0.2.1 panics in multi-layer search_layer for some graphs
+                // (large indexes). Rather than crash, fall back to an exact linear
+                // scan — O(n·dim), trivial for typical indexes and always correct.
+                eprintln!(
+                    "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
+                    n
+                );
+                return Ok(self.brute_force_search(query, k.min(n)));
+            }
+        };
+
         let mut neighbors = Vec::new();
         for res in results {
             neighbors.push((NodeId::new(res.d_id as u64), res.distance));
         }
         
         Ok(neighbors)
+    }
+
+    /// Exact nearest-neighbour search by linear scan over stored vectors.
+    /// Used as a fallback when the HNSW index search panics. The index uses
+    /// cosine distance, so this matches it; non-finite distances are skipped.
+    fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        let mut scored: Vec<(NodeId, f32)> = self
+            .stored_vectors
+            .iter()
+            .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+            .filter(|(_, d)| d.is_finite())
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored
     }
 
     /// Get dimensions

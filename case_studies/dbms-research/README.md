@@ -40,9 +40,10 @@ problems (by formal bounds).
 ("Cardinality estimation error propagation through plans") whose 1024-dim
 embedding is committed alongside the demo ([`seed_embedding.json`](seed_embedding.json),
 extracted once from this snapshot) and posts it to `POST /api/vector-search` —
-Samyama's HNSW index returns the **research topics** the problem is semantically
-nearest to. No external embedding service: the query vector ships with the demo,
-so the semantic search reproduces offline.
+Samyama returns the **open problems** semantically nearest to it (e.g. "Error
+Propagation Through Query Plans", "Cardinality Estimation for Columnar Plans").
+No external embedding service: the query vector ships with the demo, so the
+semantic search reproduces offline.
 
 > Vector search is also covered directly in the engine suite — see
 > `benches/vector_benchmark.rs` and `tests/vector_search_test.rs`.
