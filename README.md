@@ -4,8 +4,8 @@
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases/tag/v0.7.0"><img src="https://img.shields.io/badge/version-0.7.0-blue" alt="Version"></a>
-    <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-1877_passing-brightgreen" alt="Tests"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
     <a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d"><img src="https://img.shields.io/badge/community-WhatsApp-25D366?logo=whatsapp&logoColor=white" alt="WhatsApp Community"></a>
@@ -76,11 +76,25 @@ Every showcase query is gated to return real rows before any GIF is recorded
 ```bash
 cargo build --release && pip install rich requests
 cd case_studies/cricket && ./run.sh          # fetch snapshot → import → validate → demo
+RECORD=1 ./run.sh                            # also (re)generate demo.gif
 ```
 
-Five domains ship today — cricket, drug-interactions, surveillance (WHO),
-pathways (Reactome/STRING/GO), and dbms-research (**vector search** over 1,000+
-research problems). [Browse the catalogue →](case_studies)
+Each snapshot is small enough to run on a laptop; every query returns real rows.
+GIFs can't pause in a browser, so each domain also ships its `demo.cast` — replay
+it pausably (`space`) with `asciinema play case_studies/<domain>/demo.cast`.
+
+| Domain | Scale | Highlight | Snapshot | Demo |
+|--------|-------|-----------|----------|------|
+| [cricket](case_studies/cricket) | 37K / 1.4M | dismissal-rivalry networks, venues, awards | [`cricket.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v1/cricket.sgsnap) | [gif](case_studies/cricket/demo.gif) |
+| [drug-interactions](case_studies/drug-interactions) | 245K / 388K | polypharmacy shared-target risk, CYP hubs | [`druginteractions.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v5/druginteractions.sgsnap) | [gif](case_studies/drug-interactions/demo.gif) |
+| [surveillance](case_studies/surveillance) | 217K / 241K | WHO disease burden + immunization gaps | [`surveillance.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v4/surveillance.sgsnap) | [gif](case_studies/surveillance/demo.gif) |
+| [health-determinants](case_studies/health-determinants) | 240K / 240K | air, water, poverty — the upstream "why" | [`health-determinants.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v6/health-determinants.sgsnap) | [gif](case_studies/health-determinants/demo.gif) |
+| [health-systems](case_studies/health-systems) | 8.7K / 8.4K | WHO emergency-preparedness (SPAR) scores | [`health-systems.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v6/health-systems.sgsnap) | [gif](case_studies/health-systems/demo.gif) |
+| [pathways](case_studies/pathways) | 119K / 835K | protein hubs (TP53), pathway crosstalk | [`pathways.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v3/pathways.sgsnap) | [gif](case_studies/pathways/demo.gif) |
+| [dbms-research](case_studies/dbms-research) | 19K · 2 HNSW | **vector search** — semantic "nearest topics" | [`dbms-research.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v7/dbms-research.sgsnap) | [gif](case_studies/dbms-research/demo.gif) |
+
+*surveillance + health-determinants + health-systems federate by `Country.iso_code`
+into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 ---
 
@@ -165,6 +179,22 @@ samyama-mcp-serve --demo cricket    # Instant AI agent tools for any graph
 
 ## Benchmarks
 
+**Run them:** `cargo bench --bench <name>` ([`benches/`](benches)). The vector,
+optimization, and micro/MVCC suites are self-contained; LDBC needs a data download.
+
+| Benchmark | Command | Measures | Data |
+|-----------|---------|----------|------|
+| Vector (HNSW) | `cargo bench --bench vector_benchmark` | build time, recall@k, search QPS (64–768 dim) | self-contained |
+| Rao family | `cargo bench --bench rao_family_benchmark` | Jaya/Rao/BMR/NSGA-II on ZDT/DTLZ | self-contained |
+| Graph optimization | `cargo bench --bench graph_optimization_benchmark` | 10+ metaheuristic solvers on allocation | self-contained |
+| Graphalytics | `cargo bench --bench graphalytics_benchmark` | BFS, PageRank, WCC, CDLP, LCC, SSSP | synthetic / LDBC |
+| Micro | `cargo bench --bench graph_benchmarks` | insertion, label scan, k-hop, filter, aggregate | self-contained |
+| MVCC & arena | `cargo bench --bench mvcc_benchmark` | 1M-node alloc, version access, time-travel | self-contained |
+| Late materialization | `cargo bench --bench late_materialization_bench` | raw vs lazy traversal vs Cypher | self-contained |
+| LDBC SNB Interactive | `cargo bench --bench ldbc_benchmark` | 21 IS/IC queries + 8 updates | needs SF1 download |
+| LDBC SNB BI | `cargo bench --bench ldbc_bi_benchmark` | 20 analytical (BI-1…20) | needs SF1 download |
+| LDBC FinBench | `cargo bench --bench finbench_benchmark` | 40+ CR/SR/RW/W on financial networks | synthetic / download |
+
 ### Scale: 74M Nodes, 1 Billion Edges
 
 | KG | Source | Nodes | Edges |
@@ -196,6 +226,8 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 | Graphalytics | **12/12 (100%)** | XS reference graphs |
 | FinBench | **40/40 (100%)** | 7.7K nodes, 42.2K edges |
 
+![LDBC benchmark results](ldbc-benchmark-results.png)
+
 ### Concurrent Performance
 
 | Workload | 1 client | 16 clients | Scaling |
@@ -208,16 +240,27 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 
 ## Examples
 
+**Run them all in one command:** `./scripts/run_all_examples.sh --batch` builds
+every example, starts a server, and runs each in turn with a pass/fail summary
+(the orchestrator for the `examples/` directory).
+
 ### Domain Knowledge Graphs
 
-| Domain | Command | Nodes | Edges |
-|--------|---------|-------|-------|
-| Banking & Fraud | `cargo run --example banking_demo` | — | Fraud patterns, money laundering, OFAC |
-| Clinical Trials | `cargo run --example clinical_trials_demo` | — | Patient-trial matching, drug interactions |
-| Supply Chain | `cargo run --example supply_chain_demo` | — | Disruption analysis, port optimization |
-| Manufacturing | `cargo run --example smart_manufacturing_demo` | — | Digital twin, failure cascades |
-| Social Network | `cargo run --example social_network_demo` | — | Influence, communities, recommendations |
-| Enterprise SOC | `cargo run --example enterprise_soc_demo` | — | MITRE ATT&CK, attack paths, threat intel |
+| Domain | Command | What it shows |
+|--------|---------|---------------|
+| Banking & Fraud | `cargo run --example banking_demo` | Fraud patterns, money laundering, OFAC, NLQ |
+| Clinical Trials | `cargo run --example clinical_trials_demo` | Patient-trial matching, drug interactions, vector search |
+| Supply Chain | `cargo run --example supply_chain_demo` | Disruption analysis, port optimization (Jaya) |
+| Manufacturing | `cargo run --example smart_manufacturing_demo` | Digital twin, failure cascades, scheduling |
+| Social Network | `cargo run --example social_network_demo` | Influence, communities, recommendations |
+| Enterprise SOC | `cargo run --example enterprise_soc_demo` | MITRE ATT&CK, attack paths, threat intel |
+| Knowledge Graph | `cargo run --example knowledge_graph_demo` | Enterprise RAG + semantic search |
+| Agentic (GAK) | `cargo run --example agentic_enrichment_demo` | Generation-augmented enrichment (needs `claude` CLI) |
+| Raft Cluster | `cargo run --example cluster_demo` | 3-node HA consensus |
+
+*19 demo examples + 11 data loaders in [`examples/`](examples); optimization/use-case
+demos: `grid_dispatch_demo`, `amr_stewardship_demo`, `healthcare_allocation_demo`,
+`wildfire_evac_demo`, `pca_demo`, `sdk_demo`, …*
 
 ### Data Loaders
 

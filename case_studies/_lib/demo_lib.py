@@ -60,7 +60,10 @@ def run_query(client: SamyamaClient, q, idx: int) -> None:
         table.add_row(*[_fmt(v) for v in row])
     console.print(table)
     console.print(f"  [green]→[/green] {res.rows} row(s) in [bold]{res.elapsed_ms:.1f} ms[/bold]")
-    pause()
+    # Hold on the result so a reader can take in the query AND its answer. GIFs
+    # can't be paused in a browser, so the read time has to be built into the
+    # recording (and demo.cast can be replayed pausably with `asciinema play`).
+    pause(3.2)
 
 
 def _fmt(v) -> str:

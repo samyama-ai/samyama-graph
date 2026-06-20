@@ -19,3 +19,5 @@ vectors/
 wal/
 data/
 .env
+social_network.svg
+.DS_Store

@@ -34,6 +34,10 @@ RECORD=1 ./run.sh
 credentials, no external services. Snapshots are fetched from pinned, hash-
 verified release/S3 URLs and cached under `case_studies/.snapshots/`.
 
+> **Want to pause and read at your own speed?** A looping GIF can't be paused in
+> a browser, so each demo's `demo.cast` (asciinema recording) is committed too.
+> Replay it pausably (press `space`) with: `asciinema play case_studies/<domain>/demo.cast`.
+
 ## Catalogue
 
 Every case study below downloads a snapshot small enough to run on a normal
@@ -44,6 +48,8 @@ laptop, so anyone can reproduce it.
 | [cricket](cricket) | Ball-by-ball sport analytics — dismissal-rivalry networks, venue specialists | `cricket.sgsnap` (21 MB) | 37K nodes / 1.4M edges | ![](cricket/demo.gif) |
 | [drug-interactions](drug-interactions) | Polypharmacy risk, CYP-enzyme hubs, side-effect burden | `druginteractions.sgsnap` (8 MB) | 245K / 388K | ![](drug-interactions/demo.gif) |
 | [surveillance](surveillance) | WHO outbreak burden & immunization gaps (cross-KG by country) | `surveillance.sgsnap` (6 MB) | 217K / 241K | ![](surveillance/demo.gif) |
+| [health-determinants](health-determinants) | Air, water, poverty — the upstream "why" of health (cross-KG) | `health-determinants.sgsnap` (5 MB) | 240K / 240K | ![](health-determinants/demo.gif) |
+| [health-systems](health-systems) | WHO emergency-preparedness (SPAR) scores (cross-KG) | `health-systems.sgsnap` (0.2 MB) | 8.7K / 8.4K | ![](health-systems/demo.gif) |
 | [pathways](pathways) | Systems-biology protein hubs (TP53), pathway crosstalk | `pathways.sgsnap` (9 MB) | 119K / 835K | ![](pathways/demo.gif) |
 | [dbms-research](dbms-research) | **Vector search** over 1000+ open DBMS research problems | `dbms-research.sgsnap` (13 MB) | 19K nodes · 2 HNSW indices | ![](dbms-research/demo.gif) |
 
