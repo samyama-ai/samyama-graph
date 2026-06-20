@@ -433,6 +433,25 @@ async fn start_server() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(6379);
 
+    // Parse --http-port (HTTP REST API port; default 8080).
+    let http_port: u16 = std::env::args()
+        .position(|a| a == "--http-port")
+        .and_then(|pos| std::env::args().nth(pos + 1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+
+    // Parse --data-path <dir> (snapshot/RocksDB persistence dir) and --ephemeral
+    // (no persistence — guarantees an empty store, no CWD-relative ./samyama_data
+    // recovery). --ephemeral wins if both are given.
+    if std::env::args().any(|a| a == "--ephemeral") {
+        config.data_path = None;
+    } else if let Some(path) = std::env::args()
+        .position(|a| a == "--data-path")
+        .and_then(|pos| std::env::args().nth(pos + 1))
+    {
+        config.data_path = Some(path);
+    }
+
     // Parse --demo flag: social (rich schema) or large (scale stress test)
     let demo_mode: Option<String> = std::env::args()
         .position(|a| a == "--demo")
@@ -539,14 +558,14 @@ async fn start_server() {
         pm.start_indexer(&*store.read().await, rx);
     }
 
-    // Start HTTP server for Visualizer API on port 8080
+    // Start HTTP server for Visualizer API (port from --http-port, default 8080)
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);
     tokio::spawn(async move {
-        let http_server = HttpServer::new(http_store, 8080)
+        let http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
             .with_tenant_manager(http_tenants);
-        println!("HTTP server starting on port 8080 (REST API; bundled visualizer deprecated — use https://graph.samyama.cloud)");
+        println!("HTTP server starting on port {} (REST API; bundled visualizer deprecated — use https://graph.samyama.cloud)", http_port);
         if let Err(e) = http_server.start().await {
             eprintln!("HTTP server error: {}", e);
         }
