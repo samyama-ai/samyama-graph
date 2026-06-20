@@ -203,19 +203,23 @@ function run_all_batch() {
     echo -e "${YELLOW}--- Knowledge & AI ---${NC}"
     run_rust_example "knowledge_graph_demo" "Knowledge Graph Demo"
     run_rust_example "social_network_demo" "Social Network Demo"
-    run_rust_example "agentic_enrichment_demo" "Agentic Enrichment Demo (GAK)"
+    # GAK shells out to the `claude` CLI; skip (not fail) when it isn't available
+    # (CI / fresh clone without Claude Code installed).
+    if command -v claude &>/dev/null; then
+        run_rust_example "agentic_enrichment_demo" "Agentic Enrichment Demo (GAK)"
+    else
+        echo -e "${YELLOW}Skipping Agentic Enrichment Demo (GAK): requires the 'claude' CLI.${NC}"
+        EXAMPLE_RESULTS+=("SKIP  0s  Agentic Enrichment Demo (GAK) — needs 'claude' CLI")
+    fi
 
     # Core Infrastructure
     echo -e "${YELLOW}--- Core Infrastructure ---${NC}"
     run_rust_example "cluster_demo" "Cluster Demo"
-    run_rust_example "persistence_demo" "Persistence Demo"
 
-    # Benchmarks
-    echo -e "${YELLOW}--- Benchmarks ---${NC}"
-    run_rust_example "full_benchmark" "Full Benchmark Suite"
-    run_rust_example "vector_benchmark" "Vector Search Benchmark"
-    run_rust_example "mvcc_benchmark" "MVCC Benchmark"
-    run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark"
+    # Benchmarks live in benches/, not examples/ — run them with `cargo bench`:
+    #   cargo bench --bench vector_benchmark | mvcc_benchmark | rao_family_benchmark
+    #   cargo bench --bench graphalytics_benchmark | graph_optimization_benchmark
+    echo -e "${YELLOW}--- Benchmarks: run via 'cargo bench --bench <name>' (see benches/) ---${NC}"
 
     # Python Client (requires server)
     echo -e "${YELLOW}--- Connectivity ---${NC}"
@@ -267,20 +271,15 @@ while true; do
     echo ""
     echo -e "${YELLOW}--- Core Infrastructure ---${NC}"
     echo "8.  Cluster Demo (Raft HA)"
-    echo "9.  Persistence Demo (Multi-tenant Storage)"
-    echo ""
-    echo -e "${YELLOW}--- Benchmarks ---${NC}"
-    echo "10. Full Benchmark Suite"
-    echo "11. Vector Search Benchmark"
-    echo "12. MVCC Benchmark"
-    echo "13. Graph Optimization Benchmark"
     echo ""
     echo -e "${YELLOW}--- Connectivity ---${NC}"
-    echo "14. Python Client Demo"
+    echo "9.  Python Client Demo"
     echo ""
     echo -e "${YELLOW}--- System ---${NC}"
-    echo "15. Reset Database (Restart Server & Clean Data)"
-    echo "16. View Server Logs"
+    echo "10. Reset Database (Restart Server & Clean Data)"
+    echo "11. View Server Logs"
+    echo ""
+    echo -e "${YELLOW}Benchmarks moved to 'cargo bench --bench <name>' (see benches/).${NC}"
     echo "a.  Run All Examples (batch)"
     echo "q.  Quit"
     echo -e "${GREEN}==============================================${NC}"
@@ -295,14 +294,9 @@ while true; do
         6) run_rust_example "social_network_demo" "Social Network Demo" ;;
         7) run_rust_example "agentic_enrichment_demo" "Agentic Enrichment Demo (GAK)" ;;
         8) run_rust_example "cluster_demo" "Cluster Demo" ;;
-        9) run_rust_example "persistence_demo" "Persistence Demo" ;;
-        10) run_rust_example "full_benchmark" "Full Benchmark Suite" ;;
-        11) run_rust_example "vector_benchmark" "Vector Search Benchmark" ;;
-        12) run_rust_example "mvcc_benchmark" "MVCC Benchmark" ;;
-        13) run_rust_example "graph_optimization_benchmark" "Graph Optimization Benchmark" ;;
-        14) run_python_client ;;
-        15) reset_environment; read -p "Environment Reset. Press Enter..." ;;
-        16) echo "--- Last 30 lines of server.log ---"; tail -n 30 server.log; read -p "Press Enter..." ;;
+        9) run_python_client ;;
+        10) reset_environment; read -p "Environment Reset. Press Enter..." ;;
+        11) echo "--- Last 30 lines of server.log ---"; tail -n 30 server.log; read -p "Press Enter..." ;;
         a) run_all_batch ;;
         q) cleanup_exit ;;
         *) echo "Invalid option"; sleep 1 ;;

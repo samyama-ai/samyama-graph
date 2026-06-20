@@ -39,8 +39,7 @@ cargo run --example smart_manufacturing_demo  # Digital twin + scheduling
 cargo run --example social_network_demo       # Social network analysis
 cargo run --example knowledge_graph_demo      # Enterprise knowledge graph
 cargo run --example enterprise_soc_demo       # Security operations center
-cargo run --example agentic_enrichment_demo   # GAK (Generation-Augmented Knowledge)
-cargo run --example persistence_demo          # Persistence & multi-tenancy
+cargo run --example agentic_enrichment_demo   # GAK (Generation-Augmented Knowledge; needs `claude` CLI)
 cargo run --example cluster_demo              # Raft clustering
 cargo run --example ldbc_loader               # Load LDBC SNB SF1 dataset
 cargo run --example finbench_loader           # Load/generate FinBench dataset
