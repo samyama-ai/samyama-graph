@@ -725,6 +725,7 @@ mod tests {
             data_path: None,
             tenant_manager: None,
             embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
