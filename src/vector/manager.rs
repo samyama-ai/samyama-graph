@@ -124,9 +124,21 @@ impl VectorIndexManager {
             }
         };
         // Build a fresh HNSW outside any lock (potentially expensive for large datasets).
+        // Skip individual vectors that don't match the index dimension rather than
+        // aborting the whole rebuild — a single malformed embedding must not leave the
+        // entire index empty (which then returns 0 results / panics on search).
         let mut new_index = VectorIndex::new(dims, metric);
+        let mut skipped = 0usize;
         for (node_id, vec) in vectors {
-            new_index.add(*node_id, vec)?;
+            if new_index.add(*node_id, vec).is_err() {
+                skipped += 1;
+            }
+        }
+        if skipped > 0 {
+            eprintln!(
+                "[vector] rebuild {}.{}: indexed {} vectors, skipped {} with mismatched dimension (expected {})",
+                label, property_key, vectors.len() - skipped, skipped, dims
+            );
         }
         // Swap in via write lock on the existing Arc so concurrent readers see
         // the updated index without needing to re-acquire the outer map lock.

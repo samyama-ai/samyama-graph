@@ -2050,13 +2050,32 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         for key in &index_keys {
-            let nodes = self.get_nodes_by_label(&crate::graph::types::Label::new(&key.label));
+            let node_ids: Vec<crate::graph::types::NodeId> = self
+                .get_nodes_by_label(&crate::graph::types::Label::new(&key.label))
+                .iter()
+                .map(|n| n.id)
+                .collect();
             let mut vectors: Vec<(crate::graph::types::NodeId, Vec<f32>)> = Vec::new();
-            for node in &nodes {
-                if let Some(crate::graph::property::PropertyValue::Vector(vec)) =
-                    node.get_property(&key.property_key)
-                {
-                    vectors.push((node.id, vec.clone()));
+            for nid in node_ids {
+                // The embedding may live inline (just-imported, not yet compacted) OR
+                // in the column store (frozen by DS-07 compaction, which clears inline
+                // props). Read inline first, fall back to columnar — the union covers
+                // both tiers, so large labels (e.g. Problem) are no longer left empty.
+                let inline = self
+                    .get_node(nid)
+                    .and_then(|n| match n.get_property(&key.property_key) {
+                        Some(crate::graph::property::PropertyValue::Vector(v)) => Some(v.clone()),
+                        _ => None,
+                    });
+                let vec = match inline {
+                    Some(v) => Some(v),
+                    None => match self.node_columns.get_property(nid.as_u64() as usize, &key.property_key) {
+                        crate::graph::property::PropertyValue::Vector(v) => Some(v),
+                        _ => None,
+                    },
+                };
+                if let Some(vec) = vec {
+                    vectors.push((nid, vec));
                 }
             }
             let _ = self.vector_index.rebuild_for_label(
@@ -2082,7 +2101,13 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
             for (k, v) in node.properties.iter() {
                 if let PropertyValue::Vector(vec) = v {
-                    discovered.entry((label.clone(), k.clone())).or_insert(vec.len());
+                    // Use the MAX length seen for this (label, property): a stray
+                    // empty/short embedding must not set the index dimension and
+                    // cause every real vector to be skipped on rebuild.
+                    discovered
+                        .entry((label.clone(), k.clone()))
+                        .and_modify(|d| *d = (*d).max(vec.len()))
+                        .or_insert(vec.len());
                 }
             }
         }
