@@ -1,0 +1,6 @@
+# cached snapshots (fetched from pinned release/S3 URLs, not committed)
+.snapshots/
+# asciinema recordings are regenerable; commit demo.gif, not the cast
+*.cast
+# server scratch
+**/samyama_data/
