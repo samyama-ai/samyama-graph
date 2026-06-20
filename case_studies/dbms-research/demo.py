@@ -27,7 +27,7 @@ GRAPH = os.environ.get("SG_GRAPH", "default")
 SEED = json.load(open(os.path.join(os.path.dirname(__file__), "seed_embedding.json")))
 
 
-def vector_search(query_vec, label="Topic", k=5, retries=8):
+def vector_search(query_vec, label="Problem", k=7, retries=8):
     """Hit the /api/vector-search HTTP endpoint, retrying while the HNSW index
     finishes rebuilding right after import."""
     for _ in range(retries):
@@ -60,24 +60,30 @@ def main():
         run_query(client, q, i)
 
     # --- vector-search finale -------------------------------------------------
-    step(len(queries) + 2, "Vector search: which topics is this problem nearest to?")
+    step(len(queries) + 2, "Vector search: find research problems like this one")
     title, emb = SEED["title"], SEED["embedding"]
     console.print(f'  seed problem: [bold white]"{title}"[/bold white]')
-    console.print("  [dim]→ POST /api/vector-search  (1024-dim embedding, HNSW, cosine)[/dim]")
+    console.print("  [dim]→ POST /api/vector-search  (1024-dim embedding, cosine)[/dim]")
     pause()
-    results = vector_search(emb, label="Topic", k=5)
+    results = vector_search(emb, label="Problem", k=7)
     tbl = Table(show_edge=False, box=None, header_style="bold magenta")
     tbl.add_column("score", justify="right")
-    tbl.add_column("nearest research topic")
+    tbl.add_column("nearest open problem")
+    shown = 0
     for it in results:
-        name = it["node"].get("properties", {}).get("name", "")
+        name = it["node"].get("properties", {}).get("title", "")
+        if name == title:
+            continue   # skip the seed itself
         tbl.add_row(f'{it.get("score", 0):.3f}', name)
+        shown += 1
+        if shown >= 5:
+            break
     console.print(tbl)
-    console.print(f"  [green]→[/green] {len(results)} semantic matches from the HNSW topic index")
+    console.print(f"  [green]→[/green] semantically nearest open problems by embedding")
     pause()
 
     takeaway("Graph structure + vector semantics in one engine — citation networks,\n"
-             "author graphs, and semantic 'nearest topics' over the same nodes.")
+             "author graphs, and semantic 'find research like this' over the same nodes.")
 
 
 if __name__ == "__main__":
