@@ -65,6 +65,25 @@ One query family — reachability, criticality, N-1 contingency — runs identic
 
 ---
 
+## Case Studies — prove it yourself
+
+[`case_studies/`](case_studies) lets anyone who clones this repo download a real
+public knowledge graph, import it, run showcase Cypher (and vector search), and
+render the session as a narrated GIF — **one command, no database to install**.
+Every showcase query is gated to return real rows before any GIF is recorded
+(see the [Definition of Done](case_studies/DEFINITION_OF_DONE.md)).
+
+```bash
+cargo build --release && pip install rich requests
+cd case_studies/cricket && ./run.sh          # fetch snapshot → import → validate → demo
+```
+
+Five domains ship today — cricket, drug-interactions, surveillance (WHO),
+pathways (Reactome/STRING/GO), and dbms-research (**vector search** over 1,000+
+research problems). [Browse the catalogue →](case_studies)
+
+---
+
 ## What is Samyama?
 
 A graph-vector database written in Rust. OpenCypher queries, Redis protocol, vector search, graph algorithms — one binary, no JVM, no GC pauses.
