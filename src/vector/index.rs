@@ -198,12 +198,17 @@ impl VectorIndex {
             });
         }
         
-        // ef_search must be >= k; a tight k*2 under-explores tiny/low-k indexes and
-        // can return fewer than k neighbours (HNSW only ever returns from the ef
-        // candidate set). Floor it so small graphs are explored exhaustively and
-        // recall stays high for small k. hnsw_rs caps ef to the graph size internally.
-        let ef_search = (k * 2).max(64);
-        let results = self.hnsw.search(query, k, ef_search);
+        // ef_search drives recall (HNSW only returns from the ef candidate set), so
+        // floor it for small k. But it must NOT exceed the number of indexed vectors
+        // or hnsw_rs panics in search_layer (hnsw_rs 0.2.1 hnsw.rs:938); clamp both ef
+        // and k into the index size. An empty index returns no neighbours rather than
+        // searching a malformed graph.
+        let n = self.stored_vectors.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let ef_search = (k * 2).max(64).min(n);
+        let results = self.hnsw.search(query, k.min(n), ef_search);
         
         let mut neighbors = Vec::new();
         for res in results {
