@@ -221,41 +221,16 @@ Lists the first 10 papers with their title and publication year.
 
 ---
 
-### Query 4 — Top Topics by Paper Count
+### Query 4 — Top Venues by Paper Count
 
 ```cypher
-MATCH (p:Paper)-[:HAS_TOPIC]->(t:Topic)
-RETURN t.name AS topic, count(p) AS paper_count
-ORDER BY paper_count DESC
-LIMIT 10;
-```
-
-Returns the top 10 topics with the most papers associated to them.
-
----
-
-### Query 5 — Most Prolific Authors
-
-```cypher
-MATCH (a:Author)-[:WROTE]->(p:Paper)
-RETURN a.name AS author, count(p) AS papers
+MATCH (p:Paper)-[:APPEARED_AT]->(v:Venue)
+RETURN v.name AS venue, count(p) AS papers
 ORDER BY papers DESC
 LIMIT 10;
 ```
 
-Returns the top 10 authors ranked by the number of papers they have written.
-
----
-
-### Query 6 — Author → Paper → Topic Path
-
-```cypher
-MATCH path = (a:Author)-[:WROTE]->(p:Paper)-[:HAS_TOPIC]->(t:Topic)
-RETURN path
-LIMIT 25;
-```
-
-Returns 25 full paths connecting authors to their papers and the topics those papers cover. Useful for graph visualization.
+Returns the top 10 venues with the most papers published at them.
 
 ---
 
