@@ -65,12 +65,13 @@ pub struct HttpServer {
     port: u16,
     data_path: Option<String>,
     tenants: Option<Arc<TenantManager>>,
+    embed_pipeline: Option<Arc<EmbedPipeline>>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port, data_path: None, tenants: None }
+        Self { store, port, data_path: None, tenants: None, embed_pipeline: None }
     }
 
     /// Set the data directory for snapshot persistence (HA-08)
@@ -86,6 +87,13 @@ impl HttpServer {
         self
     }
 
+    /// Set a global embed pipeline used as fallback for all tenants that have
+    /// no per-tenant embed_config configured.
+    pub fn with_embed_pipeline(mut self, pipeline: Arc<EmbedPipeline>) -> Self {
+        self.embed_pipeline = Some(pipeline);
+        self
+    }
+
     /// Start the HTTP server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>> =
@@ -96,7 +104,7 @@ impl HttpServer {
             engine: Arc::new(QueryEngine::new()),
             data_path: self.data_path.clone(),
             tenant_manager: self.tenants.clone(),
-            embed_pipeline: None,
+            embed_pipeline: self.embed_pipeline.clone(),
             embed_cache: Arc::clone(&embed_cache),
         };
 

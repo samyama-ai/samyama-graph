@@ -1,5 +1,7 @@
 use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
 use samyama::http::HttpServer;
+use samyama::persistence::{AutoEmbedConfig, LLMProvider};
+use samyama::embed::EmbedPipeline;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
@@ -551,6 +553,57 @@ async fn start_server() {
         .map(|pm| pm.tenants_arc())
         .unwrap_or_else(|| Arc::new(samyama::persistence::TenantManager::new()));
 
+    let global_embed_pipeline: Option<Arc<EmbedPipeline>> =
+        if std::env::var("EMBED_ENABLED").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+            let provider = match std::env::var("EMBED_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
+                "ollama"      => LLMProvider::Ollama,
+                "gemini"      => LLMProvider::Gemini,
+                "azureopenai" => LLMProvider::AzureOpenAI,
+                "anthropic"   => LLMProvider::Anthropic,
+                "claudecode"  => LLMProvider::ClaudeCode,
+                _             => LLMProvider::OpenAI,
+            };
+            let model     = std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
+            let api_key   = std::env::var("EMBED_API_KEY").ok();
+            let base_url  = std::env::var("EMBED_API_BASE_URL").ok();
+            let dimension = std::env::var("EMBED_DIMENSION").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1536);
+            let chunk_size    = std::env::var("EMBED_CHUNK_SIZE").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(512);
+            let chunk_overlap = std::env::var("EMBED_CHUNK_OVERLAP").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(64);
+
+            let embed_config = AutoEmbedConfig {
+                provider,
+                embedding_model: model.clone(),
+                api_key,
+                api_base_url: base_url,
+                chunk_size,
+                chunk_overlap,
+                vector_dimension: dimension,
+                embedding_policies: HashMap::new(),
+            };
+
+            match EmbedPipeline::new(embed_config) {
+                Ok(pipeline) => {
+                    println!(
+                        "Global embed pipeline: model={} dimension={} chunk_size={} chunk_overlap={}",
+                        model, dimension, chunk_size, chunk_overlap
+                    );
+                    Some(Arc::new(pipeline))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to build embed pipeline from EMBED_* vars: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     println!("\nServer starting on {}:{}", config.address, config.port);
 
     // Start background indexer now that store is wrapped in Arc
@@ -562,9 +615,12 @@ async fn start_server() {
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);
     tokio::spawn(async move {
-        let http_server = HttpServer::new(http_store, http_port)
+        let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
             .with_tenant_manager(http_tenants);
+        if let Some(ref pipeline) = global_embed_pipeline {
+            http_server = http_server.with_embed_pipeline(Arc::clone(pipeline));
+        }
         println!("HTTP server starting on port {} (REST API; bundled visualizer deprecated — use https://graph.samyama.cloud)", http_port);
         if let Err(e) = http_server.start().await {
             eprintln!("HTTP server error: {}", e);
