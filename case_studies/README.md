@@ -52,6 +52,7 @@ laptop, so anyone can reproduce it.
 | [health-systems](health-systems) | WHO emergency-preparedness (SPAR) scores (cross-KG) | `health-systems.sgsnap` (0.2 MB) | 8.7K / 8.4K | ![](health-systems/demo.gif) |
 | [pathways](pathways) | Systems-biology protein hubs (TP53), pathway crosstalk | `pathways.sgsnap` (9 MB) | 119K / 835K | ![](pathways/demo.gif) |
 | [dbms-research](dbms-research) | **Vector search** over 1000+ open DBMS research problems | `dbms-research.sgsnap` (13 MB) | 19K nodes · 2 HNSW indices | ![](dbms-research/demo.gif) |
+| [bank-model-risk](bank-model-risk) | **Model governance** — lineage / blast-radius, regulatory coverage, open findings, explainability (*synthetic*) | `bank-model-risk.sgsnap` (28 KB) | 520 / 2.4K | ![](bank-model-risk/demo.gif) |
 
 *(Snapshots are GitHub release assets on
 [`samyama-ai/samyama-graph`](https://github.com/samyama-ai/samyama-graph/releases)
