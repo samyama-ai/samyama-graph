@@ -11,8 +11,7 @@ Get the Samyama Graph database engine running locally in minutes using Docker.
 | Resource | Link |
 |----------|------|
 | GitHub Repository | https://github.com/VaidhyaMegha/samyama-graph |
-| Demo Video | https://preview--samyama-graph.lovable.app/videos |
-| Documentation | https://docs.samyama.ai |
+| Demo Video | https://samyama.dev/videos |
 
 ---
 
