@@ -325,6 +325,6 @@ For questions, issues, or feedback:
 
 | Channel | Link |
 |---------|------|
-| GitHub Issues | https://github.com/VaidhyaMegha/samyama-graph/issues |
-| Email | support@samyama.ai |
+| GitHub Issues | https://github.com/samyama-ai/samyama-graph/issues |
+| Email | enquiry@samyama.ai |
 | Website | https://samyama.ai |
