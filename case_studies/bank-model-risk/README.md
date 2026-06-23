@@ -51,6 +51,22 @@ Eight governance queries ship here — blast-radius, what-feeds-CCAR, open High 
 Tier-1 production models, regulatory coverage, explainability, SR 11-7 audit readiness,
 data-concentration risk, and owner accountability. Each is gated to return rows.
 
+## GraphRAG over regulation
+
+The snapshot also carries a **384-dim HNSW vector index** on `RegulatoryRequirement.embedding`
+(obligation text embedded with `all-MiniLM-L6-v2`). After import you can ask a governance
+question in natural language, retrieve the most relevant regulatory clauses by cosine
+similarity, and ground each in the graph (which models it governs, which controls satisfy it,
+which models carry open findings) — a deterministic, source-traced answer:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/vector-search -H 'Content-Type: application/json' \
+  -d '{"label":"RegulatoryRequirement","property_key":"embedding","query_vector":[…384 floats…],"k":3}'
+```
+
+The natural-language front end (embed query → retrieve → graph-ground → cite) lives in the
+generator repo: [`etl/graphrag.py`](https://github.com/samyama-ai/bank-model-risk-kg/blob/main/etl/graphrag.py).
+
 ## License
 
 Apache 2.0. All data is synthetic and generated; it represents no real institution.
