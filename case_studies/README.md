@@ -53,10 +53,12 @@ laptop, so anyone can reproduce it.
 | [pathways](pathways) | Systems-biology protein hubs (TP53), pathway crosstalk | `pathways.sgsnap` (9 MB) | 119K / 835K | ![](pathways/demo.gif) |
 | [dbms-research](dbms-research) | **Vector search** over 1000+ open DBMS research problems | `dbms-research.sgsnap` (13 MB) | 19K nodes · 2 HNSW indices | ![](dbms-research/demo.gif) |
 | [bank-model-risk](bank-model-risk) | **Model governance** — lineage / blast-radius, regulatory coverage, open findings, explainability + **GraphRAG** over regulation (*synthetic*) | `bank-model-risk.sgsnap` (85 KB) | 520 / 2.4K · 1 HNSW index | ![](bank-model-risk/demo.gif) |
+| [imdb-movies](imdb-movies) | Film analytics — top-rated movies, director–actor power pairs, genre trends, decade arcs | `imdb.sgsnap` (50 MB) | 1.94M nodes / 2.63M edges | ![](imdb-movies/demo.gif) |
+| [football](football) | Football Knowledge Graph — top scorers, winning nations, busiest stadiums, multi-tournament veterans | `football.sgsnap` (0.4 MB) | 16K nodes / 12K edges | ![](football/demo.gif) |
 
 *(Snapshots are GitHub release assets on
 [`samyama-ai/samyama-graph`](https://github.com/samyama-ai/samyama-graph/releases)
-— tags `kg-snapshots-v1…v7` — with sha256 pinned in each `case.env`.)*
+— tags `kg-snapshots-v1…v8` — with sha256 pinned in each `case.env`.)*
 
 **Deferred (follow-up waves):** clinical-trials (`clinical-trials.sgsnap`, 712 MB /
 7.8M nodes — needs ~30 GB RAM, too heavy for the "anyone can run it" bar); the
