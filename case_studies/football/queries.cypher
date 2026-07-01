@@ -8,7 +8,9 @@ LIMIT 10;
 // @query Top goal scorers of all time | players who scored the most World Cup goals
 MATCH (g:Goal)-[:SCORED_BY]->(p:Player)
 WHERE g.own_goal = false
-RETURN p.given_name + ' ' + p.family_name AS player, count(g) AS goals
+RETURN CASE WHEN p.given_name IS NULL OR p.given_name = '' OR p.given_name = 'not applicable'
+            THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player,
+       count(g) AS goals
 ORDER BY goals DESC
 LIMIT 10;
 
@@ -17,7 +19,7 @@ MATCH (m:Match)
 WHERE m.home_score IS NOT NULL AND m.away_score IS NOT NULL
 RETURN m.name AS match, m.date AS date, m.home_score + m.away_score AS total_goals,
        m.home_score AS home, m.away_score AS away, m.stage AS stage
-ORDER BY total_goals DESC
+ORDER BY m.home_score + m.away_score DESC
 LIMIT 10;
 
 // @query Most prolific host nations | tournaments and whether host country won
@@ -43,9 +45,10 @@ LIMIT 10;
 // @query Multi-tournament players | veterans who played in most World Cups
 MATCH (p:Player)
 WHERE p.count_tournaments >= 3
-RETURN p.given_name + ' ' + p.family_name AS player,
+RETURN CASE WHEN p.given_name IS NULL OR p.given_name = '' OR p.given_name = 'not applicable'
+            THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player,
        p.position AS position, p.count_tournaments AS tournaments
-ORDER BY tournaments DESC
+ORDER BY p.count_tournaments DESC
 LIMIT 10;
 
 // @query Goals by match stage | where in the tournament do most goals happen
