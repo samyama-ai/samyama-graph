@@ -45,6 +45,8 @@ cargo run --example ldbc_loader               # Load LDBC SNB SF1 dataset
 cargo run --example finbench_loader           # Load/generate FinBench dataset
 cargo run --release --example cricket_loader  # Load 21K Cricsheet matches
 cargo run --release --example aact_loader     # Load AACT clinical trials dataset
+cargo run --release --example imdb_loader     # Load IMDB movies/persons KG (needs --data-dir)
+cargo run --release --example football_loader # Load Football KG (needs --data-dir)
 
 # Start RESP server
 cargo run                      # RESP on 127.0.0.1:6379, HTTP on :8080
