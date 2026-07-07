@@ -127,7 +127,7 @@ GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
 
 ---
 
-## Why Samyama?
+## Why Samyama Graph?
 
 **If your data has relationships, you need a graph database.** If your graph database can't handle a billion edges on a single machine, you need Samyama.
 
