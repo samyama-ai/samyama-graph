@@ -1,5 +1,6 @@
 <p align="center">
-  <h1 align="center">Samyama</h1>
+  <h1 align="center">Samyama Graph </h1>
+  <P align ="center">A Rust-native graph-vector database for GraphRAG, knowledge graphs, and billion-edge analytics.</P>
   <p align="center">
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
@@ -100,9 +101,10 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 ---
 
-## What is Samyama?
+## What is Samyama Graph?
 
-A graph-vector database written in Rust. OpenCypher queries, Redis protocol, vector search, graph algorithms — one binary, no JVM, no GC pauses.
+Samyama Graph is a Rust-native graph-vector database that lets developers store, query, search, and analyze connected data in one system.
+It brings together graph traversal, OpenCypher-style querying, vector search, graph algorithms, and Redis-compatible access, making it useful for GraphRAG, knowledge graphs, AI agent memory, and large-scale relationship analytics.
 
 ```bash
 # Run with Docker (no Rust toolchain needed)
