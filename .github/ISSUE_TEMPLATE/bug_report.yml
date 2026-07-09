@@ -1,0 +1,64 @@
+name: 🐛 Bug report
+description: Report something that isn't working as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill in as much as you can —
+        a minimal reproduction (Cypher query, snapshot, or code) helps us fix it fast.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I run … I expected … but got …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands, Cypher queries, or a minimal code sample.
+      render: shell
+      placeholder: |
+        1. Start server: ./target/release/samyama
+        2. GRAPH.QUERY mydb "..."
+        3. See error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `samyama --version`, the release tag, or the commit SHA.
+      placeholder: "1.1.0 / commit abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are you running it?
+      options:
+        - Built from source (cargo)
+        - Docker image (ghcr.io)
+        - Rust SDK (embedded / remote)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / architecture
+      placeholder: "Ubuntu 22.04 x86_64 / macOS 14 arm64 / Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Paste any server/client logs. This will be rendered as code automatically.
+      render: shell
+    validations:
+      required: false

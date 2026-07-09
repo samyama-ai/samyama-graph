@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 WhatsApp community
+    url: https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d
+    about: Questions, help, and updates from the Samyama OSS community.
+  - name: 🗣️ GitHub Discussions
+    url: https://github.com/samyama-ai/samyama-graph/discussions
+    about: Ask questions, share ideas, and discuss design before filing an issue.
+  - name: 📚 Documentation (The Book)
+    url: https://graph.samyama.cloud/book/
+    about: Read the docs — Cypher compatibility, benchmarks, architecture, and guides.

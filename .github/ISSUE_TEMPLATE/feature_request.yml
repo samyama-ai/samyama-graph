@@ -1,0 +1,49 @@
+name: 💡 Feature request
+description: Suggest an idea, enhancement, or new integration
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape Samyama Graph! Please describe the problem you're
+        trying to solve, not only the solution — it helps us find the best design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The use case or pain point behind this request.
+      placeholder: I'm building … and I need …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see — a Cypher feature, algorithm, integration, API, etc.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Cypher / query engine
+        - Vector search (HNSW)
+        - Graph algorithms
+        - Persistence / snapshots
+        - Protocol / RESP / HTTP API
+        - Raft / clustering
+        - NLQ (natural language → Cypher)
+        - SDK / integrations (LangChain, LlamaIndex, Python/TS, …)
+        - Docs / examples / case studies
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've tried or thought about.
+    validations:
+      required: false

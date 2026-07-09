@@ -1,0 +1,7 @@
+# Adds a "Sponsor" button to the repo. Uncomment and fill in the handles you use.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+# github: [your-github-sponsors-username]      # GitHub Sponsors
+# open_collective: samyama                      # Open Collective slug
+# ko_fi: yourname
+# custom: ["https://samyama.dev/contact"]        # e.g. a contact/support page
