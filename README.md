@@ -1,6 +1,6 @@
 <p align="center">
-  <h1 align="center">Samyama Graph </h1>
-  <P align ="center">A Rust-native graph-vector database for GraphRAG, knowledge graphs, and billion-edge analytics.</P>
+  <h1 align="center">Samyama Graph</h1>
+  <p align="center">A Rust-native graph-vector database for GraphRAG, knowledge graphs, and billion-edge analytics.</p>
   <p align="center">
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
@@ -15,6 +15,49 @@
     💬 <strong><a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d">Join the Samyama OSS community on WhatsApp</a></strong> — questions, help, and updates.
   </p>
 </p>
+
+---
+
+## What is Samyama Graph?
+
+Samyama Graph is a Rust-native graph-vector database that lets developers store, query, search, and analyze connected data in one system.
+
+It brings together graph traversal, OpenCypher-style querying, vector search, graph algorithms, and Redis-compatible access, making it useful for GraphRAG, knowledge graphs, AI agent memory, and large-scale relationship analytics.
+
+### Quickstart
+
+```bash
+# Run with Docker (no Rust toolchain needed)
+docker run -d -p 6379:6379 -p 8080:8080 ghcr.io/samyama-ai/samyama-graph:latest
+```
+
+```bash
+# Or build from source
+git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
+cargo build --release
+./target/release/samyama    # RESP on :6379, HTTP on :8080
+```
+
+```bash
+# Connect with any Redis client
+redis-cli -p 6379
+GRAPH.QUERY mydb "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})"
+GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
+```
+
+## What can you build with Samyama Graph?
+
+Samyama Graph is useful when your application needs both connected-data reasoning and semantic retrieval.
+
+You can use it to build:
+
+- **GraphRAG systems** that combine vector search with graph traversal
+- **Knowledge graph applications** for enterprise, research, healthcare, and operations data
+- **AI agent memory** where entities, tools, actions, and context are stored as a graph
+- **Biomedical and clinical graphs** across papers, trials, pathways, drugs, and conditions
+- **Fraud and investigation graphs** for relationship discovery and pattern analysis
+- **Infrastructure and dependency graphs** for impact analysis and root-cause exploration
+- **Large-scale graph analytics** using built-in graph algorithms
 
 ---
 
@@ -41,6 +84,8 @@ ORDER BY trials DESC LIMIT 5
 **5.2 seconds.** One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
 
 [See all 100 benchmark queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
+
+> ⭐ **Find this useful?** A GitHub star helps more developers discover Samyama Graph.
 
 ---
 
@@ -98,32 +143,6 @@ it pausably (`space`) with `asciinema play case_studies/<domain>/demo.cast`.
 
 *surveillance + health-determinants + health-systems federate by `Country.iso_code`
 into a public-health trifecta.* [Browse the catalogue →](case_studies)
-
----
-
-## What is Samyama Graph?
-
-Samyama Graph is a Rust-native graph-vector database that lets developers store, query, search, and analyze connected data in one system.
-It brings together graph traversal, OpenCypher-style querying, vector search, graph algorithms, and Redis-compatible access, making it useful for GraphRAG, knowledge graphs, AI agent memory, and large-scale relationship analytics.
-
-```bash
-# Run with Docker (no Rust toolchain needed)
-docker run -d -p 6379:6379 -p 8080:8080 ghcr.io/samyama-ai/samyama-graph:latest
-```
-
-```bash
-# Or build from source
-git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
-cargo build --release
-./target/release/samyama    # RESP on :6379, HTTP on :8080
-```
-
-```bash
-# Connect with any Redis client
-redis-cli -p 6379
-GRAPH.QUERY mydb "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})"
-GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
-```
 
 ---
 
