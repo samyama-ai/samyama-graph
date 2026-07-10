@@ -359,6 +359,17 @@ Everything above is open source (Apache 2.0). [Samyama Enterprise](https://samya
 
 ---
 
+## Contributing
+
+Contributions are welcome — bug reports, docs, tests, and code. See
+**[CONTRIBUTING.md](CONTRIBUTING.md)** for development setup, build/test commands,
+and the pull request workflow. Good first areas are listed there.
+
+- 🐛 Found a bug or have an idea? [Open an issue](https://github.com/samyama-ai/samyama-graph/issues/new/choose).
+- 💬 Questions or general discussion? [Join the community chat](https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d).
+
+---
+
 ## License
 
 Apache License 2.0 — use it in production, contribute back if you'd like.

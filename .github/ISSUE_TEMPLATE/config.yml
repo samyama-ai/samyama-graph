@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 Community & Questions
+    url: https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d
+    about: For general questions, usage help, and discussion, please use the Samyama OSS community chat instead of opening an issue.
+  - name: 📖 Documentation (The Book)
+    url: https://graph.samyama.cloud/book/
+    about: Check the documentation before filing — your question may already be answered here.
