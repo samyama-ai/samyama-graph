@@ -26,13 +26,162 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 
 ### Quickstart
 
-```bash
-# Run with Docker (no Rust toolchain needed)
-docker run -d -p 6379:6379 -p 8080:8080 ghcr.io/samyama-ai/samyama-graph:latest
-```
+#### Option 1 — Run with Docker Compose
+
+**Step 1 — Prerequisites**
+
+- ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
+- ✅ No AWS account or credentials needed — the image is publicly available
+
+**Step 2 — Pull the Docker image**
 
 ```bash
-# Or build from source
+docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+```
+
+**Step 3 — Docker Compose setup**
+
+Create a clean folder, then create `docker-compose.yml` inside it.
+
+Linux & Mac:
+
+```bash
+mkdir -p samyama-graph
+cd samyama-graph
+touch docker-compose.yml
+```
+
+Windows (PowerShell):
+
+```powershell
+mkdir C:\samyama-graph
+cd C:\samyama-graph
+notepad docker-compose.yml
+```
+
+> ℹ️ Replace `<your-openai-api-key>` with your actual key. Generate one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+
+```yaml
+version: "3.9"
+services:
+  samyama-graph:
+    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    container_name: samyama-graph
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+      - "8080:8080"
+    environment:
+      EMBED_ENABLED: "true"
+      EMBED_PROVIDER: openai
+      EMBED_MODEL: text-embedding-3-small
+      EMBED_API_KEY: <your-openai-api-key>
+      EMBED_DIMENSION: 1024
+    volumes:
+      - samyama-data:/app/samyama_data
+    networks:
+      - samyama-network
+networks:
+  samyama-network:
+    driver: bridge
+volumes:
+  samyama-data:
+```
+
+**Step 4 — Start the server**
+
+```bash
+docker compose up -d
+```
+
+Server will be available at http://localhost:8080
+
+**Step 5 — Verify it's running**
+
+```bash
+docker ps
+docker logs -f samyama-graph
+```
+
+You should see `samyama-graph` with status `Up`.
+
+**Step 6 — Open the visualizer**
+
+Open http://localhost:8080 in your browser.
+
+<details>
+<summary><strong>Step 7 — Optional: Load sample dataset</strong> <sub>Optional</sub></summary>
+
+**7a — Download snapshot**
+
+| Dataset | Description | File |
+|---------|-------------|------|
+| DBMS Research | Database management systems research knowledge graph | [`dbms-research.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v7/dbms-research.sgsnap) |
+
+Tip: Save the file in the same folder as `docker-compose.yml` to avoid path errors.
+- Windows: `C:\samyama-graph\dbms-research.sgsnap`
+- Linux / Mac: `./samyama-graph/dbms-research.sgsnap`
+
+**7b — Create tenant**
+
+Linux & Mac:
+
+```bash
+curl -X POST http://localhost:8080/api/tenants \
+  -H "Content-Type: application/json" \
+  -d '{"id": "dbms-research", "name": "dbms-research"}'
+```
+
+Windows (PowerShell):
+
+```powershell
+curl.exe -X POST http://localhost:8080/api/tenants `
+  -H "Content-Type: application/json" `
+  -d '{"id": "dbms-research", "name": "dbms-research"}'
+```
+
+**7c — Import snapshot**
+
+Linux & Mac:
+
+```bash
+curl -X POST http://localhost:8080/api/snapshot/import \
+  -F "file=@./samyama-graph/dbms-research.sgsnap" \
+  -F "tenant_id=dbms-research"
+```
+
+Windows (PowerShell):
+
+```powershell
+curl.exe -X POST http://localhost:8080/api/snapshot/import `
+  -F "file=@C:\samyama-graph\dbms-research.sgsnap" `
+  -F "tenant_id=dbms-research"
+```
+
+Note: On Windows always use `curl.exe` — PowerShell's `curl` alias does not support `-F`.
+
+</details>
+
+**Step 8 — Stop / reset**
+
+Stop the server:
+
+```bash
+docker compose down
+```
+
+Reset all data (⚠️ deletes volume):
+
+```bash
+docker compose down -v
+```
+
+⚠️ This deletes all graph data stored in the Docker volume.
+
+#### Option 2 — Build from source
+
+```bash
+# Build from source
 git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
 cargo build --release
 ./target/release/samyama    # RESP on :6379, HTTP on :8080
@@ -341,6 +490,7 @@ samyama
 | LDBC Results | [docs/ldbc/](docs/ldbc/) |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
 | API Spec | [api/openapi.yaml](api/openapi.yaml) |
+| Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
 ---
 
