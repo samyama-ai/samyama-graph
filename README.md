@@ -105,9 +105,15 @@ docker logs -f samyama-graph
 
 You should see `samyama-graph` with status `Up`.
 
-**Step 6 — Open the visualizer**
+**Step 6 — Samyama Visualizer**
 
-Open http://localhost:8080 in your browser.
+Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
+
+1. Open https://graph.samyama.cloud/ in your browser.
+2. Sign up for a new account, or sign in if you already have one.
+3. From the left sidebar, click **Home**.
+4. In the connection field, enter your local graph server URL: `http://localhost:8080`.
+5. Click **Connect** — the status will change to **Connected**.
 
 <details>
 <summary><strong>Step 7 — Optional: Load sample dataset</strong> <sub>Optional</sub></summary>
