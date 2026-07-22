@@ -383,93 +383,234 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
     }
 }
 
+/// Hop ceiling for an unbounded variable-length pattern (`*`) inside an EXISTS
+/// subquery. Bounded patterns use their own maximum. Traversal already
+/// terminates through relationship isomorphism (no edge is reused within a
+/// single path), so this is a guard against pathological fan-out rather than a
+/// correctness requirement.
+const EXISTS_UNBOUNDED_MAX_HOPS: usize = 15;
+
 /// Evaluate EXISTS { MATCH pattern WHERE cond }
+///
+/// The subquery is matched with the outer record's bindings held fixed: a
+/// variable already bound by the outer query pins that position to exactly the
+/// node it is bound to, instead of being matched freely. That is what makes
+/// `NOT EXISTS { MATCH (a)-[:R]-(b) }` mean "these two specific nodes are not
+/// connected" rather than "a has no R edge at all" — the latter is true for
+/// almost every row in a dense graph and silently empties the result set.
+///
+/// Returns true as soon as one complete path matches and the inner WHERE holds
+/// with every subquery variable bound.
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    // Run a mini pattern match against the store
     for path in &pattern.paths {
-        let start_var = path.start.variable.as_deref();
-        let start_labels = &path.start.labels;
-
-        // Check if the start variable is bound from the outer query
-        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
-            if let Some(val) = record.get(var) {
-                match val {
-                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
-                    _ => vec![],
-                }
-            } else if let Some(first_label) = start_labels.first() {
-                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-            } else {
-                store.all_nodes().iter().map(|n| n.id).collect()
-            }
-        } else if let Some(first_label) = start_labels.first() {
-            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-        } else {
-            store.all_nodes().iter().map(|n| n.id).collect()
-        };
-
-        for node_id in &start_node_ids {
-            let node = match store.get_node(*node_id) {
-                Some(n) => n,
-                None => continue,
+        // Candidate start nodes: pinned when the start variable is already bound
+        // by the outer query, otherwise every node carrying the required label.
+        let start_candidates: Vec<NodeId> =
+            match path.start.variable.as_deref().and_then(|v| record.get(v)) {
+                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
+                // Bound to something that is not a node — cannot match.
+                Some(_) => continue,
+                None => match path.start.labels.first() {
+                    Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
+                    None => store.all_nodes().iter().map(|n| n.id).collect(),
+                },
             };
 
-            // Check labels
-            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
-            if !has_all_labels { continue; }
-
-            // Check properties
-            if let Some(ref props) = path.start.properties {
-                let props_match = props.iter().all(|(k, v)| {
-                    node.properties.get(k).map_or(false, |pv| pv == v)
-                });
-                if !props_match { continue; }
+        for start_id in start_candidates {
+            if !exists_node_matches(store, start_id, &path.start) {
+                continue;
             }
 
-            // If no segments, just check existence
-            if path.segments.is_empty() {
-                if let Some(wc) = where_clause {
-                    let mut temp_record = record.clone();
-                    if let Some(var) = start_var {
-                        temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
-                    }
-                    let result = eval_expression(&wc.predicate, &temp_record, store)?;
-                    if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
-                        return Ok(Value::Property(PropertyValue::Boolean(true)));
-                    }
-                } else {
-                    return Ok(Value::Property(PropertyValue::Boolean(true)));
-                }
-            } else {
-                // Check edges
-                for segment in &path.segments {
-                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
-                    let outgoing = store.get_outgoing_edges(*node_id);
-                    for edge in &outgoing {
-                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
-                            continue;
-                        }
-                        if !segment.node.labels.is_empty() {
-                            if let Some(target) = store.get_node(edge.target) {
-                                let target_matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
-                                if target_matches {
-                                    return Ok(Value::Property(PropertyValue::Boolean(true)));
-                                }
-                            }
-                        } else {
-                            return Ok(Value::Property(PropertyValue::Boolean(true)));
-                        }
-                    }
-                }
+            let mut bindings = record.clone();
+            if let Some(var) = path.start.variable.as_deref() {
+                bindings.bind(var.to_string(), Value::NodeRef(start_id));
+            }
+
+            if exists_match_segment(path, 0, start_id, &bindings, &[], where_clause, store)? {
+                return Ok(Value::Property(PropertyValue::Boolean(true)));
             }
         }
     }
     Ok(Value::Property(PropertyValue::Boolean(false)))
+}
+
+/// Check a node against a pattern's labels and inline property constraints.
+fn exists_node_matches(
+    store: &GraphStore,
+    id: NodeId,
+    pat: &crate::query::ast::NodePattern,
+) -> bool {
+    let node = match store.get_node(id) {
+        Some(n) => n,
+        None => return false,
+    };
+    if !pat.labels.iter().all(|l| node.labels.contains(l)) {
+        return false;
+    }
+    if let Some(props) = &pat.properties {
+        if !props.iter().all(|(k, v)| node.properties.get(k).map_or(false, |pv| pv == v)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Neighbours of `node` reachable by an edge matching `edge_pat`, honouring the
+/// pattern's direction. Returns each matching edge with the node at its far end.
+fn exists_neighbors(
+    store: &GraphStore,
+    node: NodeId,
+    edge_pat: &crate::query::ast::EdgePattern,
+) -> Vec<(crate::graph::Edge, NodeId)> {
+    let types: Vec<&str> = edge_pat.types.iter().map(|t| t.as_str()).collect();
+    let edge_matches = |e: &crate::graph::Edge| -> bool {
+        if !types.is_empty() && !types.contains(&e.edge_type.as_str()) {
+            return false;
+        }
+        match &edge_pat.properties {
+            Some(props) => props
+                .iter()
+                .all(|(k, v)| e.properties.get(k).map_or(false, |pv| pv == v)),
+            None => true,
+        }
+    };
+
+    let mut out = Vec::new();
+    if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
+        for e in store.get_outgoing_edges(node) {
+            if edge_matches(&e) {
+                let other = e.target;
+                out.push((e, other));
+            }
+        }
+    }
+    if matches!(edge_pat.direction, Direction::Incoming | Direction::Both) {
+        for e in store.get_incoming_edges(node) {
+            if edge_matches(&e) {
+                let other = e.source;
+                out.push((e, other));
+            }
+        }
+    }
+    out
+}
+
+/// Match `path.segments[seg_idx..]` starting from `current`. Once every segment
+/// is consumed, the inner WHERE is evaluated with all subquery variables bound.
+fn exists_match_segment(
+    path: &crate::query::ast::PathPattern,
+    seg_idx: usize,
+    current: NodeId,
+    bindings: &Record,
+    visited_edges: &[crate::graph::EdgeId],
+    where_clause: Option<&crate::query::ast::WhereClause>,
+    store: &GraphStore,
+) -> ExecutionResult<bool> {
+    if seg_idx == path.segments.len() {
+        return Ok(match where_clause {
+            Some(wc) => matches!(
+                eval_expression(&wc.predicate, bindings, store)?,
+                Value::Property(PropertyValue::Boolean(true))
+            ),
+            None => true,
+        });
+    }
+
+    let segment = &path.segments[seg_idx];
+    let (min_hops, max_hops) = match &segment.edge.length {
+        Some(len) => (
+            len.min.unwrap_or(1),
+            len.max.unwrap_or(EXISTS_UNBOUNDED_MAX_HOPS),
+        ),
+        None => (1, 1),
+    };
+
+    exists_expand_hops(
+        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, store,
+    )
+}
+
+/// Expand a single segment, which spans several hops for a variable-length
+/// pattern. Backtracks across every legal hop count in `min_hops..=max_hops`.
+#[allow(clippy::too_many_arguments)]
+fn exists_expand_hops(
+    path: &crate::query::ast::PathPattern,
+    seg_idx: usize,
+    current: NodeId,
+    depth: usize,
+    min_hops: usize,
+    max_hops: usize,
+    bindings: &Record,
+    visited_edges: &[crate::graph::EdgeId],
+    where_clause: Option<&crate::query::ast::WhereClause>,
+    store: &GraphStore,
+) -> ExecutionResult<bool> {
+    let segment = &path.segments[seg_idx];
+
+    // This hop count is a legal length for the segment — try to close it here.
+    if depth >= min_hops && exists_node_matches(store, current, &segment.node) {
+        // If this segment's variable is already bound — by the outer query or by
+        // an earlier segment — the position must be that exact node.
+        let pinned_ok = match segment.node.variable.as_deref().and_then(|v| bindings.get(v)) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id == current,
+            Some(_) => false,
+            None => true,
+        };
+        if pinned_ok {
+            let mut next = bindings.clone();
+            if let Some(var) = segment.node.variable.as_deref() {
+                next.bind(var.to_string(), Value::NodeRef(current));
+            }
+            if exists_match_segment(
+                path, seg_idx + 1, current, &next, visited_edges, where_clause, store,
+            )? {
+                return Ok(true);
+            }
+        }
+    }
+
+    if depth >= max_hops {
+        return Ok(false);
+    }
+
+    for (edge, neighbor) in exists_neighbors(store, current, &segment.edge) {
+        // Relationship isomorphism: an edge may not repeat within one path.
+        if visited_edges.contains(&edge.id) {
+            continue;
+        }
+        let mut next_visited = visited_edges.to_vec();
+        next_visited.push(edge.id);
+
+        let mut next = bindings.clone();
+        if let Some(var) = segment.edge.variable.as_deref() {
+            next.bind(
+                var.to_string(),
+                Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
+            );
+        }
+
+        if exists_expand_hops(
+            path,
+            seg_idx,
+            neighbor,
+            depth + 1,
+            min_hops,
+            max_hops,
+            &next,
+            &next_visited,
+            where_clause,
+            store,
+        )? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Evaluate list comprehension: [x IN list WHERE cond | expr]

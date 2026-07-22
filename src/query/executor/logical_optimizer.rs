@@ -343,7 +343,25 @@ fn collect_vars_recursive(expr: &crate::query::ast::Expression, vars: &mut HashS
             collect_vars_recursive(inner, vars);
             collect_vars_recursive(index, vars);
         }
-        Expression::ExistsSubquery { .. } => {} // Subquery scoping — don't leak vars
+        Expression::ExistsSubquery { pattern, where_clause } => {
+            // Variables the subquery shares with the outer query are genuine
+            // dependencies of this predicate — the filter must not be pushed
+            // below the operator that binds them, or the subquery is evaluated
+            // against an unbound variable and matches far too eagerly. Collecting
+            // every variable named in the subquery over-approximates (a
+            // subquery-local variable counts too), which can only block a
+            // pushdown, never enable an unsafe one.
+            for path in &pattern.paths {
+                if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+                for seg in &path.segments {
+                    if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                    if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+                }
+            }
+            if let Some(wc) = where_clause {
+                collect_vars_recursive(&wc.predicate, vars);
+            }
+        }
         Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
             collect_vars_recursive(list_expr, vars);
             if let Some(f) = filter {

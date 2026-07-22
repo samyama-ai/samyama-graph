@@ -1851,6 +1851,34 @@ impl QueryPlanner {
             Expression::Function { args, .. } => {
                 for arg in args { Self::collect_expression_variables(arg, vars); }
             }
+            Expression::ExistsSubquery { pattern, where_clause } => {
+                // An EXISTS subquery's pattern routinely references variables bound
+                // by the enclosing query — `NOT EXISTS { MATCH (a)-[:KNOWS]-(b) }`
+                // where both `a` and `b` come from the outer MATCH. Those are real
+                // dependencies: the predicate cannot be evaluated until they are
+                // bound. Reporting no variables (the previous behaviour) made this
+                // predicate look constant, so it was applied at the initial scan —
+                // before the expansion that binds `b`. With `b` free the subquery
+                // degenerates to "does `a` have any such edge at all", which is
+                // true for almost every row, so `NOT EXISTS` silently eliminated
+                // the entire result set.
+                //
+                // Collecting every variable named in the subquery over-approximates:
+                // a variable local to the subquery is counted as a dependency too.
+                // That only ever defers the filter to a later, still-correct point
+                // (deferred predicates and cross-path predicates are both applied
+                // after the joins), never evaluates it too early.
+                for path in &pattern.paths {
+                    if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+                    for seg in &path.segments {
+                        if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                        if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+                    }
+                }
+                if let Some(wc) = where_clause {
+                    Self::collect_expression_variables(&wc.predicate, vars);
+                }
+            }
             _ => {}
         }
     }
