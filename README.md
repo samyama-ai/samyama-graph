@@ -5,7 +5,7 @@
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/github/v/release/samyama-ai/samyama-graph?label=version&color=blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
@@ -31,12 +31,12 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 **Step 1 — Prerequisites**
 
 - ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No AWS account or credentials needed — the image is publicly available
+- ✅ No account or credentials needed — the image is public on GitHub Container Registry
 
 **Step 2 — Pull the Docker image**
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull ghcr.io/samyama-ai/samyama-graph:1.7.0
 ```
 
 **Step 3 — Docker Compose setup**
@@ -65,7 +65,7 @@ notepad docker-compose.yml
 version: "3.9"
 services:
   samyama-graph:
-    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    image: ghcr.io/samyama-ai/samyama-graph:1.7.0
     container_name: samyama-graph
     restart: unless-stopped
     ports:
