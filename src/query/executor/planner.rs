@@ -528,7 +528,17 @@ impl QueryPlanner {
 
         // Determine split point for WITH barrier
         let split = query.with_split_index.unwrap_or(query.match_clauses.len());
-        let pre_with_clauses = &query.match_clauses[..split];
+        // Propagate node labels/inline properties for variables shared across multiple
+        // MATCH clauses in this pre-WITH group, e.g.
+        //   MATCH (m:Post {id: 1})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(author:Person)
+        //   MATCH (m)-[:HAS_CREATOR]->(op:Person)
+        // Without this, the second clause's bare `(m)` has no known label or index
+        // predicate and each MATCH clause is planned independently, so it falls back to
+        // an unrestricted all-nodes scan even though `m` is already typed (and pinned to
+        // one id) earlier in the same query. Same variable = same node, so inheriting
+        // constraints declared anywhere in the query is correctness-preserving, not a guess.
+        let enriched_pre_with_clauses = propagate_shared_variable_labels(&query.match_clauses[..split]);
+        let pre_with_clauses: &[MatchClause] = &enriched_pre_with_clauses;
         let post_with_clauses = &query.match_clauses[split..];
 
         // Pre-compute variable sets for each pre-WITH MATCH clause
@@ -1317,7 +1327,7 @@ impl QueryPlanner {
             max_candidate_plans: self.config.max_candidate_plans,
         };
 
-        let candidates = enumerate_plans(&pg, where_clause, catalog, &config);
+        let candidates = enumerate_plans(&pg, where_clause, catalog, &store.property_index, &config);
         if candidates.is_empty() {
             return Err(ExecutionError::PlanningError("No valid plans enumerated".to_string()));
         }
@@ -1407,14 +1417,53 @@ impl QueryPlanner {
 
         for &(path_idx, _) in &paths_with_cost {
             let path = &pattern.paths[path_idx];
-            // Start with node scan for this path
-            // Auto-generate variable names for anonymous nodes (e.g., `()` in patterns)
-            let start_var = path.start.variable.clone().unwrap_or_else(|| {
-                let name = format!("_anon_{}", anon_counter);
-                anon_counter += 1;
-                name
-            });
 
+            // Build the ordered list of pattern nodes (start + each segment's node),
+            // assigning variable names in written order (including anonymous nodes).
+            // This is computed up front so anchor selection below can consider any
+            // node in the pattern, not just the first one written.
+            let mut path_nodes: Vec<PathNodeRef> = Vec::with_capacity(path.segments.len() + 1);
+            path_nodes.push(PathNodeRef {
+                var: path.start.variable.clone().unwrap_or_else(|| {
+                    let name = format!("_anon_{}", anon_counter);
+                    anon_counter += 1;
+                    name
+                }),
+                labels: path.start.labels.clone(),
+                properties: path.start.properties.clone(),
+            });
+            for segment in &path.segments {
+                path_nodes.push(PathNodeRef {
+                    var: segment.node.variable.clone().unwrap_or_else(|| {
+                        let name = format!("_anon_{}", anon_counter);
+                        anon_counter += 1;
+                        name
+                    }),
+                    labels: segment.node.labels.clone(),
+                    properties: segment.node.properties.clone(),
+                });
+            }
+            let start_var = path_nodes[0].var.clone();
+
+            // QP-05: Anchor selection — pick the cheapest node in the pattern (by index
+            // lookup or label cardinality) to start the scan from, instead of always
+            // scanning from the first written node. Traversal toward earlier-written
+            // nodes then uses reversed edge direction. Restricted to simple linear
+            // chains: no variable-length hops, no shortestPath, no named path variable
+            // (path materialization assumes forward traversal order from the start).
+            let anchor_eligible = path.path_variable.is_none()
+                && !matches!(path.path_type, PathType::Shortest | PathType::AllShortest)
+                && !path.segments.iter().any(|s| s.edge.length.is_some());
+            let anchor_idx = if anchor_eligible {
+                choose_anchor_index(&path_nodes, &per_path_preds[path_idx], store)
+            } else {
+                0
+            };
+
+            let (mut path_operator, deferred_predicates): (OperatorBox, Vec<Expression>) =
+                if anchor_eligible && anchor_idx > 0 {
+                    self.build_path_from_anchor(path, &path_nodes, anchor_idx, &per_path_preds[path_idx], store)
+                } else {
             // Merge inline start node properties into predicates for index selection.
             // Without this, {prop: val} in MATCH patterns falls back to NodeScan + Filter
             // instead of IndexScan. See ADR-015 for context.
@@ -1431,55 +1480,20 @@ impl QueryPlanner {
                 }
             }
 
-            // Optimization: Check for index usage (using this path's assigned predicates)
-            let mut index_op: Option<OperatorBox> = None;
-            let mut remaining_predicates: Vec<Expression> = Vec::new();
+            // Optimization: Check for index usage (using this path's assigned predicates).
+            // Recognizes both `n.prop OP literal` and `literal OP n.prop` operand orders.
+            let mut remaining_predicates: Vec<Expression> = per_path_preds[path_idx].clone();
+            let mut path_operator: OperatorBox = if let Some((idx, label, property, op, val)) =
+                find_index_predicate(&start_var, &path.start.labels, &remaining_predicates, store)
             {
-                let predicates = &per_path_preds[path_idx];
-                let mut used_index = false;
-
-                for pred in predicates {
-                    if used_index {
-                        // Already found an index — push remaining predicates to filter
-                        remaining_predicates.push(pred.clone());
-                        continue;
-                    }
-                    if let Expression::Binary { left, op, right } = pred {
-                        if let (Expression::Property { variable, property }, Expression::Literal(val)) = (left.as_ref(), right.as_ref()) {
-                            if variable == &start_var {
-                                for label in &path.start.labels {
-                                    if store.property_index.has_index(label, property) {
-                                        match op {
-                                            BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
-                                                index_op = Some(Box::new(IndexScanOperator::new(
-                                                    start_var.clone(),
-                                                    label.clone(),
-                                                    property.clone(),
-                                                    op.clone(),
-                                                    val.clone()
-                                                )));
-                                                used_index = true;
-                                            },
-                                            _ => {}
-                                        }
-                                        if used_index { break; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !used_index {
-                        remaining_predicates.push(pred.clone());
-                    }
-                }
-            }
-
-            let mut path_operator = index_op.unwrap_or_else(|| {
+                remaining_predicates.remove(idx);
+                Box::new(IndexScanOperator::new(start_var.clone(), label, property, op, val))
+            } else {
                 Box::new(NodeScanOperator::new(
                     start_var.clone(),
                     path.start.labels.clone(),
                 ))
-            });
+            };
 
             // Note: start node inline properties are already merged into per_path_preds
             // above, so they're handled via IndexScan or remaining_predicates Filter.
@@ -1554,12 +1568,8 @@ impl QueryPlanner {
             } else {
                 // Normal path: use ExpandOperator for each segment
                 let mut current_var = start_var.clone();
-                for segment in &path.segments {
-                    let target_var = segment.node.variable.clone().unwrap_or_else(|| {
-                        let name = format!("_anon_{}", anon_counter);
-                        anon_counter += 1;
-                        name
-                    });
+                for (seg_idx, segment) in path.segments.iter().enumerate() {
+                    let target_var = path_nodes[seg_idx + 1].var.clone();
 
                     let edge_var = segment.edge.variable.clone();
                     let edge_types: Vec<String> = segment.edge.types.iter()
@@ -1629,6 +1639,8 @@ impl QueryPlanner {
                     current_var = target_var;
                 }
             }
+                    (path_operator, deferred_predicates)
+                };
 
             // Apply deferred WHERE predicates after all path expansions
             if !deferred_predicates.is_empty() {
@@ -1680,6 +1692,117 @@ impl QueryPlanner {
         }
 
         Ok(result)
+    }
+
+    /// Build a path plan anchored at `nodes[anchor_idx]` instead of the pattern's first
+    /// node. Traverses backward (reversed edge direction) toward earlier-written nodes
+    /// and forward (written direction) toward later-written nodes. Only invoked when
+    /// `choose_anchor_index` found a cheaper starting point than the first node.
+    fn build_path_from_anchor(
+        &self,
+        path: &PathPattern,
+        nodes: &[PathNodeRef],
+        anchor_idx: usize,
+        path_preds: &[Expression],
+        store: &GraphStore,
+    ) -> (OperatorBox, Vec<Expression>) {
+        let anchor = &nodes[anchor_idx];
+        let anchor_var = anchor.var.clone();
+
+        // Predicates referencing only the anchor variable can be evaluated at the
+        // anchor scan; everything else is deferred until the whole path is built,
+        // mirroring the conservative deferral used by the start-anchored builder.
+        let mut anchor_only_preds: Vec<Expression> = Vec::new();
+        let mut deferred_predicates: Vec<Expression> = Vec::new();
+        for pred in path_preds {
+            let mut pred_vars = HashSet::new();
+            Self::collect_expression_variables(pred, &mut pred_vars);
+            if pred_vars.iter().all(|v| v == &anchor_var) {
+                anchor_only_preds.push(pred.clone());
+            } else {
+                deferred_predicates.push(pred.clone());
+            }
+        }
+
+        let mut candidates: Vec<Expression> = Vec::new();
+        if let Some(props) = &anchor.properties {
+            for (prop_name, prop_value) in props {
+                candidates.push(Expression::Binary {
+                    left: Box::new(Expression::Property { variable: anchor_var.clone(), property: prop_name.clone() }),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expression::Literal(prop_value.clone())),
+                });
+            }
+        }
+        candidates.extend(anchor_only_preds);
+
+        let mut path_operator: OperatorBox = if let Some((idx, label, property, op, val)) =
+            find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
+        {
+            candidates.remove(idx);
+            Box::new(IndexScanOperator::new(anchor_var.clone(), label, property, op, val))
+        } else {
+            Box::new(NodeScanOperator::new(anchor_var.clone(), anchor.labels.clone()))
+        };
+        if !candidates.is_empty() {
+            let filter_expr = candidates.into_iter().reduce(|acc, pred| {
+                Expression::Binary { left: Box::new(acc), op: BinaryOp::And, right: Box::new(pred) }
+            }).unwrap();
+            path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+        }
+
+        // Walk backward toward earlier-written nodes using reversed edge direction:
+        // the anchor is now the traversal source, so an originally-outgoing edge from
+        // the earlier node must be read as incoming from the anchor's perspective.
+        let mut current_var = anchor_var.clone();
+        for seg_idx in (0..anchor_idx).rev() {
+            let segment = &path.segments[seg_idx];
+            let target = &nodes[seg_idx];
+            let edge_var = segment.edge.variable.clone();
+            let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+            let reversed_dir = match segment.edge.direction {
+                Direction::Outgoing => Direction::Incoming,
+                Direction::Incoming => Direction::Outgoing,
+                Direction::Both => Direction::Both,
+            };
+            let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, reversed_dir);
+            path_operator = if !target.labels.is_empty() {
+                Box::new(expand.with_target_labels(target.labels.clone()))
+            } else {
+                Box::new(expand)
+            };
+            if let Some(ref props) = target.properties {
+                if !props.is_empty() {
+                    let filter_expr = self.build_property_filter(&target.var, props);
+                    path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                }
+            }
+            current_var = target.var.clone();
+        }
+
+        // Walk forward toward later-written nodes using the written edge direction.
+        let mut current_var = anchor_var;
+        for seg_idx in anchor_idx..path.segments.len() {
+            let segment = &path.segments[seg_idx];
+            let target = &nodes[seg_idx + 1];
+            let edge_var = segment.edge.variable.clone();
+            let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+            let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, segment.edge.direction.clone());
+            path_operator = if !target.labels.is_empty() {
+                Box::new(expand.with_target_labels(target.labels.clone()))
+            } else {
+                Box::new(expand)
+            };
+            if let Some(ref props) = target.properties {
+                if !props.is_empty() {
+                    let filter_expr = self.build_property_filter(&target.var, props);
+                    path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                }
+            }
+            current_var = target.var.clone();
+        }
+
+        (path_operator, deferred_predicates)
     }
 
     /// Build a filter expression from node properties.
@@ -2242,6 +2365,187 @@ impl Default for QueryPlanner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Propagate node labels and inline properties for variables shared across multiple
+/// MATCH clauses (planned independently and later joined on the shared variable).
+/// If a variable is typed or constrained in one clause but referenced bare (e.g.
+/// `(m)`) in another, copy the known labels/properties over so the second clause's
+/// scan can also be narrowed/indexed instead of falling back to an all-nodes scan.
+/// Safe because the same variable name within a query always refers to the same
+/// node, so any constraint declared for it anywhere already applies everywhere.
+fn propagate_shared_variable_labels(clauses: &[MatchClause]) -> Vec<MatchClause> {
+    fn record_node(
+        var_labels: &mut HashMap<String, Vec<Label>>,
+        var_properties: &mut HashMap<String, HashMap<String, PropertyValue>>,
+        node: &NodePattern,
+    ) {
+        let var = match &node.variable {
+            Some(v) => v,
+            None => return,
+        };
+        if !node.labels.is_empty() {
+            var_labels.entry(var.clone()).or_insert_with(|| node.labels.clone());
+        }
+        if let Some(props) = &node.properties {
+            let entry = var_properties.entry(var.clone()).or_default();
+            for (k, v) in props {
+                entry.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    fn enrich_node(
+        var_labels: &HashMap<String, Vec<Label>>,
+        var_properties: &HashMap<String, HashMap<String, PropertyValue>>,
+        node: &mut NodePattern,
+    ) {
+        let var = match &node.variable {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        if node.labels.is_empty() {
+            if let Some(labels) = var_labels.get(&var) {
+                node.labels = labels.clone();
+            }
+        }
+        if let Some(known_props) = var_properties.get(&var) {
+            let existing = node.properties.get_or_insert_with(HashMap::new);
+            for (k, v) in known_props {
+                existing.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    let mut var_labels: HashMap<String, Vec<Label>> = HashMap::new();
+    let mut var_properties: HashMap<String, HashMap<String, PropertyValue>> = HashMap::new();
+
+    for clause in clauses {
+        for path in &clause.pattern.paths {
+            record_node(&mut var_labels, &mut var_properties, &path.start);
+            for seg in &path.segments {
+                record_node(&mut var_labels, &mut var_properties, &seg.node);
+            }
+        }
+    }
+
+    if var_labels.is_empty() && var_properties.is_empty() {
+        return clauses.to_vec();
+    }
+
+    let mut result: Vec<MatchClause> = clauses.to_vec();
+    for clause in &mut result {
+        for path in &mut clause.pattern.paths {
+            enrich_node(&var_labels, &var_properties, &mut path.start);
+            for seg in &mut path.segments {
+                enrich_node(&var_labels, &var_properties, &mut seg.node);
+            }
+        }
+    }
+    result
+}
+
+/// A single node within a path pattern, resolved to a concrete variable name
+/// (anonymous nodes get an auto-generated `_anon_N` name). Used by anchor
+/// selection to consider indexing/scanning any node in the pattern, not just
+/// the first one written.
+struct PathNodeRef {
+    var: String,
+    labels: Vec<Label>,
+    properties: Option<HashMap<String, PropertyValue>>,
+}
+
+/// Flip a comparison operator to normalize a reversed-operand predicate.
+/// E.g. `5 < n.age` is equivalent to `n.age > 5`, so `Lt` flips to `Gt`.
+fn flip_comparison_op(op: &BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::Le => BinaryOp::Ge,
+        BinaryOp::Ge => BinaryOp::Le,
+        other => other.clone(),
+    }
+}
+
+/// Find a predicate in `preds` usable as an index lookup for `var`, matching
+/// either operand order (`var.prop OP literal` or `literal OP var.prop`).
+/// Returns the predicate's index within `preds` plus the matched label,
+/// property, normalized operator, and literal value.
+fn find_index_predicate(
+    var: &str,
+    labels: &[Label],
+    preds: &[Expression],
+    store: &GraphStore,
+) -> Option<(usize, Label, String, BinaryOp, PropertyValue)> {
+    for (i, pred) in preds.iter().enumerate() {
+        if let Expression::Binary { left, op, right } = pred {
+            let matched = match (left.as_ref(), right.as_ref()) {
+                (Expression::Property { variable, property }, Expression::Literal(val)) if variable == var => {
+                    Some((property.clone(), op.clone(), val.clone()))
+                }
+                (Expression::Literal(val), Expression::Property { variable, property }) if variable == var => {
+                    Some((property.clone(), flip_comparison_op(op), val.clone()))
+                }
+                _ => None,
+            };
+            if let Some((property, norm_op, val)) = matched {
+                if matches!(norm_op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le) {
+                    for label in labels {
+                        if store.property_index.has_index(label, &property) {
+                            return Some((i, label.clone(), property, norm_op, val));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Choose the cheapest node in a path pattern to anchor the scan at: prefer a
+/// node with an indexable predicate (cost ~= label cardinality * selectivity),
+/// falling back to plain label-scan cardinality, and finally an all-nodes scan
+/// for label-free nodes. Ties favor the earliest (first-written) node so
+/// behavior is unchanged when no node is strictly cheaper than the start.
+fn choose_anchor_index(nodes: &[PathNodeRef], path_preds: &[Expression], store: &GraphStore) -> usize {
+    let stats = store.statistics();
+    let mut best_idx = 0usize;
+    let mut best_cost = f64::MAX;
+
+    for (i, node) in nodes.iter().enumerate() {
+        let mut candidates: Vec<Expression> = Vec::new();
+        if let Some(props) = &node.properties {
+            for (prop_name, prop_value) in props {
+                candidates.push(Expression::Binary {
+                    left: Box::new(Expression::Property { variable: node.var.clone(), property: prop_name.clone() }),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expression::Literal(prop_value.clone())),
+                });
+            }
+        }
+        candidates.extend(path_preds.iter().cloned());
+
+        let cost = if let Some((_, label, property, op, _)) = find_index_predicate(&node.var, &node.labels, &candidates, store) {
+            let base = stats.estimate_label_scan(&label) as f64;
+            let selectivity = if matches!(op, BinaryOp::Eq) {
+                stats.estimate_equality_selectivity(&label, &property)
+            } else {
+                0.3
+            };
+            (base * selectivity).max(1.0)
+        } else if let Some(label) = node.labels.first() {
+            stats.estimate_label_scan(label) as f64
+        } else {
+            f64::MAX
+        };
+
+        if cost < best_cost {
+            best_cost = cost;
+            best_idx = i;
+        }
+    }
+
+    best_idx
 }
 
 /// Flatten an AND-chain expression into a list of individual predicates.
@@ -3304,6 +3608,146 @@ mod tests {
     }
 
     #[test]
+    fn test_reversed_operand_eq_triggers_index_scan() {
+        // `'Person50' = n.name` is semantically identical to `n.name = 'Person50'` and
+        // should also use the index — operand order must not affect index selection.
+        let mut store = GraphStore::new();
+        for i in 0..100 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
+        }
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
+
+        use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
+
+        let query = parse_query("EXPLAIN MATCH (n:Person) WHERE 'Person50' = n.name RETURN n").unwrap();
+        let executor = crate::query::executor::QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
+            s.clone()
+        } else { panic!("Expected plan text"); };
+
+        assert!(plan_text.contains("IndexScan"),
+            "Reversed-operand equality should use IndexScan: {}", plan_text);
+        assert!(!plan_text.contains("NodeScan"),
+            "Reversed-operand equality should not fall back to NodeScan: {}", plan_text);
+    }
+
+    #[test]
+    fn test_reversed_operand_comparison_triggers_index_scan() {
+        // `25 < n.age` is equivalent to `n.age > 25` — the comparison operator must be
+        // flipped (not just the operands) when normalizing to the indexed form.
+        let mut store = GraphStore::new();
+        store.property_index.create_index(crate::graph::Label::new("Person"), "age".to_string());
+        for i in 0..50 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "age", crate::graph::PropertyValue::Integer(i as i64)).unwrap();
+        }
+
+        use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
+
+        let query = parse_query("EXPLAIN MATCH (n:Person) WHERE 25 < n.age RETURN n").unwrap();
+        let executor = crate::query::executor::QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
+            s.clone()
+        } else { panic!("Expected plan text"); };
+
+        assert!(plan_text.contains("IndexScan"),
+            "Reversed-operand comparison should use IndexScan: {}", plan_text);
+        assert!(!plan_text.contains("NodeScan"),
+            "Reversed-operand comparison should not fall back to NodeScan: {}", plan_text);
+
+        // Correctness: flipping `25 < n.age` to `n.age > 25` must preserve results —
+        // exercise actual execution, not just the plan shape.
+        let exec_query = parse_query("MATCH (n:Person) WHERE 25 < n.age RETURN n.age AS age").unwrap();
+        let exec = crate::query::executor::QueryExecutor::new(&store);
+        let rows = exec.execute(&exec_query).unwrap();
+        assert_eq!(rows.records.len(), 24, "Expected ages 26..49 to match 25 < n.age");
+    }
+
+    #[test]
+    fn test_anchor_selection_uses_index_on_non_start_node() {
+        // MATCH (a:Company)-[:WORKS_AT]->(b:Person) WHERE b.name = '...' — the predicate
+        // lands on the *second* pattern node. The planner should anchor the scan at `b`
+        // via its index and traverse the relationship in reverse, rather than always
+        // full-scanning `a`'s (much larger) label first.
+        let mut store = GraphStore::new();
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
+        let mut company_ids = Vec::new();
+        for i in 0..500 {
+            let id = store.create_node("Company");
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Company{}", i))).unwrap();
+            company_ids.push(id);
+        }
+        for i in 0..500 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
+            store.create_edge(company_ids[i], id, "WORKS_AT").unwrap();
+        }
+
+        use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
+
+        let query = parse_query(
+            "EXPLAIN MATCH (a:Company)-[:WORKS_AT]->(b:Person) WHERE b.name = 'Person250' RETURN a, b"
+        ).unwrap();
+        let executor = crate::query::executor::QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
+            s.clone()
+        } else { panic!("Expected plan text"); };
+
+        assert!(plan_text.contains("IndexScan"),
+            "Predicate on non-start node should still use IndexScan: {}", plan_text);
+
+        // Correctness: executing the query must still return the single matching row,
+        // with the relationship traversed to the correct company.
+        let exec_query = parse_query(
+            "MATCH (a:Company)-[:WORKS_AT]->(b:Person) WHERE b.name = 'Person250' RETURN a.name AS company, b.name AS person"
+        ).unwrap();
+        let exec = crate::query::executor::QueryExecutor::new(&store);
+        let rows = exec.execute(&exec_query).unwrap();
+        assert_eq!(rows.records.len(), 1);
+        assert_eq!(rows.records[0].get("company"),
+            Some(&Value::Property(PropertyValue::String("Company250".to_string()))));
+        assert_eq!(rows.records[0].get("person"),
+            Some(&Value::Property(PropertyValue::String("Person250".to_string()))));
+    }
+
+    #[test]
+    fn test_anchor_selection_reversed_direction_pattern() {
+        // Same as above but with the arrow written backward: (b:Person)<-[:WORKS_AT]-(a:Company).
+        // The reversed anchor traversal must flip the already-reversed direction correctly
+        // (Incoming written direction -> Outgoing effective direction from the anchor).
+        let mut store = GraphStore::new();
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
+        let mut company_ids = Vec::new();
+        for i in 0..500 {
+            let id = store.create_node("Company");
+            company_ids.push(id);
+        }
+        for i in 0..500 {
+            let id = store.create_node("Person");
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
+            store.create_edge(company_ids[i], id, "WORKS_AT").unwrap();
+        }
+
+        let exec_query = parse_query(
+            "MATCH (b:Person)<-[:WORKS_AT]-(a:Company) WHERE b.name = 'Person250' RETURN a, b"
+        ).unwrap();
+        let exec = crate::query::executor::QueryExecutor::new(&store);
+        let rows = exec.execute(&exec_query).unwrap();
+        assert_eq!(rows.records.len(), 1, "Expected exactly one company employing Person250");
+    }
+
+    #[test]
     fn test_plan_edge_direction() {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
@@ -3606,7 +4050,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(match_clause);
         let catalog = store.catalog();
         let config = EnumerationConfig { max_candidate_plans: 64 };
-        let candidates = enumerate_plans(&pg, query.where_clause.as_ref(), catalog, &config);
+        let candidates = enumerate_plans(&pg, query.where_clause.as_ref(), catalog, &store.property_index, &config);
         assert!(candidates.len() >= 2, "Should have at least 2 candidate plans");
 
         for (plan_idx, (logical_plan, cost)) in candidates.iter().enumerate() {

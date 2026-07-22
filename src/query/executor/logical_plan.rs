@@ -43,6 +43,7 @@ pub enum LogicalPlanNode {
         variable: String,
         label: Label,
         property: String,
+        op: crate::query::ast::BinaryOp,
         value: Expression,
     },
     /// Expand from a bound node to discover new neighbors
@@ -307,6 +308,9 @@ impl LogicalPlanNode {
 pub struct PatternNode {
     pub variable: String,
     pub labels: Vec<Label>,
+    /// Inline property constraints from the pattern, e.g. `(n:Person {name: 'Alice'})`.
+    /// Treated the same as an equivalent `WHERE n.name = 'Alice'` predicate.
+    pub properties: Vec<(String, crate::graph::PropertyValue)>,
 }
 
 /// An edge in the pattern graph
@@ -348,9 +352,14 @@ impl PatternGraph {
             let start_var = path_pattern.start.variable.clone().unwrap_or_default();
             if !start_var.is_empty() {
                 let labels: Vec<Label> = path_pattern.start.labels.iter().cloned().collect();
+                let properties: Vec<(String, crate::graph::PropertyValue)> = path_pattern.start.properties
+                    .as_ref()
+                    .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
                 nodes.entry(start_var.clone()).or_insert_with(|| PatternNode {
                     variable: start_var.clone(),
                     labels,
+                    properties,
                 });
             }
 
@@ -360,9 +369,14 @@ impl PatternGraph {
                 let next_var = segment.node.variable.clone().unwrap_or_default();
                 if !next_var.is_empty() {
                     let labels: Vec<Label> = segment.node.labels.iter().cloned().collect();
+                    let properties: Vec<(String, crate::graph::PropertyValue)> = segment.node.properties
+                        .as_ref()
+                        .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                        .unwrap_or_default();
                     nodes.entry(next_var.clone()).or_insert_with(|| PatternNode {
                         variable: next_var.clone(),
                         labels,
+                        properties,
                     });
                 }
 

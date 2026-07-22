@@ -7,7 +7,7 @@
 //! - ExpandInto → ExpandIntoOperator
 //! - Filter → FilterOperator
 
-use crate::query::ast::Direction;
+use crate::query::ast::{Direction, Expression};
 use super::logical_plan::{LogicalPlanNode, ExpandDirection};
 use super::operator::*;
 use super::leapfrog::{TrieJoinOperator, PhysicalTrieConstraint};
@@ -23,9 +23,22 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             Box::new(NodeScanOperator::new(variable.clone(), labels))
         }
 
-        LogicalPlanNode::IndexLookup { variable, label, .. } => {
-            // Fall back to label scan for now — index integration in Phase 3
-            Box::new(NodeScanOperator::new(variable.clone(), vec![label.clone()]))
+        LogicalPlanNode::IndexLookup { variable, label, property, op, value } => {
+            // The plan enumerator only ever emits IndexLookup after confirming an
+            // index exists for (label, property) and normalizing `value` to a
+            // literal (see plan_enumerator::normalize_index_predicate); by the time
+            // we reach physical planning, query parameters have already been
+            // substituted into literals as well (see executor::mod::substitute_params).
+            match value {
+                Expression::Literal(val) => Box::new(IndexScanOperator::new(
+                    variable.clone(),
+                    label.clone(),
+                    property.clone(),
+                    op.clone(),
+                    val.clone(),
+                )),
+                _ => Box::new(NodeScanOperator::new(variable.clone(), vec![label.clone()])),
+            }
         }
 
         LogicalPlanNode::Expand { input, source_var, target_var, edge_var, edge_types, direction } => {

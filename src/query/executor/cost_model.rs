@@ -343,6 +343,7 @@ mod tests {
             variable: "n".to_string(),
             label: Label::new("Person"),
             property: "id".to_string(),
+            op: crate::query::ast::BinaryOp::Eq,
             value: Expression::Literal(crate::graph::PropertyValue::Integer(42)),
         };
         let cost = estimate_plan_cost(&plan, &catalog);
