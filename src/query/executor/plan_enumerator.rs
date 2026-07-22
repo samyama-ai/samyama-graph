@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use crate::graph::catalog::GraphCatalog;
 use crate::graph::types::{Label, EdgeType};
+use crate::index::manager::IndexManager;
 use crate::query::ast::{WhereClause, Expression, BinaryOp};
 use super::cost_model::estimate_plan_cost;
 use super::logical_plan::{LogicalPlanNode, PatternGraph, PatternEdge, ExpandDirection};
@@ -35,18 +36,34 @@ pub fn enumerate_plans(
     pattern: &PatternGraph,
     where_clause: Option<&WhereClause>,
     catalog: &GraphCatalog,
+    index: &IndexManager,
     config: &EnumerationConfig,
 ) -> Vec<(LogicalPlanNode, f64)> {
     let mut candidates: Vec<(LogicalPlanNode, f64)> = Vec::new();
 
     // Flatten WHERE into individual AND predicates
-    let predicates = where_clause
+    let mut predicates = where_clause
         .map(|wc| flatten_and_predicates(&wc.predicate))
         .unwrap_or_default();
 
-    // Collect node names in deterministic order for reproducible plan enumeration
+    // Inline node properties, e.g. `(n:Person {name: 'Alice'})`, are treated as
+    // additional equality predicates so they participate in index selection the
+    // same way an equivalent WHERE clause would.
     let mut node_names: Vec<&String> = pattern.nodes.keys().collect();
     node_names.sort();
+    for var_name in &node_names {
+        let node = &pattern.nodes[*var_name];
+        for (prop, val) in &node.properties {
+            predicates.push(Expression::Binary {
+                left: Box::new(Expression::Property {
+                    variable: (*var_name).clone(),
+                    property: prop.clone(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expression::Literal(val.clone())),
+            });
+        }
+    }
 
     // For each node as a potential starting point
     for var_name in node_names {
@@ -54,7 +71,7 @@ pub fn enumerate_plans(
             break;
         }
 
-        let plan = build_plan_from_start(var_name, pattern, &predicates, catalog);
+        let plan = build_plan_from_start(var_name, pattern, &predicates, catalog, index);
         let optimized = optimize(plan);
         let cost = estimate_plan_cost(&optimized, catalog);
         candidates.push((optimized, cost));
@@ -79,18 +96,41 @@ fn build_plan_from_start(
     pattern: &PatternGraph,
     predicates: &[Expression],
     catalog: &GraphCatalog,
+    index: &IndexManager,
 ) -> LogicalPlanNode {
     let start_node = &pattern.nodes[start_var];
-
-    // Start with a LabelScan
     let label = start_node.labels.first().cloned();
-    let mut plan = LogicalPlanNode::LabelScan {
+
+    let mut used_predicates: HashSet<usize> = HashSet::new();
+
+    // Try to satisfy the start node via an index lookup before falling back to a
+    // full LabelScan. Matches both `n.prop OP literal` and `literal OP n.prop`.
+    let mut plan = None;
+    if let Some(l) = &label {
+        for (i, pred) in predicates.iter().enumerate() {
+            if let Some((property, op, value)) = normalize_index_predicate(pred, start_var) {
+                if matches!(op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le)
+                    && index.has_index(l, &property)
+                {
+                    plan = Some(LogicalPlanNode::IndexLookup {
+                        variable: start_var.to_string(),
+                        label: l.clone(),
+                        property,
+                        op: op.clone(),
+                        value,
+                    });
+                    used_predicates.insert(i);
+                    break;
+                }
+            }
+        }
+    }
+    let mut plan = plan.unwrap_or_else(|| LogicalPlanNode::LabelScan {
         variable: start_var.to_string(),
         label,
-    };
+    });
 
     // Push any predicates that only reference the start variable
-    let mut used_predicates: HashSet<usize> = HashSet::new();
     plan = push_applicable_predicates(plan, predicates, &mut used_predicates);
 
     // BFS through the pattern — process edges, checking visited at each step
@@ -131,7 +171,7 @@ fn build_plan_from_start(
                 } else {
                     // One endpoint bound → Expand with direction choice
                     processed_edges.insert(edge_idx);
-                    let direction = choose_direction(current_var, edge, &pattern.nodes, catalog);
+                    let direction = choose_direction(current_var, edge);
 
                     // source_var is always the BOUND variable (current_var),
                     // target_var is always the NEW variable (other_var).
@@ -186,59 +226,53 @@ fn build_plan_from_start(
     plan
 }
 
-/// Choose traversal direction based on catalog statistics.
+/// Determine which adjacency list to walk to discover `other_var` from `bound_var`
+/// along `edge`.
 ///
-/// Compares avg_out_degree (forward) vs avg_in_degree (reverse) from the bound
-/// node's perspective. Picks the direction with lower expected fan-out.
-fn choose_direction(
-    bound_var: &str,
-    edge: &PatternEdge,
-    nodes: &std::collections::HashMap<String, super::logical_plan::PatternNode>,
-    catalog: &GraphCatalog,
-) -> ExpandDirection {
-    let bound_label = nodes.get(bound_var).and_then(|n| n.labels.first());
-
-    // If no edge types specified, default to forward
-    if edge.edge_types.is_empty() {
-        return if edge.source_var == bound_var {
-            ExpandDirection::Forward
-        } else {
-            ExpandDirection::Reverse
-        };
-    }
-
-    let et = &edge.edge_types[0]; // Use first edge type for estimation
-
+/// This is *not* a cost tradeoff: the edge is stored as `source_var -> target_var`,
+/// so reaching the unbound endpoint from `bound_var` has exactly one correct
+/// direction — outgoing (Forward) when `bound_var` is the edge's source, incoming
+/// (Reverse) when `bound_var` is the edge's target. Picking the other direction
+/// would traverse a semantically different adjacency list and return wrong
+/// neighbors, not merely a slower plan. The catalog-driven cost comparison that
+/// actually matters for direction — whether it's cheaper to approach this edge
+/// from its source side or its target side — happens one level up, in
+/// `enumerate_plans`, by generating a separate start-from-every-node candidate
+/// for each pattern node and letting `estimate_plan_cost` pick the cheapest.
+fn choose_direction(bound_var: &str, edge: &PatternEdge) -> ExpandDirection {
     if edge.source_var == bound_var {
-        // We're at the source — forward means outgoing
-        // Compare forward (outgoing from source) vs reverse (incoming to target)
-        let forward_cost = bound_label
-            .map(|l| catalog.estimate_expand_out(l, et))
-            .unwrap_or(1.0);
-
-        let target_label = nodes.get(&edge.target_var).and_then(|n| n.labels.first());
-        let reverse_cost = target_label
-            .map(|l| catalog.estimate_expand_in(l, et))
-            .unwrap_or(1.0);
-
-        // Forward traversal from source is the natural direction
-        // Only reverse if the reverse scan from the target label's perspective is significantly cheaper
-        // Note: reverse from source means we'd have to start from target and scan incoming
-        // This only makes sense if we're building the plan from this bound var
         ExpandDirection::Forward
     } else {
-        // We're at the target — reverse means incoming to us
-        let reverse_cost = bound_label
-            .map(|l| catalog.estimate_expand_in(l, et))
-            .unwrap_or(1.0);
-
-        let source_label = nodes.get(&edge.source_var).and_then(|n| n.labels.first());
-        let forward_cost = source_label
-            .map(|l| catalog.estimate_expand_out(l, et))
-            .unwrap_or(1.0);
-
         ExpandDirection::Reverse
     }
+}
+
+/// If `pred` is an equality/range comparison between `var`'s property and a
+/// literal, return `(property, op, literal_expr)` normalized so `op` always
+/// reads left-to-right as `var.property OP literal` — regardless of which side
+/// the property appeared on in the source query. `5 < n.age` and `n.age > 5`
+/// both normalize to `("age", Gt, 5)`.
+pub(crate) fn normalize_index_predicate(pred: &Expression, var: &str) -> Option<(String, BinaryOp, Expression)> {
+    let Expression::Binary { left, op, right } = pred else { return None };
+
+    if let (Expression::Property { variable, property }, Expression::Literal(_)) = (left.as_ref(), right.as_ref()) {
+        if variable == var {
+            return Some((property.clone(), op.clone(), (**right).clone()));
+        }
+    }
+    if let (Expression::Literal(_), Expression::Property { variable, property }) = (left.as_ref(), right.as_ref()) {
+        if variable == var {
+            let flipped = match op {
+                BinaryOp::Gt => BinaryOp::Lt,
+                BinaryOp::Ge => BinaryOp::Le,
+                BinaryOp::Lt => BinaryOp::Gt,
+                BinaryOp::Le => BinaryOp::Ge,
+                other => other.clone(),
+            };
+            return Some((property.clone(), flipped, (**left).clone()));
+        }
+    }
+    None
 }
 
 /// Push filter predicates whose variables are all bound by the current plan
@@ -373,7 +407,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(&clause);
         let config = EnumerationConfig::default();
 
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
         assert_eq!(plans.len(), 1);
         match &plans[0].0 {
             LogicalPlanNode::LabelScan { variable, label } => {
@@ -399,7 +433,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(&clause);
         let config = EnumerationConfig::default();
 
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
         // Two starting points: a and b
         assert_eq!(plans.len(), 2);
         // Both should have a cost > 0
@@ -439,7 +473,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(&clause);
         let config = EnumerationConfig::default();
 
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
         assert_eq!(plans.len(), 2);
         // Cheapest plan should have lower cost
         let cheapest_cost = plans[0].1;
@@ -463,7 +497,7 @@ mod tests {
         };
         let config = EnumerationConfig::default();
 
-        let plans = enumerate_plans(&pg, Some(&where_clause), &catalog, &config);
+        let plans = enumerate_plans(&pg, Some(&where_clause), &catalog, &crate::index::manager::IndexManager::new(), &config);
         assert_eq!(plans.len(), 1);
         // Plan should have a Filter node
         match &plans[0].0 {
@@ -493,7 +527,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(&clause);
         let config = EnumerationConfig::default();
 
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
         // Three starting points: a, b, c
         assert_eq!(plans.len(), 3);
     }
@@ -511,7 +545,7 @@ mod tests {
         let pg = PatternGraph::from_match_clause(&clause);
         let config = EnumerationConfig { max_candidate_plans: 2 };
 
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
         assert!(plans.len() <= 2);
     }
 
@@ -551,14 +585,17 @@ mod tests {
         pg.nodes.insert("a".to_string(), super::super::logical_plan::PatternNode {
             variable: "a".to_string(),
             labels: vec![Label::new("Person")],
+            properties: Vec::new(),
         });
         pg.nodes.insert("b".to_string(), super::super::logical_plan::PatternNode {
             variable: "b".to_string(),
             labels: vec![Label::new("Person")],
+            properties: Vec::new(),
         });
         pg.nodes.insert("c".to_string(), super::super::logical_plan::PatternNode {
             variable: "c".to_string(),
             labels: vec![Label::new("Person")],
+            properties: Vec::new(),
         });
         pg.edges.push(PatternEdge {
             source_var: "a".to_string(),
@@ -583,7 +620,7 @@ mod tests {
         });
 
         let config = EnumerationConfig::default();
-        let plans = enumerate_plans(&pg, None, &catalog, &config);
+        let plans = enumerate_plans(&pg, None, &catalog, &crate::index::manager::IndexManager::new(), &config);
 
         // After WCO optimization, ExpandInto+Expand chains become TrieJoin.
         // At least one plan should contain a TrieJoin (upgraded from ExpandInto).
