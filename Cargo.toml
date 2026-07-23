@@ -3,6 +3,7 @@ members = [
     ".", "crates/samyama-graph-algorithms",
     "crates/samyama-optimization",
     "crates/samyama-sdk",
+    "crates/samyama-gpu",
     "cli",
 ]
 exclude = ["sdk/python"]
@@ -88,6 +89,17 @@ futures = "0.3"
 samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.1.0" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
+
+# GPU acceleration (optional; pulls the wgpu/cudarc dep tree only under --features gpu)
+samyama-gpu = { path = "crates/samyama-gpu", version = "1.1.0", optional = true }
+
+[features]
+default = []
+# Enable in-engine GPU acceleration. Off by default so users who do not want the
+# large wgpu/cudarc dep tree never compile it. See docs/ADR/ADR-025.
+gpu = ["dep:samyama-gpu", "samyama-graph-algorithms/gpu"]
+# NVIDIA CUDA fast path (implies gpu). Requires a CUDA toolkit at build time.
+cuda = ["gpu", "samyama-gpu/cuda"]
 
 [dev-dependencies]
 tempfile = "3.8"

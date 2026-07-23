@@ -45,6 +45,32 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
         return LccResult { coefficients: HashMap::new(), average: 0.0 };
     }
 
+    // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    #[cfg(feature = "gpu")]
+    {
+        if n > crate::gpu_dispatch::min_gpu_nodes() && samyama_gpu::gpu_available() {
+            {
+                match samyama_gpu::gpu_lcc(
+                    n,
+                    &view.out_offsets,
+                    &view.out_targets,
+                    &view.in_offsets,
+                    &view.in_sources,
+                    directed,
+                ) {
+                    Ok(gpu_result) => {
+                        let mut coefficients = HashMap::with_capacity(n);
+                        for (idx, &cc) in gpu_result.coefficients.iter().enumerate() {
+                            coefficients.insert(view.index_to_node[idx], cc);
+                        }
+                        return LccResult { coefficients, average: gpu_result.average };
+                    }
+                    Err(e) => tracing::warn!("GPU LCC failed, falling back to CPU: {}", e),
+                }
+            }
+        }
+    }
+
     // Build undirected neighbor sets for each node (parallel for large graphs)
     let use_parallel = n >= 1000;
 
