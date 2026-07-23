@@ -55,6 +55,7 @@ laptop, so anyone can reproduce it.
 | [bank-model-risk](bank-model-risk) | **Model governance** — lineage / blast-radius, regulatory coverage, open findings, explainability + **GraphRAG** over regulation (*synthetic*) | `bank-model-risk.sgsnap` (85 KB) | 520 / 2.4K · 1 HNSW index | ![](bank-model-risk/demo.gif) |
 | [imdb-movies](imdb-movies) | Film analytics — top-rated movies, director–actor power pairs, genre trends, decade arcs | `imdb.sgsnap` (50 MB) | 1.94M nodes / 2.63M edges | ![](imdb-movies/demo.gif) |
 | [football](football) | Football Knowledge Graph — top scorers, winning nations, busiest stadiums, multi-tournament veterans | `football.sgsnap` (0.4 MB) | 16K nodes / 12K edges | ![](football/demo.gif) |
+| [legal-judgments](legal-judgments) | Indian Supreme Court judgments (2016) — most-cited sections (IPC §302), strongest bench pairings, laws by topic breadth (reproduces a Postgres + AGE + pgvector demo in one engine) | `legal-judgments.sgsnap` (0.14 MB) | 4.5K nodes / 8.4K edges | ![](legal-judgments/demo.gif) |
 
 *(Snapshots are GitHub release assets on
 [`samyama-ai/samyama-graph`](https://github.com/samyama-ai/samyama-graph/releases)
