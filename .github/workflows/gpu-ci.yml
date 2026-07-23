@@ -1,0 +1,60 @@
+name: GPU CI (self-hosted)
+
+# GPU test lane for the in-engine GPU acceleration (workstream Phase 1 hard gate).
+# Runs on vm-1's self-hosted runner (RTX 4050) with SAMYAMA_REQUIRE_GPU=1 so the GPU
+# tests FAIL rather than silently skip when the GPU path is broken.
+#
+# SECURITY: self-hosted runners execute the code in the branch under test. Fork PRs must
+# never run untrusted code on vm-1 automatically. This lane therefore:
+#   - runs freely on push to main and on manual dispatch, and
+#   - for pull_request, is gated behind the `gpu-ci` GitHub Environment, which the repo
+#     admin configures with required reviewers — a maintainer must approve each run.
+# Configure: Settings → Environments → gpu-ci → Required reviewers. Do NOT remove the gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  SAMYAMA_REQUIRE_GPU: "1"
+
+jobs:
+  gpu-tests:
+    name: GPU tests (wgpu + CUDA)
+    runs-on: [self-hosted, gpu]
+    environment: gpu-ci # approval gate for PR runs; see header
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show GPU + toolchain
+        shell: bash
+        run: |
+          nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+          cargo --version
+          nvcc --version | grep -i release || echo "no nvcc (CUDA job will be skipped)"
+
+      - name: GPU smoke + parity (wgpu backend, --features gpu)
+        shell: bash
+        run: |
+          # SAMYAMA_REQUIRE_GPU=1 turns "no adapter" into a hard failure, so a broken
+          # GPU path cannot pass green.
+          cargo test -p samyama-gpu --test gpu_smoke
+          cargo test -p samyama-graph-algorithms --features gpu cpu_gpu_parity_all_ops
+
+      - name: Full GPU-feature suite (--features gpu)
+        shell: bash
+        run: cargo test --features gpu
+
+      - name: CUDA unified-memory tests (--features cuda, if toolkit present)
+        shell: bash
+        run: |
+          if command -v nvcc >/dev/null 2>&1; then
+            cargo test -p samyama-gpu --features cuda unified
+          else
+            echo "nvcc not found — skipping CUDA lane."
+          fi

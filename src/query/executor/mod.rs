@@ -4577,6 +4577,52 @@ mod tests {
     }
 
     #[test]
+    fn test_algo_cdlp_with_results() {
+        let store = build_triangle_graph();
+        let query = parse_query(
+            "CALL algo.cdlp('Person') YIELD node, communityId"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert!(result.records.len() >= 3, "CDLP should return a result per node, got {}", result.records.len());
+        for record in &result.records {
+            assert!(record.get("node").is_some(), "CDLP result should bind node");
+            let cid = record.get("communityId").expect("CDLP result should have communityId");
+            assert!(matches!(cid, Value::Property(PropertyValue::Integer(_))), "communityId should be an integer, got {:?}", cid);
+        }
+    }
+
+    #[test]
+    fn test_algo_cdlp_with_config() {
+        let store = build_triangle_graph();
+        let query = parse_query(
+            "CALL algo.cdlp('Person', 'KNOWS', {maxIterations: 5}) YIELD node, communityId"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert!(result.records.len() >= 3, "CDLP with config should return results");
+    }
+
+    #[test]
+    fn test_algo_lcc_with_results() {
+        let store = build_triangle_graph();
+        let query = parse_query(
+            "CALL algo.lcc('Person') YIELD node, coefficient"
+        ).unwrap();
+        let executor = QueryExecutor::new(&store);
+        let result = executor.execute(&query).unwrap();
+        assert!(result.records.len() >= 3, "LCC should return a result per node, got {}", result.records.len());
+        for record in &result.records {
+            let coeff = record.get("coefficient").expect("LCC result should have coefficient");
+            if let Value::Property(PropertyValue::Float(c)) = coeff {
+                assert!(*c >= 0.0 && *c <= 1.0, "LCC coefficient must be in [0,1], got {c}");
+            } else {
+                panic!("Expected float coefficient, got {coeff:?}");
+            }
+        }
+    }
+
+    #[test]
     fn test_algo_scc_with_results() {
         let store = build_triangle_graph();
         let query = parse_query(

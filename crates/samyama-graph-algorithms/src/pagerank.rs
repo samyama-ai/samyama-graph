@@ -37,9 +37,45 @@ pub fn page_rank(
     config: PageRankConfig,
 ) -> HashMap<NodeId, f64> {
     let n = view.node_count;
-    
+
     if n == 0 {
         return HashMap::new();
+    }
+
+    // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    // The GPU kernel does not implement dangling redistribution, so skip GPU when
+    // that is requested (CPU path stays the source of truth).
+    #[cfg(feature = "gpu")]
+    {
+        if n > crate::gpu_dispatch::min_gpu_nodes()
+            && !config.dangling_redistribution
+            && samyama_gpu::gpu_available()
+        {
+            {
+                let gpu_config = samyama_gpu::pagerank::GpuPageRankConfig {
+                    damping_factor: config.damping_factor,
+                    iterations: config.iterations,
+                    tolerance: config.tolerance,
+                    check_interval: 10,
+                };
+                match samyama_gpu::gpu_page_rank(
+                    n,
+                    &view.in_offsets,
+                    &view.in_sources,
+                    &view.out_offsets,
+                    &gpu_config,
+                ) {
+                    Ok(scores) => {
+                        let mut result = HashMap::with_capacity(n);
+                        for (idx, score) in scores.into_iter().enumerate() {
+                            result.insert(view.index_to_node[idx], score);
+                        }
+                        return result;
+                    }
+                    Err(e) => tracing::warn!("GPU PageRank failed, falling back to CPU: {}", e),
+                }
+            }
+        }
     }
 
     // 2. Initialize scores

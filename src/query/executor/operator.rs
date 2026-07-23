@@ -6472,6 +6472,106 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// CALL algo.cdlp(label?, edge_type?, {maxIterations}?) YIELD node, communityId
+    ///
+    /// Community detection by label propagation (LDBC CDLP). CPU-first; routes to the
+    /// GPU automatically above the size threshold when built with `--features gpu`.
+    fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (label?, edge_type?, config_map?)
+        let mut label = None;
+        let mut edge_type = None;
+        let mut config = crate::algo::CdlpConfig::default();
+
+        if !self.args.is_empty() {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
+                label = Some(s.clone());
+            }
+        }
+        if self.args.len() > 1 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
+                edge_type = Some(s.clone());
+            }
+        }
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Integer(i)) = m.get("maxIterations") {
+                    config.max_iterations = *i as usize;
+                }
+            }
+        }
+
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+        let result = crate::algo::cdlp(&view, &config);
+
+        for (node_id, community_id) in result.labels {
+            let nid = NodeId::new(node_id);
+            let mut record = Record::new();
+            if let Some(node) = store.get_node(nid) {
+                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind(
+                    "communityId".to_string(),
+                    Value::Property(PropertyValue::Integer(community_id as i64)),
+                );
+                self.results.push(record);
+            }
+        }
+
+        // Sort by communityId for deterministic output.
+        self.results.sort_by(|a, b| {
+            let ca = a.get("communityId").unwrap().as_property().unwrap().as_integer().unwrap();
+            let cb = b.get("communityId").unwrap().as_property().unwrap().as_integer().unwrap();
+            ca.cmp(&cb)
+        });
+
+        Ok(())
+    }
+
+    /// CALL algo.lcc(label?, edge_type?) YIELD node, coefficient
+    ///
+    /// Local clustering coefficient (LDBC LCC). CPU-first; routes to the GPU automatically
+    /// above the size threshold when built with `--features gpu`.
+    fn execute_lcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Arguments: (label?, edge_type?)
+        let mut label = None;
+        let mut edge_type = None;
+
+        if !self.args.is_empty() {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[0] {
+                label = Some(s.clone());
+            }
+        }
+        if self.args.len() > 1 {
+            if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
+                edge_type = Some(s.clone());
+            }
+        }
+
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+        let result = crate::algo::local_clustering_coefficient(&view);
+
+        for (node_id, coeff) in result.coefficients {
+            let nid = NodeId::new(node_id);
+            let mut record = Record::new();
+            if let Some(node) = store.get_node(nid) {
+                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind(
+                    "coefficient".to_string(),
+                    Value::Property(PropertyValue::Float(coeff)),
+                );
+                self.results.push(record);
+            }
+        }
+
+        // Sort by coefficient descending.
+        self.results.sort_by(|a, b| {
+            let ca = a.get("coefficient").unwrap().as_property().unwrap().as_float().unwrap();
+            let cb = b.get("coefficient").unwrap().as_property().unwrap().as_float().unwrap();
+            cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -6797,6 +6897,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
                 "algo.triangleCount" => self.execute_triangle_count(store)?,
+                "algo.cdlp" => self.execute_cdlp(store)?,
+                "algo.lcc" => self.execute_lcc(store)?,
                 "algo.or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
@@ -6827,6 +6929,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "algo.maxFlow" => self.execute_max_flow(store)?,
                 "algo.mst" => self.execute_mst(store)?,
                 "algo.triangleCount" => self.execute_triangle_count(store)?,
+                "algo.cdlp" => self.execute_cdlp(store)?,
+                "algo.lcc" => self.execute_lcc(store)?,
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;

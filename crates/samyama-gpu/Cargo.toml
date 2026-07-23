@@ -1,0 +1,21 @@
+[package]
+name = "samyama-gpu"
+version = "1.1.0"
+edition = "2021"
+authors = ["Samyama Graph Database Team"]
+description = "GPU-accelerated graph algorithms and vector operations for Samyama Graph"
+license = "Apache-2.0"
+repository = "https://github.com/samyama-ai/samyama-graph"
+keywords = ["gpu", "wgpu", "graph", "algorithms", "acceleration"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+tracing = "0.1"
+cudarc = { version = "0.12", optional = true, features = ["std", "driver", "nvrtc", "cuda-version-from-build-system"] }
+
+[features]
+default = []
+cuda = ["cudarc"]

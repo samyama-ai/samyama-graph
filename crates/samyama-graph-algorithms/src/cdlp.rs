@@ -41,6 +41,34 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
         return CdlpResult { labels: HashMap::new(), iterations: 0 };
     }
 
+    // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    #[cfg(feature = "gpu")]
+    {
+        if n > crate::gpu_dispatch::min_gpu_nodes() && samyama_gpu::gpu_available() {
+            {
+                // Pass actual NodeIds as initial labels so tie-breaking matches the LDBC spec.
+                let node_ids: Vec<u32> = (0..n).map(|i| view.index_to_node[i] as u32).collect();
+                match samyama_gpu::gpu_cdlp(
+                    n,
+                    &view.out_offsets,
+                    &view.out_targets,
+                    &view.in_offsets,
+                    &view.in_sources,
+                    config.max_iterations,
+                    Some(&node_ids),
+                ) {
+                    Ok(gpu_result) => {
+                        let labels: HashMap<NodeId, NodeId> = (0..n)
+                            .map(|idx| (view.index_to_node[idx], gpu_result.labels[idx] as NodeId))
+                            .collect();
+                        return CdlpResult { labels, iterations: gpu_result.iterations };
+                    }
+                    Err(e) => tracing::warn!("GPU CDLP failed, falling back to CPU: {}", e),
+                }
+            }
+        }
+    }
+
     // Initialize: each node gets its own NodeId as label
     let mut labels: Vec<NodeId> = (0..n).map(|i| view.index_to_node[i]).collect();
     let mut new_labels = labels.clone();

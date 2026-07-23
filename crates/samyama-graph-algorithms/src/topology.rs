@@ -14,6 +14,27 @@ use rayon::prelude::*;
 pub fn count_triangles(view: &GraphView) -> usize {
     let n = view.node_count;
 
+    // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    #[cfg(feature = "gpu")]
+    {
+        if n > crate::gpu_dispatch::min_gpu_nodes() && samyama_gpu::gpu_available() {
+            {
+                match samyama_gpu::gpu_count_triangles(
+                    n,
+                    &view.out_offsets,
+                    &view.out_targets,
+                    &view.in_offsets,
+                    &view.in_sources,
+                ) {
+                    Ok(result) => return result,
+                    Err(e) => {
+                        tracing::warn!("GPU triangle count failed, falling back to CPU: {}", e)
+                    }
+                }
+            }
+        }
+    }
+
     // Parallel outer loop: each node computes its partial triangle count
     if n >= 1000 {
         (0..n).into_par_iter().map(|u| {
