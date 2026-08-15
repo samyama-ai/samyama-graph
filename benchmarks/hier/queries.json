@@ -12,7 +12,7 @@
   "H6": "anti-subsumption and subtree set difference",
   "H7": "lowest common ancestor",
   "H8": "top-k over roll-up (roll-up called in a loop)",
-  "H9": "hierarchy-filtered vector search (specified; blocked, see `skip`)",
+  "H9": "hierarchy-filtered vector search",
   "H10": "temporal roll-up windows"
  },
  "queries": [
@@ -682,29 +682,25 @@
    "id": "H9-01",
    "class": "H9",
    "name": "200-NN vector search restricted to the T0 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T0\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
-   "skip": "engine gap: CALL db.index.vector.queryNodes(...) YIELD node cannot be composed with a following MATCH or WHERE that references `node`, so an ANN search cannot be restricted to a subtree today. The ANN call and the subsumption predicate each work in isolation; only the composition is missing."
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T0\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
   },
   {
    "id": "H9-02",
    "class": "H9",
    "name": "200-NN vector search restricted to the T05 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T05\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
-   "skip": "engine gap: CALL db.index.vector.queryNodes(...) YIELD node cannot be composed with a following MATCH or WHERE that references `node`, so an ANN search cannot be restricted to a subtree today. The ANN call and the subsumption predicate each work in isolation; only the composition is missing."
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T05\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
   },
   {
    "id": "H9-03",
    "class": "H9",
    "name": "200-NN vector search restricted to the T1 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T1\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
-   "skip": "engine gap: CALL db.index.vector.queryNodes(...) YIELD node cannot be composed with a following MATCH or WHERE that references `node`, so an ANN search cannot be restricted to a subtree today. The ANN call and the subsumption predicate each work in isolation; only the composition is missing."
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T1\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
   },
   {
    "id": "H9-04",
    "class": "H9",
    "name": "200-NN vector search restricted to the T subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
-   "skip": "engine gap: CALL db.index.vector.queryNodes(...) YIELD node cannot be composed with a following MATCH or WHERE that references `node`, so an ANN search cannot be restricted to a subtree today. The ANN call and the subsumption predicate each work in isolation; only the composition is missing."
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
   },
   {
    "id": "H10-01",

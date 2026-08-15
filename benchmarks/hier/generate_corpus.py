@@ -229,16 +229,14 @@ for label in ["State", "City"]:
         f'MATCH (t:{label})<-[:LOCATED_IN*0..]-(d) RETURN t.code AS code, sum(d.units) AS v '
         f'ORDER BY sum(d.units) DESC')
 
-# ------------------------------------- H9 hierarchy-filtered vector search (blocked)
-BLOCKED = ("engine gap: CALL db.index.vector.queryNodes(...) YIELD node cannot be composed "
-           "with a following MATCH or WHERE that references `node`, so an ANN search cannot "
-           "be restricted to a subtree today. The ANN call and the subsumption predicate "
-           "each work in isolation; only the composition is missing.")
+# ---------------------------------------------- H9 hierarchy-filtered vector search
+# Unblocked by samyama-graph#439: a CALL's YIELD variables are now in scope for a
+# following MATCH's WHERE, which is what this composition needs. The ANN call and the
+# subsumption predicate always worked in isolation; only joining them was missing.
 for i, code in enumerate(["T0", "T05", "T1", "T"], start=1):
     add(f"H9-{i:02d}", "H9", f"200-NN vector search restricted to the {code} subtree",
         f'CALL db.index.vector.queryNodes("Term", "emb", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score '
-        f'MATCH (r:Term {{code: "{code}"}}) WHERE subsumes(node, r) RETURN count(node) AS n',
-        skip=BLOCKED)
+        f'MATCH (r:Term {{code: "{code}"}}) WHERE subsumes(node, r) RETURN count(node) AS n')
 
 # ------------------------------------------------------ H10 temporal roll-up windows
 n = 0
@@ -271,7 +269,7 @@ corpus = {
         "H6": "anti-subsumption and subtree set difference",
         "H7": "lowest common ancestor",
         "H8": "top-k over roll-up (roll-up called in a loop)",
-        "H9": "hierarchy-filtered vector search (specified; blocked, see `skip`)",
+        "H9": "hierarchy-filtered vector search",
         "H10": "temporal roll-up windows",
     },
     "queries": Q,
