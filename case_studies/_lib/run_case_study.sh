@@ -20,6 +20,18 @@ CASE_DIR="$(pwd)"
 source "$CASE_DIR/case.env"
 : "${DOMAIN:?case.env must set DOMAIN}"
 : "${SNAPSHOT_URL:?case.env must set SNAPSHOT_URL}"
+# A case study whose snapshot has not been published yet carries a placeholder rather than
+# a URL. Detect it and skip cleanly: otherwise curl treats the placeholder as a hostname and
+# emits four DNS failures before the runner reports a generic "snapshot fetch failed", which
+# reads as a broken case study rather than an unpublished one (#428).
+case "$SNAPSHOT_URL" in
+  PENDING_UPLOAD|TODO|CHANGEME|"")
+    echo "SKIP: ${DOMAIN} — its snapshot has not been published yet (SNAPSHOT_URL=${SNAPSHOT_URL:-unset})."
+    echo "      Build it locally with the command in case.env, then pass --snapshot, or wait"
+    echo "      for the release. Skipping rather than failing: nothing here is broken."
+    exit 0
+    ;;
+esac
 : "${SNAPSHOT_SHA256:=-}"     # "-" to skip hash check
 : "${GRAPH:=default}"
 : "${DEDUP_KEY:=}"
