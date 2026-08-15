@@ -1370,3 +1370,92 @@ fn where_can_filter_yielded_variables_directly() {
         2
     );
 }
+
+// ---------------------------------------------------------------------------
+// Multi-hop projection keeps columns aligned to their node (#338)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn projecting_several_properties_across_a_relationship_keeps_them_on_one_node() {
+    // Reported as `a.key` and `a.email` in the same row coming from *different* nodes, with
+    // nodes that had no such relationship appearing as endpoints. Both are invisible in a
+    // row count, so this asserts the pairing itself: key `k{i}` must carry email `e{i}@x`,
+    // odd-numbered nodes must carry no email, and only linked nodes may appear at all.
+    //
+    // Sized so the planner behaves as it would on real data rather than taking a
+    // small-input path -- the original report noted the shape was correct on a toy graph.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    const N: usize = 300;
+    const LINKED: usize = 160; // keys k0..k159 are linked in pairs; the rest are isolated
+    for i in 0..N {
+        let q = if i % 2 == 0 {
+            format!("CREATE (:Person {{key: \"k{i}\", email: \"e{i}@x\", name: \"n{i}\"}})")
+        } else {
+            format!("CREATE (:Person {{key: \"k{i}\", name: \"n{i}\"}})")
+        };
+        engine.execute_mut(&q, &mut s, "default").unwrap();
+    }
+    for i in (0..LINKED).step_by(2) {
+        engine
+            .execute_mut(
+                &format!(
+                    "MATCH (a:Person {{key: \"k{i}\"}}), (b:Person {{key: \"k{}\"}}) \
+                     CREATE (a)-[:SAME_AS]->(b)",
+                    i + 1
+                ),
+                &mut s, "default",
+            )
+            .unwrap();
+    }
+
+    // control: an isolated node has no email and no relationship
+    assert_eq!(scalar(&s, "MATCH (p:Person {key: \"k299\"}) RETURN p.email AS e"), "e=NULL");
+    assert_eq!(
+        scalar(&s, "MATCH (p:Person {key: \"k298\"})-[:SAME_AS]-(x) RETURN count(x) AS n"),
+        "n=0"
+    );
+
+    for q in [
+        "MATCH (a)-[:SAME_AS]-(b) RETURN a.key AS akey, a.email AS aemail",
+        "MATCH (a:Person)-[:SAME_AS]-(b:Person) RETURN a.key AS akey, a.email AS aemail",
+        // projection order must not matter
+        "MATCH (a)-[:SAME_AS]-(b) RETURN a.email AS aemail, a.key AS akey",
+    ] {
+        let r = rows(&s, q);
+        assert_eq!(r.len(), LINKED, "{q}");
+        for row in &r {
+            // rows render as "akey=k12  aemail=e12@x" (cells sorted by column name)
+            let key = row
+                .split_whitespace()
+                .find_map(|c| c.strip_prefix("akey="))
+                .unwrap_or_else(|| panic!("no akey in {row:?}"));
+            let i: usize = key[1..].parse().unwrap();
+            assert!(i < LINKED, "phantom endpoint: {key} has no SAME_AS edge ({q})");
+            let expected = if i % 2 == 0 {
+                format!("aemail=e{i}@x")
+            } else {
+                "aemail=NULL".to_string()
+            };
+            assert!(
+                row.contains(&expected),
+                "column misalignment: {row:?} should carry {expected} ({q})"
+            );
+        }
+    }
+
+    // both endpoints projected at once
+    let r = rows(
+        &s,
+        "MATCH (a)-[:SAME_AS]->(b) RETURN a.key AS akey, a.email AS aemail, b.key AS bkey",
+    );
+    assert_eq!(r.len(), LINKED / 2);
+    for row in &r {
+        let akey = row.split_whitespace().find_map(|c| c.strip_prefix("akey=")).unwrap();
+        let bkey = row.split_whitespace().find_map(|c| c.strip_prefix("bkey=")).unwrap();
+        let (ai, bi): (usize, usize) = (akey[1..].parse().unwrap(), bkey[1..].parse().unwrap());
+        assert_eq!(bi, ai + 1, "endpoints paired wrongly: {row:?}");
+        assert!(row.contains(&format!("aemail=e{ai}@x")), "{row:?}");
+    }
+}
