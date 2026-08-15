@@ -1272,16 +1272,33 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "keys" => {
             match &args[0] {
-                Value::Node(_, node) => {
-                    let keys: Vec<PropertyValue> = node.properties.keys()
-                        .map(|k| PropertyValue::String(k.clone()))
-                        .collect();
+                Value::Node(id, node) => {
+                    // Properties live in row storage *and* in the columnar store, and a
+                    // snapshot import populates only the latter -- so reading
+                    // `node.properties` alone reported an imported node as having no
+                    // properties at all, even while `n.name` returned a value (#333).
+                    let keys: Vec<PropertyValue> = match store {
+                        Some(s) => s
+                            .node_properties_full(*id)
+                            .keys()
+                            .map(|k| PropertyValue::String(k.clone()))
+                            .collect(),
+                        None => node
+                            .properties
+                            .keys()
+                            .map(|k| PropertyValue::String(k.clone()))
+                            .collect(),
+                    };
                     Ok(Value::Property(PropertyValue::Array(keys)))
                 }
                 Value::NodeRef(id) => {
                     let s = store.ok_or_else(|| ExecutionError::RuntimeError("keys() on NodeRef requires store".to_string()))?;
-                    let node = s.get_node(*id).ok_or_else(|| ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())))?;
-                    let keys: Vec<PropertyValue> = node.properties.keys()
+                    if s.get_node(*id).is_none() {
+                        return Err(ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())));
+                    }
+                    let keys: Vec<PropertyValue> = s
+                        .node_properties_full(*id)
+                        .keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
                     Ok(Value::Property(PropertyValue::Array(keys)))
@@ -1561,13 +1578,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // CY-20: properties() — return all properties as a map
         "properties" => {
             match &args[0] {
-                Value::Node(_, node) => {
-                    Ok(Value::Property(PropertyValue::Map(node.properties.clone())))
+                Value::Node(id, node) => {
+                    // See keys(): row storage alone is incomplete after a snapshot import.
+                    let props = match store {
+                        Some(s) => s.node_properties_full(*id),
+                        None => node.properties.clone(),
+                    };
+                    Ok(Value::Property(PropertyValue::Map(props)))
                 }
                 Value::NodeRef(id) => {
                     let s = store.ok_or_else(|| ExecutionError::RuntimeError("properties() on NodeRef requires store".to_string()))?;
-                    let node = s.get_node(*id).ok_or_else(|| ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())))?;
-                    Ok(Value::Property(PropertyValue::Map(node.properties.clone())))
+                    if s.get_node(*id).is_none() {
+                        return Err(ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())));
+                    }
+                    Ok(Value::Property(PropertyValue::Map(s.node_properties_full(*id))))
                 }
                 Value::Edge(_, edge) => {
                     Ok(Value::Property(PropertyValue::Map(edge.properties.clone())))

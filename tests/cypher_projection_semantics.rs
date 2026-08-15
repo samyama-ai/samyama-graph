@@ -1459,3 +1459,63 @@ fn projecting_several_properties_across_a_relationship_keeps_them_on_one_node() 
         assert!(row.contains(&format!("aemail=e{ai}@x")), "{row:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Properties survive a snapshot round-trip (#333)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keys_and_properties_see_columnar_values_after_a_snapshot_import() {
+    // Properties live in row storage *and* in the columnar store, and a snapshot import
+    // populates only the latter. `keys()`, `properties()` and whole-node RETURN read the
+    // row map directly, so an imported node reported having no properties at all — while
+    // `n.name` returned a value, because scalar access goes through the columnar store.
+    //
+    // Reported (#333) as specific to nodes carrying embeddings, but it is not: the
+    // embedding merely happened to be the one property that survived in row storage, which
+    // made embedded nodes look singled out. A node with no embedding is equally affected.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut(
+            "CREATE (:Player {name: \"Alice\", player_id: \"P-1\", age: 30})",
+            &mut s, "default",
+        )
+        .unwrap();
+    engine
+        .execute_mut("CREATE (:Team {name: \"Reds\", city: \"X\"})", &mut s, "default")
+        .unwrap();
+    engine
+        .execute_mut("MATCH (p:Player) SET p.embedding = [0.1, 0.2, 0.3]", &mut s, "default")
+        .unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+    samyama::snapshot::export_tenant(&s, &mut buf).expect("export");
+    let mut imported = GraphStore::new();
+    samyama::snapshot::import_tenant(&mut imported, &buf[..]).expect("import");
+
+    // scalar access always worked; it is the aggregate views that did not
+    assert_eq!(scalar(&imported, "MATCH (p:Player) RETURN p.name AS v"), "v=Alice");
+
+    let keys = scalar(&imported, "MATCH (p:Player) RETURN keys(p) AS v");
+    for expected in ["name", "player_id", "age", "embedding"] {
+        assert!(keys.contains(expected), "keys() lost {expected}: {keys}");
+    }
+
+    let props = scalar(&imported, "MATCH (p:Player) RETURN properties(p) AS v");
+    for expected in ["name", "player_id", "age"] {
+        assert!(props.contains(expected), "properties() lost {expected}: {props}");
+    }
+
+    // the node without an embedding must be just as complete
+    let team_keys = scalar(&imported, "MATCH (t:Team) RETURN keys(t) AS v");
+    for expected in ["name", "city"] {
+        assert!(team_keys.contains(expected), "keys() lost {expected}: {team_keys}");
+    }
+
+    // and nothing regressed for a graph that was never exported
+    let fresh_keys = scalar(&s, "MATCH (t:Team) RETURN keys(t) AS v");
+    for expected in ["name", "city"] {
+        assert!(fresh_keys.contains(expected), "{fresh_keys}");
+    }
+}

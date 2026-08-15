@@ -34,6 +34,33 @@ pub struct QueryResponse {
 }
 
 /// Handler for Cypher queries
+/// Merge row-storage and columnar properties for every node in `batch`.
+///
+/// A snapshot import populates only the columnar store, so serializing `node.properties`
+/// directly reported imported nodes as having no properties -- `"properties": {}` -- even
+/// while `n.name` returned a value (#333). Resolving only the nodes in one result keeps
+/// late materialization intact; materializing on every scan would not.
+///
+/// Synchronous, and called while the store guard is already held: a `RecordBatch` is not
+/// `Send`, so awaiting anything after the query has run would make the handler's future
+/// non-`Send`.
+fn merged_node_properties(
+    batch: &crate::query::RecordBatch,
+    store: &crate::graph::GraphStore,
+) -> HashMap<u64, HashMap<String, PropertyValue>> {
+    batch
+        .records
+        .iter()
+        .flat_map(|r| r.bindings().values())
+        .filter_map(|v| match v {
+            Value::Node(id, _) => Some(*id),
+            Value::NodeRef(id) => Some(*id),
+            _ => None,
+        })
+        .map(|id| (id.as_u64(), store.node_properties_full(id)))
+        .collect()
+}
+
 pub async fn query_handler(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
@@ -74,12 +101,22 @@ pub async fn query_handler(
                      query_upper.ends_with(" CREATE") || query_upper.ends_with(" SET") ||
                      query_upper.ends_with(" DELETE") || query_upper.ends_with(" MERGE")));
 
-    let result = if is_write {
+    let (result, full_props) = if is_write {
         let mut store_guard = state.store.write().await;
-        state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph)
+        let result = state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph);
+        let props = result
+            .as_ref()
+            .map(|b| merged_node_properties(b, &store_guard))
+            .unwrap_or_default();
+        (result, props)
     } else {
         let store_guard = state.store.read().await;
-        state.engine.execute(&payload.query, &*store_guard)
+        let result = state.engine.execute(&payload.query, &*store_guard);
+        let props = result
+            .as_ref()
+            .map(|b| merged_node_properties(b, &store_guard))
+            .unwrap_or_default();
+        (result, props)
     };
 
     match result {
@@ -87,6 +124,13 @@ pub async fn query_handler(
             let mut nodes = HashMap::new();
             let mut edges = HashMap::new();
             let mut records = Vec::new();
+
+            // Properties live in row storage and in the columnar store; a snapshot import
+            // populates only the latter, so serializing `node.properties` alone reported
+            // imported nodes as having none -- `"properties": {}` -- while `n.name`
+            // returned a value (#333). Resolve the merged view for the nodes actually in
+            // this result, rather than materializing it on every scan, which would defeat
+            // late materialization.
 
             for record in &batch.records {
                 let mut row = Vec::new();
@@ -97,8 +141,17 @@ pub async fn query_handler(
                     match val {
                         Value::Node(id, node) => {
                             let mut properties = serde_json::Map::new();
-                            for (k, v) in &node.properties {
-                                properties.insert(k.clone(), v.to_json());
+                            if let Some(merged) = full_props.get(&id.as_u64()) {
+                                for (k, v) in merged {
+                                    properties.insert(k.clone(), v.to_json());
+                                }
+                            }
+                            // fall back to whatever the value itself carries if the node is
+                            // no longer in the store (e.g. one returned by a DELETE)
+                            if properties.is_empty() {
+                                for (k, v) in &node.properties {
+                                    properties.insert(k.clone(), v.to_json());
+                                }
                             }
                             let node_json = json!({
                                 "id": id.as_u64().to_string(),
