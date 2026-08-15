@@ -189,7 +189,12 @@ impl SamyamaClient {
         })
     }
 
-    /// Execute a Cypher query
+    /// Execute a Cypher query.
+    ///
+    /// `graph` selects the target graph. This build serves a single graph, `"default"`,
+    /// and the server rejects any other name. It previously accepted and ignored the
+    /// argument, so datasets written under different graph names silently merged into one
+    /// (#366). To keep datasets apart here, run a separate instance per dataset.
     #[pyo3(signature = (cypher, graph="default"))]
     fn query(&self, cypher: &str, graph: &str) -> PyResult<QueryResult> {
         let rt = get_runtime();
@@ -203,7 +208,9 @@ impl SamyamaClient {
         }
     }
 
-    /// Execute a read-only Cypher query
+    /// Execute a read-only Cypher query.
+    ///
+    /// See `query` for what `graph` does -- and does not -- select.
     #[pyo3(signature = (cypher, graph="default"))]
     fn query_readonly(&self, cypher: &str, graph: &str) -> PyResult<QueryResult> {
         let rt = get_runtime();

@@ -1,5 +1,6 @@
 //! HTTP handlers for the Visualizer API
 
+use axum::http::StatusCode;
 use axum::{
     extract::{Query, State, Json, Multipart},
     response::IntoResponse,
@@ -37,6 +38,29 @@ pub async fn query_handler(
     State(state): State<AppState>,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    // OSS serves exactly one graph. The `graph` argument used to be accepted and then
+    // ignored: every read and write landed in the same store, so two datasets loaded into
+    // what looked like separate graphs silently merged, and the merge was only discoverable
+    // by noticing the row counts were wrong. Rejecting the argument turns that into a loud,
+    // actionable failure at the first query rather than silent corruption of a loaded
+    // dataset. See #366.
+    if payload.graph != default_graph() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "This build serves a single graph ('{}'); the requested graph '{}' does not \
+                     exist and the argument cannot be honoured. Previously it was ignored and \
+                     the query silently ran against '{}', merging datasets. Omit the argument, \
+                     or use a separate data directory per dataset.",
+                    default_graph(), payload.graph, default_graph()
+                ),
+                "graph": payload.graph,
+            })),
+        )
+            .into_response();
+    }
+
     // Check if query is write or read
     let query_upper = payload.query.trim().to_uppercase();
     let is_write = query_upper.starts_with("CREATE") ||
@@ -1242,13 +1266,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_handler_explicit_graph_param() {
-        // When graph field is sent, should use that graph
+    async fn test_query_handler_rejects_non_default_graph() {
+        // This previously asserted OK, on the belief that the graph argument selected a
+        // graph. It never did -- the query ran against the single default store, so two
+        // datasets loaded into different graph names merged with no error (#366). A build
+        // that serves one graph must refuse the argument rather than quietly ignore it.
+        let (app, _state) = test_app();
+
+        let (status, json) = post_query(
+            app,
+            r#"{"query": "MATCH (n) RETURN n", "graph": "test_graph"}"#,
+        ).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["graph"], "test_graph");
+        assert!(
+            json["error"].as_str().unwrap_or_default().contains("single graph"),
+            "error should explain why: {json:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_handler_accepts_default_graph_explicitly() {
         let (app, _state) = test_app();
 
         let (status, _json) = post_query(
             app,
-            r#"{"query": "MATCH (n) RETURN n", "graph": "test_graph"}"#,
+            r#"{"query": "MATCH (n) RETURN n", "graph": "default"}"#,
         ).await;
 
         assert_eq!(status, StatusCode::OK);
