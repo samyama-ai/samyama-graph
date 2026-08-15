@@ -6363,6 +6363,11 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 pub struct MatchCreateEdgeOperator {
     /// Input operator (MATCH results)
     input: OperatorBox,
+    /// Nodes in the CREATE pattern that the MATCH did not bind, and must therefore be
+    /// created fresh for every matched row: (handle, labels, properties). Previously these
+    /// were ignored entirely, so `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither
+    /// the node nor the edge and reported success.
+    nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
     /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
     edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     /// Whether edges have been created for current batch
@@ -6379,8 +6384,20 @@ impl MatchCreateEdgeOperator {
         input: OperatorBox,
         edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     ) -> Self {
+        Self::with_nodes(input, Vec::new(), edges_to_create)
+    }
+
+    /// As `new`, plus the CREATE-pattern nodes the MATCH did not bind. Those are created
+    /// once per matched row, then bound under their handle so the edge wiring below can
+    /// reference them exactly like a matched variable.
+    pub fn with_nodes(
+        input: OperatorBox,
+        nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
+        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    ) -> Self {
         Self {
             input,
+            nodes_to_create,
             edges_to_create,
             done: false,
             results: Vec::new(),
@@ -6400,6 +6417,27 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
         // First pass: process all matched records and create edges
         if !self.done {
             while let Some(record) = self.input.next_mut(store, tenant_id)? {
+                // CREATE runs once per matched row, so any pattern node the MATCH did not
+                // bind is a *new* node for this row. Bind it under its handle first; the
+                // edge wiring below then treats it exactly like a matched variable.
+                let mut record = record;
+                for (handle, labels, properties) in &self.nodes_to_create {
+                    let primary_label = labels
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| Label::new(""));
+                    let node_id = store.create_node(primary_label);
+                    for label in labels.iter().skip(1) {
+                        let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
+                    }
+                    for (key, value) in properties {
+                        let _ = store.set_node_property(tenant_id, node_id, key.clone(), value.clone());
+                    }
+                    if let Some(node) = store.get_node(node_id) {
+                        record.bind(handle.clone(), Value::Node(node_id, node.clone()));
+                    }
+                }
+
                 // For each matched record, create the specified edges
                 for (source_var, target_var, edge_type, properties, _edge_var) in &self.edges_to_create {
                     // Get source node ID from record bindings
@@ -6429,6 +6467,13 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         result_record.bind("_edge".to_string(), Value::Edge(edge_id, edge));
                     }
                     self.results.push(result_record);
+                }
+
+                // A CREATE that only adds nodes (no relationship segment) still produced a
+                // row for this match; without this the row -- and any RETURN over it --
+                // would vanish.
+                if self.edges_to_create.is_empty() {
+                    self.results.push(record);
                 }
             }
             self.done = true;

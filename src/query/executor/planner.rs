@@ -1215,11 +1215,67 @@ impl QueryPlanner {
             // Collect edges to create from the CREATE pattern
             let mut edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
 
+            // Variables the MATCH already bound. Anything else in the CREATE pattern is a
+            // *new* node: previously such nodes were dropped on the floor, so
+            // `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither node nor edge and
+            // still reported success.
+            let mut matched_vars: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for mc in &query.match_clauses {
+                for path in &mc.pattern.paths {
+                    if let Some(v) = &path.start.variable {
+                        matched_vars.insert(v.clone());
+                    }
+                    for seg in &path.segments {
+                        if let Some(v) = &seg.node.variable {
+                            matched_vars.insert(v.clone());
+                        }
+                    }
+                }
+            }
+
+            // Nodes to create per matched row: (handle, labels, properties)
+            let mut nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)> =
+                Vec::new();
+            let mut anon_seq = 0usize;
+
+            // Assign a handle to a CREATE-pattern node, registering it for creation when
+            // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
+            // can still be wired to them.
+            let mut handle_for = |node: &crate::query::ast::NodePattern,
+                                  nodes_to_create: &mut Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
+                                  anon_seq: &mut usize|
+             -> String {
+                match &node.variable {
+                    Some(v) if matched_vars.contains(v) => v.clone(),
+                    Some(v) => {
+                        nodes_to_create.push((
+                            v.clone(),
+                            node.labels.clone(),
+                            node.properties.clone().unwrap_or_default(),
+                        ));
+                        v.clone()
+                    }
+                    None => {
+                        let h = format!("__anon_mcreate_{anon_seq}");
+                        *anon_seq += 1;
+                        nodes_to_create.push((
+                            h.clone(),
+                            node.labels.clone(),
+                            node.properties.clone().unwrap_or_default(),
+                        ));
+                        h
+                    }
+                }
+            };
+
             for path in &create_pattern.paths {
-                let mut current_var = path.start.variable.clone();
+                let mut current_var =
+                    handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
 
                 for segment in &path.segments {
-                    let target_var = segment.node.variable.clone();
+                    let target_var =
+                        handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
                     let edge = &segment.edge;
                     let edge_type = edge.types.first()
                         .cloned()
@@ -1227,24 +1283,33 @@ impl QueryPlanner {
                     let edge_properties = edge.properties.clone().unwrap_or_default();
                     let edge_variable = edge.variable.clone();
 
-                    if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
-                        edges_to_create.push((
-                            src.clone(),
-                            tgt.clone(),
-                            edge_type,
-                            edge_properties,
-                            edge_variable,
-                        ));
-                    }
+                    // Direction comes from the pattern, not from write order.
+                    let (from, to) = match segment.edge.direction {
+                        Direction::Incoming => (target_var.clone(), current_var.clone()),
+                        Direction::Outgoing | Direction::Both => {
+                            (current_var.clone(), target_var.clone())
+                        }
+                    };
+                    edges_to_create.push((
+                        from,
+                        to,
+                        edge_type,
+                        edge_properties,
+                        edge_variable,
+                    ));
 
                     current_var = target_var;
                 }
             }
 
-            // Wrap the match operator with edge creation
-            if !edges_to_create.is_empty() {
+            // Wrap the match operator with node+edge creation
+            if !edges_to_create.is_empty() || !nodes_to_create.is_empty() {
                 use crate::query::executor::operator::MatchCreateEdgeOperator;
-                operator = Box::new(MatchCreateEdgeOperator::new(operator, edges_to_create));
+                operator = Box::new(MatchCreateEdgeOperator::with_nodes(
+                    operator,
+                    nodes_to_create,
+                    edges_to_create,
+                ));
             }
 
             true // This is a write query

@@ -925,3 +925,108 @@ fn create_honours_the_direction_the_pattern_was_written_in() {
         "n=1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MATCH ... CREATE builds new nodes, and MATCH/WHERE groups chain (#305, #402)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn match_create_creates_the_unbound_nodes_in_its_pattern() {
+    // `MATCH (p) CREATE (p)-[:R]->(c:C {..})` wired edges only between variables the MATCH
+    // had already bound; a node appearing for the first time in the CREATE pattern was
+    // dropped, taking its edge with it. The statement reported success and changed nothing,
+    // which is how the fixture in this very file's sibling tests came to be silently empty.
+    let engine = QueryEngine::new();
+
+    for (pattern, want_dir) in [
+        ("MATCH (p:P) CREATE (p)-[:R]->(c:C {id: 1})", "forward"),
+        ("MATCH (p:P) CREATE (p)-[:R]->(:C {id: 1})", "forward"), // anonymous new node
+        ("MATCH (p:P) CREATE (p)<-[:R]-(c:C {id: 1})", "reverse"),
+    ] {
+        let mut s = GraphStore::new();
+        engine
+            .execute_mut("CREATE (:P {id: 0})", &mut s, "default")
+            .unwrap();
+        engine.execute_mut(pattern, &mut s, "default").unwrap();
+
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "{pattern}");
+        assert_eq!(edge_count(&s), "n=1", "{pattern}");
+        let fwd = scalar(&s, "MATCH (:P)-[:R]->(:C) RETURN count(*) AS n");
+        let rev = scalar(&s, "MATCH (:C)-[:R]->(:P) RETURN count(*) AS n");
+        match want_dir {
+            "forward" => assert_eq!((fwd.as_str(), rev.as_str()), ("n=1", "n=0"), "{pattern}"),
+            _ => assert_eq!((fwd.as_str(), rev.as_str()), ("n=0", "n=1"), "{pattern}"),
+        }
+    }
+
+    // CREATE runs once per matched row.
+    let mut s = GraphStore::new();
+    for id in 0..3 {
+        engine
+            .execute_mut(&format!("CREATE (:P {{id: {id}}})"), &mut s, "default")
+            .unwrap();
+    }
+    engine
+        .execute_mut("MATCH (p:P) CREATE (p)-[:R]->(:C {tag: 1})", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (c:C) RETURN count(c) AS n"), "n=3");
+    assert_eq!(edge_count(&s), "n=3");
+}
+
+#[test]
+fn match_where_groups_chain_beyond_two() {
+    // The grammar hand-unrolled exactly two `MATCH+ WHERE?` groups before the first WITH,
+    // so a third MATCH after a second WHERE was a *parse error* — the multi-hop cohort
+    // shape that analytic queries are written in. Asserting semantics, not just parsing:
+    // each added clause must actually narrow the result.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    // p1 has all three attachments, p2 two, p3 one.
+    for (p, drug, lab) in [("p1", true, true), ("p2", true, false), ("p3", false, false)] {
+        engine
+            .execute_mut(&format!("CREATE (:P {{n: \"{p}\"}})"), &mut s, "default")
+            .unwrap();
+        engine
+            .execute_mut(
+                &format!("MATCH (p:P {{n: \"{p}\"}}) CREATE (p)-[:HAS_CONDITION]->(:C {{x: \"Diabetes\"}})"),
+                &mut s, "default",
+            )
+            .unwrap();
+        if drug {
+            engine.execute_mut(
+                &format!("MATCH (p:P {{n: \"{p}\"}}) CREATE (p)-[:PRESCRIBED]->(:D {{y: \"Metformin\"}})"),
+                &mut s, "default").unwrap();
+        }
+        if lab {
+            engine.execute_mut(
+                &format!("MATCH (p:P {{n: \"{p}\"}}) CREATE (p)-[:MEASURED]->(:M {{z: \"HbA1c\"}})"),
+                &mut s, "default").unwrap();
+        }
+    }
+
+    let base = "MATCH (p:P)-[:HAS_CONDITION]->(c:C) WHERE c.x CONTAINS \"Diabetes\" \
+                MATCH (p)-[:PRESCRIBED]->(d:D) WHERE d.y CONTAINS \"Metformin\"";
+    assert_eq!(scalar(&s, &format!("{base} RETURN count(p) AS n")), "n=2");
+    // third group: parses *and* narrows
+    assert_eq!(
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n")),
+        "n=1"
+    );
+    assert_eq!(
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"HbA1c\" RETURN count(p) AS n")),
+        "n=1"
+    );
+    // a predicate in the third group must be able to exclude everything — proving it is
+    // applied rather than parsed and discarded
+    assert_eq!(
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"NOPE\" RETURN count(p) AS n")),
+        "n=0"
+    );
+    // and an earlier group's predicate is still ANDed in, not overwritten
+    assert_eq!(
+        scalar(&s, &"MATCH (p:P)-[:HAS_CONDITION]->(c:C) WHERE c.x CONTAINS \"Diabetes\" \
+                     MATCH (p)-[:PRESCRIBED]->(d:D) WHERE d.y = \"NOPE\" \
+                     MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n".to_string()),
+        "n=0"
+    );
+}
