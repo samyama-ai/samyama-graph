@@ -43,7 +43,9 @@ if_not_exists = { ^"IF" ~ ^"NOT" ~ ^"EXISTS" }
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 
 // CALL statement (Standalone or followed by MATCH)
-call_stmt = { (call_subquery | call_clause) ~ match_stmt_partial? ~ return_clause? }
+// `WHERE` may filter YIELDed variables directly. It previously only appeared inside
+// `match_stmt_partial`, so filtering a CALL's output required an intervening MATCH.
+call_stmt = { (call_subquery | call_clause) ~ where_clause? ~ match_stmt_partial? ~ return_clause? }
 match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
 
 // CALL subquery: CALL { MATCH ... RETURN ... }
@@ -56,7 +58,9 @@ yield_items = { yield_item ~ ("," ~ yield_item)* }
 yield_item = { variable ~ (^"AS" ~ variable)? }
 
 // MERGE statement: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
-merge_stmt = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? ~ return_clause? }
+// A bare `SET` after MERGE applies whichever branch was taken, unlike ON CREATE / ON
+// MATCH which are branch-specific. Only the branch-specific forms were accepted.
+merge_stmt = { ^"MERGE" ~ pattern ~ on_create_set? ~ on_match_set? ~ set_clause* ~ remove_clause* ~ return_clause? }
 on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_item ~ ("," ~ set_item)* }
 
@@ -227,7 +231,11 @@ integer = @{ "-"? ~ ASCII_DIGIT+ }
 // Float: digits.digits, leading-dot (.5), or exponent-without-decimal (1e-07),
 // each with an optional exponent. f64::parse handles all of these forms.
 float = @{ "-"? ~ ( (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)?) | (ASCII_DIGIT+ ~ ^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+) | ("." ~ ASCII_DIGIT+ ~ (^"e" ~ ("-" | "+")? ~ ASCII_DIGIT+)?) ) }
-string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" | "'" ~ (!"'" ~ ANY)* ~ "'" }
+// A backslash escapes the next character, so a quote can appear inside a string of the
+// same kind. Without this the literal simply ended at the escaped quote, making a
+// string containing its own quote character unrepresentable.
+escape_seq = @{ "\\" ~ ANY }
+string = @{ "\"" ~ (escape_seq | !("\"" | "\\") ~ ANY)* ~ "\"" | "'" ~ (escape_seq | !("'" | "\\") ~ ANY)* ~ "'" }
 list = { "[" ~ (value ~ ("," ~ value)*)? ~ "]" }
 map = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
 map_entry = { (string | property_key) ~ ":" ~ value }

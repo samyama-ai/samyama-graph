@@ -489,6 +489,11 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
                     }
                 }
             }
+            Rule::where_clause => {
+                // `CALL ... YIELD x WHERE <pred>` -- filters the procedure's output
+                // directly, with no intervening MATCH.
+                query.where_clause = Some(parse_where_clause(inner)?);
+            }
             Rule::match_stmt_partial => {
                 parse_match_statement_partial(inner, query)?;
             }
@@ -499,6 +504,56 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
         }
     }
     Ok(())
+}
+
+/// Strip the surrounding quotes from a string literal and interpret its escape sequences.
+///
+/// The grammar lets a backslash escape the following character so a quote can appear inside
+/// a string of the same kind; this turns those sequences into the characters they denote.
+/// Previously nothing interpreted them, so `"a\\nb"` produced a literal backslash and an
+/// `n` rather than a newline, and an escaped quote could not be written at all.
+///
+/// An unrecognised escape yields the escaped character itself (`\\q` -> `q`), which keeps
+/// Windows-style paths and regex fragments from turning into a parse error.
+fn unescape_string_literal(literal: &str) -> String {
+    let inner = &literal[1..literal.len() - 1];
+    if !inner.contains('\\') {
+        return inner.to_string();
+    }
+
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000C}'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            // \uXXXX, as in openCypher
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        out.push('u');
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn parse_match_statement_partial(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
@@ -874,6 +929,16 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     }
                 }
             }
+            Rule::set_clause => {
+                // A bare SET after MERGE, applying on both branches. Kept in
+                // `query.set_clauses` rather than folded into ON CREATE/ON MATCH so the
+                // planner can layer one SetProperty over the merge instead of duplicating
+                // the items into both branch lists.
+                query.set_clauses.push(parse_set_clause(inner)?);
+            }
+            Rule::remove_clause => {
+                query.remove_clauses.push(parse_remove_clause(inner)?);
+            }
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }
@@ -1232,10 +1297,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
-                let s = inner.as_str();
-                // Remove quotes
-                let unquoted = &s[1..s.len()-1];
-                return Ok(PropertyValue::String(unquoted.to_string()));
+                return Ok(PropertyValue::String(unescape_string_literal(inner.as_str())));
             }
             Rule::list => {
                 let mut items = Vec::new();
@@ -1272,8 +1334,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                             match part.as_rule() {
                                 Rule::property_key => key = part.as_str().to_string(),
                                 Rule::string => {
-                                    let s = part.as_str();
-                                    key = s[1..s.len()-1].to_string();
+                                    key = unescape_string_literal(part.as_str());
                                 }
                                 Rule::value => val = parse_value(part)?,
                                 _ => {}

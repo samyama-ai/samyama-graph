@@ -721,6 +721,21 @@ impl QueryPlanner {
                     on_match,
                 ));
 
+                // A bare `SET` after MERGE applies on both branches, unlike ON CREATE /
+                // ON MATCH. It parsed but was dropped here, so `MERGE (m) SET m.x = 1`
+                // silently left the property unset.
+                if !query.set_clauses.is_empty() {
+                    let items: Vec<(String, String, Expression)> = query
+                        .set_clauses
+                        .iter()
+                        .flat_map(|sc| sc.items.iter())
+                        .map(|item| {
+                            (item.variable.clone(), item.property.clone(), item.value.clone())
+                        })
+                        .collect();
+                    operator = Box::new(SetPropertyOperator::new(operator, items));
+                }
+
                 let mut output_columns = Vec::new();
                 if let Some(return_clause) = &query.return_clause {
                     let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {

@@ -1282,3 +1282,91 @@ fn unwind_can_lead_a_statement() {
         2
     );
 }
+
+// ---------------------------------------------------------------------------
+// String escapes, bare SET after MERGE, WHERE after YIELD (#308, #309, #348)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_literals_support_escape_sequences() {
+    // The literal ran to the first matching quote with no escape handling, so a string
+    // containing its own quote character could not be written at all, and `\n` produced a
+    // backslash followed by an `n` rather than a newline.
+    let s = GraphStore::new();
+
+    assert_eq!(scalar(&s, r#"RETURN "it\"s" AS v"#), "v=it\"s");
+    assert_eq!(scalar(&s, r#"RETURN 'it\'s' AS v"#), "v=it's");
+    assert_eq!(scalar(&s, r#"RETURN "a\nb" AS v"#), "v=a\nb");
+    assert_eq!(scalar(&s, r#"RETURN "a\tb" AS v"#), "v=a\tb");
+    assert_eq!(scalar(&s, r#"RETURN "back\\slash" AS v"#), "v=back\\slash");
+    assert_eq!(scalar(&s, r#"RETURN "ABC" AS v"#), "v=ABC");
+    // a quote of the *other* kind needs no escape
+    assert_eq!(scalar(&s, r#"RETURN "single 'inside'" AS v"#), "v=single 'inside'");
+    // unescaped strings are untouched
+    assert_eq!(scalar(&s, r#"RETURN "plain" AS v"#), "v=plain");
+
+    // round-trips through storage, and an escaped literal matches what it stored
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut(r#"CREATE (:S {v: "say \"hi\""})"#, &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (n:S) RETURN n.v AS v"), "v=say \"hi\"");
+    assert_eq!(
+        scalar(&s, r#"MATCH (n:S) WHERE n.v = "say \"hi\"" RETURN count(n) AS n"#),
+        "n=1"
+    );
+}
+
+#[test]
+fn a_bare_set_after_merge_applies_on_both_branches() {
+    // Only ON CREATE SET / ON MATCH SET were accepted. A bare SET -- which applies whichever
+    // branch MERGE took -- was a parse error, and once parsing was fixed it was still
+    // dropped during planning, leaving the property unset with no error.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    // create branch
+    engine
+        .execute_mut("MERGE (m:M {k: 1}) SET m.seen = 1", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (m:M) RETURN m.seen AS v"), "v=1");
+
+    // match branch: the SET must still apply, and must not create a second node
+    engine
+        .execute_mut("MERGE (m:M {k: 1}) SET m.seen = 2", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (m:M) RETURN m.seen AS v"), "v=2");
+    assert_eq!(scalar(&s, "MATCH (m:M) RETURN count(m) AS n"), "n=1");
+}
+
+#[test]
+fn where_can_filter_yielded_variables_directly() {
+    // WHERE only existed inside the MATCH sub-rule, so filtering a CALL's output required
+    // an intervening MATCH. Note the intermediate state was worse than the parse error:
+    // once the grammar accepted it, the predicate was parsed and silently discarded, so
+    // every row came back regardless.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    for label in ["P", "Q", "R"] {
+        engine
+            .execute_mut(&format!("CREATE (:{label} {{n: 1}})"), &mut s, "default")
+            .unwrap();
+    }
+
+    assert_eq!(bag(&s, "CALL db.labels() YIELD label RETURN label").len(), 3);
+    assert_eq!(
+        bag(&s, "CALL db.labels() YIELD label WHERE label = \"P\" RETURN label"),
+        vec!["label=P"]
+    );
+    // a predicate matching nothing must return nothing -- otherwise the filter is being
+    // ignored rather than applied
+    assert_eq!(
+        bag(&s, "CALL db.labels() YIELD label WHERE label = \"ZZZ\" RETURN label").len(),
+        0
+    );
+    assert_eq!(
+        bag(&s, "CALL db.labels() YIELD label WHERE label <> \"P\" RETURN label").len(),
+        2
+    );
+}
