@@ -785,6 +785,7 @@ async fn main() -> Result<(), Error> {
 
     let mut passed = 0usize;
     let mut errors = 0usize;
+    let mut empty_reads = 0usize;
     let mut last_category = "";
     let bench_start = Instant::now();
 
@@ -814,13 +815,21 @@ async fn main() -> Result<(), Error> {
             eprintln!("       {}", err);
             errors += 1;
         } else {
-            println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  OK",
+            // A read that returns nothing is not a passing benchmark. LDBC's short and
+            // complex reads return rows by construction when their parameters resolve, so
+            // 0 rows means the parameters missed the data -- and a 0.03 ms "OK" for a query
+            // that traversed nothing is the most flattering possible wrong answer. Say so
+            // in the status rather than reporting it as a pass (#449).
+            let empty = result.rows == 0
+                && matches!(query.category, "short" | "complex");
+            println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
                 result.id, result.name,
                 result.rows,
                 format_ms(result.min),
                 format_ms(result.median),
-                format_ms(result.max));
-            passed += 1;
+                format_ms(result.max),
+                if empty { "EMPTY" } else { "OK" });
+            if empty { empty_reads += 1; } else { passed += 1; }
         }
     }
 
@@ -830,14 +839,26 @@ async fn main() -> Result<(), Error> {
     // Summary
     // ========================================================================
     println!();
-    println!("Summary: {}/{} passed, {} errors (total benchmark time: {})",
-        passed, queries.len(), errors, format_duration(bench_time));
+    println!("Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
+        passed, queries.len(), empty_reads, errors, format_duration(bench_time));
+    if empty_reads > 0 {
+        println!();
+        println!("WARNING: {empty_reads} read(s) returned 0 rows. LDBC reads return rows by");
+        println!("         construction when their parameters resolve, so this almost certainly");
+        println!("         means the substitution parameters do not match this dataset -- ids");
+        println!("         are assigned per `datagen` run and are not portable between extracts.");
+        println!("         Timings above are therefore not measuring traversal. Supply matching");
+        println!("         parameters with --params-file <json>.");
+    }
 
     // Cache stats
     let stats = client.cache_stats();
     println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
 
-    if errors > 0 {
+    // Any empty read is a configuration failure, not a pass. A run with 17 of 21 reads
+    // returning nothing measured nothing, and exiting 0 on it is how "21/21 passed in 32 ms"
+    // came to look like a result (#449).
+    if errors > 0 || empty_reads > 0 {
         std::process::exit(1);
     }
 
