@@ -1230,3 +1230,55 @@ fn unique_constraints_accept_modern_syntax_and_are_actually_enforced() {
         .execute_mut("CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE", &mut s3, "default")
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// UNWIND as a leading clause (#307)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unwind_can_lead_a_statement() {
+    // UNWIND was already allowed after a MATCH or WITH, but a *leading* one had no rule to
+    // match, so `UNWIND [...] AS x ...` failed at column 1 — the shape batch and
+    // parameterized writes are written in.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut("CREATE (:P {name: \"a\", n: 1})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:P {name: \"b\", n: 2})", &mut s, "default").unwrap();
+
+    assert_eq!(bag(&s, "UNWIND [1, 2, 3] AS x RETURN x").len(), 3);
+    assert_eq!(bag(&s, "UNWIND [] AS x RETURN x").len(), 0);
+    assert_eq!(bag(&s, "UNWIND [1, 2, 3] AS x RETURN x LIMIT 2").len(), 2);
+    assert_eq!(
+        bag(&s, "UNWIND [\"a\", \"b\"] AS s RETURN s"),
+        vec!["s=a", "s=b"]
+    );
+    assert_eq!(scalar(&s, "UNWIND [1, 2, 3] AS x RETURN count(x) AS n"), "n=3");
+
+    // A leading UNWIND feeding a MATCH: the predicate references the unwound variable, so
+    // the Unwind must be planned *below* the filter. It was previously pushed above it,
+    // and the query died with "Variable not found: x".
+    assert_eq!(
+        bag(&s, "UNWIND [1, 2] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name").len(),
+        2
+    );
+    assert_eq!(
+        bag(&s, "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name"),
+        vec!["name=a"]
+    );
+    // ... and a value matching nothing yields nothing, so the predicate is really applied
+    assert_eq!(
+        bag(&s, "UNWIND [99] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name").len(),
+        0
+    );
+
+    // A trailing UNWIND still cross-products, unchanged.
+    assert_eq!(
+        bag(&s, "MATCH (p:P) UNWIND [1, 2] AS x RETURN p.name AS name, x").len(),
+        4
+    );
+    // and one fed from an aggregate still works
+    assert_eq!(
+        bag(&s, "MATCH (p:P) WITH collect(p.n) AS ns UNWIND ns AS x RETURN x").len(),
+        2
+    );
+}

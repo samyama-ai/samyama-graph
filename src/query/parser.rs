@@ -195,7 +195,12 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::merge_stmt => {
                 parse_merge_statement(inner, query)?;
             }
-            Rule::match_stmt => {
+            Rule::match_stmt | Rule::unwind_stmt => {
+                // Same clause set, so the same builder applies -- it already dispatches on
+                // each inner rule rather than assuming a fixed clause order. The rule
+                // itself is what records the UNWIND's position: in `unwind_stmt` it is by
+                // construction the first clause.
+                query.unwind_leading = inner.as_rule() == Rule::unwind_stmt;
                 parse_match_statement(inner, query)?;
             }
             Rule::create_stmt => {

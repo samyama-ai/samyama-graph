@@ -800,7 +800,11 @@ impl QueryPlanner {
                 });
             }
 
-            // CY-30: Standalone RETURN without MATCH/CREATE (e.g., RETURN 1+2, RETURN sin(0.5))
+            // CY-30: Standalone RETURN without MATCH/CREATE (e.g., RETURN 1+2, RETURN sin(0.5)).
+            // A leading UNWIND also has no MATCH, but it is *not* a single-row projection --
+            // it must fall through to the general pipeline so the Unwind, and any
+            // aggregation over it, get planned.
+            if query.unwind_clause.is_none() {
             if let Some(return_clause) = &query.return_clause {
                 // Single-row operator that emits one empty record for projection
                 use crate::query::executor::operator::SingleRowOperator;
@@ -826,10 +830,13 @@ impl QueryPlanner {
                     is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
+            }
 
-            return Err(ExecutionError::PlanningError(
-                "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()
-            ));
+            if query.unwind_clause.is_none() {
+                return Err(ExecutionError::PlanningError(
+                    "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()
+                ));
+            }
         }
 
         let mut operator: Option<OperatorBox> = None;
@@ -870,9 +877,25 @@ impl QueryPlanner {
         let mut per_match_where: Vec<Option<WhereClause>> = vec![None; pre_with_clauses.len()];
         let mut cross_match_predicates: Vec<Expression> = Vec::new();
 
+        // See the matching guard in the WITH-stage decomposition below: a predicate that
+        // references a leading UNWIND's variable cannot run during match planning, because
+        // the Unwind operator that binds it sits above the matches. The top-level WHERE
+        // filter re-applies the full predicate after the Unwind, so dropping it here loses
+        // nothing.
+        let deferred_unwind_var_pre: Option<String> = if query.unwind_leading {
+            query.unwind_clause.as_ref().map(|u| u.variable.clone())
+        } else {
+            None
+        };
+
         for pred in pre_where_preds {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
+            if let Some(uv) = &deferred_unwind_var_pre {
+                if pred_vars.contains(uv) {
+                    continue;
+                }
+            }
 
             let target = pre_match_var_sets.iter().position(|match_vars| {
                 pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
@@ -998,9 +1021,26 @@ impl QueryPlanner {
             let mut per_match_where: Vec<Option<WhereClause>> = vec![None; stage_matches.len()];
             let mut cross_match_preds: Vec<Expression> = Vec::new();
 
+            // A predicate referring to a leading UNWIND's variable cannot be evaluated
+            // during match planning -- the variable is not bound until the Unwind operator
+            // runs, which sits above the matches. Leaving it here produced a filter under
+            // the Unwind and the query died with "Variable not found". Dropping it from the
+            // decomposition is safe because the top-level WHERE filter, applied after the
+            // Unwind, evaluates the full predicate anyway.
+            let deferred_unwind_var: Option<String> = if query.unwind_leading {
+                query.unwind_clause.as_ref().map(|u| u.variable.clone())
+            } else {
+                None
+            };
+
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
+                if let Some(uv) = &deferred_unwind_var {
+                    if pred_vars.contains(uv) {
+                        continue;
+                    }
+                }
                 let target = match_var_sets.iter().position(|match_vars| {
                     pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
                 });
@@ -1178,7 +1218,31 @@ impl QueryPlanner {
             }
         }
 
+        // A statement that begins with UNWIND has no MATCH to build a pipeline on, so seed
+        // it with a single empty row and let the rest of the planner -- filters,
+        // aggregation, ORDER BY, SKIP/LIMIT -- apply unchanged. Hand-building a plan here
+        // instead would have to re-implement all of that; the first attempt did, and
+        // promptly failed on `UNWIND [...] AS x RETURN count(x)`.
+        if operator.is_none() && query.unwind_clause.is_some() {
+            use crate::query::executor::operator::SingleRowOperator;
+            operator = Some(Box::new(SingleRowOperator::new()));
+        }
+
         let mut operator = operator.unwrap();
+
+        // A *leading* UNWIND binds its variable before the WHERE, because the predicate may
+        // reference it (`UNWIND [1,2] AS x MATCH (p) WHERE p.n = x`). Applied after the
+        // filter, as a trailing UNWIND is, that query fails with "Variable not found".
+        let leading_unwind = query.unwind_leading && query.with_clause.is_none();
+        if leading_unwind {
+            if let Some(unwind_clause) = &query.unwind_clause {
+                operator = Box::new(UnwindOperator::new(
+                    operator,
+                    unwind_clause.expression.clone(),
+                    unwind_clause.variable.clone(),
+                ));
+            }
+        }
 
         // Add WHERE clause if present.
         // When a WITH clause exists, WHERE predicates were already decomposed and
@@ -1192,8 +1256,10 @@ impl QueryPlanner {
 
         // Extra WITH stages and UNWIND are now handled in the unified loop above.
 
-        // Add standalone UNWIND clause (only when no WITH clause handles it)
-        if query.with_clause.is_none() {
+        // Add standalone UNWIND clause (only when no WITH clause handles it, and not
+        // already applied above as a leading UNWIND). A trailing UNWIND stays here, after
+        // the filter, so the cross product is built from the already-narrowed rows.
+        if query.with_clause.is_none() && !leading_unwind {
             if let Some(unwind_clause) = &query.unwind_clause {
                 operator = Box::new(UnwindOperator::new(
                     operator,
@@ -3969,6 +4035,7 @@ mod tests {
             params: std::collections::HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
+            unwind_leading: false,
             merge_clause: None,
             union_queries: vec![],
             explain: false,

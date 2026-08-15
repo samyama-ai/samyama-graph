@@ -121,6 +121,13 @@ pub struct Query {
     pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
     pub unwind_clause: Option<UnwindClause>,
+    /// Whether the UNWIND *led* the statement (`UNWIND ... MATCH ...`) rather than
+    /// following the match. The AST keeps a single `unwind_clause` with no position, but
+    /// the two orders plan differently: a leading UNWIND must bind its variable before the
+    /// WHERE runs, or a predicate referencing it fails with "Variable not found". A
+    /// trailing UNWIND deliberately stays after the filter so the cross product is built
+    /// from the already-narrowed rows.
+    pub unwind_leading: bool,
     /// MERGE clause (optional)
     pub merge_clause: Option<MergeClause>,
     /// UNION queries (chained via UNION/UNION ALL)
@@ -651,6 +658,7 @@ impl Query {
             params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
+            unwind_leading: false,
             merge_clause: None,
             union_queries: Vec::new(),
             explain: false,
