@@ -840,3 +840,88 @@ fn comparisons_against_a_missing_property_are_unknown_not_true() {
         "n=1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CREATE builds the pattern it was given (#400)
+// ---------------------------------------------------------------------------
+
+fn edge_count(s: &GraphStore) -> String {
+    scalar(s, "MATCH ()-[r]->() RETURN count(r) AS n")
+}
+
+#[test]
+fn create_wires_edges_even_when_endpoints_are_anonymous() {
+    // Edges were wired by variable name, so an endpoint written as `(:Label)` had no name
+    // to wire to and the relationship was dropped. The nodes were still created and no
+    // error was raised, so a bulk load of `CREATE (:A {..})-[:R]->(:B {..})` produced a
+    // graph with every node and not one edge -- the shape most load scripts are written in.
+    let engine = QueryEngine::new();
+
+    for pattern in [
+        "CREATE (a:A {id: 1})-[:R]->(b:B {id: 2})", // both named (always worked)
+        "CREATE (a:A {id: 1})-[:R]->(:B {id: 2})",  // tail anonymous
+        "CREATE (:A {id: 1})-[:R]->(b:B {id: 2})",  // head anonymous
+        "CREATE (:A {id: 1})-[:R]->(:B {id: 2})",   // both anonymous
+        "CREATE (:A {id: 1})-[r:R]->(:B {id: 2})",  // named rel, anonymous endpoints
+    ] {
+        let mut s = GraphStore::new();
+        engine.execute_mut(pattern, &mut s, "default").unwrap();
+        assert_eq!(edge_count(&s), "n=1", "no edge created by: {pattern}");
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "{pattern}");
+    }
+
+    // Multi-segment paths wire every segment, named or not.
+    for pattern in [
+        "CREATE (a:A)-[:R]->(b:B)-[:R2]->(c:C)",
+        "CREATE (:A)-[:R]->(:B)-[:R2]->(:C)",
+        "CREATE (a:A)-[:R]->(:B)-[:R2]->(c:C)",
+    ] {
+        let mut s = GraphStore::new();
+        engine.execute_mut(pattern, &mut s, "default").unwrap();
+        assert_eq!(edge_count(&s), "n=2", "wrong edge count for: {pattern}");
+    }
+}
+
+#[test]
+fn create_honours_the_direction_the_pattern_was_written_in() {
+    // `plan_create_only` wired source -> target in written order and never consulted the
+    // segment's direction, so a `<-` pattern stored an edge pointing the *opposite* way.
+    // Every query against it then silently returns nothing, or the wrong endpoint.
+    let engine = QueryEngine::new();
+
+    let mut s = GraphStore::new();
+    engine
+        .execute_mut("CREATE (a:A {id: 1})<-[:R]-(b:B {id: 2})", &mut s, "default")
+        .unwrap();
+    assert_eq!(edge_count(&s), "n=1");
+    assert_eq!(
+        scalar(&s, "MATCH (b:B)-[:R]->(a:A) RETURN count(*) AS n"),
+        "n=1",
+        "`(a)<-[:R]-(b)` must store b -> a"
+    );
+    assert_eq!(
+        scalar(&s, "MATCH (a:A)-[:R]->(b:B) RETURN count(*) AS n"),
+        "n=0",
+        "the edge must not also point a -> b"
+    );
+
+    // Same, with anonymous endpoints.
+    let mut s = GraphStore::new();
+    engine
+        .execute_mut("CREATE (:A {id: 1})<-[:R]-(:B {id: 2})", &mut s, "default")
+        .unwrap();
+    assert_eq!(
+        scalar(&s, "MATCH (b:B)-[:R]->(a:A) RETURN count(*) AS n"),
+        "n=1"
+    );
+
+    // And the forward form is unchanged.
+    let mut s = GraphStore::new();
+    engine
+        .execute_mut("CREATE (a:A {id: 1})-[:R]->(b:B {id: 2})", &mut s, "default")
+        .unwrap();
+    assert_eq!(
+        scalar(&s, "MATCH (a:A)-[:R]->(b:B) RETURN count(*) AS n"),
+        "n=1"
+    );
+}

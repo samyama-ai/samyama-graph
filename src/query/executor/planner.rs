@@ -2705,6 +2705,33 @@ impl QueryPlanner {
         // Collect edges to create: (source_var, target_var, edge_type, properties, edge_var)
         let mut edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
 
+        // Anonymous nodes still need a handle for edge wiring. Edges are wired by variable
+        // name, so an endpoint written as `(:Label)` used to have nothing to wire to and
+        // the edge was dropped -- silently, since the nodes were still created. Give every
+        // anonymous node a synthetic name that cannot collide with a user variable, and
+        // keep it out of `output_columns` so it stays invisible to RETURN.
+        let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for path in &pattern.paths {
+            if let Some(v) = &path.start.variable {
+                declared.insert(v.clone());
+            }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable {
+                    declared.insert(v.clone());
+                }
+            }
+        }
+        let mut anon_seq = 0usize;
+        let mut next_anon = move |declared: &std::collections::HashSet<String>| -> String {
+            loop {
+                let name = format!("__anon_create_{anon_seq}");
+                anon_seq += 1;
+                if !declared.contains(&name) {
+                    return name;
+                }
+            }
+        };
+
         for path in &pattern.paths {
             // Add start node
             let start = &path.start;
@@ -2717,10 +2744,16 @@ impl QueryPlanner {
                 output_columns.push(var.clone());
             }
 
-            nodes_to_create.push((labels, properties, variable.clone()));
+            // Only the *named* variable reaches output_columns above; the synthetic one is
+            // purely for edge wiring.
+            let start_handle = match &variable {
+                Some(v) => v.clone(),
+                None => next_anon(&declared),
+            };
+            nodes_to_create.push((labels, properties, Some(start_handle.clone())));
 
             // Track current source variable for edge creation
-            let mut current_source_var = variable;
+            let mut current_source_var = Some(start_handle);
 
             // Add nodes and edges from path segments (if any)
             // Example: CREATE (a:Person)-[:KNOWS]->(b:Person)
@@ -2734,7 +2767,11 @@ impl QueryPlanner {
                     output_columns.push(var.clone());
                 }
 
-                nodes_to_create.push((node_labels, node_properties, node_variable.clone()));
+                let node_handle = match &node_variable {
+                    Some(v) => v.clone(),
+                    None => next_anon(&declared),
+                };
+                nodes_to_create.push((node_labels, node_properties, Some(node_handle.clone())));
 
                 // Extract edge information
                 let edge = &segment.edge;
@@ -2744,12 +2781,25 @@ impl QueryPlanner {
                 let edge_properties: HashMap<String, PropertyValue> = edge.properties.clone().unwrap_or_default();
                 let edge_variable = edge.variable.clone();
 
-                // Create edge between source and target nodes
-                // For CREATE, we need both variables to be defined
-                if let (Some(source_var), Some(target_var)) = (&current_source_var, &node_variable) {
+                // Both endpoints now always have a handle (real or synthetic), so an edge
+                // is created for every segment regardless of how the pattern was written.
+                //
+                // Direction is taken from the pattern rather than from write order: an
+                // `<-` segment points at the *earlier* node. This was previously ignored
+                // entirely, so `CREATE (a)<-[:R]-(b)` stored a->b -- an edge pointing the
+                // opposite way to what was written, with nothing to indicate it.
+                if let Some(source_var) = &current_source_var {
+                    let (from, to) = match segment.edge.direction {
+                        Direction::Incoming => (node_handle.clone(), source_var.clone()),
+                        // `-[:R]-` is undirected; CREATE has to pick one, and written
+                        // order is the least surprising choice.
+                        Direction::Outgoing | Direction::Both => {
+                            (source_var.clone(), node_handle.clone())
+                        }
+                    };
                     edges_to_create.push((
-                        source_var.clone(),
-                        target_var.clone(),
+                        from,
+                        to,
                         edge_type,
                         edge_properties,
                         edge_variable,
@@ -2757,7 +2807,7 @@ impl QueryPlanner {
                 }
 
                 // Update source variable for next segment
-                current_source_var = node_variable;
+                current_source_var = Some(node_handle);
             }
         }
 
