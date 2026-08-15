@@ -7257,21 +7257,57 @@ impl AlgorithmOperator {
     }
 }
 
+impl AlgorithmOperator {
+    /// Canonical form of a procedure name for algorithm dispatch.
+    ///
+    /// Dispatch matched `"algo.pageRank"` exactly, so `algo.pagerank` -- the spelling
+    /// anyone would try first -- reported "Unknown algorithm" while the algorithm was
+    /// there all along (#198). The namespace is optional and the name is matched
+    /// case-insensitively, so `pagerank`, `algo.pagerank`, `algo.pageRank` and
+    /// `samyama.pageRank` all reach the same implementation.
+    pub fn canonical_name(name: &str) -> String {
+        let bare = name
+            .strip_prefix("algo.")
+            .or_else(|| name.strip_prefix("samyama."))
+            .or_else(|| name.strip_prefix("gds."))
+            .unwrap_or(name);
+        bare.to_ascii_lowercase()
+    }
+
+    /// Is this a name the algorithm operator can run?
+    pub fn is_algorithm(name: &str) -> bool {
+        matches!(
+            Self::canonical_name(name).as_str(),
+            "pagerank"
+                | "shortestpath"
+                | "wcc"
+                | "scc"
+                | "weightedpath"
+                | "maxflow"
+                | "mst"
+                | "trianglecount"
+                | "cdlp"
+                | "lcc"
+                | "or.solve"
+        )
+    }
+}
+
 impl PhysicalOperator for AlgorithmOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
-            match self.name.as_str() {
-                "algo.pageRank" => self.execute_pagerank(store)?,
-                "algo.shortestPath" => self.execute_shortest_path(store)?,
-                "algo.wcc" => self.execute_wcc(store)?,
-                "algo.scc" => self.execute_scc(store)?,
-                "algo.weightedPath" => self.execute_weighted_path(store)?,
-                "algo.maxFlow" => self.execute_max_flow(store)?,
-                "algo.mst" => self.execute_mst(store)?,
-                "algo.triangleCount" => self.execute_triangle_count(store)?,
-                "algo.cdlp" => self.execute_cdlp(store)?,
-                "algo.lcc" => self.execute_lcc(store)?,
-                "algo.or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
+            match Self::canonical_name(&self.name).as_str() {
+                "pagerank" => self.execute_pagerank(store)?,
+                "shortestpath" => self.execute_shortest_path(store)?,
+                "wcc" => self.execute_wcc(store)?,
+                "scc" => self.execute_scc(store)?,
+                "weightedpath" => self.execute_weighted_path(store)?,
+                "maxflow" => self.execute_max_flow(store)?,
+                "mst" => self.execute_mst(store)?,
+                "trianglecount" => self.execute_triangle_count(store)?,
+                "cdlp" => self.execute_cdlp(store)?,
+                "lcc" => self.execute_lcc(store)?,
+                "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;
@@ -7288,21 +7324,21 @@ impl PhysicalOperator for AlgorithmOperator {
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
          if !self.executed {
-            match self.name.as_str() {
-                "algo.or.solve" => self.execute_or_solve(store, tenant_id)?,
+            match Self::canonical_name(&self.name).as_str() {
+                "or.solve" => self.execute_or_solve(store, tenant_id)?,
                 // For read-only algos, we can just call the immutable implementations
                 // But we need to borrow store immutably.
                 // Since we have &mut store, we can reborrow as &store
-                "algo.pageRank" => self.execute_pagerank(store)?,
-                "algo.shortestPath" => self.execute_shortest_path(store)?,
-                "algo.wcc" => self.execute_wcc(store)?,
-                "algo.scc" => self.execute_scc(store)?,
-                "algo.weightedPath" => self.execute_weighted_path(store)?,
-                "algo.maxFlow" => self.execute_max_flow(store)?,
-                "algo.mst" => self.execute_mst(store)?,
-                "algo.triangleCount" => self.execute_triangle_count(store)?,
-                "algo.cdlp" => self.execute_cdlp(store)?,
-                "algo.lcc" => self.execute_lcc(store)?,
+                "pagerank" => self.execute_pagerank(store)?,
+                "shortestpath" => self.execute_shortest_path(store)?,
+                "wcc" => self.execute_wcc(store)?,
+                "scc" => self.execute_scc(store)?,
+                "weightedpath" => self.execute_weighted_path(store)?,
+                "maxflow" => self.execute_max_flow(store)?,
+                "mst" => self.execute_mst(store)?,
+                "trianglecount" => self.execute_triangle_count(store)?,
+                "cdlp" => self.execute_cdlp(store)?,
+                "lcc" => self.execute_lcc(store)?,
                 _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
             }
             self.executed = true;

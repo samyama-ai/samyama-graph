@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -1769,7 +1769,17 @@ impl QueryPlanner {
             Ok(Box::new(ShowPropertyKeysOperator::new()))
         } else if call_clause.procedure_name == "db.schema.visualization" {
             Ok(Box::new(SchemaVisualizationOperator::new()))
-        } else if call_clause.procedure_name.starts_with("algo.") {
+        } else if call_clause.procedure_name.starts_with("algo.")
+            || AlgorithmOperator::is_algorithm(&call_clause.procedure_name)
+        {
+            // Namespace optional and case-insensitive: `pagerank`, `algo.pagerank`,
+            // `algo.pageRank` and `samyama.pageRank` all route here. Routing on the
+            // `algo.` prefix alone meant `CALL pagerank()` never reached the operator and
+            // came back as "Unknown procedure" (#198).
+            //
+            // The prefix check is kept alongside so an unrecognised `algo.*` name still
+            // reaches the operator and gets the specific "Unknown algorithm" error rather
+            // than the generic "Unknown procedure".
             Ok(Box::new(AlgorithmOperator::new(
                 call_clause.procedure_name.clone(),
                 call_clause.arguments.clone(),
