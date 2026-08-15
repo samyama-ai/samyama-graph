@@ -122,3 +122,42 @@ fn dedup_is_still_off_by_default() {
     assert_eq!(stats.merged_count, 0);
     assert_eq!(store.all_nodes().len(), 2);
 }
+
+#[test]
+fn labels_absent_from_the_snapshot_are_not_indexed_or_merged() {
+    // The pre-populate pass used to walk the entire store for every import, indexing nodes
+    // whose labels the incoming file does not even contain and which therefore can never
+    // merge. Scoping it to the snapshot's own labels must not change what merges: the store
+    // here is dominated by :Article, which the snapshot knows nothing about.
+    let snapshot = snapshot_with_label_order("[\"ChemblTarget\",\"Protein\"]");
+
+    let mut store = uniprot_side(); // one :Protein with accession P12345
+    for i in 0..5000 {
+        let id = store.create_node("Article");
+        store.get_node_mut(id).unwrap().set_property(
+            "accession".to_string(),
+            PropertyValue::String(format!("P{i}")),
+        );
+    }
+    // an :Article carrying the *same* accession must still not merge — different entity
+    let clash = store.create_node("Article");
+    store.get_node_mut(clash).unwrap().set_property(
+        "accession".to_string(),
+        PropertyValue::String("P12345".to_string()),
+    );
+    let before = store.all_nodes().len();
+
+    let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
+
+    assert_eq!(stats.merged_count, 1, "should merge only with the :Protein");
+    assert_eq!(
+        store.all_nodes().len(),
+        before,
+        "the merge reuses the existing :Protein, so the node count is unchanged"
+    );
+    // the clashing :Article is untouched
+    let articles = store
+        .get_nodes_by_label(&samyama::graph::Label::new("Article"))
+        .len();
+    assert_eq!(articles, 5001);
+}

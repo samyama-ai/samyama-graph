@@ -322,21 +322,38 @@ fn import_tenant_inner(
     // Only populated when the caller provides dedup_keys.
     let mut dedup_index: HashMap<(String, String, String), NodeId> = HashMap::new();
 
-    // Pre-populate dedup index from existing store nodes (only if dedup requested)
+    // Pre-populate dedup index from existing store nodes (only if dedup requested).
+    //
+    // Only the labels this snapshot actually contains are indexed, and they are reached
+    // through the label index rather than by walking the whole store. A node whose label
+    // does not appear in the incoming file can never merge with anything in it, so
+    // indexing it is pure cost -- and that cost was O(store) on *every* import, which for
+    // a federation growing 66M -> 266M nodes means re-scanning a store that gets larger
+    // each time and indexing hundreds of millions of nodes that can never match (#316).
+    //
+    // The header is an exact inventory: `export_tenant` materialises `labels` by scanning
+    // the data it writes, so it cannot drift from the file's contents.
     if !dedup_keys.is_empty() {
-    for node in store.all_nodes() {
-        // Index under *every* label, not just whichever one iterated first. `labels` is a
-        // set, so "first" is not a stable contract: a dual-labelled node such as
-        // :ChemblTarget + :Protein could be indexed under either, and if the two snapshots
-        // happened to iterate differently the keys never matched and the merge silently did
-        // not happen (#317). Indexing under all labels makes the merge depend on label
-        // *intersection*, which is order-independent.
-        let labels: Vec<String> = if node.labels.is_empty() {
-            vec![String::new()]
-        } else {
-            node.labels.iter().map(|l| l.as_str().to_string()).collect()
-        };
-        for label in &labels {
+    let snapshot_labels: Vec<crate::graph::Label> = header
+        .labels
+        .iter()
+        .map(|l| crate::graph::Label::new(l.as_str()))
+        .collect();
+    for snapshot_label in &snapshot_labels {
+        let label = snapshot_label.as_str().to_string();
+        let node_ids: Vec<NodeId> = store
+            .get_nodes_by_label(snapshot_label)
+            .iter()
+            .map(|n| n.id)
+            .collect();
+        for node_id in node_ids {
+        let Some(node) = store.get_node(node_id) else { continue };
+        // Indexed under this label specifically, not "whichever label iterated first":
+        // `labels` is a set, so "first" is not a stable contract, and a dual-labelled node
+        // such as :ChemblTarget + :Protein could be indexed under either. If the two sides
+        // disagreed the lookup missed and the merge silently did not happen (#317).
+        // Matching now depends on label *intersection*, which is order-independent.
+        {
         for &key in dedup_keys {
             // Check node HashMap properties
             if let Some(val) = node.get_property(key) {
@@ -358,6 +375,7 @@ fn import_tenant_inner(
                 }
                 _ => {}
             }
+        }
         }
         }
     }
