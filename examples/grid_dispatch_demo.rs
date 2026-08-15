@@ -110,7 +110,13 @@ fn build_grid_kg(data_dir: &std::path::Path) -> (GraphStore, Vec<Generator>, Vec
     // Generators.
     let gen_csv = data_dir.join("sample_generators.csv");
     let mut gens = Vec::new();
-    let f = File::open(&gen_csv).expect("generators csv");
+    let f = File::open(&gen_csv).unwrap_or_else(|e| {
+        eprintln!("Error: cannot read the smart-grid sample data: {}", &gen_csv.display());
+        eprintln!("       {e}");
+        eprintln!("       this example needs data that is not part of this repository;");
+        eprintln!("       pass --data-dir PATH to point at your own copy.");
+        std::process::exit(1);
+    });
     for (i, line) in BufReader::new(f).lines().enumerate() {
         let line = line.unwrap();
         if i == 0 { continue; } // header

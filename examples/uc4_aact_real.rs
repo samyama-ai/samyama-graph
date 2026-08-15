@@ -101,7 +101,13 @@ fn as_f(v: &serde_json::Value) -> f64 {
 
 async fn cypher(client: &RemoteClient, q: &str) -> samyama_sdk::QueryResult {
     client.query_readonly("default", q).await
-        .unwrap_or_else(|e| panic!("cypher error: {e}\n{q}"))
+        .unwrap_or_else(|e| {
+            eprintln!("Error: query failed against the server: {e}");
+            eprintln!("       {q}");
+            eprintln!("       this example talks to a running samyama server on :8080;");
+            eprintln!("       start one with `./target/release/samyama` and load the AACT data first.");
+            std::process::exit(1);
+        })
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]

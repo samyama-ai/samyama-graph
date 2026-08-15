@@ -123,7 +123,13 @@ fn main() {
     eprintln!("loading {} ...", a.snapshot.display());
     let mut store = GraphStore::new();
     let t0 = Instant::now();
-    let f = File::open(&a.snapshot).expect("snapshot open");
+    let f = File::open(&a.snapshot).unwrap_or_else(|e| {
+        eprintln!("Error: cannot read the drug-interactions snapshot: {}", &a.snapshot.display());
+        eprintln!("       {e}");
+        eprintln!("       this example needs data that is not part of this repository;");
+        eprintln!("       pass --snapshot PATH to point at your own copy.");
+        std::process::exit(1);
+    });
     let stats = samyama::snapshot::import_tenant(&mut store, f).expect("import");
     let load_ms = t0.elapsed().as_millis();
     eprintln!("loaded {} nodes, {} edges in {} ms",

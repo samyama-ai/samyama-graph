@@ -99,7 +99,13 @@ fn build_amr_kg(catalog: &std::path::Path)
     -> (GraphStore, Vec<(String, String, String, String)>) // (gene_family, class, subclass, taxa)
 {
     let mut store = GraphStore::new();
-    let f = File::open(catalog).expect("catalog");
+    let f = File::open(catalog).unwrap_or_else(|e| {
+        eprintln!("Error: cannot read the NCBI Reference Gene Catalog: {}", catalog.display());
+        eprintln!("       {e}");
+        eprintln!("       this example needs data that is not part of this repository;");
+        eprintln!("       pass --catalog PATH to point at your own copy.");
+        std::process::exit(1);
+    });
     let mut header: Vec<String> = Vec::new();
     let mut rows = Vec::new();
 

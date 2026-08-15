@@ -35,7 +35,16 @@ fn main() {
     eprintln!("spec : {}", spec_path.display());
 
     let mut s = String::new();
-    File::open(&nodes_path).expect("nodes").read_to_string(&mut s).unwrap();
+    File::open(&nodes_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: cannot read the supply-chain nodes file: {}", nodes_path.display());
+            eprintln!("       {e}");
+            eprintln!("       this example needs data that is not part of this repository;");
+            eprintln!("       pass --nodes PATH to point at your own copy.");
+            std::process::exit(1);
+        })
+        .read_to_string(&mut s)
+        .unwrap();
     let nodes_json: serde_json::Value = serde_json::from_str(&s).expect("nodes json");
     s.clear();
     File::open(&spec_path).expect("spec").read_to_string(&mut s).unwrap();

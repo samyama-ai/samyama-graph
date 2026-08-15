@@ -113,7 +113,13 @@ fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
 fn parse_osm(path: &std::path::Path)
     -> (GraphStore, Vec<OsmNode>, HashMap<i64, usize>)
 {
-    let mut file = File::open(path).expect("OSM JSON");
+    let mut file = File::open(path).unwrap_or_else(|e| {
+        eprintln!("Error: cannot read an OSM JSON extract: {}", path.display());
+        eprintln!("       {e}");
+        eprintln!("       this example needs data that is not part of this repository;");
+        eprintln!("       pass --osm PATH to point at your own copy.");
+        std::process::exit(1);
+    });
     let mut buf = String::new();
     file.read_to_string(&mut buf).expect("read");
     let v: serde_json::Value = serde_json::from_str(&buf).expect("json parse");
