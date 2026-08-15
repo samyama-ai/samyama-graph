@@ -302,7 +302,18 @@ pub fn import_tenant_with_dedup(
     // Pre-populate dedup index from existing store nodes (only if dedup requested)
     if !dedup_keys.is_empty() {
     for node in store.all_nodes() {
-        let label = node.labels.iter().next().map(|l| l.as_str().to_string()).unwrap_or_default();
+        // Index under *every* label, not just whichever one iterated first. `labels` is a
+        // set, so "first" is not a stable contract: a dual-labelled node such as
+        // :ChemblTarget + :Protein could be indexed under either, and if the two snapshots
+        // happened to iterate differently the keys never matched and the merge silently did
+        // not happen (#317). Indexing under all labels makes the merge depend on label
+        // *intersection*, which is order-independent.
+        let labels: Vec<String> = if node.labels.is_empty() {
+            vec![String::new()]
+        } else {
+            node.labels.iter().map(|l| l.as_str().to_string()).collect()
+        };
+        for label in &labels {
         for &key in dedup_keys {
             // Check node HashMap properties
             if let Some(val) = node.get_property(key) {
@@ -325,6 +336,7 @@ pub fn import_tenant_with_dedup(
                 _ => {}
             }
         }
+        }
     }
     } // end if !dedup_keys.is_empty()
 
@@ -346,18 +358,27 @@ pub fn import_tenant_with_dedup(
                 .unwrap_or_else(|| "".to_string());
 
             // --- Entity dedup: check if this node already exists (only if dedup requested) ---
+            // Try every label the incoming node carries, for the same reason the index
+            // holds every label: a match on any shared label is a match.
+            let snap_labels: Vec<String> = if snap_node.labels.is_empty() {
+                vec![String::new()]
+            } else {
+                snap_node.labels.clone()
+            };
             let mut existing_id: Option<NodeId> = None;
-            for &key in dedup_keys.iter() {
+            'dedup: for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
                     let val_str = match json_val {
                         serde_json::Value::String(s) => normalize_dedup(s),
                         serde_json::Value::Number(n) => n.to_string(),
                         _ => continue,
                     };
-                    let lookup = (first_label.clone(), key.to_string(), val_str);
-                    if let Some(&eid) = dedup_index.get(&lookup) {
-                        existing_id = Some(eid);
-                        break;
+                    for label in &snap_labels {
+                        let lookup = (label.clone(), key.to_string(), val_str.clone());
+                        if let Some(&eid) = dedup_index.get(&lookup) {
+                            existing_id = Some(eid);
+                            break 'dedup;
+                        }
                     }
                 }
             }
@@ -440,7 +461,12 @@ pub fn import_tenant_with_dedup(
                             serde_json::Value::Number(n) => n.to_string(),
                             _ => continue,
                         };
-                        dedup_index.insert((first_label.clone(), key.to_string(), val_str), new_id);
+                        for label in &snap_labels {
+                            dedup_index.insert(
+                                (label.clone(), key.to_string(), val_str.clone()),
+                                new_id,
+                            );
+                        }
                     }
                 }
                 id_remap.insert(snap_node.id, new_id);
@@ -463,7 +489,12 @@ pub fn import_tenant_with_dedup(
                             PropertyValue::Integer(i) => i.to_string(),
                             _ => continue,
                         };
-                        dedup_index.insert((first_label.clone(), key.to_string(), val_str), new_id);
+                        for label in &snap_labels {
+                            dedup_index.insert(
+                                (label.clone(), key.to_string(), val_str.clone()),
+                                new_id,
+                            );
+                        }
                     }
                 }
                 id_remap.insert(snap_node.id, new_id);
