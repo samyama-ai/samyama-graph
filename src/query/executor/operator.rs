@@ -7654,6 +7654,186 @@ impl MergeOperator {
     ) -> Self {
         Self { pattern, on_create_set, on_match_set, executed: false }
     }
+
+    /// Does a node satisfy the pattern's labels and inline properties?
+    fn node_matches(node: &crate::graph::Node, labels: &[Label], props: Option<&HashMap<String, PropertyValue>>) -> bool {
+        if !labels.iter().all(|l| node.labels.contains(l)) {
+            return false;
+        }
+        match props {
+            Some(required) => required
+                .iter()
+                .all(|(k, v)| node.properties.get(k).map_or(false, |pv| pv == v)),
+            None => true,
+        }
+    }
+
+    /// MERGE over a pattern that contains relationships: find the whole pattern or create
+    /// the whole pattern.
+    ///
+    /// Note this creates *fresh* nodes when the pattern as a whole is absent, even where
+    /// nodes with the same labels and properties already exist -- openCypher's documented
+    /// behaviour, and the reason the idiomatic way to add an edge between existing nodes is
+    /// to bind them first (`MATCH (a),(b) MERGE (a)-[:R]->(b)`), which reuses them.
+    fn merge_path(
+        &self,
+        path: &crate::query::ast::PathPattern,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
+        // Flatten the path into nodes and the relationships between them.
+        let mut pattern_nodes: Vec<&crate::query::ast::NodePattern> = vec![&path.start];
+        // (from_index, to_index, type, properties, variable)
+        let mut pattern_rels: Vec<(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+        for segment in &path.segments {
+            pattern_nodes.push(&segment.node);
+            let to = pattern_nodes.len() - 1;
+            let from = to - 1;
+            let edge_type = segment
+                .edge
+                .types
+                .first()
+                .cloned()
+                .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+            let props = segment.edge.properties.clone().unwrap_or_default();
+            let (a, b) = match segment.edge.direction {
+                Direction::Incoming => (to, from),
+                Direction::Outgoing | Direction::Both => (from, to),
+            };
+            pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone()));
+        }
+
+        // Candidate node ids per pattern position. A pattern node with no label has no
+        // cheap candidate set, so it cannot participate in a match and the pattern is
+        // treated as absent (i.e. created).
+        let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
+        for np in &pattern_nodes {
+            let mut ids = Vec::new();
+            if let Some(first_label) = np.labels.first() {
+                for node in store.get_nodes_by_label(first_label) {
+                    if Self::node_matches(node, &np.labels, np.properties.as_ref()) {
+                        ids.push(node.id);
+                    }
+                }
+            }
+            candidates.push(ids);
+        }
+
+        // Backtracking search for an assignment satisfying every relationship. Patterns are
+        // a handful of nodes, so this stays trivial.
+        let found = if candidates.iter().any(|c| c.is_empty()) {
+            None
+        } else {
+            let mut assignment: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
+            Self::search(&candidates, &pattern_rels, store, &mut assignment)
+        };
+
+        let mut record = Record::new();
+
+        if let Some(assignment) = found {
+            for (i, np) in pattern_nodes.iter().enumerate() {
+                if let Some(var) = &np.variable {
+                    record.bind(var.clone(), Value::NodeRef(assignment[i]));
+                }
+            }
+            let sets = self.on_match_set.clone();
+            self.apply_sets(&sets, &record, store, tenant_id)?;
+            return Ok(Some(record));
+        }
+
+        // Create the entire pattern.
+        let mut created: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
+        for np in &pattern_nodes {
+            let label_str = np.labels.first().map(|l| l.as_str()).unwrap_or("Node");
+            let node_id = store.create_node(label_str);
+            for label in np.labels.iter().skip(1) {
+                if let Some(node) = store.get_node_mut(node_id) {
+                    node.labels.insert(label.clone());
+                }
+            }
+            if let Some(required) = np.properties.as_ref() {
+                for (k, v) in required {
+                    let _ = store.set_node_property(tenant_id, node_id, k.clone(), v.clone());
+                }
+            }
+            if let Some(var) = &np.variable {
+                record.bind(var.clone(), Value::NodeRef(node_id));
+            }
+            created.push(node_id);
+        }
+        for (from, to, edge_type, props, _var) in &pattern_rels {
+            let edge_id = store
+                .create_edge(created[*from], created[*to], edge_type.clone())
+                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            for (k, v) in props {
+                store.set_edge_property_sparse(edge_id, k.clone(), v.clone());
+            }
+        }
+
+        let sets = self.on_create_set.clone();
+        self.apply_sets(&sets, &record, store, tenant_id)?;
+        Ok(Some(record))
+    }
+
+    /// Assign candidate nodes position by position, keeping only assignments whose
+    /// relationships all exist in the store.
+    fn search(
+        candidates: &[Vec<NodeId>],
+        rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)],
+        store: &GraphStore,
+        assignment: &mut Vec<NodeId>,
+    ) -> Option<Vec<NodeId>> {
+        let i = assignment.len();
+        if i == candidates.len() {
+            return Some(assignment.clone());
+        }
+        for &cand in &candidates[i] {
+            // A pattern node cannot bind to a node already used at another position.
+            if assignment.contains(&cand) {
+                continue;
+            }
+            assignment.push(cand);
+            // Check every relationship whose endpoints are now both assigned.
+            let ok = rels.iter().all(|(from, to, ty, _p, _v)| {
+                if *from > i || *to > i {
+                    return true;
+                }
+                let src = assignment[*from];
+                let dst = assignment[*to];
+                store
+                    .get_outgoing_edge_targets(src)
+                    .iter()
+                    .any(|(_eid, _s, t, et)| *t == dst && et == ty)
+            });
+            if ok {
+                if let Some(found) = Self::search(candidates, rels, store, assignment) {
+                    return Some(found);
+                }
+            }
+            assignment.pop();
+        }
+        None
+    }
+
+    /// Apply ON CREATE / ON MATCH SET items for any variable bound by the pattern.
+    fn apply_sets(
+        &self,
+        sets: &[(String, String, Expression)],
+        record: &Record,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<()> {
+        for (var, prop, expr) in sets {
+            let Some(node_id) = record.get(var).and_then(|v| v.node_id()) else {
+                continue;
+            };
+            let val = eval_expression(expr, record, store)?;
+            if let Value::Property(pv) = val {
+                let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for MergeOperator {
@@ -7671,6 +7851,15 @@ impl PhysicalOperator for MergeOperator {
 
         let path = self.pattern.paths.first()
             .ok_or_else(|| ExecutionError::PlanningError("MERGE pattern has no paths".to_string()))?;
+
+        // A MERGE pattern containing relationships is match-or-create over the *whole*
+        // pattern, per openCypher: if the entire pattern does not already exist, the
+        // entire pattern is created. Previously only `path.start` was considered and the
+        // segments were ignored outright, so `MERGE (a:X {..})-[:R]->(b:X {..})` matched
+        // the first node, created no relationship, and reported success.
+        if !path.segments.is_empty() {
+            return self.merge_path(path, store, tenant_id);
+        }
 
         let start = &path.start;
         let start_var = start.variable.clone().unwrap_or_else(|| "n".to_string());

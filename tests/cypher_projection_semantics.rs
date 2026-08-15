@@ -1030,3 +1030,102 @@ fn match_where_groups_chain_beyond_two() {
         "n=0"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MERGE over a relationship pattern (#306)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_on_a_relationship_pattern_creates_and_then_matches_the_whole_pattern() {
+    // MERGE only ever inspected the first node of its pattern and ignored the segments, so
+    // a relationship MERGE created no edge and reported success. openCypher treats a MERGE
+    // pattern as all-or-nothing: match the whole pattern, else create the whole pattern.
+    let engine = QueryEngine::new();
+
+    let mut s = GraphStore::new();
+    for run in 1..=3 {
+        engine
+            .execute_mut(
+                "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) RETURN a.k AS k",
+                &mut s,
+                "default",
+            )
+            .unwrap();
+        // idempotent: the second and third runs must match, not create again
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "run {run}");
+        assert_eq!(edge_count(&s), "n=1", "run {run}");
+    }
+
+    // direction comes from the pattern
+    let mut s = GraphStore::new();
+    engine
+        .execute_mut("MERGE (a:X {k: 1})<-[:R]-(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (:Y)-[:R]->(:X) RETURN count(*) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (:X)-[:R]->(:Y) RETURN count(*) AS n"), "n=0");
+
+    // multi-segment paths, also idempotent
+    let mut s = GraphStore::new();
+    for _ in 0..2 {
+        engine
+            .execute_mut(
+                "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2})-[:R2]->(c:Z {k: 3}) RETURN a.k AS k",
+                &mut s, "default",
+            )
+            .unwrap();
+    }
+    assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=3");
+    assert_eq!(edge_count(&s), "n=2");
+
+    // a pattern differing only in edge type is a *different* pattern, so it is created
+    let mut s = GraphStore::new();
+    engine.execute_mut("MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default").unwrap();
+    engine.execute_mut("MERGE (a:X {k: 1})-[:OTHER]->(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default").unwrap();
+    assert_eq!(edge_count(&s), "n=2");
+}
+
+#[test]
+fn merge_between_already_bound_nodes_reuses_them() {
+    // The idiomatic way to add an edge between *existing* nodes is to bind them first.
+    // This form reuses the matched nodes rather than creating fresh ones, and is the
+    // reason a standalone MERGE creating new nodes is not a bug but the documented
+    // openCypher behaviour.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut("CREATE (:Repro {k: 10})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:Repro {k: 11})", &mut s, "default").unwrap();
+
+    for _ in 0..2 {
+        engine
+            .execute_mut(
+                "MATCH (a:Repro {k: 10}), (b:Repro {k: 11}) MERGE (a)-[:R]->(b) RETURN a.k AS k",
+                &mut s, "default",
+            )
+            .unwrap();
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "must not duplicate nodes");
+        assert_eq!(edge_count(&s), "n=1", "must not duplicate the edge");
+    }
+}
+
+#[test]
+fn merge_on_create_and_on_match_fire_on_the_right_branch() {
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    engine
+        .execute_mut(
+            "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) ON CREATE SET a.tag = \"created\" RETURN a.k AS k",
+            &mut s, "default",
+        )
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (a:X) RETURN a.tag AS tag"), "tag=created");
+
+    engine
+        .execute_mut(
+            "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) ON MATCH SET a.tag = \"matched\" RETURN a.k AS k",
+            &mut s, "default",
+        )
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (a:X) RETURN a.tag AS tag"), "tag=matched");
+    assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "the second MERGE matched");
+}
