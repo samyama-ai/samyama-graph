@@ -438,10 +438,11 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => {
-                if index_name.is_none() {
-                    index_name = Some(inner.as_str().to_string());
-                }
+            // The optional index name has its own rule so it cannot swallow the `FOR`
+            // keyword. Taking it from the first `variable` instead would now pick up the
+            // pattern variable (`n` in `FOR (n:Embedding)`) whenever the name is omitted.
+            Rule::index_name => {
+                index_name = Some(inner.as_str().to_string());
             }
             Rule::label => {
                 label = Some(Label::new(inner.as_str()));
@@ -1300,26 +1301,37 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::String(unescape_string_literal(inner.as_str())));
             }
             Rule::list => {
+                // `Vector` is the embedding type -- f32 throughout. Treating *any*
+                // all-numeric list as one meant `[1, 2, 3]` came back as
+                // `Float(1.0), Float(2.0), Float(3.0)`: `UNWIND [1,2,3] AS x RETURN x`
+                // returned decimals for data that had none (#409).
+                //
+                // A list is only taken to be a vector when it actually contains a float.
+                // An all-integer list stays a list of integers, and the vector paths
+                // accept a numeric array (see `PropertyValue::to_vector`) so an embedding
+                // written as `[1, 0, 0]` still indexes.
                 let mut items = Vec::new();
-                let mut all_floats = true;
-                let mut float_vals = Vec::new();
+                let mut numeric_vals = Vec::new();
+                let mut all_numeric = true;
+                let mut saw_float = false;
 
                 for item in inner.into_inner() {
                     if item.as_rule() == Rule::value {
                         let val = parse_value(item)?;
-                        if let PropertyValue::Float(f) = val {
-                            float_vals.push(f as f32);
-                        } else if let PropertyValue::Integer(i) = val {
-                            float_vals.push(i as f32);
-                        } else {
-                            all_floats = false;
+                        match val {
+                            PropertyValue::Float(f) => {
+                                saw_float = true;
+                                numeric_vals.push(f as f32);
+                            }
+                            PropertyValue::Integer(i) => numeric_vals.push(i as f32),
+                            _ => all_numeric = false,
                         }
                         items.push(val);
                     }
                 }
 
-                if !float_vals.is_empty() && all_floats {
-                    return Ok(PropertyValue::Vector(float_vals));
+                if all_numeric && saw_float && !numeric_vals.is_empty() {
+                    return Ok(PropertyValue::Vector(numeric_vals));
                 }
                 return Ok(PropertyValue::Array(items));
             }

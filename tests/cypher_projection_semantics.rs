@@ -1519,3 +1519,57 @@ fn keys_and_properties_see_columnar_values_after_a_snapshot_import() {
         assert!(fresh_keys.contains(expected), "{fresh_keys}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// List literals keep their element types (#409)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integer_list_literals_stay_integers() {
+    // Any all-numeric list was stored as `Vector`, the f32 embedding type, so `[1, 2, 3]`
+    // came back as 1.0, 2.0, 3.0 -- decimals for data that had none. A list is only taken
+    // to be a vector when it actually contains a float.
+    let s = GraphStore::new();
+
+    assert_eq!(bag(&s, "UNWIND [1, 2, 3] AS x RETURN x"), vec!["x=1", "x=2", "x=3"]);
+    assert_eq!(bag(&s, "UNWIND [10, 20] AS x RETURN x + 1 AS y"), vec!["y=11", "y=21"]);
+
+    // a float anywhere still makes it a vector, so embeddings are unaffected
+    let v = scalar(&s, "RETURN [0.1, 0.2] AS v");
+    assert!(v.contains('.'), "float list should keep its decimals: {v}");
+
+    // mixed types stay a plain list
+    let mixed = scalar(&s, "RETURN [1, \"a\"] AS v");
+    assert!(mixed.contains('a'), "{mixed}");
+}
+
+#[test]
+fn an_embedding_written_with_whole_numbers_is_still_indexable() {
+    // Consequence of the above: `[1, 0, 0]` is now a list of integers rather than a
+    // `Vector`, so the vector paths must accept a numeric array or such an embedding would
+    // silently stop being indexed -- trading one silent wrong answer for another.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE (:D {name: \"a\", emb: [1, 0, 0]})", &mut s, "default")
+        .unwrap();
+    engine
+        .execute_mut("CREATE (:D {name: \"b\", emb: [0, 1, 0]})", &mut s, "default")
+        .unwrap();
+
+    // unnamed form: the optional index name used to swallow `FOR`, so this was rejected
+    engine
+        .execute_mut("CREATE VECTOR INDEX FOR (d:D) ON (d.emb)", &mut s, "default")
+        .unwrap();
+    s.rebuild_vector_index();
+    assert_eq!(scalar(&s, "MATCH (d:D) RETURN count(d) AS n"), "n=2");
+
+    // named form still works and keeps the name it was given
+    let mut s2 = GraphStore::new();
+    engine
+        .execute_mut("CREATE (:D {emb: [0.5, 0.5]})", &mut s2, "default")
+        .unwrap();
+    engine
+        .execute_mut("CREATE VECTOR INDEX myidx FOR (d:D) ON (d.emb)", &mut s2, "default")
+        .unwrap();
+}

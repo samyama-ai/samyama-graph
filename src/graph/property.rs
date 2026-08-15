@@ -354,6 +354,27 @@ impl PropertyValue {
         }
     }
 
+    /// This value as an embedding, accepting either a `Vector` or a numeric `Array`.
+    ///
+    /// An all-integer list literal stays a list of integers so `[1, 2, 3]` does not turn
+    /// into decimals (#409); an embedding written as `[1, 0, 0]` is therefore an `Array`
+    /// rather than a `Vector`, and must still be indexable. Returns `None` for arrays with
+    /// any non-numeric element.
+    pub fn to_vector(&self) -> Option<Vec<f32>> {
+        match self {
+            PropertyValue::Vector(v) => Some(v.clone()),
+            PropertyValue::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    PropertyValue::Float(f) => Some(*f as f32),
+                    PropertyValue::Integer(i) => Some(*i as f32),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
     /// Get type name as string
     pub fn type_name(&self) -> &'static str {
         match self {

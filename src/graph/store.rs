@@ -2166,18 +2166,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 // in the column store (frozen by DS-07 compaction, which clears inline
                 // props). Read inline first, fall back to columnar — the union covers
                 // both tiers, so large labels (e.g. Problem) are no longer left empty.
+                // Accept a numeric array as well as a Vector: an embedding written with
+                // whole numbers (`[1, 0, 0]`) is a list of integers, not a float vector.
                 let inline = self
                     .get_node(nid)
-                    .and_then(|n| match n.get_property(&key.property_key) {
-                        Some(crate::graph::property::PropertyValue::Vector(v)) => Some(v.clone()),
-                        _ => None,
-                    });
+                    .and_then(|n| n.get_property(&key.property_key).and_then(|p| p.to_vector()));
                 let vec = match inline {
                     Some(v) => Some(v),
-                    None => match self.node_columns.get_property(nid.as_u64() as usize, &key.property_key) {
-                        crate::graph::property::PropertyValue::Vector(v) => Some(v),
-                        _ => None,
-                    },
+                    None => self
+                        .node_columns
+                        .get_property(nid.as_u64() as usize, &key.property_key)
+                        .to_vector(),
                 };
                 if let Some(vec) = vec {
                     vectors.push((nid, vec));

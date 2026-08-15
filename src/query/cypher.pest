@@ -13,7 +13,11 @@ with_return_stmt = { with_clause ~ return_clause ~ order_by_clause? ~ skip_claus
 return_stmt = { return_clause ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 
 // CREATE VECTOR INDEX statement
-create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ variable? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
+// The optional index name must not swallow `FOR`. `variable?` matched it, and the rule
+// then failed at the "(" -- so the unnamed form was rejected outright. Same trap as
+// the optional constraint name.
+index_name = @{ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
 create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
