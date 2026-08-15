@@ -258,6 +258,29 @@ pub fn import_tenant_with_dedup(
     reader: impl Read,
     dedup_keys: &[&str],
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    // A failed import used to leave whatever it had already applied in the graph: a
+    // truncated snapshot returned "unexpected end of file" *and* several million nodes,
+    // so the caller saw an error and a partially-populated graph, with no way to tell how
+    // much of it had landed (#199). Track what this import creates and undo it on failure.
+    let mut created_nodes: Vec<crate::graph::NodeId> = Vec::new();
+    match import_tenant_inner(store, reader, dedup_keys, &mut created_nodes) {
+        Ok(stats) => Ok(stats),
+        Err(e) => {
+            // Reverse order so edges go with their endpoints.
+            for id in created_nodes.iter().rev() {
+                let _ = store.delete_node("default", *id);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn import_tenant_inner(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
+    created_nodes: &mut Vec<crate::graph::NodeId>,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
     let buf_reader = BufReader::new(decoder);
     let mut lines = buf_reader.lines();
@@ -432,6 +455,7 @@ pub fn import_tenant_with_dedup(
             if use_stubs {
                 // v2: use lightweight stubs + column properties
                 let new_id = store.create_node_stub(first_label.as_str());
+                created_nodes.push(new_id);
                 // Add remaining labels
                 if let Some(node) = store.get_node_mut(new_id) {
                     for label in snap_node.labels.iter().skip(1) {
@@ -473,6 +497,7 @@ pub fn import_tenant_with_dedup(
             } else {
                 // v1: use full create_node with HashMap properties
                 let new_id = store.create_node(first_label.as_str());
+                created_nodes.push(new_id);
                 if let Some(node) = store.get_node_mut(new_id) {
                     for label in snap_node.labels.iter().skip(1) {
                         node.add_label(label.as_str());
