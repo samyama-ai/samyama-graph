@@ -2165,3 +2165,51 @@ fn writing_through_a_map_path_is_still_rejected() {
     assert!(e.execute_mut("MATCH (d:D) SET d.plain = 6", &mut s, "default").is_ok());
     assert!(e.execute_mut("MATCH (d:D) REMOVE d.plain", &mut s, "default").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// split() (#437 probe finding)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn split_on_a_single_character() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"a,b,c\", \",\") AS v"), "v=[a,b,c]");
+}
+
+#[test]
+fn split_on_a_multi_character_delimiter() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"a::b\", \"::\") AS v"), "v=[a,b]");
+}
+
+#[test]
+fn split_that_matches_nothing_returns_the_whole_string() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"abc\", \",\") AS v"), "v=[abc]");
+}
+
+#[test]
+fn split_on_an_empty_delimiter_yields_characters() {
+    // Cypher splits into single characters here. Rust's split("") would also
+    // emit an empty string at each end, which is why this is special-cased.
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"abc\", \"\") AS v"), "v=[a,b,c]");
+}
+
+#[test]
+fn split_keeps_the_empty_field_a_trailing_delimiter_creates() {
+    // "a," is two fields, the second empty -- dropping it would lose information.
+    assert_eq!(scalar(&GraphStore::new(), "RETURN size(split(\"a,\", \",\")) AS v"), "v=2");
+}
+
+#[test]
+fn split_composes_with_size_and_indexing() {
+    let s = GraphStore::new();
+    assert_eq!(scalar(&s, "RETURN size(split(\"a,b,c\", \",\")) AS v"), "v=3");
+    assert_eq!(scalar(&s, "RETURN split(\"a,b,c\", \",\")[1] AS v"), "v=b");
+}
+
+#[test]
+fn split_with_the_wrong_arity_says_so() {
+    let err = QueryEngine::new()
+        .execute("RETURN split(\"a\") AS v", &GraphStore::new())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("split() requires 2 arguments"), "{err}");
+}

@@ -1014,6 +1014,25 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let s = extract_string(&args[0])?;
             Ok(Value::Property(PropertyValue::String(s.trim().to_string())))
         }
+        "split" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(
+                    "split() requires 2 arguments: split(string, delimiter)".to_string(),
+                ));
+            }
+            let s = extract_string(&args[0])?;
+            let delim = extract_string(&args[1])?;
+            // Cypher splits on an empty delimiter into single characters; Rust's
+            // split("") would additionally yield empty strings at both ends.
+            let parts: Vec<PropertyValue> = if delim.is_empty() {
+                s.chars().map(|c| PropertyValue::String(c.to_string())).collect()
+            } else {
+                s.split(delim.as_str())
+                    .map(|p| PropertyValue::String(p.to_string()))
+                    .collect()
+            };
+            Ok(Value::Property(PropertyValue::Array(parts)))
+        }
         "ltrim" => {
             let s = extract_string(&args[0])?;
             Ok(Value::Property(PropertyValue::String(s.trim_start().to_string())))

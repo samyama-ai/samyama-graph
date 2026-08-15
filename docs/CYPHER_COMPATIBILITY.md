@@ -7,7 +7,7 @@
 
 There is **no measured OpenCypher coverage percentage** in this document, and there will not be one until the openCypher TCK is actually run (#434). A previous version of this page claimed "~90% OpenCypher coverage"; that figure was self-assessed, never checked against the TCK, and an earlier internal assessment of the same engine put the number at 40–50%. Rather than pick between two unverified numbers, the claim is withdrawn.
 
-What this page reports instead is narrower and checkable: **78 probes, 75 supported, 3 not.** Each probe is one representative query for one feature. Re-run it with:
+What this page reports instead is narrower and checkable: **78 probes, 76 supported, 2 not.** Each probe is one representative query for one feature. Re-run it with:
 
 ```
 cargo run --release --example cypher_matrix_probe
@@ -17,11 +17,10 @@ A ✅ here means *the query executed*. It does not certify semantics — a const
 
 ## What is not supported
 
-Three things, all verified:
+Two things, all verified:
 
 | Feature | Behaviour | Tracking |
 | :--- | :--- | :--- |
-| `split()` | `Unknown function: split` | — |
 | `FOREACH` | Parse error | — |
 | `algo.bfs`, `algo.dijkstra` | Do not exist under those names — use `algo.shortestPath` and `algo.weightedPath` | — |
 
@@ -57,7 +56,7 @@ Three things, all verified:
 | | `trim`, `replace` | ✅ | |
 | | `substring`, `left`, `right` | ✅ | |
 | | `reverse`, `toString` | ✅ | |
-| | `split` | ❌ | |
+| | `split` | ✅ | Multi-char delimiters; empty delimiter splits into characters |
 | **Numeric Functions** | `abs`, `ceil`, `floor`, `round` | ✅ | |
 | | `sqrt`, `sign` | ✅ | |
 | | `toInteger`, `toFloat` | ✅ | |
