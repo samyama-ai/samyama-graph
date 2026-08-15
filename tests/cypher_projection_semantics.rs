@@ -1931,3 +1931,59 @@ fn single_subscript_and_slice_still_work() {
     assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][0] AS v"), "v=1");
     assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2,3][0..2] AS v"), "v=[1,2]");
 }
+
+// ---------------------------------------------------------------------------
+// Null propagation through arithmetic (#457)
+//
+// Comparison and logical operators already returned null for a null operand;
+// arithmetic raised a type error instead. The damaging case was not the
+// literal but `p.a + p.missing` -- a property absent on some nodes is the
+// ordinary state of a property graph, and it aborted the entire query.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arithmetic_with_null_yields_null_not_an_error() {
+    let s = GraphStore::new();
+    for q in [
+        "RETURN 1 + null AS v",
+        "RETURN null + 1 AS v",
+        "RETURN 1 - null AS v",
+        "RETURN 1 * null AS v",
+        "RETURN 1 / null AS v",
+        "RETURN 1 % null AS v",
+        "RETURN \"a\" + null AS v",
+        "RETURN -null AS v",
+    ] {
+        assert_eq!(scalar(&s, q), "v=NULL", "{q}");
+    }
+}
+
+#[test]
+fn a_missing_property_nulls_only_its_own_row() {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    e.execute_mut("CREATE (:P {a: 1})", &mut s, "default").unwrap();
+    e.execute_mut("CREATE (:P {a: 2, b: 10})", &mut s, "default").unwrap();
+
+    // The row lacking `b` is null; the row that has it still computes. Before
+    // the fix this raised a type error and neither row came back.
+    assert_eq!(bag(&s, "MATCH (p:P) RETURN p.a + p.b AS v"), vec!["v=12", "v=NULL"]);
+}
+
+#[test]
+fn narrowing_null_did_not_disable_the_type_check() {
+    let e = QueryEngine::new();
+    let s = GraphStore::new();
+    // Genuinely non-numeric, non-null operands must still be rejected.
+    assert!(e.execute("RETURN \"a\" - 1 AS v", &s).is_err());
+    // And division by zero is still an error, not a null.
+    assert!(e.execute("RETURN 1 / 0 AS v", &s).is_err());
+}
+
+#[test]
+fn ordinary_arithmetic_is_unaffected() {
+    let s = GraphStore::new();
+    assert_eq!(scalar(&s, "RETURN 1 + 2 AS v"), "v=3");
+    assert_eq!(scalar(&s, "RETURN \"a\" + \"b\" AS v"), "v=ab");
+    assert_eq!(scalar(&s, "RETURN 7 % 3 AS v"), "v=1");
+}

@@ -183,6 +183,12 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
                 PropertyValue::Duration { months: m1 + m2, days: d1 + d2, seconds: s1 + s2, nanos: n1 + n2 }
             }
+            // Cypher null propagation: any arithmetic with a null operand is null,
+            // not an error. Without this, `p.a + p.missing` aborts the whole query --
+            // and a property absent on some nodes is the ordinary state of a property
+            // graph, not an exceptional one (#457). The logical and comparison operators
+            // already propagate null this way; arithmetic was the outlier.
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
@@ -205,6 +211,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
                 PropertyValue::Duration { months: m1 - m2, days: d1 - d2, seconds: s1 - s2, nanos: n1 - n2 }
             }
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
         },
         BinaryOp::Mul => match (&left_prop, &right_prop) {
@@ -212,6 +219,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Mul requires numeric operands".to_string())),
         },
         BinaryOp::Div => match (&left_prop, &right_prop) {
@@ -220,6 +228,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Div requires numeric operands".to_string())),
         },
         BinaryOp::Mod => match (&left_prop, &right_prop) {
@@ -228,6 +237,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Mod requires numeric operands".to_string())),
         },
         BinaryOp::StartsWith => match (&left_prop, &right_prop) {
@@ -280,6 +290,8 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
         UnaryOp::Minus => match val {
             Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+            // -null is null, matching NOT above and the binary arithmetic ops (#457).
+            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
             _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
         },
     }
@@ -2623,6 +2635,7 @@ impl FilterOperator {
                         match val {
                             Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
                             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+                            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                             _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
                         }
                     }
@@ -2842,6 +2855,7 @@ impl FilterOperator {
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 + r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l + *r as f64)),
             (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::String(format!("{}{}", l, r))),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("Addition requires numeric or string operands".to_string())),
         }
     }
@@ -2852,6 +2866,7 @@ impl FilterOperator {
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l - r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 - r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l - *r as f64)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("Subtraction requires numeric operands".to_string())),
         }
     }
@@ -2862,6 +2877,7 @@ impl FilterOperator {
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l * r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 * r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l * *r as f64)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("Multiplication requires numeric operands".to_string())),
         }
     }
@@ -2873,6 +2889,7 @@ impl FilterOperator {
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l / r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 / r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l / *r as f64)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("Division requires numeric operands".to_string())),
         }
     }
@@ -2884,6 +2901,7 @@ impl FilterOperator {
             (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l % r)),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 % r)),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l % *r as f64)),
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
             _ => Err(ExecutionError::TypeError("Modulo requires numeric operands".to_string())),
         }
     }

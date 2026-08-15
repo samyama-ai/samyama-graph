@@ -1,13 +1,13 @@
 # Cypher Compatibility Matrix
 
-**Verified against:** Samyama v1.7.0, commit `6f36a54`
+**Verified against:** Samyama v1.7.0, commit `6f36a54` (arithmetic null row re-verified after #457)
 **Method:** every row below was executed against the engine by `examples/cypher_matrix_probe.rs`. Nothing here is from memory.
 
 ## How to read this
 
 There is **no measured OpenCypher coverage percentage** in this document, and there will not be one until the openCypher TCK is actually run (#434). A previous version of this page claimed "~90% OpenCypher coverage"; that figure was self-assessed, never checked against the TCK, and an earlier internal assessment of the same engine put the number at 40–50%. Rather than pick between two unverified numbers, the claim is withdrawn.
 
-What this page reports instead is narrower and checkable: **78 probes, 73 supported, 5 not.** Each probe is one representative query for one feature. Re-run it with:
+What this page reports instead is narrower and checkable: **78 probes, 74 supported, 4 not.** Each probe is one representative query for one feature. Re-run it with:
 
 ```
 cargo run --release --example cypher_matrix_probe
@@ -17,14 +17,13 @@ A ✅ here means *the query executed*. It does not certify semantics — a const
 
 ## What is not supported
 
-Five things, all verified:
+Four things, all verified:
 
 | Feature | Behaviour | Tracking |
 | :--- | :--- | :--- |
 | `split()` | `Unknown function: split` | — |
 | `FOREACH` | Parse error | — |
 | `CALL {}` subquery | Parses, then `Variable not found` — the subquery's columns are never exported | #458 |
-| Null propagation in **arithmetic** | `1 + null` raises a type error instead of returning `null`; `p.a + p.missing` aborts the whole query | #457 |
 | `algo.bfs`, `algo.dijkstra` | Do not exist under those names — use `algo.shortestPath` and `algo.weightedPath` | — |
 
 ## Feature Matrix
@@ -93,7 +92,7 @@ Five things, all verified:
 | | `all` / `any` / `none` / `single` | ✅ | |
 | **Type Handling** | Integer/Float coercion | ✅ | |
 | | Null propagation — comparison | ✅ | `1 > null` → `null` |
-| | Null propagation — arithmetic | ❌ | `1 + null` raises a type error — #457 |
+| | Null propagation — arithmetic | ✅ | `1 + null` → `null`; `p.a + p.missing` nulls only its own row. Fixed in #457 |
 | | Temporal types | ✅ | `date()`, component access, arithmetic. No temporal index |
 | | Duration arithmetic | ✅ | |
 | **Extensions** | `CREATE VECTOR INDEX` | ✅ | |
