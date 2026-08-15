@@ -20,6 +20,10 @@ pub enum TenantError {
     #[error("Tenant not found: {0}")]
     NotFound(String),
 
+    /// Embed configuration is internally inconsistent
+    #[error("invalid embed config: {0}")]
+    InvalidEmbedConfig(String),
+
     /// Quota exceeded
     #[error("Quota exceeded for tenant {tenant}: {resource}")]
     QuotaExceeded {
@@ -285,6 +289,58 @@ fn default_embedding_property() -> String {
     "embedding".to_string()
 }
 
+/// Native output dimension of the embedding models we can recognise.
+///
+/// An embedding model has exactly one output dimension, but `vector_dimension` is set by
+/// hand and independently of `embedding_model`. When the two disagree the mismatch used to
+/// surface far downstream -- as a bare `DimensionMismatch` at insert time, per vector, or
+/// (once auto-embed was routed correctly) as a log line saying every embedding had been
+/// dropped. Recognising the common models lets the contradiction be caught when the config
+/// is set, which is the only point at which it can be fixed cheaply.
+///
+/// Unknown models are not rejected: this is a convenience check, not a whitelist, and
+/// self-hosted or fine-tuned models are legitimate.
+pub fn native_dimension_for_model(model: &str) -> Option<usize> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let base = name.split(':').next().unwrap_or(name);
+    Some(match base {
+        "text-embedding-3-small" | "text-embedding-ada-002" => 1536,
+        "text-embedding-3-large" => 3072,
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm-l6-v2" | "all-minilm" => 384,
+        "embed-english-v3.0" => 1024,
+        "text-embedding-004" | "embedding-001" => 768,
+        "mock" => 64,
+        _ => return None,
+    })
+}
+
+impl AutoEmbedConfig {
+    /// Check the configuration is internally consistent before it is stored.
+    ///
+    /// Only catches what is knowable at config time: a declared dimension that contradicts
+    /// the model's own. Vectors from *different* models are not comparable even at equal
+    /// dimensions, which this cannot detect -- see #275 for the index-provenance half.
+    pub fn validate(&self) -> Result<(), TenantError> {
+        if self.vector_dimension == 0 {
+            return Err(TenantError::InvalidEmbedConfig(
+                "vector_dimension must be greater than zero".to_string(),
+            ));
+        }
+        if let Some(native) = native_dimension_for_model(&self.embedding_model) {
+            if native != self.vector_dimension {
+                return Err(TenantError::InvalidEmbedConfig(format!(
+                    "model `{}` produces {}-dimensional vectors but vector_dimension is {}; every embedding would be rejected at insert time",
+                    self.embedding_model, native, self.vector_dimension
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Tenant manager - manages all tenants and their resources
 pub struct TenantManager {
     /// All tenants
@@ -475,6 +531,12 @@ impl TenantManager {
 
         let tenant = tenants.get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        // Reject a config that cannot work, rather than accepting it and dropping every
+        // embedding it produces.
+        if let Some(cfg) = &config {
+            cfg.validate()?;
+        }
 
         tenant.embed_config = config;
 
