@@ -646,6 +646,7 @@ async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
 
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
+    let explicit_data_dir = args.iter().any(|a| a == "--data-dir");
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
         PathBuf::from(args.get(pos + 1).expect("--data-dir requires a path argument"))
     } else {
@@ -679,9 +680,18 @@ async fn main() -> Result<(), Error> {
     };
 
     if !data_dir.exists() {
-        eprintln!("ERROR: Data directory not found: {}", data_dir.display());
-        eprintln!("Download LDBC SF1 data and extract to: {}", default_dir);
-        std::process::exit(1);
+        // An explicitly requested directory that does not exist is a mistake worth failing
+        // on. The *default* dataset simply not being present means this benchmark was not
+        // run, which is not the same as it failing -- a clean host has no LDBC SF1 and
+        // should report a skip, so "run every benchmark" is not permanently red.
+        if explicit_data_dir {
+            eprintln!("ERROR: Data directory not found: {}", data_dir.display());
+            std::process::exit(1);
+        }
+        eprintln!("SKIP: LDBC SF1 dataset not present at {}", data_dir.display());
+        eprintln!("      Download and extract it there, or pass --data-dir PATH.");
+        eprintln!("      Skipping rather than failing: the benchmark did not run, it did not break.");
+        return Ok(());
     }
 
     // ========================================================================
