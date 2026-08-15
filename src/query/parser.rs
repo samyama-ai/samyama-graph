@@ -1569,36 +1569,23 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             let mut prefix_ops = Vec::new();
             let mut primary_pair = None;
             let mut postfix_pair = None;
-            let mut index_pair = None;
+            let mut index_pairs = Vec::new();
 
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::unary_op => prefix_ops.push(inner),
                     Rule::primary => primary_pair = Some(inner),
                     Rule::postfix_op => postfix_pair = Some(inner),
-                    Rule::index_op => index_pair = Some(inner),
+                    Rule::index_op => index_pairs.push(inner),
                     _ => {}
                 }
             }
 
             let mut expr = parse_primary(primary_pair.unwrap())?;
 
-            // Apply postfix operator (IS NULL / IS NOT NULL)
-            if let Some(postfix) = postfix_pair {
-                let text = postfix.as_str().to_uppercase();
-                let op = if text.contains("NOT") {
-                    UnaryOp::IsNotNull
-                } else {
-                    UnaryOp::IsNull
-                };
-                expr = Expression::Unary {
-                    op,
-                    expr: Box::new(expr),
-                };
-            }
-
-            // Apply index operator [expr] or slice operator [start..end]
-            if let Some(index) = index_pair {
+            // Apply each index/slice suffix in source order, so chained
+            // subscripts like m["a"]["b"] and xs[0][1] compose left to right.
+            for index in index_pairs {
                 let mut handled = false;
                 for idx_inner in index.into_inner() {
                     if idx_inner.as_rule() == Rule::slice_op {
@@ -1636,6 +1623,20 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     }
                 }
                 let _ = handled;
+            }
+
+            // Apply postfix operator (IS NULL / IS NOT NULL)
+            if let Some(postfix) = postfix_pair {
+                let text = postfix.as_str().to_uppercase();
+                let op = if text.contains("NOT") {
+                    UnaryOp::IsNotNull
+                } else {
+                    UnaryOp::IsNull
+                };
+                expr = Expression::Unary {
+                    op,
+                    expr: Box::new(expr),
+                };
             }
 
             // Apply prefix operators in reverse order (innermost first)

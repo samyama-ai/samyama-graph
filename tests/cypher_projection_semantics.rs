@@ -1849,3 +1849,85 @@ fn counting_with_an_inline_property_filter_counts_only_the_matching_rows() {
     assert_eq!(scalar(&s, "MATCH (p:P) RETURN count(p) AS n"), "n=3");
     assert_eq!(scalar(&s, "MATCH (p:P) RETURN count(*) AS n"), "n=3");
 }
+
+// ---------------------------------------------------------------------------
+// Chained subscripting (#453)
+//
+// `term` in the grammar allowed at most one `index_op`, and placed it *after*
+// `postfix_op`. That made every chained subscript a parse error -- for lists as
+// well as maps -- and made `xs[0] IS NULL`, the idiomatic missing-element test,
+// unparseable too. The rule is now `primary ~ index_op* ~ postfix_op?`.
+// ---------------------------------------------------------------------------
+
+/// A map-valued property, the shape that has no dot-notation path access (#452).
+fn nested_map_fixture() -> GraphStore {
+    let mut s = GraphStore::new();
+    QueryEngine::new()
+        .execute_mut("CREATE (:D {meta: {c: {d: 9}}})", &mut s, "default")
+        .unwrap();
+    s
+}
+
+#[test]
+fn chained_list_index() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [[1,2],[3,4]][0][1] AS v"), "v=2");
+}
+
+#[test]
+fn chained_index_three_deep() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [[[5]]][0][0][0] AS v"), "v=5");
+}
+
+#[test]
+fn chained_list_then_map_key() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [{a:1}][0][\"a\"] AS v"), "v=1");
+}
+
+#[test]
+fn chained_map_keys_on_stored_property() {
+    assert_eq!(
+        scalar(&nested_map_fixture(), "MATCH (d:D) RETURN d.meta[\"c\"][\"d\"] AS v"),
+        "v=9"
+    );
+}
+
+#[test]
+fn chained_map_key_in_where() {
+    assert_eq!(
+        scalar(
+            &nested_map_fixture(),
+            "MATCH (d:D) WHERE d.meta[\"c\"][\"d\"] = 9 RETURN count(d) AS v"
+        ),
+        "v=1"
+    );
+}
+
+#[test]
+fn index_then_slice_composes() {
+    assert_eq!(
+        scalar(&GraphStore::new(), "RETURN [[1,2,3],[4]][0][0..2] AS v"),
+        "v=[1,2]"
+    );
+}
+
+#[test]
+fn is_null_applies_to_indexed_element_not_container() {
+    // The out-of-range element is null even though the list itself is not.
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][5] IS NULL AS v"), "v=true");
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][0] IS NULL AS v"), "v=false");
+}
+
+#[test]
+fn is_null_on_missing_map_key() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN {a:1}[\"z\"] IS NULL AS v"), "v=true");
+    assert_eq!(
+        scalar(&GraphStore::new(), "RETURN {a:1}[\"a\"] IS NOT NULL AS v"),
+        "v=true"
+    );
+}
+
+#[test]
+fn single_subscript_and_slice_still_work() {
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][0] AS v"), "v=1");
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2,3][0..2] AS v"), "v=[1,2]");
+}
