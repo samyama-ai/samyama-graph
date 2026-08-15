@@ -30,7 +30,7 @@
 //! licence and are gated behind `--i-have-a-licence <source>`, which does nothing but make
 //! the acknowledgement explicit and audit-visible.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 
 use samyama::graph::{GraphStore, NodeId, PropertyValue};
@@ -51,6 +51,13 @@ struct Args {
     to_year: i64,
     licence: Option<String>,
     limit: Option<usize>,
+    /// Term codes to drop before the structural probe runs.
+    ///
+    /// A cycle in a covering relation is a data defect and the build refuses it rather
+    /// than condensing it, which is right -- but published ontologies do carry a handful
+    /// of them, and 14 bad terms should not cost you the other 52,598. The refusal names
+    /// the offending codes, so they can be fed straight back in here.
+    exclude: HashSet<String>,
 }
 
 fn main() {
@@ -75,6 +82,25 @@ fn main() {
         to_year: get("--to").and_then(|v| v.parse().ok()).unwrap_or(2026),
         licence: get("--i-have-a-licence"),
         limit: get("--limit").and_then(|v| v.parse().ok()),
+        exclude: {
+            let mut set: HashSet<String> = get("--exclude")
+                .map(|v| v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
+                .unwrap_or_default();
+            if let Some(path) = get("--exclude-file") {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => set.extend(
+                        text.lines()
+                            .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                            .filter(|l| !l.is_empty()),
+                    ),
+                    Err(e) => {
+                        eprintln!("Error: cannot read --exclude-file {path}: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            set
+        },
     };
 
     if let Some(src) = &args.licence {
@@ -103,6 +129,43 @@ fn main() {
         "[ontology] loaded {nodes} nodes, {edges} covering edges in {:.2}s",
         t0.elapsed().as_secs_f64()
     );
+
+    // Drop excluded terms before the probe. Deleting the node takes its covering edges
+    // with it, which is the point: excluding one member of a cycle breaks the cycle.
+    // Done centrally rather than inside each format's loader so every format gets it.
+    if !args.exclude.is_empty() {
+        let mut dropped = 0usize;
+        let mut missing: Vec<&String> = Vec::new();
+        for code in &args.exclude {
+            let hit = store
+                .all_nodes()
+                .iter()
+                .find(|n| {
+                    matches!(
+                        store.node_columns.get_property(n.id.as_u64() as usize, "code"),
+                        PropertyValue::String(ref c) if c == code
+                    )
+                })
+                .map(|n| n.id);
+            match hit {
+                Some(id) => {
+                    let _ = store.delete_node("default", id);
+                    dropped += 1;
+                }
+                None => missing.push(code),
+            }
+        }
+        eprintln!("[ontology] excluded {dropped} term(s) before building");
+        if !missing.is_empty() {
+            let shown: Vec<&str> = missing.iter().take(5).map(|s| s.as_str()).collect();
+            eprintln!(
+                "[ontology] warning: {} excluded code(s) were not present: {}{}",
+                missing.len(),
+                shown.join(", "),
+                if missing.len() > 5 { ", ..." } else { "" }
+            );
+        }
+    }
 
     // Declare the index and report the probe's verdict. A decline is a result, not a
     // failure: it says this poset belongs on a 2-hop index, which is the honest answer for
@@ -210,6 +273,8 @@ fn usage() -> String {
          \x20 --cuts a,b,c       prefix cut points, --format prefix (ATC: 1,3,4,5,7)\n\
          \x20 --from/--to YEAR   calendar range                 (default 2015..2026)\n\
          \x20 --limit N          stop after N covering edges (smoke tests)\n\
+         \x20 --exclude A,B,C    drop these term codes before building (e.g. cycle members)\n\
+         \x20 --exclude-file F   same, one code per line, # comments allowed\n\
          \x20 --i-have-a-licence SRC   acknowledge a restricted source: {}\n",
         RESTRICTED.join(", ")
     )
