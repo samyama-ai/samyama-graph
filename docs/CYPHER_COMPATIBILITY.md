@@ -102,12 +102,12 @@ Two things, all verified:
 | | `algo.mst` | ✅ | |
 | | `algo.triangleCount` | ✅ | |
 | | `algo.cdlp` / `algo.lcc` | ✅ | |
-| | `algo.bfs` / `algo.dijkstra` | ❌ | Not registered — use `shortestPath` / `weightedPath` |
+| | `algo.bfs` / `algo.dijkstra` | ❌ | Not registered. The error now redirects to `algo.shortestPath` / `algo.weightedPath` and lists every procedure with its argument shape |
 | | `algo.or.solve` | ✅ | Requires write access |
 
 ## Known inconsistency
 
-Algorithm procedures do not share a calling convention. `algo.pageRank` takes a config map; `algo.shortestPath`, `algo.weightedPath` and `algo.maxFlow` take **positional** arguments. The error text does not say which form a given procedure wants, so the first attempt at any of them tends to fail.
+Algorithm procedures do not share a calling convention. `algo.pageRank` and `algo.or.solve` take a config map; `algo.shortestPath`, `algo.weightedPath`, `algo.maxFlow`, `algo.mst`, `algo.cdlp` and `algo.lcc` take **positional** arguments. This is still inconsistent, but an unknown or misused name now reports the full list with each procedure's argument shape, so it costs one failed attempt rather than three.
 
 ## Maintaining this page
 

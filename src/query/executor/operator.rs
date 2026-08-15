@@ -6883,6 +6883,35 @@ pub struct AlgorithmOperator {
 }
 
 impl AlgorithmOperator {
+    /// Every algorithm this operator dispatches, with its calling convention.
+    ///
+    /// `Unknown algorithm: algo.bfs` gave the caller nothing to go on -- the
+    /// name they wanted (`algo.shortestPath`) is not guessable from it, and
+    /// the procedures do not share an argument shape either, so even the right
+    /// name fails on the first attempt. Listing both removes two rounds of
+    /// trial and error.
+    fn available() -> &'static str {
+        "pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), \
+maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), \
+lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
+    }
+
+    /// Error for a procedure name that does not dispatch, naming what does.
+    fn unknown_algorithm(name: &str) -> ExecutionError {
+        let hint = match name.to_lowercase().replace("algo.", "").as_str() {
+            "bfs" | "breadthfirstsearch" => " -- for an unweighted path, use algo.shortestPath",
+            "dijkstra" | "shortestpathweighted" => " -- for a weighted path, use algo.weightedPath",
+            "pagerank2" | "prank" => " -- did you mean algo.pageRank?",
+            "louvain" | "labelpropagation" => " -- for community detection, use algo.cdlp",
+            "connectedcomponents" | "components" => " -- use algo.wcc or algo.scc",
+            _ => "",
+        };
+        ExecutionError::RuntimeError(format!(
+            "Unknown algorithm: {name}{hint}. Available: {}",
+            Self::available()
+        ))
+    }
+
     pub fn new(name: String, args: Vec<crate::query::ast::Expression>) -> Self {
         Self {
             name,
@@ -7505,7 +7534,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
-                _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
+                _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
         }
@@ -7536,7 +7565,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
-                _ => return Err(ExecutionError::RuntimeError(format!("Unknown algorithm: {}", self.name))),
+                _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
         }

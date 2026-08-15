@@ -2213,3 +2213,36 @@ fn split_with_the_wrong_arity_says_so() {
         .to_string();
     assert!(err.contains("split() requires 2 arguments"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// Unknown-algorithm errors name what exists (#437 probe finding)
+//
+// `Unknown algorithm: algo.bfs` gave the caller nothing: the name they wanted
+// is not guessable from it, and the procedures do not share an argument shape
+// either, so even the right name failed on the first attempt.
+// ---------------------------------------------------------------------------
+
+fn algo_error(q: &str) -> String {
+    QueryEngine::new()
+        .execute(q, &GraphStore::new())
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn unknown_algorithm_lists_the_available_ones_with_their_arguments() {
+    let err = algo_error("CALL algo.nonsense() YIELD nodeId RETURN count(*) AS v");
+    assert!(err.contains("shortestPath(source, target)"), "{err}");
+    assert!(err.contains("weightedPath(source, target, weightProperty)"), "{err}");
+    assert!(err.contains("pageRank({config})"), "{err}");
+}
+
+#[test]
+fn common_wrong_names_are_redirected_to_the_right_procedure() {
+    assert!(algo_error("CALL algo.bfs() YIELD nodeId RETURN count(*) AS v")
+        .contains("use algo.shortestPath"));
+    assert!(algo_error("CALL algo.dijkstra() YIELD nodeId RETURN count(*) AS v")
+        .contains("use algo.weightedPath"));
+    assert!(algo_error("CALL algo.louvain() YIELD nodeId RETURN count(*) AS v")
+        .contains("use algo.cdlp"));
+}
