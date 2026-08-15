@@ -231,6 +231,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 64,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         }
     }
 
@@ -266,6 +267,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -282,6 +284,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -308,6 +311,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -324,6 +328,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -340,6 +345,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         // AzureOpenAI without api_base_url should fail
@@ -357,6 +363,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -373,6 +380,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -421,6 +429,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config).unwrap();
         let result = client.generate_embeddings(&["test".to_string()]).await;
@@ -448,6 +457,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config);
         assert!(client.is_ok());
@@ -526,6 +536,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config).unwrap();
         assert_eq!(client.api_base_url, "https://api.openai.com/v1");
@@ -540,6 +551,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client_ollama = EmbeddingClient::new(&config_ollama).unwrap();
         assert_eq!(client_ollama.api_base_url, "http://localhost:11434");
@@ -554,6 +566,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client_gemini = EmbeddingClient::new(&config_gemini).unwrap();
         assert_eq!(client_gemini.api_base_url, "https://generativelanguage.googleapis.com/v1beta");
@@ -568,6 +581,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client_anthropic = EmbeddingClient::new(&config_anthropic).unwrap();
         assert_eq!(client_anthropic.api_base_url, "https://api.anthropic.com/v1");
@@ -582,6 +596,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client_cc = EmbeddingClient::new(&config_cc).unwrap();
         assert_eq!(client_cc.api_base_url, "");
@@ -602,6 +617,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config).unwrap();
         assert_eq!(client.api_base_url, "https://proxy.example.com/v1");
@@ -618,6 +634,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let client = EmbeddingClient::new(&config).unwrap();
         let result = client.generate_embeddings(&["test".to_string()]).await;

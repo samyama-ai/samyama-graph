@@ -269,8 +269,20 @@ pub struct AutoEmbedConfig {
     pub chunk_overlap: usize,
     /// Vector dimension size
     pub vector_dimension: usize,
-    /// Embedding policies: Label -> `Vec<PropertyKey>`
+    /// Embedding policies: Label -> `Vec<PropertyKey>` (the *source* text properties)
     pub embedding_policies: HashMap<String, Vec<String>>,
+    /// Property the generated embedding is indexed under. Defaults to `embedding`.
+    ///
+    /// Auto-embed used to index the vector under the *source* property (`headline`), while
+    /// users naturally create their vector index on the property the embedding is called
+    /// (`embedding`) -- so the vectors landed in an index nobody queried, and search
+    /// returned nothing (#310). Naming the target explicitly removes the guess.
+    #[serde(default = "default_embedding_property")]
+    pub embedding_property: String,
+}
+
+fn default_embedding_property() -> String {
+    "embedding".to_string()
 }
 
 /// Tenant manager - manages all tenants and their resources
@@ -646,6 +658,7 @@ mod tests {
             chunk_overlap: 64,
             vector_dimension: 1536,
             embedding_policies: HashMap::from([("Document".to_string(), vec!["content".to_string()])]),
+            embedding_property: "embedding".to_string(),
         };
 
         manager.update_embed_config("tenant1", Some(embed_config)).unwrap();
@@ -1037,6 +1050,7 @@ mod tests {
             chunk_overlap: 32,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         let result = manager.update_embed_config("ghost", Some(config));
         assert!(result.is_err());
@@ -1063,6 +1077,7 @@ mod tests {
             chunk_overlap: 32,
             vector_dimension: 768,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         };
         manager.update_embed_config("t1", Some(config)).unwrap();
         assert!(manager.get_tenant("t1").unwrap().embed_config.is_some());
@@ -1185,6 +1200,7 @@ mod tests {
             embedding_policies: HashMap::from([
                 ("Document".to_string(), vec!["content".to_string(), "title".to_string()]),
             ]),
+            embedding_property: "embedding".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AutoEmbedConfig = serde_json::from_str(&json).unwrap();
@@ -1331,6 +1347,7 @@ mod tests {
             chunk_overlap: 128,
             vector_dimension: 768,
             embedding_policies: policies,
+            embedding_property: "embedding".to_string(),
         };
 
         assert_eq!(config.provider, LLMProvider::Ollama);
@@ -1462,6 +1479,7 @@ mod tests {
             chunk_overlap: 32,
             vector_dimension: 1536,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         });
         tenant.nlq_config = Some(NLQConfig {
             enabled: true,

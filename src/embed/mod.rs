@@ -118,6 +118,7 @@ mod tests {
             chunk_overlap: 20,
             vector_dimension: 64,
             embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
         }
     }
 

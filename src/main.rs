@@ -585,6 +585,7 @@ async fn start_server() {
                 chunk_overlap,
                 vector_dimension: dimension,
                 embedding_policies: HashMap::new(),
+                embedding_property: "embedding".to_string(),
             };
 
             match EmbedPipeline::new(embed_config) {

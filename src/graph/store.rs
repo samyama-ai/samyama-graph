@@ -675,17 +675,44 @@ impl GraphStore {
                                                 // Trigger Auto-Embed
                                                 let vector_index_clone = Arc::clone(&vector_index);
                                                 let label_str = label.as_str().to_string();
-                                                let key_clone = key.clone();
+                                                // The vector is indexed under the
+                                                // *target* property, not the source text
+                                                // property it was generated from: an index
+                                                // is created on `Person.embedding`, never
+                                                // on `Person.headline`, so indexing under
+                                                // the source key put every vector in an
+                                                // index nobody queried (#310).
+                                                let target_key = config.embedding_property.clone();
                                                 let text_clone = text.clone();
                                                 let config_clone = config.clone();
-                                                
+
                                                 tokio::spawn(async move {
-                                                    if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
-                                                        if let Ok(chunks) = pipeline.process_text(&text_clone).await {
-                                                            for chunk in chunks {
-                                                                let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &chunk.embedding);
+                                                    match crate::embed::EmbedPipeline::new(config_clone) {
+                                                        Ok(pipeline) => match pipeline.process_text(&text_clone).await {
+                                                            Ok(chunks) => {
+                                                                for chunk in chunks {
+                                                                    if let Err(e) = vector_index_clone.add_vector(
+                                                                        &label_str,
+                                                                        &target_key,
+                                                                        id,
+                                                                        &chunk.embedding,
+                                                                    ) {
+                                                                        tracing::warn!(
+                                                                            "auto-embed: could not index {}.{} for node {}: {}",
+                                                                            label_str, target_key, id.as_u64(), e
+                                                                        );
+                                                                    }
+                                                                }
                                                             }
-                                                        }
+                                                            Err(e) => tracing::warn!(
+                                                                "auto-embed: embedding failed for {}.{}: {}",
+                                                                label_str, target_key, e
+                                                            ),
+                                                        },
+                                                        Err(e) => tracing::warn!(
+                                                            "auto-embed: pipeline unavailable for {}.{}: {}",
+                                                            label_str, target_key, e
+                                                        ),
                                                     }
                                                 });
                                             }
@@ -759,17 +786,36 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                                         if keys.contains(&key) {
                                             let vector_index_clone = Arc::clone(&vector_index);
                                             let label_str = label.as_str().to_string();
-                                            let key_clone = key.clone();
+                                            // Index under the target property, not the
+                                            // source text property -- see NodeCreated.
+                                            let target_key = config.embedding_property.clone();
                                             let text_clone = text.clone();
                                             let config_clone = config.clone();
-                                            
+
                                             tokio::spawn(async move {
-                                                if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
-                                                    if let Ok(chunks) = pipeline.process_text(&text_clone).await {
-                                                        if let Some(first) = chunks.first() {
-                                                            let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);
+                                                match crate::embed::EmbedPipeline::new(config_clone) {
+                                                    Ok(pipeline) => match pipeline.process_text(&text_clone).await {
+                                                        Ok(chunks) => {
+                                                            if let Some(first) = chunks.first() {
+                                                                if let Err(e) = vector_index_clone.add_vector(
+                                                                    &label_str, &target_key, id, &first.embedding,
+                                                                ) {
+                                                                    tracing::warn!(
+                                                                        "auto-embed: could not index {}.{} for node {}: {}",
+                                                                        label_str, target_key, id.as_u64(), e
+                                                                    );
+                                                                }
+                                                            }
                                                         }
-                                                    }
+                                                        Err(e) => tracing::warn!(
+                                                            "auto-embed: embedding failed for {}.{}: {}",
+                                                            label_str, target_key, e
+                                                        ),
+                                                    },
+                                                    Err(e) => tracing::warn!(
+                                                        "auto-embed: pipeline unavailable for {}.{}: {}",
+                                                        label_str, target_key, e
+                                                    ),
                                                 }
                                             });
                                         }
@@ -822,17 +868,36 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                                         if keys.contains(&key) {
                                             let vector_index_clone = Arc::clone(&vector_index);
                                             let label_str = label.as_str().to_string();
-                                            let key_clone = key.clone();
+                                            // Index under the target property, not the
+                                            // source text property -- see NodeCreated.
+                                            let target_key = config.embedding_property.clone();
                                             let text_clone = text.clone();
                                             let config_clone = config.clone();
-                                            
+
                                             tokio::spawn(async move {
-                                                if let Ok(pipeline) = crate::embed::EmbedPipeline::new(config_clone) {
-                                                    if let Ok(chunks) = pipeline.process_text(&text_clone).await {
-                                                        if let Some(first) = chunks.first() {
-                                                            let _ = vector_index_clone.add_vector(&label_str, &key_clone, id, &first.embedding);
+                                                match crate::embed::EmbedPipeline::new(config_clone) {
+                                                    Ok(pipeline) => match pipeline.process_text(&text_clone).await {
+                                                        Ok(chunks) => {
+                                                            if let Some(first) = chunks.first() {
+                                                                if let Err(e) = vector_index_clone.add_vector(
+                                                                    &label_str, &target_key, id, &first.embedding,
+                                                                ) {
+                                                                    tracing::warn!(
+                                                                        "auto-embed: could not index {}.{} for node {}: {}",
+                                                                        label_str, target_key, id.as_u64(), e
+                                                                    );
+                                                                }
+                                                            }
                                                         }
-                                                    }
+                                                        Err(e) => tracing::warn!(
+                                                            "auto-embed: embedding failed for {}.{}: {}",
+                                                            label_str, target_key, e
+                                                        ),
+                                                    },
+                                                    Err(e) => tracing::warn!(
+                                                        "auto-embed: pipeline unavailable for {}.{}: {}",
+                                                        label_str, target_key, e
+                                                    ),
                                                 }
                                             });
                                         }

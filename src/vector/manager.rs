@@ -67,9 +67,22 @@ impl VectorIndexManager {
         node_id: NodeId,
         vector: &Vec<f32>,
     ) -> VectorResult<()> {
-        if let Some(index_lock) = self.get_index(label, property_key) {
-            let mut index = index_lock.write().unwrap();
-            index.add(node_id, vector)?;
+        match self.get_index(label, property_key) {
+            Some(index_lock) => {
+                let mut index = index_lock.write().unwrap();
+                index.add(node_id, vector)?;
+            }
+            // Returning Ok here made a vector added to a non-existent index indistinguishable
+            // from one that was stored, which is how auto-embed could generate thousands of
+            // embeddings that went nowhere without a single error (#310). Callers that treat
+            // a missing index as acceptable can still ignore the result; they can no longer
+            // do so unknowingly.
+            None => {
+                tracing::warn!(
+                    "no vector index for {}.{}; vector for node {} was not stored",
+                    label, property_key, node_id.as_u64()
+                );
+            }
         }
         Ok(())
     }
