@@ -32,6 +32,16 @@ impl PropertyIndex {
         }
     }
 
+    /// How many nodes hold `value`, without materialising their ids.
+    ///
+    /// The planner uses this to cost an indexed equality exactly rather than estimating it.
+    /// The estimate defaults to 10% selectivity when a property has no statistics, which on
+    /// a large label makes an index lookup look more expensive than a full scan of a
+    /// smaller one -- see #303.
+    pub fn count(&self, value: &PropertyValue) -> usize {
+        self.index.get(value).map_or(0, |nodes| nodes.len())
+    }
+
     pub fn get(&self, value: &PropertyValue) -> Vec<NodeId> {
         self.index.get(value)
             .map(|nodes| nodes.iter().cloned().collect())

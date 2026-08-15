@@ -3233,14 +3233,36 @@ fn choose_anchor_index(nodes: &[PathNodeRef], path_preds: &[Expression], store: 
         }
         candidates.extend(path_preds.iter().cloned());
 
-        let cost = if let Some((_, label, property, op, _)) = find_index_predicate(&node.var, &node.labels, &candidates, store) {
-            let base = stats.estimate_label_scan(&label) as f64;
-            let selectivity = if matches!(op, BinaryOp::Eq) {
-                stats.estimate_equality_selectivity(&label, &property)
+        let cost = if let Some((_, label, property, op, val)) = find_index_predicate(&node.var, &node.labels, &candidates, store) {
+            // For an indexed equality, ask the index how many nodes actually match instead
+            // of estimating. `estimate_equality_selectivity` falls back to 10% when a
+            // property has no statistics, so on a large label an index lookup was costed at
+            // a tenth of the label -- more than a full scan of a smaller one, and the
+            // planner would anchor on the *other* end of the pattern and scan it. That is
+            // why structurally identical anchored 1-hops differed by six orders of
+            // magnitude, and why an anchor value that does not exist still scanned (#303).
+            //
+            // The lookup is one index probe at plan time, and it makes a missing anchor cost
+            // 0 -- so the plan short-circuits instead of scanning.
+            let exact = if matches!(op, BinaryOp::Eq) {
+                store
+                    .property_index
+                    .indexed_equality_count(&label, &property, &val)
             } else {
-                0.3
+                None
             };
-            (base * selectivity).max(1.0)
+            match exact {
+                Some(n) => n as f64,
+                None => {
+                    let base = stats.estimate_label_scan(&label) as f64;
+                    let selectivity = if matches!(op, BinaryOp::Eq) {
+                        stats.estimate_equality_selectivity(&label, &property)
+                    } else {
+                        0.3
+                    };
+                    (base * selectivity).max(1.0)
+                }
+            }
         } else if let Some(label) = node.labels.first() {
             stats.estimate_label_scan(label) as f64
         } else {

@@ -2324,8 +2324,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
             for (i, &node_id) in node_ids.iter().enumerate() {
                 if i >= sample_size { break; }
-                if let Some(node) = self.get_node(node_id) {
-                    for (key, val) in &node.properties {
+                // Read the merged view, not `node.properties` alone. A snapshot import
+                // populates only the columnar store, so sampling row storage found *no*
+                // properties at all and produced zero statistics -- leaving every
+                // selectivity estimate on the 10% default. On a large label that made an
+                // index lookup look more expensive than scanning a smaller label, and the
+                // planner anchored on the wrong end of the pattern and scanned it (#303).
+                {
+                    let props = self.node_properties_full(node_id);
+                    for (key, val) in &props {
                         *property_presence.entry(key.clone()).or_insert(0) += 1;
 
                         let hash = {

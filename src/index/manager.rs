@@ -105,6 +105,21 @@ impl IndexManager {
         self.create_index(label, property);
     }
 
+    /// Exact number of nodes an indexed equality would return, if such an index exists.
+    ///
+    /// Lets the planner cost an anchored lookup from the index itself instead of a
+    /// selectivity estimate that may be a placeholder (#303).
+    pub fn indexed_equality_count(
+        &self,
+        label: &Label,
+        property: &str,
+        value: &PropertyValue,
+    ) -> Option<usize> {
+        let index = self.get_index(label, property)?;
+        let count = index.read().unwrap().count(value);
+        Some(count)
+    }
+
     /// Check if a unique constraint exists
     pub fn has_unique_constraint(&self, label: &Label, property: &str) -> bool {
         let key = PropertyIndexKey {
