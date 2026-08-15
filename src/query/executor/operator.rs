@@ -8322,6 +8322,16 @@ impl PhysicalOperator for ForeachOperator {
                 // Execute CREATE operations
                 for pattern in &self.create_patterns {
                     for path in &pattern.paths {
+                        // A relationship pattern would need the surrounding
+                        // variables joined up; creating just the start node
+                        // would silently produce an orphan instead of an edge.
+                        if !path.segments.is_empty() {
+                            return Err(ExecutionError::RuntimeError(
+                                "CREATE of a relationship pattern inside FOREACH is not supported"
+                                    .to_string(),
+                            ));
+                        }
+
                         let label_str = path.start.labels.first()
                             .map(|l| l.as_str())
                             .unwrap_or("Node");
@@ -8329,6 +8339,28 @@ impl PhysicalOperator for ForeachOperator {
                         if let Some(props) = &path.start.properties {
                             for (k, v) in props {
                                 let _ = store.set_node_property(tenant_id, node_id, k.to_string(), v.clone());
+                            }
+                        }
+                        // Property values that are expressions rather than
+                        // literals -- crucially including the loop variable
+                        // itself. These live in `property_exprs`, and not
+                        // evaluating them meant `CREATE (:T {i: i})` created
+                        // the node and silently dropped `i` (#467): the right
+                        // number of nodes, none of the data.
+                        if let Some(prop_exprs) = &path.start.property_exprs {
+                            for (k, expr) in prop_exprs {
+                                let val = eval_expression(expr, &inner_record, store)?;
+                                let prop_val = match val {
+                                    Value::Property(p) => p,
+                                    Value::Null => PropertyValue::Null,
+                                    other => {
+                                        return Err(ExecutionError::TypeError(format!(
+                                            "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
+which cannot be stored as a property value"
+                                        )))
+                                    }
+                                };
+                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), prop_val);
                             }
                         }
                     }

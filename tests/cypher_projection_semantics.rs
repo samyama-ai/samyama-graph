@@ -2246,3 +2246,100 @@ fn common_wrong_names_are_redirected_to_the_right_procedure() {
     assert!(algo_error("CALL algo.louvain() YIELD nodeId RETURN count(*) AS v")
         .contains("use algo.cdlp"));
 }
+
+// ---------------------------------------------------------------------------
+// FOREACH CREATE binds the loop variable (#467)
+//
+// The CREATE branch read only `path.start.properties` -- the already-literal
+// map. A property whose value is an *expression*, which includes the loop
+// variable itself, lives in `property_exprs` and was never evaluated. So
+// `CREATE (:T {i: i})` created the node and silently dropped `i`: the right
+// number of nodes, none of the data, and a successful-looking statement.
+// ---------------------------------------------------------------------------
+
+fn foreach_store() -> GraphStore {
+    let mut s = GraphStore::new();
+    QueryEngine::new()
+        .execute_mut("CREATE (:P {n: 0})", &mut s, "default")
+        .unwrap();
+    s
+}
+
+#[test]
+fn foreach_create_stores_the_loop_variable() {
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    e.execute_mut(
+        "MATCH (p:P) FOREACH (i IN [7,8] | CREATE (:T {i: i, lit: 99}))",
+        &mut s,
+        "default",
+    )
+    .unwrap();
+
+    // The property must exist as a key, not merely read back as null -- before
+    // the fix it was never created at all.
+    assert_eq!(bag(&s, "MATCH (t:T) RETURN t.i AS v"), vec!["v=7", "v=8"]);
+    assert_eq!(bag(&s, "MATCH (t:T) RETURN t.lit AS v"), vec!["v=99", "v=99"]);
+}
+
+#[test]
+fn foreach_create_handles_the_canonical_tag_case() {
+    // The shape from the docs, and the one that silently produced nameless
+    // nodes: right count, no data, no error.
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    e.execute_mut(
+        "MATCH (p:P) FOREACH (tag IN [\"a\",\"b\"] | CREATE (:Tag {name: tag}))",
+        &mut s,
+        "default",
+    )
+    .unwrap();
+    assert_eq!(bag(&s, "MATCH (t:Tag) RETURN t.name AS v"), vec!["v=a", "v=b"]);
+}
+
+#[test]
+fn foreach_create_evaluates_expressions_over_the_loop_variable() {
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    e.execute_mut(
+        "MATCH (p:P) FOREACH (i IN [1,2] | CREATE (:Calc {v: i * 10}))",
+        &mut s,
+        "default",
+    )
+    .unwrap();
+    assert_eq!(bag(&s, "MATCH (c:Calc) RETURN c.v AS v"), vec!["v=10", "v=20"]);
+}
+
+#[test]
+fn foreach_set_still_binds_the_loop_variable() {
+    // SET was always correct; pin it so the CREATE fix cannot regress it.
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [5] | SET p.n = i)", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (p:P) RETURN p.n AS v"), "v=5");
+}
+
+#[test]
+fn foreach_create_of_a_relationship_is_refused_not_silently_orphaned() {
+    // Only the start node was ever created, so this produced a stray node
+    // instead of an edge. Refusing is the honest answer.
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    let before = s.node_count();
+    let err = e
+        .execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("relationship pattern inside FOREACH"), "{err}");
+    assert_eq!(s.node_count(), before, "a refused FOREACH must not leave nodes behind");
+}
+
+#[test]
+fn foreach_over_an_empty_list_is_a_no_op() {
+    let e = QueryEngine::new();
+    let mut s = foreach_store();
+    let before = s.node_count();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [] | CREATE (:Empty {i: i}))", &mut s, "default")
+        .unwrap();
+    assert_eq!(s.node_count(), before);
+}
