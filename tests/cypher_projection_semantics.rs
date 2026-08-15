@@ -1129,3 +1129,104 @@ fn merge_on_create_and_on_match_fire_on_the_right_branch() {
     assert_eq!(scalar(&s, "MATCH (a:X) RETURN a.tag AS tag"), "tag=matched");
     assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "the second MERGE matched");
 }
+
+// ---------------------------------------------------------------------------
+// Pattern predicates, modern constraint syntax, and unique enforcement (#367)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relationship_pattern_can_be_used_as_a_predicate() {
+    // `WHERE (:Acc)-[:SUPPORTS]->(o)` is the natural way to write "has a ...", and its
+    // negation is the natural way to write "has no ..." — the whole point of coverage and
+    // gap analysis. Both were parse errors, forcing the OPTIONAL MATCH + count = 0 idiom.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut("CREATE (:Op {name: \"op1\"})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:Op {name: \"op2\"})", &mut s, "default").unwrap();
+    engine
+        .execute_mut(
+            "MATCH (o:Op {name: \"op1\"}) CREATE (:Acc {name: \"a1\"})-[:SUPPORTS]->(o)",
+            &mut s, "default",
+        )
+        .unwrap();
+
+    assert_eq!(
+        bag(&s, "MATCH (o:Op) WHERE (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"),
+        vec!["name=op1"]
+    );
+    assert_eq!(
+        bag(&s, "MATCH (o:Op) WHERE NOT (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"),
+        vec!["name=op2"]
+    );
+    // must agree with the EXISTS { } form it desugars to
+    assert_eq!(
+        bag(&s, "MATCH (o:Op) WHERE EXISTS { MATCH (:Acc)-[:SUPPORTS]->(o) } RETURN o.name AS name"),
+        vec!["name=op1"]
+    );
+
+    // Parenthesised expressions must not be mistaken for patterns.
+    let mut s2 = GraphStore::new();
+    engine.execute_mut("CREATE (:N {a: 1, b: 2})", &mut s2, "default").unwrap();
+    assert_eq!(scalar(&s2, "MATCH (n:N) WHERE (n.a + n.b) = 3 RETURN count(n) AS n"), "n=1");
+    assert_eq!(scalar(&s2, "MATCH (n:N) RETURN (n.a * (n.b + 1)) AS v"), "v=3");
+}
+
+#[test]
+fn unique_constraints_accept_modern_syntax_and_are_actually_enforced() {
+    // The registry, the per-constraint index and `check_unique_constraint` all existed but
+    // nothing on the write path called them, so a constraint was accepted, listed by
+    // SHOW CONSTRAINTS, and enforced nothing — a double load silently produced duplicates
+    // while appearing to be protected against exactly that.
+    let engine = QueryEngine::new();
+
+    // all three spellings register the same constraint
+    for stmt in [
+        "CREATE CONSTRAINT ON (n:Kernel) ASSERT n.id IS UNIQUE",
+        "CREATE CONSTRAINT kid IF NOT EXISTS FOR (n:Kernel) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT FOR (n:Kernel) REQUIRE n.id IS UNIQUE",
+    ] {
+        let mut s = GraphStore::new();
+        engine.execute_mut(stmt, &mut s, "default").unwrap();
+        let shown = bag(&s, "SHOW CONSTRAINTS");
+        assert_eq!(shown.len(), 1, "{stmt}");
+        assert!(shown[0].contains("Kernel"), "{stmt}: {shown:?}");
+        assert!(shown[0].contains("id"), "{stmt}: {shown:?}");
+    }
+
+    let mut s = GraphStore::new();
+    engine
+        .execute_mut("CREATE CONSTRAINT FOR (n:Kernel) REQUIRE n.id IS UNIQUE", &mut s, "default")
+        .unwrap();
+    engine.execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default").unwrap();
+
+    // the duplicate is rejected ...
+    assert!(engine.execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default").is_err());
+    // ... and leaves nothing behind: a rejected statement must not half-apply
+    assert_eq!(scalar(&s, "MATCH (k:Kernel) RETURN count(k) AS n"), "n=1");
+
+    // a distinct value is fine
+    engine.execute_mut("CREATE (:Kernel {id: 2})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (k:Kernel) RETURN count(k) AS n"), "n=2");
+
+    // re-setting a node's own value is not a violation; taking another's is
+    engine
+        .execute_mut("MATCH (k:Kernel {id: 2}) SET k.id = 2 RETURN k.id AS i", &mut s, "default")
+        .unwrap();
+    assert!(engine
+        .execute_mut("MATCH (k:Kernel {id: 2}) SET k.id = 1 RETURN k.id AS i", &mut s, "default")
+        .is_err());
+
+    // graphs with no constraints are unaffected
+    let mut s2 = GraphStore::new();
+    engine.execute_mut("CREATE (:Free {id: 1})", &mut s2, "default").unwrap();
+    engine.execute_mut("CREATE (:Free {id: 1})", &mut s2, "default").unwrap();
+    assert_eq!(scalar(&s2, "MATCH (f:Free) RETURN count(f) AS n"), "n=2");
+
+    // creating a constraint over pre-existing duplicates still fails
+    let mut s3 = GraphStore::new();
+    engine.execute_mut("CREATE (:K {id: 1})", &mut s3, "default").unwrap();
+    engine.execute_mut("CREATE (:K {id: 1})", &mut s3, "default").unwrap();
+    assert!(engine
+        .execute_mut("CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE", &mut s3, "default")
+        .is_err());
+}

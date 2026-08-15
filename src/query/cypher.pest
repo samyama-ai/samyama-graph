@@ -33,7 +33,13 @@ hier_aggregates = { ^"AGGREGATE" ~ property_key ~ ("," ~ property_key)* }
 drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
 show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
-create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ ^"ON" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ASSERT" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
+create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
+// Neo4j 4+/5 form. The optional name must not swallow the `IF` or `FOR` keyword, and is
+// kept in its own rule so it is not mistaken for the pattern variable.
+constraint_modern = { constraint_name? ~ if_not_exists? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"REQUIRE" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
+constraint_legacy = { ^"ON" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ASSERT" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
+constraint_name = @{ !(^"IF" ~ !(ASCII_ALPHANUMERIC | "_")) ~ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+if_not_exists = { ^"IF" ~ ^"NOT" ~ ^"EXISTS" }
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 
 // CALL statement (Standalone or followed by MATCH)
@@ -146,8 +152,13 @@ primary = {
     parameter |
     value |
     variable |
+    pattern_predicate |
     "(" ~ expression ~ ")"
 }
+
+// A relationship pattern used as a boolean predicate: `WHERE (:Acc)-[:SUPPORTS]->(o)`.
+// Requires at least one segment, so a parenthesised expression `(a + b)` cannot match it.
+pattern_predicate = { node ~ (edge_pattern ~ node)+ }
 
 // COUNT(*) — special rule since * is not a valid expression
 count_star = { ^"COUNT" ~ "(" ~ distinct? ~ "*" ~ ")" }

@@ -142,6 +142,9 @@ pub enum GraphError {
 
     #[error("Write conflict: {0}")]
     WriteConflict(String),
+
+    #[error("Constraint violation: {0}")]
+    ConstraintViolation(String),
 }
 
 pub type GraphResult<T> = Result<T, GraphError>;
@@ -1085,6 +1088,45 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let val = value.into();
         let idx = node_id.as_u64() as usize;
 
+        // Enforce unique constraints on the write path. The constraint registry, the
+        // per-constraint index and `check_unique_constraint` all existed but nothing ever
+        // called them, so `CREATE CONSTRAINT ... IS UNIQUE` was accepted, listed by
+        // SHOW CONSTRAINTS, and enforced nothing -- a double load silently produced
+        // duplicates. The `has_any_unique_constraints` guard keeps graphs without
+        // constraints (every bulk load) off the per-label path entirely.
+        let constrained_labels: Vec<Label> = if self.property_index.has_any_unique_constraints()
+            && !val.is_null()
+        {
+            let labels: Vec<Label> = match self.get_node(node_id) {
+                Some(node) => node.labels.iter().cloned().collect(),
+                None => Vec::new(),
+            };
+            labels
+                .into_iter()
+                .filter(|l| self.property_index.has_unique_constraint(l, &key_str))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for label in &constrained_labels {
+            // Re-setting a property to the value this same node already holds is not a
+            // violation; only another node holding it is.
+            if let Some(holder) =
+                self.property_index
+                    .unique_constraint_holder(label, &key_str, &val)
+            {
+                if holder != node_id {
+                    return Err(GraphError::ConstraintViolation(format!(
+                        ":{}({}) already has value {:?} on node {}",
+                        label.as_str(),
+                        key_str,
+                        val,
+                        holder
+                    )));
+                }
+            }
+        }
+
         // Update columnar storage (always latest)
         self.node_columns.set_property(idx, &key_str, val.clone());
         self.update_hierarchies_for_property(node_id, &key_str, &val);
@@ -1106,6 +1148,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             // Update in place (same transaction/version)
             let node = versions.last_mut().unwrap();
             old_val = node.set_property(key_str.clone(), val.clone());
+        }
+
+        // Record the new value so subsequent writes can see it. Without this the
+        // constraint index only ever holds what the backfill put there at CREATE
+        // CONSTRAINT time, and nodes added afterwards would not conflict with each other.
+        for label in &constrained_labels {
+            self.property_index
+                .constraint_insert(label, &key_str, val.clone(), node_id);
         }
 
         let event = crate::graph::event::IndexEvent::PropertySet {

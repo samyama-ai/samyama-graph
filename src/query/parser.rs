@@ -382,7 +382,21 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
     let mut label = None;
     let mut property = None;
 
-    for inner in pair.into_inner() {
+    // Both the legacy `ON ... ASSERT` and modern `FOR ... REQUIRE` forms wrap their parts
+    // in a sub-rule; unwrap it so the field extraction below is shared. `constraint_name`
+    // and `if_not_exists` are deliberately separate rules so the optional constraint name
+    // is not picked up as the pattern variable.
+    let inner_pairs: Vec<_> = pair
+        .into_inner()
+        .flat_map(|p| match p.as_rule() {
+            Rule::constraint_modern | Rule::constraint_legacy => {
+                p.into_inner().collect::<Vec<_>>()
+            }
+            _ => vec![p],
+        })
+        .collect();
+
+    for inner in inner_pairs {
         match inner.as_rule() {
             Rule::variable => {
                 if variable.is_none() {
@@ -1528,6 +1542,15 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             }
             Rule::exists_subquery => {
                 return parse_exists_subquery(inner);
+            }
+            Rule::pattern_predicate => {
+                // `WHERE (:Acc)-[:SUPPORTS]->(o)` means "such a path exists", which is
+                // exactly `EXISTS { MATCH ... }` -- so it desugars to the same node and
+                // inherits its (already correct) evaluation, including under NOT.
+                return Ok(Expression::ExistsSubquery {
+                    pattern: Pattern { paths: vec![parse_path(inner)?] },
+                    where_clause: None,
+                });
             }
             Rule::reduce_expression => {
                 return parse_reduce_expression(inner);

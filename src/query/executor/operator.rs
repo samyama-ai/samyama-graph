@@ -5413,7 +5413,12 @@ impl PhysicalOperator for CreateNodeOperator {
 
                 // Set properties using store.set_node_property to trigger indexing
                 for (key, value) in properties {
-                    let _ = store.set_node_property(tenant_id, node_id, key.clone(), value.clone());
+                    if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
+                    {
+                        // A rejected property must not leave a half-built node behind.
+                        let _ = store.delete_node(tenant_id, node_id);
+                        return Err(ExecutionError::GraphError(e.to_string()));
+                    }
                 }
 
                 self.created_nodes.push((node_id, variable.clone()));
@@ -6431,7 +6436,12 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
                     }
                     for (key, value) in properties {
-                        let _ = store.set_node_property(tenant_id, node_id, key.clone(), value.clone());
+                        if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
+                        {
+                            // A rejected property must not leave a half-built node behind.
+                            let _ = store.delete_node(tenant_id, node_id);
+                            return Err(ExecutionError::GraphError(e.to_string()));
+                        }
                     }
                     if let Some(node) = store.get_node(node_id) {
                         record.bind(handle.clone(), Value::Node(node_id, node.clone()));
@@ -7466,7 +7476,8 @@ impl PhysicalOperator for SetPropertyOperator {
                 if let Some(node_val) = record.get(var) {
                     match node_val {
                         Value::NodeRef(id) | Value::Node(id, _) => {
-                            let _ = store.set_node_property(tenant_id, *id, prop.clone(), val.clone());
+                            store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
+                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
                             let _ = store.set_edge_property(*id, prop.clone(), val.clone());
@@ -7753,7 +7764,12 @@ impl MergeOperator {
             }
             if let Some(required) = np.properties.as_ref() {
                 for (k, v) in required {
-                    let _ = store.set_node_property(tenant_id, node_id, k.clone(), v.clone());
+                    if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
+                    {
+                        // A rejected property must not leave a half-built node behind.
+                        let _ = store.delete_node(tenant_id, node_id);
+                        return Err(ExecutionError::GraphError(e.to_string()));
+                    }
                 }
             }
             if let Some(var) = &np.variable {
@@ -7913,7 +7929,12 @@ impl PhysicalOperator for MergeOperator {
 
             if let Some(required_props) = props {
                 for (k, v) in required_props {
-                    let _ = store.set_node_property(tenant_id, node_id, k.clone(), v.clone());
+                    if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
+                    {
+                        // A rejected property must not leave a half-built node behind.
+                        let _ = store.delete_node(tenant_id, node_id);
+                        return Err(ExecutionError::GraphError(e.to_string()));
+                    }
                 }
             }
 
