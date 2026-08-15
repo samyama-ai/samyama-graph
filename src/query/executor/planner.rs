@@ -555,6 +555,30 @@ impl QueryPlanner {
         Ok(())
     }
 
+    /// Variables that exist only *above* the match pipeline, and so cannot be referenced by
+    /// a predicate evaluated during match planning.
+    ///
+    /// Two sources, both of which bind their variables in an operator that sits on top of
+    /// the matches: a leading UNWIND, and a `CALL ... YIELD`. A predicate mentioning one of
+    /// these must be left to the top-level WHERE filter, which runs after both are joined
+    /// in. Assigning it to a MATCH instead puts the filter underneath the operator that
+    /// binds the variable, and the query dies with "Variable not found" even though the
+    /// same variable projects fine in RETURN (#429).
+    fn late_bound_variables(query: &Query) -> HashSet<String> {
+        let mut vars = HashSet::new();
+        if query.unwind_leading {
+            if let Some(u) = &query.unwind_clause {
+                vars.insert(u.variable.clone());
+            }
+        }
+        if let Some(call) = &query.call_clause {
+            for item in &call.yield_items {
+                vars.insert(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+            }
+        }
+        vars
+    }
+
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         Self::reject_unevaluated_property_exprs(query)?;
         let mut plan = self.plan_inner(query, store)?;
@@ -951,19 +975,13 @@ impl QueryPlanner {
         // the Unwind operator that binds it sits above the matches. The top-level WHERE
         // filter re-applies the full predicate after the Unwind, so dropping it here loses
         // nothing.
-        let deferred_unwind_var_pre: Option<String> = if query.unwind_leading {
-            query.unwind_clause.as_ref().map(|u| u.variable.clone())
-        } else {
-            None
-        };
+        let late_bound_pre = Self::late_bound_variables(query);
 
         for pred in pre_where_preds {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
-            if let Some(uv) = &deferred_unwind_var_pre {
-                if pred_vars.contains(uv) {
-                    continue;
-                }
+            if pred_vars.iter().any(|v| late_bound_pre.contains(v)) {
+                continue;
             }
 
             let target = pre_match_var_sets.iter().position(|match_vars| {
@@ -1096,19 +1114,13 @@ impl QueryPlanner {
             // the Unwind and the query died with "Variable not found". Dropping it from the
             // decomposition is safe because the top-level WHERE filter, applied after the
             // Unwind, evaluates the full predicate anyway.
-            let deferred_unwind_var: Option<String> = if query.unwind_leading {
-                query.unwind_clause.as_ref().map(|u| u.variable.clone())
-            } else {
-                None
-            };
+            let late_bound = Self::late_bound_variables(query);
 
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
-                if let Some(uv) = &deferred_unwind_var {
-                    if pred_vars.contains(uv) {
-                        continue;
-                    }
+                if pred_vars.iter().any(|v| late_bound.contains(v)) {
+                    continue;
                 }
                 let target = match_var_sets.iter().position(|match_vars| {
                     pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))

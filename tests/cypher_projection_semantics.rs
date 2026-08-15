@@ -1671,3 +1671,82 @@ fn match_and_merge_refuse_non_literal_property_values_rather_than_ignoring_them(
         vec!["v=1"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// YIELD variables are in scope for a following MATCH's WHERE (#429)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_yielded_variable_can_be_referenced_by_a_later_where() {
+    // `CALL ... YIELD x` binds x in an operator that sits *above* the match pipeline, so a
+    // predicate mentioning x was being assigned to a MATCH and evaluated underneath the
+    // operator that binds it -- "Variable not found", even though the same variable
+    // projects fine in RETURN. That asymmetry is what made it confusing: the join was
+    // already happening, only the filter was placed on the wrong side of it.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    for i in 0..5 {
+        engine
+            .execute_mut(&format!("CREATE (:Term {{code: \"T{i}\"}})"), &mut s, "default")
+            .unwrap();
+    }
+
+    // db.labels() yields exactly one row here: "Term"
+    assert_eq!(bag(&s, "CALL db.labels() YIELD label RETURN label"), vec!["label=Term"]);
+
+    // The predicate must *filter*, not merely parse. `t.code` is T0..T4 and `label` is
+    // "Term", so this is never true -- a dropped predicate would give 5.
+    assert_eq!(
+        scalar(
+            &s,
+            "CALL db.labels() YIELD label MATCH (t:Term) WHERE t.code = label RETURN count(t) AS n"
+        ),
+        "n=0"
+    );
+
+    // always true -> every row survives
+    assert_eq!(
+        scalar(
+            &s,
+            "CALL db.labels() YIELD label MATCH (t:Term) WHERE label = \"Term\" RETURN count(t) AS n"
+        ),
+        "n=5"
+    );
+
+    // a predicate spanning both sides of the join
+    assert_eq!(
+        scalar(
+            &s,
+            "CALL db.labels() YIELD label MATCH (t:Term) \
+             WHERE label = \"Term\" AND t.code = \"T2\" RETURN count(t) AS n"
+        ),
+        "n=1"
+    );
+    assert_eq!(
+        scalar(
+            &s,
+            "CALL db.labels() YIELD label MATCH (t:Term) \
+             WHERE label = \"Nope\" AND t.code = \"T2\" RETURN count(t) AS n"
+        ),
+        "n=0"
+    );
+
+    // a match-only predicate must still be pushed down to the MATCH, not deferred
+    assert_eq!(
+        scalar(
+            &s,
+            "CALL db.labels() YIELD label MATCH (t:Term) WHERE t.code = \"T1\" RETURN count(t) AS n"
+        ),
+        "n=1"
+    );
+
+    // and the previously-working shapes are unchanged
+    assert_eq!(
+        scalar(&s, "CALL db.labels() YIELD label MATCH (t:Term) RETURN count(t) AS n"),
+        "n=5"
+    );
+    assert_eq!(
+        scalar(&s, "CALL db.labels() YIELD label WHERE label = \"Term\" RETURN count(*) AS n"),
+        "n=1"
+    );
+}
