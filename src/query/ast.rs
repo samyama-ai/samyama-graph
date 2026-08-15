@@ -276,6 +276,14 @@ pub struct NodePattern {
     pub labels: Vec<Label>,
     /// Property constraints
     pub properties: Option<HashMap<String, PropertyValue>>,
+    /// Property values that are not literals, e.g. `{n: p.n}` or `{id: row.id}`.
+    ///
+    /// Kept separate from `properties` so the literal case -- the overwhelming majority,
+    /// and the only one usable for an index lookup -- keeps its concrete `PropertyValue`
+    /// and every existing consumer is unaffected. Only CREATE and MERGE evaluate these,
+    /// once per row; a MATCH pattern carrying one is rejected in planning rather than
+    /// silently ignoring the constraint.
+    pub property_exprs: Option<HashMap<String, Expression>>,
 }
 
 /// Edge pattern: -[:KNOWS|FOLLOWS*1..5]->
@@ -291,6 +299,14 @@ pub struct EdgePattern {
     pub length: Option<LengthPattern>,
     /// Property constraints
     pub properties: Option<HashMap<String, PropertyValue>>,
+    /// Property values that are not literals, e.g. `{n: p.n}` or `{id: row.id}`.
+    ///
+    /// Kept separate from `properties` so the literal case -- the overwhelming majority,
+    /// and the only one usable for an index lookup -- keeps its concrete `PropertyValue`
+    /// and every existing consumer is unaffected. Only CREATE and MERGE evaluate these,
+    /// once per row; a MATCH pattern carrying one is rejected in planning rather than
+    /// silently ignoring the constraint.
+    pub property_exprs: Option<HashMap<String, Expression>>,
 }
 
 /// Edge direction
@@ -690,6 +706,7 @@ mod tests {
             variable: Some("n".to_string()),
             labels: vec![Label::new("Person")],
             properties: None,
+            property_exprs: None,
         };
         assert_eq!(pattern.variable, Some("n".to_string()));
         assert_eq!(pattern.labels.len(), 1);

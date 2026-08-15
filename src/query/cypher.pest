@@ -128,7 +128,14 @@ range_pattern = { integer? ~ ".." ~ integer? }
 // Properties: {name: "Alice", age: 30}
 properties = { "{" ~ property_list? ~ "}" }
 property_list = { property ~ ("," ~ property)* }
-property = { property_key ~ ":" ~ value }
+// A property value may be any expression, not only a literal: `CREATE (:Q {n: p.n})`
+// and `UNWIND $rows AS row CREATE (:N {id: row.id})` both need to read a bound
+// variable. `value` is tried first so literals -- the overwhelming majority, and the
+// ones usable for index lookup -- keep parsing to a literal exactly as before.
+property = { property_key ~ ":" ~ (value ~ !expression_continues | expression) }
+// A literal followed by an operator is really the start of an expression
+// (`{n: 1 + 2}`), so `value` must not win in that case.
+expression_continues = { "+" | "-" | "*" | "/" | "%" | "." | "[" | "=" | "<" | ">" | "!" }
 property_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // RETURN items

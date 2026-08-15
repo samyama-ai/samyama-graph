@@ -376,6 +376,7 @@ mod tests {
                 variable: Some(start_var.to_string()),
                 labels: start_labels,
                 properties: None,
+                property_exprs: None,
             },
             segments,
         }
@@ -389,11 +390,13 @@ mod tests {
                 direction: dir,
                 length: None,
                 properties: None,
+                property_exprs: None,
             },
             node: NodePattern {
                 variable: Some(node_var.to_string()),
                 labels: node_labels,
                 properties: None,
+                property_exprs: None,
             },
         }
     }

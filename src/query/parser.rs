@@ -1138,6 +1138,7 @@ fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
     let mut variable = None;
     let mut labels = Vec::new();
     let mut properties = None;
+    let mut property_exprs = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1152,7 +1153,9 @@ fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
                 }
             }
             Rule::properties => {
-                properties = Some(parse_properties(inner)?);
+                let (literals, exprs) = parse_properties_split(inner)?;
+                properties = Some(literals);
+                property_exprs = exprs;
             }
             _ => {}
         }
@@ -1162,6 +1165,7 @@ fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
         variable,
         labels,
         properties,
+        property_exprs,
     })
 }
 
@@ -1179,6 +1183,7 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
     let mut types = Vec::new();
     let mut length = None;
     let mut properties = None;
+    let mut property_exprs = None;
 
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::edge_detail {
@@ -1198,7 +1203,9 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
                         length = Some(parse_length_pattern(detail)?);
                     }
                     Rule::properties => {
-                        properties = Some(parse_properties(detail)?);
+                        let (literals, exprs) = parse_properties_split(detail)?;
+                        properties = Some(literals);
+                        property_exprs = exprs;
                     }
                     _ => {}
                 }
@@ -1212,6 +1219,7 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
         direction,
         length,
         properties,
+        property_exprs,
     })
 }
 
@@ -1250,6 +1258,45 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
     })
 }
 
+/// Split a property map into literal values and expression values.
+///
+/// Literals keep their concrete `PropertyValue` -- they are the majority and the only form
+/// usable for an index lookup -- while anything referring to a bound variable
+/// (`{n: p.n}`, `{id: row.id}`) is returned separately for CREATE/MERGE to evaluate per
+/// row. Returning `(literals, exprs)` rather than converting everything to expressions
+/// keeps all existing consumers of `properties` working unchanged.
+type SplitProperties = (HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>);
+
+fn parse_properties_split(pair: pest::iterators::Pair<Rule>) -> ParseResult<SplitProperties> {
+    let mut literals = HashMap::new();
+    let mut exprs: HashMap<String, Expression> = HashMap::new();
+
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::property_list {
+            for prop in inner.into_inner() {
+                if prop.as_rule() == Rule::property {
+                    let mut key = String::new();
+                    for part in prop.into_inner() {
+                        match part.as_rule() {
+                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::value => {
+                                literals.insert(key.clone(), parse_value(part)?);
+                            }
+                            Rule::expression => {
+                                exprs.insert(key.clone(), parse_expression(part)?);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((literals, if exprs.is_empty() { None } else { Some(exprs) }))
+}
+
+#[allow(dead_code)]
 fn parse_properties(pair: pest::iterators::Pair<Rule>) -> ParseResult<HashMap<String, PropertyValue>> {
     let mut props = HashMap::new();
 

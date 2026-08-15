@@ -1573,3 +1573,101 @@ fn an_embedding_written_with_whole_numbers_is_still_indexable() {
         .execute_mut("CREATE VECTOR INDEX myidx FOR (d:D) ON (d.emb)", &mut s2, "default")
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// CREATE property values may be expressions (#408)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_can_derive_property_values_from_bound_variables() {
+    // Pattern property values had to be literals, so a node could only ever be created with
+    // constants: `CREATE (:Q {n: p.n})` was a parse error while `SET p.m = p.n` was fine.
+    // That ruled out copy/derive writes and, with UNWIND, batch writes entirely.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE (:P {n: 1, name: \"a\"})", &mut s, "default")
+        .unwrap();
+
+    engine.execute_mut("MATCH (p:P) CREATE (:Q {n: p.n})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (q:Q) RETURN q.n AS v"), "v=1");
+
+    engine.execute_mut("MATCH (p:P) CREATE (:R {n: p.n + 10})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (r:R) RETURN r.n AS v"), "v=11");
+
+    engine.execute_mut("MATCH (p:P) CREATE (:S {label: p.name})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (x:S) RETURN x.label AS v"), "v=a");
+
+    // literals are unaffected
+    engine.execute_mut("MATCH (p:P) CREATE (:T {n: 5})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (t:T) RETURN t.n AS v"), "v=5");
+}
+
+#[test]
+fn unwind_drives_a_batch_create() {
+    // The batch-write idiom from #307. It needs both a leading UNWIND *and* a non-literal
+    // property value; with either missing it runs once with nothing bound.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    engine
+        .execute_mut("UNWIND [1, 2, 3] AS x CREATE (:N {id: x})", &mut s, "default")
+        .unwrap();
+
+    assert_eq!(scalar(&s, "MATCH (n:N) RETURN count(n) AS n"), "n=3");
+    let mut ids = bag(&s, "MATCH (n:N) RETURN n.id AS id");
+    ids.sort();
+    assert_eq!(ids, vec!["id=1", "id=2", "id=3"]);
+
+    // one row per unwound value, each carrying its own value — not three copies of one
+    engine
+        .execute_mut("UNWIND [7, 8] AS x CREATE (:M {id: x, doubled: x * 2})", &mut s, "default")
+        .unwrap();
+    let mut rows = bag(&s, "MATCH (m:M) RETURN m.id AS id, m.doubled AS doubled");
+    rows.sort();
+    assert_eq!(rows, vec!["doubled=14 id=7", "doubled=16 id=8"]);
+}
+
+#[test]
+fn a_constant_expression_is_allowed_but_an_unbound_variable_is_refused() {
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+
+    // nothing bound, but a constant needs nothing bound
+    engine.execute_mut("CREATE (:C {n: 1 + 2})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (c:C) RETURN c.n AS v"), "v=3");
+
+    // a variable that is not bound must be an error, not a silent null — storing nothing
+    // for a property without saying so is the failure this whole change removes
+    let err = engine
+        .execute_mut("CREATE (:D {n: nosuch.x})", &mut s, "default")
+        .expect_err("should not silently store null");
+    assert!(format!("{err}").contains("not bound"), "{err}");
+    assert_eq!(scalar(&s, "MATCH (d:D) RETURN count(d) AS n"), "n=0");
+}
+
+#[test]
+fn match_and_merge_refuse_non_literal_property_values_rather_than_ignoring_them() {
+    // These are not evaluated yet. Accepting and dropping the constraint would make
+    // `MATCH (p:P {n: x})` return *every* :P — a working-looking query returning too much.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut("CREATE (:P {n: 1})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:P {n: 2})", &mut s, "default").unwrap();
+
+    let err = engine
+        .execute("UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v", &s)
+        .expect_err("must not silently match everything");
+    assert!(format!("{err}").contains("WHERE"), "should name the workaround: {err}");
+
+    let err = engine
+        .execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default")
+        .expect_err("must not silently store null");
+    assert!(format!("{err}").contains("WHERE"), "{err}");
+
+    // the WHERE form it points at does work
+    assert_eq!(
+        bag(&s, "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.n AS v"),
+        vec!["v=1"]
+    );
+}

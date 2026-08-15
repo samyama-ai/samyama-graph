@@ -510,7 +510,53 @@ impl QueryPlanner {
     /// each individually capable of dropping the flag on the floor — which is how
     /// `RETURN DISTINCT` came to be a complete no-op (#311). One choke point cannot
     /// forget.
+    /// Reject non-literal property values where they are not yet evaluated.
+    ///
+    /// CREATE evaluates them per row; MATCH and MERGE patterns do not. Until they do, a
+    /// pattern carrying one has to be an error: silently dropping the constraint means
+    /// `MATCH (p:P {n: x})` returns every `:P` rather than the matching one, which looks
+    /// like a working query returning too much.
+    fn reject_unevaluated_property_exprs(query: &Query) -> ExecutionResult<()> {
+        let complain = |clause: &str, key: &str| {
+            ExecutionError::PlanningError(format!(
+                "{clause} does not yet support a non-literal property value (`{key}`); use a WHERE comparison instead"
+            ))
+        };
+
+        for mc in &query.match_clauses {
+            for path in &mc.pattern.paths {
+                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                    return Err(complain("MATCH", key));
+                }
+                for seg in &path.segments {
+                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                        return Err(complain("MATCH", key));
+                    }
+                    if let Some(key) = seg.edge.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                        return Err(complain("MATCH", key));
+                    }
+                }
+            }
+        }
+
+        if let Some(merge) = &query.merge_clause {
+            for path in &merge.pattern.paths {
+                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                    return Err(complain("MERGE", key));
+                }
+                for seg in &path.segments {
+                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                        return Err(complain("MERGE", key));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        Self::reject_unevaluated_property_exprs(query)?;
         let mut plan = self.plan_inner(query, store)?;
         if query.return_clause.as_ref().is_some_and(|r| r.distinct) {
             plan.root = Box::new(DistinctOperator::new(plan.root));
@@ -758,8 +804,16 @@ impl QueryPlanner {
             }
         }
 
-        // Handle CREATE-only queries (no MATCH/CALL required)
-        if query.match_clauses.is_empty() && query.call_clause.is_none() {
+        // Handle CREATE-only queries (no MATCH/CALL required).
+        //
+        // A leading UNWIND is excluded: `UNWIND $rows AS row CREATE (:N {id: row.id})` has
+        // no MATCH but is still row-driven, and planning it as a CREATE-only statement runs
+        // it once with nothing bound. It falls through to the general pipeline, where the
+        // Unwind feeds the create.
+        if query.match_clauses.is_empty()
+            && query.call_clause.is_none()
+            && query.unwind_clause.is_none()
+        {
             if let Some(create_clause) = &query.create_clause {
                 let mut plan = self.plan_create_only(create_clause)?;
                 // CY-12: Wrap with ProjectOperator if RETURN clause is present
@@ -1316,15 +1370,24 @@ impl QueryPlanner {
             }
 
             // Nodes to create per matched row: (handle, labels, properties)
-            let mut nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)> =
-                Vec::new();
+            let mut nodes_to_create: Vec<(
+                String,
+                Vec<Label>,
+                HashMap<String, PropertyValue>,
+                Option<HashMap<String, Expression>>,
+            )> = Vec::new();
             let mut anon_seq = 0usize;
 
             // Assign a handle to a CREATE-pattern node, registering it for creation when
             // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
             // can still be wired to them.
             let mut handle_for = |node: &crate::query::ast::NodePattern,
-                                  nodes_to_create: &mut Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
+                                  nodes_to_create: &mut Vec<(
+                String,
+                Vec<Label>,
+                HashMap<String, PropertyValue>,
+                Option<HashMap<String, Expression>>,
+            )>,
                                   anon_seq: &mut usize|
              -> String {
                 match &node.variable {
@@ -1334,6 +1397,7 @@ impl QueryPlanner {
                             v.clone(),
                             node.labels.clone(),
                             node.properties.clone().unwrap_or_default(),
+                            node.property_exprs.clone(),
                         ));
                         v.clone()
                     }
@@ -1344,6 +1408,7 @@ impl QueryPlanner {
                             h.clone(),
                             node.labels.clone(),
                             node.properties.clone().unwrap_or_default(),
+                            node.property_exprs.clone(),
                         ));
                         h
                     }
@@ -2855,7 +2920,12 @@ impl QueryPlanner {
 
         // Collect all nodes to create from the pattern
         // Each node has: (labels, properties, variable_name)
-        let mut nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+        let mut nodes_to_create: Vec<(
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+            Option<HashMap<String, Expression>>,
+        )> = Vec::new();
         let mut output_columns: Vec<String> = Vec::new();
 
         // Collect edges to create: (source_var, target_var, edge_type, properties, edge_var)
@@ -2906,7 +2976,12 @@ impl QueryPlanner {
                 Some(v) => v.clone(),
                 None => next_anon(&declared),
             };
-            nodes_to_create.push((labels, properties, Some(start_handle.clone())));
+            nodes_to_create.push((
+                labels,
+                properties,
+                Some(start_handle.clone()),
+                start.property_exprs.clone(),
+            ));
 
             // Track current source variable for edge creation
             let mut current_source_var = Some(start_handle);
@@ -2927,7 +3002,12 @@ impl QueryPlanner {
                     Some(v) => v.clone(),
                     None => next_anon(&declared),
                 };
-                nodes_to_create.push((node_labels, node_properties, Some(node_handle.clone())));
+                nodes_to_create.push((
+                    node_labels,
+                    node_properties,
+                    Some(node_handle.clone()),
+                    node.property_exprs.clone(),
+                ));
 
                 // Extract edge information
                 let edge = &segment.edge;

@@ -5390,7 +5390,7 @@ impl PhysicalOperator for LeftOuterJoinOperator {
 /// Create node operator: CREATE (n:Person {name: "Alice"})
 pub struct CreateNodeOperator {
     /// Nodes to create (label, properties, variable)
-    nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)>,
+    nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>, Option<HashMap<String, Expression>>)>,
     /// Created node IDs (for returning)
     created_nodes: Vec<(NodeId, Option<String>)>,
     /// Current index for iteration
@@ -5401,7 +5401,14 @@ pub struct CreateNodeOperator {
 
 impl CreateNodeOperator {
     /// Create a new CreateNodeOperator
-    pub fn new(nodes: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>)>) -> Self {
+    pub fn new(
+        nodes: Vec<(
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+            Option<HashMap<String, Expression>>,
+        )>,
+    ) -> Self {
         Self {
             nodes_to_create: nodes,
             created_nodes: Vec::new(),
@@ -5422,7 +5429,7 @@ impl PhysicalOperator for CreateNodeOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
-            for (labels, properties, variable) in &self.nodes_to_create {
+            for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
                 // Use first label as primary, or empty string if none
                 let primary_label = labels.first()
                     .map(|l| l.clone())
@@ -5435,8 +5442,30 @@ impl PhysicalOperator for CreateNodeOperator {
                     let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
                 }
 
+                // A CREATE with no input row has nothing bound, so a non-literal value can
+                // only be a constant (`{n: 1 + 2}`). Anything referring to a variable is an
+                // error rather than a silent null -- quietly storing nothing for a property
+                // is the failure this change exists to remove.
+                let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
+                if let Some(exprs) = property_exprs {
+                    let empty = Record::new();
+                    for (key, expr) in exprs {
+                        match eval_expression(expr, &empty, store) {
+                            Ok(Value::Property(p)) => {
+                                evaluated.insert(key.clone(), p);
+                            }
+                            _ => {
+                                let _ = store.delete_node(tenant_id, node_id);
+                                return Err(ExecutionError::RuntimeError(format!(
+                                    "CREATE property `{key}` refers to a variable that is not bound here; bind it first with MATCH, WITH or UNWIND"
+                                )));
+                            }
+                        }
+                    }
+                }
+
                 // Set properties using store.set_node_property to trigger indexing
-                for (key, value) in properties {
+                for (key, value) in properties.iter().chain(evaluated.iter()) {
                     if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
                     {
                         // A rejected property must not leave a half-built node behind.
@@ -6396,7 +6425,7 @@ pub struct MatchCreateEdgeOperator {
     /// created fresh for every matched row: (handle, labels, properties). Previously these
     /// were ignored entirely, so `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither
     /// the node nor the edge and reported success.
-    nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
+    nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
     /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
     edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     /// Whether edges have been created for current batch
@@ -6421,7 +6450,7 @@ impl MatchCreateEdgeOperator {
     /// reference them exactly like a matched variable.
     pub fn with_nodes(
         input: OperatorBox,
-        nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>)>,
+        nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
         edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     ) -> Self {
         Self {
@@ -6450,7 +6479,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 // bind is a *new* node for this row. Bind it under its handle first; the
                 // edge wiring below then treats it exactly like a matched variable.
                 let mut record = record;
-                for (handle, labels, properties) in &self.nodes_to_create {
+                for (handle, labels, properties, property_exprs) in &self.nodes_to_create {
                     let primary_label = labels
                         .first()
                         .cloned()
@@ -6459,7 +6488,26 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     for label in labels.iter().skip(1) {
                         let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
                     }
-                    for (key, value) in properties {
+                    // Non-literal property values (`{id: row.id}`) are evaluated against
+                    // this row, so each created node gets the value belonging to its own
+                    // match rather than a constant.
+                    let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
+                    if let Some(exprs) = property_exprs {
+                        for (key, expr) in exprs {
+                            let value = eval_expression(expr, &record, store)?;
+                            let pv = match value {
+                                Value::Property(p) => p,
+                                Value::Null => PropertyValue::Null,
+                                other => {
+                                    return Err(ExecutionError::TypeError(format!(
+                                        "property `{key}` must be a scalar, got {other:?}"
+                                    )))
+                                }
+                            };
+                            evaluated.insert(key.clone(), pv);
+                        }
+                    }
+                    for (key, value) in properties.iter().chain(evaluated.iter()) {
                         if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
                         {
                             // A rejected property must not leave a half-built node behind.
