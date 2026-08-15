@@ -91,3 +91,58 @@ fn a_good_import_still_works_and_still_works_after_a_failed_one() {
     assert_eq!(stats.node_count, 50);
     assert_eq!(store.all_nodes().len(), 50);
 }
+
+// ---------------------------------------------------------------------------
+// Export compression (#314)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_snapshot_round_trips_at_every_compression_level() {
+    // Export was fixed at gzip level 6, the slowest part of the operation and single
+    // threaded — 0.77 MB/s on a billion-edge federation, projecting to 6-8 hours. The level
+    // is now a choice, so what matters is that every level still produces a snapshot the
+    // importer reads identically.
+    use samyama::snapshot::export_tenant_with_compression;
+
+    let engine = QueryEngine::new();
+    let mut source = GraphStore::new();
+    for i in 0..200 {
+        engine
+            .execute_mut(&format!("CREATE (:N {{id: {i}, name: \"node {i}\"}})"), &mut source, "default")
+            .unwrap();
+    }
+    for i in 0..100 {
+        engine
+            .execute_mut(
+                &format!("MATCH (a:N {{id: {i}}}), (b:N {{id: {}}}) CREATE (a)-[:R]->(b)", i + 1),
+                &mut source, "default",
+            )
+            .unwrap();
+    }
+
+    for level in [0u32, 1, 3, 6, 9] {
+        let mut buf = Vec::new();
+        export_tenant_with_compression(&source, &mut buf, level)
+            .unwrap_or_else(|e| panic!("export at level {level}: {e}"));
+
+        let mut restored = GraphStore::new();
+        let stats = import_tenant(&mut restored, &buf[..])
+            .unwrap_or_else(|e| panic!("import of level {level}: {e}"));
+
+        assert_eq!(stats.node_count, 200, "level {level}");
+        assert_eq!(restored.all_nodes().len(), 200, "level {level}");
+
+        // and the data itself survives, not just the counts
+        let batch = engine
+            .execute("MATCH (n:N {id: 7}) RETURN n.name AS name", &restored)
+            .expect("query");
+        assert_eq!(batch.records.len(), 1, "level {level}");
+    }
+}
+
+#[test]
+fn the_default_compression_level_is_the_documented_one() {
+    // Guards against the default silently reverting to gzip's level 6, which is 2.25x
+    // slower for 3% fewer bytes.
+    assert_eq!(samyama::snapshot::DEFAULT_SNAPSHOT_COMPRESSION, 3);
+}

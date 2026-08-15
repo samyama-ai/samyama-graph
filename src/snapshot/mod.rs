@@ -30,9 +30,67 @@ use format::{
 /// v2 format: merges ColumnStore properties into node records and exports stub
 /// edges from adjacency lists (not just the Edge arena). This captures the full
 /// graph state including bulk-loaded data from create_node_stub/create_edge_stub.
+/// A dense set of edge ids, used to tell adjacency-only (stub) edges from full ones.
+///
+/// This is probed once per adjacency entry -- twice over the whole graph, since the header
+/// pre-pass counts before the body writes. At 1.35B edges a `HashSet<u64>` is both ~20 GB
+/// and a random-access cache miss on every probe, which is most of why export ran at
+/// 0.77 MB/s and was CPU-bound rather than IO-bound (#314). Edge ids are dense, so one bit
+/// each is enough: ~170 MB for the same 1.35B edges, contiguous and cache-friendly.
+struct EdgeIdSet {
+    bits: Vec<u64>,
+}
+
+impl EdgeIdSet {
+    fn from_ids(ids: impl Iterator<Item = u64>) -> Self {
+        let ids: Vec<u64> = ids.collect();
+        let max = ids.iter().copied().max().unwrap_or(0);
+        let mut set = Self {
+            bits: vec![0u64; (max as usize / 64) + 1],
+        };
+        for id in ids {
+            set.insert(id);
+        }
+        set
+    }
+
+    fn insert(&mut self, id: u64) {
+        let word = id as usize / 64;
+        if word < self.bits.len() {
+            self.bits[word] |= 1u64 << (id % 64);
+        }
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        let word = id as usize / 64;
+        word < self.bits.len() && (self.bits[word] >> (id % 64)) & 1 == 1
+    }
+}
+
+/// Default gzip level for snapshot export.
+///
+/// Was `Compression::default()` (6), which is the slowest part of an export and runs on one
+/// core. On a representative snapshot payload level 3 is **2.25x faster for 3% more bytes**,
+/// and level 1 is 3.6x faster for 24% more -- worth having, but 24% of a 22 GB federation
+/// snapshot is another 5 GB to store and move, so 3 is the better default (#314).
+pub const DEFAULT_SNAPSHOT_COMPRESSION: u32 = 3;
+
+/// Export at the default compression level.
 pub fn export_tenant(
     store: &GraphStore,
     writer: impl Write,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    export_tenant_with_compression(store, writer, DEFAULT_SNAPSHOT_COMPRESSION)
+}
+
+/// Export at an explicit gzip level (0-9).
+///
+/// Lower is faster and larger. Use 1 when the snapshot is a local capture whose size does
+/// not matter; the default trades almost no size for most of the speed.
+pub fn export_tenant_with_compression(
+    store: &GraphStore,
+    writer: impl Write,
+    compression_level: u32,
 ) -> Result<ExportStats, Box<dyn std::error::Error>> {
     let nodes = store.all_nodes();
     let full_edges = store.all_edges(); // Full Edge objects (may be empty for stub-loaded)
@@ -50,7 +108,7 @@ pub fn export_tenant(
     let mut adjacency_edge_count: u64 = 0;
 
     // Collect full edge IDs to avoid double-counting
-    let full_edge_ids: HashSet<u64> = full_edges.iter().map(|e| e.id.as_u64()).collect();
+    let full_edge_ids = EdgeIdSet::from_ids(full_edges.iter().map(|e| e.id.as_u64()));
 
     // Count adjacency-only (stub) edges
     for node in &nodes {
@@ -58,7 +116,7 @@ pub fn export_tenant(
         // Frozen outgoing neighbors
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(_nid, eid) in &frozen {
-            if !full_edge_ids.contains(&eid.as_u64()) {
+            if !full_edge_ids.contains(eid.as_u64()) {
                 adjacency_edge_count += 1;
                 if let Some(et) = store.get_edge_type(eid) {
                     edge_type_set.insert(et.as_str().to_string());
@@ -68,7 +126,7 @@ pub fn export_tenant(
         // Write buffer outgoing
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(_nid, eid) in buf {
-            if !full_edge_ids.contains(&eid.as_u64()) {
+            if !full_edge_ids.contains(eid.as_u64()) {
                 adjacency_edge_count += 1;
                 if let Some(et) = store.get_edge_type(eid) {
                     edge_type_set.insert(et.as_str().to_string());
@@ -91,7 +149,7 @@ pub fn export_tenant(
     let total_edge_count = full_edges.len() as u64 + adjacency_edge_count;
 
     // Create gzip encoder
-    let mut gz = GzEncoder::new(writer, Compression::default());
+    let mut gz = GzEncoder::new(writer, Compression::new(compression_level.min(9)));
 
     // Write header (v2)
     let header = SnapshotHeader {
@@ -187,7 +245,7 @@ pub fn export_tenant(
         // Frozen outgoing
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(tgt_nid, eid) in &frozen {
-            if full_edge_ids.contains(&eid.as_u64()) { continue; }
+            if full_edge_ids.contains(eid.as_u64()) { continue; }
             let et = store.get_edge_type(eid)
                 .map(|e| e.as_str().to_string())
                 .unwrap_or_default();
@@ -207,7 +265,7 @@ pub fn export_tenant(
         // Write buffer outgoing
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(tgt_nid, eid) in buf {
-            if full_edge_ids.contains(&eid.as_u64()) { continue; }
+            if full_edge_ids.contains(eid.as_u64()) { continue; }
             let et = store.get_edge_type(eid)
                 .map(|e| e.as_str().to_string())
                 .unwrap_or_default();
