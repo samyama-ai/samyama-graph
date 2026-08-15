@@ -1329,7 +1329,17 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .collect();
                     Ok(Value::Property(PropertyValue::Array(keys)))
                 }
-                _ => Err(ExecutionError::TypeError("keys() requires node or edge".to_string())),
+                // keys() over a map property. Cypher defines keys() on maps as
+                // well as nodes and edges, and without this a map property can
+                // be stored and read whole but never enumerated (#452).
+                Value::Property(PropertyValue::Map(m)) => {
+                    let keys: Vec<PropertyValue> = m
+                        .keys()
+                        .map(|k| PropertyValue::String(k.clone()))
+                        .collect();
+                    Ok(Value::Property(PropertyValue::Array(keys)))
+                }
+                _ => Err(ExecutionError::TypeError("keys() requires a node, edge, or map".to_string())),
             }
         }
         "exists" => {

@@ -2087,3 +2087,81 @@ fn call_subquery_works_on_the_write_path_too() {
         .unwrap();
     assert_eq!(batch.records.len(), 3);
 }
+
+// ---------------------------------------------------------------------------
+// Map dot access and keys() over maps (#452)
+//
+// Map properties stored and round-tripped intact to arbitrary depth, but the
+// only way in was `m["k"]`. Dot notation was a parse error and keys() rejected
+// maps outright, so a map's fields could not even be enumerated.
+// ---------------------------------------------------------------------------
+
+fn map_property_fixture() -> GraphStore {
+    let mut s = GraphStore::new();
+    QueryEngine::new()
+        .execute_mut(
+            "CREATE (:D {meta: {a: 1, c: {d: 9}}, plain: 5})",
+            &mut s,
+            "default",
+        )
+        .unwrap();
+    s
+}
+
+#[test]
+fn dot_access_reaches_one_level_into_a_map() {
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.a AS v"), "v=1");
+}
+
+#[test]
+fn dot_access_chains_arbitrarily_deep() {
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.c.d AS v"), "v=9");
+}
+
+#[test]
+fn dot_access_works_in_a_predicate() {
+    let s = map_property_fixture();
+    assert_eq!(scalar(&s, "MATCH (d:D) WHERE d.meta.a = 1 RETURN count(d) AS v"), "v=1");
+    assert_eq!(scalar(&s, "MATCH (d:D) WHERE d.meta.c.d = 9 RETURN count(d) AS v"), "v=1");
+}
+
+#[test]
+fn dot_and_bracket_access_are_the_same_path() {
+    // Both spellings desugar to Expression::Index, so they cannot drift apart.
+    let s = map_property_fixture();
+    assert_eq!(
+        scalar(&s, "MATCH (d:D) RETURN d.meta.c[\"d\"] AS v"),
+        scalar(&s, "MATCH (d:D) RETURN d.meta[\"c\"][\"d\"] AS v")
+    );
+}
+
+#[test]
+fn a_missing_map_key_is_null_not_an_error() {
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.nope AS v"), "v=NULL");
+}
+
+#[test]
+fn plain_property_access_is_unaffected() {
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.plain AS v"), "v=5");
+}
+
+#[test]
+fn keys_enumerates_a_map_and_still_a_node() {
+    let s = map_property_fixture();
+    assert_eq!(bag(&s, "MATCH (d:D) RETURN keys(d.meta) AS v"), vec!["v=[a,c]"]);
+    assert_eq!(bag(&s, "MATCH (d:D) RETURN keys(d) AS v"), vec!["v=[meta,plain]"]);
+}
+
+#[test]
+fn writing_through_a_map_path_is_still_rejected() {
+    // Reads gained dot access; writes did not, because writing into a map is
+    // not implemented. Accepting the syntax and dropping the write would be
+    // worse than refusing it.
+    let e = QueryEngine::new();
+    let mut s = map_property_fixture();
+    assert!(e.execute_mut("MATCH (d:D) SET d.meta.a = 5", &mut s, "default").is_err());
+    assert!(e.execute_mut("MATCH (d:D) REMOVE d.meta.a", &mut s, "default").is_err());
+    // Ordinary single-segment SET/REMOVE keep working.
+    assert!(e.execute_mut("MATCH (d:D) SET d.plain = 6", &mut s, "default").is_ok());
+    assert!(e.execute_mut("MATCH (d:D) REMOVE d.plain", &mut s, "default").is_ok());
+}

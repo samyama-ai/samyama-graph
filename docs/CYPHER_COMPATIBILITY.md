@@ -64,7 +64,7 @@ Three things, all verified:
 | | `rand`, `log`, `exp` | ✅ | Previously listed as a gap; shipped in v0.6.x |
 | **Collection Functions** | `size`, `length` | ✅ | |
 | | `head`, `last`, `tail` | ✅ | |
-| | `keys` | ✅ | Nodes and edges. Rejects maps — #452 |
+| | `keys` | ✅ | Nodes, edges and maps (#452) |
 | | `range` | ✅ | |
 | | `nodes()`, `relationships()` | ✅ | Previously listed as a gap; shipped in v0.6.x |
 | | List indexing `xs[0]` | ✅ | |
@@ -82,7 +82,7 @@ Three things, all verified:
 | | List comprehension | ✅ | |
 | | Map literal `{a: 1}` | ✅ | Nested to arbitrary depth |
 | | Map bracket access `m["a"]` | ✅ | Chaining fixed in #453 |
-| | Map dot access `m.a` | ❌ | Parse error — #452 |
+| | Map dot access `m.a` | ✅ | `d.meta.a`, `d.meta.c.d`; desugars to the same `Index` path as brackets. Fixed in #452. Reads only — `SET d.meta.a = 1` is still a parse error |
 | **Predicates** | `STARTS WITH`, `ENDS WITH`, `CONTAINS` | ✅ | |
 | | `=~` (regex) | ✅ | |
 | | `IN` (list membership) | ✅ | |

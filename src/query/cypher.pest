@@ -168,6 +168,7 @@ primary = {
     list_comprehension |
     count_star |
     function_call |
+    nested_property_access |
     property_access |
     parameter |
     value |
@@ -209,6 +210,10 @@ case_when = { ^"WHEN" ~ expression ~ ^"THEN" ~ expression }
 case_else = { ^"ELSE" ~ expression }
 
 property_access = { variable ~ "." ~ property_key }
+// Map path access: `d.meta.a`, `d.meta.a.b`. Kept separate from
+// `property_access` because that rule is shared with SET/REMOVE/constraints,
+// where a nested path would mean something this engine does not implement.
+nested_property_access = { variable ~ "." ~ property_key ~ ("." ~ property_key)+ }
 function_call = { function_name ~ "(" ~ distinct? ~ (expression ~ ("," ~ expression)*)? ~ ")" }
 function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 

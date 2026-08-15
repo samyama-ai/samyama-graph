@@ -1660,6 +1660,39 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     }
 }
 
+/// `d.meta.a`, `d.meta.a.b` -- a property lookup followed by map key lookups.
+///
+/// The first segment is the stored property; every segment after it indexes into
+/// the map that property holds. Desugaring to `Expression::Index` reuses the map
+/// indexing that `d.meta["a"]` already goes through, so there is one evaluation
+/// path for both spellings rather than two that can drift apart (#452).
+fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let mut variable = None;
+    let mut keys: Vec<String> = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::property_key => keys.push(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+    let variable = variable
+        .ok_or_else(|| ParseError::SemanticError("Missing variable in property path".to_string()))?;
+    let mut it = keys.into_iter();
+    let first = it
+        .next()
+        .ok_or_else(|| ParseError::SemanticError("Missing property in property path".to_string()))?;
+
+    let mut expr = Expression::Property { variable, property: first };
+    for key in it {
+        expr = Expression::Index {
+            expr: Box::new(expr),
+            index: Box::new(Expression::Literal(PropertyValue::String(key))),
+        };
+    }
+    Ok(expr)
+}
+
 fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1705,6 +1738,9 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             }
             Rule::property_access => {
                 return parse_property_access(inner);
+            }
+            Rule::nested_property_access => {
+                return parse_nested_property_access(inner);
             }
             Rule::function_call => {
                 return parse_function_call(inner);
