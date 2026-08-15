@@ -228,7 +228,7 @@ fn main() {
         Err(samyama::index::hierarchy::HierarchyError::NotAcyclic {
             ordered,
             total,
-            example_cycle,
+            cycles,
         }) => {
             // Translate the internal node ids back into the identifiers the user supplied,
             // otherwise the diagnostic names nodes they have no way to look up.
@@ -243,14 +243,29 @@ fn main() {
                  nodes could not be ordered",
                 total - ordered
             );
-            if !example_cycle.is_empty() {
-                let path: Vec<String> = example_cycle.iter().map(|&i| code_of(i)).collect();
-                eprintln!("[ontology] example cycle: {}", path.join(" -> "));
+            if !cycles.is_empty() {
+                eprintln!("[ontology] {} cycle(s):", cycles.len());
+                for cyc in cycles.iter().take(20) {
+                    let path: Vec<String> = cyc.iter().map(|&i| code_of(i)).collect();
+                    eprintln!("[ontology]   {}", path.join(" -> "));
+                }
+                if cycles.len() > 20 {
+                    eprintln!("[ontology]   ... and {} more", cycles.len() - 20);
+                }
                 eprintln!(
                     "[ontology] a cycle in a subsumption relation is a data defect: it would \
                      make every roll-up over it wrong, so the build refuses rather than \
-                     condensing it. Exclude these terms or report them upstream."
+                     condensing it. Report them upstream, or exclude one term per cycle."
                 );
+                // One member of each cycle is enough to break it. Printed ready to paste so
+                // the fix takes one more run rather than one run per cycle.
+                let breakers: Vec<String> = cycles
+                    .iter()
+                    .filter_map(|c| c.first().map(|&i| code_of(i)))
+                    .collect();
+                if !breakers.is_empty() {
+                    eprintln!("[ontology] to load anyway: --exclude {}", breakers.join(","));
+                }
             }
             std::process::exit(1);
         }

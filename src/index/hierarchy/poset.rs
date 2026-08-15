@@ -37,9 +37,10 @@ pub enum HierarchyError {
         ordered: usize,
         /// Total nodes in the poset.
         total: usize,
-        /// One cycle, as graph node ids, `a -> b -> ... -> a`. Empty only if the cycle
-        /// could not be recovered, which should not happen when `ordered < total`.
-        example_cycle: Vec<NodeId>,
+        /// Every distinct cycle found, each as graph node ids `a -> b -> ... -> a`.
+        /// Capped at 50 -- enough to act on, bounded for a pathological poset. Empty only
+        /// if no cycle could be recovered, which should not happen when `ordered < total`.
+        cycles: Vec<Vec<NodeId>>,
     },
     /// The poset is a DAG whose chain width exceeds the cap; a 2-hop index is the right
     /// substrate there. This is a *decline*, not a failure — see ADR-035.
@@ -66,19 +67,21 @@ impl std::fmt::Display for HierarchyError {
             HierarchyError::NotAcyclic {
                 ordered,
                 total,
-                example_cycle,
+                cycles,
             } => {
                 let unordered = total.saturating_sub(*ordered);
                 write!(
                     f,
-                    "covering relation has a cycle: {unordered} of {total} nodes could not be ordered"
+                    "covering relation has {} cycle(s): {unordered} of {total} nodes could not be ordered",
+                    cycles.len()
                 )?;
-                if !example_cycle.is_empty() {
-                    let path: Vec<String> = example_cycle
-                        .iter()
-                        .map(|n| n.as_u64().to_string())
-                        .collect();
-                    write!(f, "; example cycle: {}", path.join(" -> "))?;
+                for cyc in cycles.iter().take(5) {
+                    let path: Vec<String> =
+                        cyc.iter().map(|n| n.as_u64().to_string()).collect();
+                    write!(f, "; {}", path.join(" -> "))?;
+                }
+                if cycles.len() > 5 {
+                    write!(f, "; ... and {} more", cycles.len() - 5)?;
                 }
                 Ok(())
             }
@@ -235,16 +238,43 @@ impl Poset {
             let stalled: Vec<u32> = (0..n as u32)
                 .filter(|&i| indeg[i as usize] > 0)
                 .collect();
-            let example_cycle = stalled
-                .first()
-                .map(|&start| Self::recover_cycle(children, &indeg, start))
-                .unwrap_or_default();
+
+            // Recover *every* distinct cycle, not just one. A caller who has been told to
+            // exclude the offending terms can only act on the ones it can see, so reporting
+            // a single example costs one full reload per additional cycle (#441).
+            //
+            // Nodes already on a found cycle are skipped, so the walk is done once per
+            // cycle rather than once per stalled node -- most stalled nodes are merely
+            // downstream of a cycle, not on one.
+            const MAX_CYCLES: usize = 50;
+            let mut cycles: Vec<Vec<u32>> = Vec::new();
+            let mut on_a_cycle: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            let mut seen_keys: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
+            for &start in &stalled {
+                if on_a_cycle.contains(&start) || cycles.len() >= MAX_CYCLES {
+                    continue;
+                }
+                let cyc = Self::recover_cycle(children, &indeg, start);
+                if cyc.is_empty() {
+                    continue;
+                }
+                // Canonical key: the cycle's node set, so the same loop entered at a
+                // different point is not reported twice.
+                let mut key: Vec<u32> = cyc.clone();
+                key.sort_unstable();
+                key.dedup();
+                if seen_keys.insert(key) {
+                    on_a_cycle.extend(cyc.iter().copied());
+                    cycles.push(cyc);
+                }
+            }
+
             return Err(HierarchyError::NotAcyclic {
                 ordered: order.len(),
                 total: n,
-                example_cycle: example_cycle
+                cycles: cycles
                     .into_iter()
-                    .map(|i| nodes[i as usize])
+                    .map(|c| c.into_iter().map(|i| nodes[i as usize]).collect())
                     .collect(),
             });
         }
@@ -463,9 +493,10 @@ mod tests {
             std::iter::empty(),
         )
         .unwrap_err();
-        let HierarchyError::NotAcyclic { example_cycle, .. } = &err else {
+        let HierarchyError::NotAcyclic { cycles, .. } = &err else {
             panic!("expected NotAcyclic, got {err:?}")
         };
+        let example_cycle = cycles.first().expect("at least one cycle recovered");
         // The cycle closes: first and last are the same node.
         assert!(example_cycle.len() >= 2, "got {example_cycle:?}");
         assert_eq!(
@@ -476,7 +507,68 @@ mod tests {
         let members: std::collections::HashSet<u64> =
             example_cycle.iter().map(|n| n.as_u64()).collect();
         assert_eq!(members, [0, 1, 2].into_iter().collect(), "got {example_cycle:?}");
-        assert!(format!("{err}").contains("example cycle"), "{err}");
+        // The message must name the cycle, not merely say one exists -- a caller told to
+        // exclude the offending terms can only act on names it can see.
+        let msg = format!("{err}");
+        assert!(msg.contains("cycle"), "{msg}");
+        for n in &members {
+            assert!(msg.contains(&n.to_string()), "message omits node {n}: {msg}");
+        }
+    }
+
+    #[test]
+    fn every_distinct_cycle_is_reported_not_just_the_first() {
+        // Two independent 2-cycles. Reporting only one costs the caller a full reload per
+        // additional cycle, because the advice ("exclude these terms") can only be followed
+        // for the terms it can see (#441).
+        let err = Poset::from_edges(
+            [
+                (NodeId::new(0), NodeId::new(1)),
+                (NodeId::new(1), NodeId::new(0)),
+                (NodeId::new(2), NodeId::new(3)),
+                (NodeId::new(3), NodeId::new(2)),
+            ]
+            .into_iter(),
+            std::iter::empty(),
+        )
+        .unwrap_err();
+        let HierarchyError::NotAcyclic { cycles, .. } = &err else {
+            panic!("expected NotAcyclic, got {err:?}")
+        };
+        assert_eq!(cycles.len(), 2, "both cycles should be reported: {cycles:?}");
+
+        // and each is a closed loop over its own pair, not the union of the two
+        let mut sets: Vec<Vec<u64>> = cycles
+            .iter()
+            .map(|c| {
+                let mut v: Vec<u64> = c.iter().map(|n| n.as_u64()).collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            })
+            .collect();
+        sets.sort();
+        assert_eq!(sets, vec![vec![0, 1], vec![2, 3]], "got {sets:?}");
+    }
+
+    #[test]
+    fn the_same_cycle_entered_from_two_nodes_is_reported_once() {
+        // A 3-cycle has three entry points. Walking from each must not produce three
+        // "distinct" cycles -- the canonical key is the node set, not the entry point.
+        let err = Poset::from_edges(
+            [
+                (NodeId::new(0), NodeId::new(1)),
+                (NodeId::new(1), NodeId::new(2)),
+                (NodeId::new(2), NodeId::new(0)),
+            ]
+            .into_iter(),
+            std::iter::empty(),
+        )
+        .unwrap_err();
+        let HierarchyError::NotAcyclic { cycles, .. } = &err else {
+            panic!("expected NotAcyclic, got {err:?}")
+        };
+        assert_eq!(cycles.len(), 1, "one loop, one report: {cycles:?}");
     }
 
     #[test]
@@ -493,9 +585,10 @@ mod tests {
             std::iter::empty(),
         )
         .unwrap_err();
-        let HierarchyError::NotAcyclic { example_cycle, .. } = &err else {
+        let HierarchyError::NotAcyclic { cycles, .. } = &err else {
             panic!("expected NotAcyclic")
         };
+        let example_cycle = cycles.first().expect("at least one cycle recovered");
         let members: std::collections::HashSet<u64> =
             example_cycle.iter().map(|n| n.as_u64()).collect();
         assert!(
@@ -520,9 +613,10 @@ mod tests {
             std::iter::empty(),
         )
         .unwrap_err();
-        let HierarchyError::NotAcyclic { example_cycle, .. } = &err else {
+        let HierarchyError::NotAcyclic { cycles, .. } = &err else {
             panic!("expected NotAcyclic")
         };
+        let example_cycle = cycles.first().expect("at least one cycle recovered");
         assert!(
             !example_cycle.is_empty(),
             "a cycle exists and must be recoverable from any stalled node: {err}"
@@ -539,9 +633,10 @@ mod tests {
         let err =
             Poset::from_edges(vec![(nid(7), nid(8)), (nid(8), nid(7))], std::iter::empty())
                 .unwrap_err();
-        let HierarchyError::NotAcyclic { example_cycle, ordered, total } = &err else {
+        let HierarchyError::NotAcyclic { cycles, ordered, total } = &err else {
             panic!("expected NotAcyclic")
         };
+        let example_cycle = cycles.first().expect("at least one cycle recovered");
         assert_eq!(*total, 2);
         assert_eq!(*ordered, 0);
         assert_eq!(example_cycle.first(), example_cycle.last());
