@@ -127,6 +127,19 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         Value::Null => PropertyValue::Null,
         _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
     };
+    // Cypher's three-valued logic: any comparison with a null operand is *unknown*, not
+    // true or false, and a WHERE treats unknown as "exclude". Evaluating `null <> 1` as
+    // true kept every row whose property was simply absent — the opposite of what the
+    // predicate asks. `IS NULL` / `IS NOT NULL` are postfix operators and unaffected;
+    // they remain the way to test for absence.
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) && (matches!(left_prop, PropertyValue::Null) || matches!(right_prop, PropertyValue::Null))
+    {
+        return Ok(Value::Property(PropertyValue::Null));
+    }
+
     let result = match op {
         BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
         BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
@@ -2590,6 +2603,19 @@ impl FilterOperator {
             Value::Null => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
         };
+
+        // Three-valued logic, same rule as `eval_binary_op`: a comparison with a null
+        // operand is unknown, and a WHERE excludes unknown. `null <> 1` evaluating to true
+        // kept every row whose property was merely absent. Note this is a *second*
+        // comparison implementation — the two must agree, and did not.
+        if matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) && (matches!(left_prop, PropertyValue::Null)
+            || matches!(right_prop, PropertyValue::Null))
+        {
+            return Ok(Value::Property(PropertyValue::Null));
+        }
 
         let result = match op {
             BinaryOp::Eq => PropertyValue::Boolean(self.coerced_eq(&left_prop, &right_prop)),
@@ -10097,7 +10123,9 @@ mod tests {
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::Null),
         ).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
+        // Cypher: null = null is *unknown*, not true. This is why `IS NULL` exists as a
+        // separate operator -- equality can never confirm nullness.
+        assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
@@ -10106,7 +10134,8 @@ mod tests {
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::Integer(1)),
         ).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
+        // Unknown, not true -- a WHERE must exclude the row rather than keep it.
+        assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     // -- And/Or type errors --
@@ -10235,8 +10264,9 @@ mod tests {
             Value::Null,
             Value::Property(PropertyValue::Integer(1)),
         ).unwrap();
-        // Null != Integer
-        assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
+        // Unknown. Filters coerce this to "exclude", so the observable WHERE behaviour is
+        // unchanged from the old `false`, but NOT(unknown) is unknown -- not true.
+        assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     // -- Comparison operators --

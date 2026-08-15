@@ -772,3 +772,71 @@ fn a_deleted_nodes_property_does_not_reappear_on_its_successor() {
     let r = bag(&s, "MATCH (n:Ghost) RETURN n.id AS id, n.secret AS secret");
     assert_eq!(r, vec!["id=c secret=NULL"], "{r:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Three-valued logic in WHERE (#398)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn comparisons_against_a_missing_property_are_unknown_not_true() {
+    // Cypher has three truth values. A comparison where either side is null is *unknown*,
+    // and WHERE keeps only rows that are definitely true. The dangerous case is `<>`:
+    // read as two-valued boolean logic, "the property is not 1" looks true for a row that
+    // has no such property at all, so the filter kept every row instead of none — a
+    // silently inverted predicate, the worst kind of wrong answer because it looks like a
+    // successful query returning data.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    for id in ["a", "b", "c"] {
+        engine
+            .execute_mut(&format!("CREATE (:Blank {{id: \"{id}\"}})"), &mut s, "default")
+            .unwrap();
+    }
+
+    for pred in [
+        "n.missing <> 1",
+        "n.missing = 1",
+        "n.missing > 0",
+        "n.missing < 0",
+        "n.missing >= 0",
+        "n.missing <= 0",
+        "n.missing = null",
+        "n.missing <> null",
+    ] {
+        assert_eq!(
+            scalar(
+                &s,
+                &format!("MATCH (n:Blank) WHERE {pred} RETURN count(n) AS n")
+            ),
+            "n=0",
+            "`WHERE {pred}` must match nothing: unknown is not true"
+        );
+    }
+
+    // IS NULL / IS NOT NULL are the operators that *can* see nullness, and still do.
+    assert_eq!(
+        scalar(
+            &s,
+            "MATCH (n:Blank) WHERE n.missing IS NULL RETURN count(n) AS n"
+        ),
+        "n=3"
+    );
+    assert_eq!(
+        scalar(
+            &s,
+            "MATCH (n:Blank) WHERE n.missing IS NOT NULL RETURN count(n) AS n"
+        ),
+        "n=0"
+    );
+
+    // A present property still compares normally — the null rule must not swallow real
+    // predicates.
+    assert_eq!(
+        scalar(&s, "MATCH (n:Blank) WHERE n.id <> \"a\" RETURN count(n) AS n"),
+        "n=2"
+    );
+    assert_eq!(
+        scalar(&s, "MATCH (n:Blank) WHERE n.id = \"a\" RETURN count(n) AS n"),
+        "n=1"
+    );
+}
