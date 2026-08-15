@@ -925,6 +925,40 @@ impl QueryPlanner {
             }
             }
 
+            // A leading FOREACH has no pattern to drive it, so it runs against a
+            // single empty row -- the same way a bare RETURN does. The loop
+            // variable is bound per element inside ForeachOperator, so nothing
+            // upstream needs to supply bindings.
+            if query.foreach_clause.is_some() && query.unwind_clause.is_none() {
+                let foreach_clause = query.foreach_clause.as_ref().expect("checked above");
+                let mut set_items = Vec::new();
+                for set_clause in &foreach_clause.set_clauses {
+                    for item in &set_clause.items {
+                        set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+                    }
+                }
+                let create_patterns: Vec<Pattern> = foreach_clause
+                    .create_clauses
+                    .iter()
+                    .map(|c| c.pattern.clone())
+                    .collect();
+                let root: OperatorBox = Box::new(ForeachOperator::new(
+                    Box::new(crate::query::executor::operator::SingleRowOperator::new()),
+                    foreach_clause.variable.clone(),
+                    foreach_clause.expression.clone(),
+                    set_items,
+                    create_patterns,
+                ));
+                return Ok(ExecutionPlan {
+                    root,
+                    output_columns: Vec::new(),
+                    is_write: true,
+                    candidates_evaluated: 0,
+                    chosen_plan_cost: 0.0,
+                    candidate_costs: Vec::new(),
+                });
+            }
+
             if query.unwind_clause.is_none() {
                 return Err(ExecutionError::PlanningError(
                     "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()

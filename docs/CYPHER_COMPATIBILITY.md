@@ -7,7 +7,7 @@
 
 There is **no measured OpenCypher coverage percentage** in this document, and there will not be one until the openCypher TCK is actually run (#434). A previous version of this page claimed "~90% OpenCypher coverage"; that figure was self-assessed, never checked against the TCK, and an earlier internal assessment of the same engine put the number at 40–50%. Rather than pick between two unverified numbers, the claim is withdrawn.
 
-What this page reports instead is narrower and checkable: **78 probes, 76 supported, 2 not.** Each probe is one representative query for one feature. Re-run it with:
+What this page reports instead is narrower and checkable: **78 probes, 77 supported, 1 not.** Each probe is one representative query for one feature. Re-run it with:
 
 ```
 cargo run --release --example cypher_matrix_probe
@@ -25,11 +25,10 @@ A ✅ here means *the query executed*. It does not certify semantics — a const
 
 ## What is not supported
 
-Two things, all verified:
+One thing, verified:
 
 | Feature | Behaviour | Tracking |
 | :--- | :--- | :--- |
-| `FOREACH` | Parse error | — |
 | `algo.bfs`, `algo.dijkstra` | Do not exist under those names — use `algo.shortestPath` and `algo.weightedPath` | — |
 
 ## Feature Matrix
@@ -59,7 +58,7 @@ Two things, all verified:
 | | `UNION` / `UNION ALL` | ✅ | |
 | | `EXISTS { }` subquery | ✅ | |
 | | `CALL { }` subquery | ✅ | Leading, non-correlated form. Exports its columns; outer `WHERE`/`DISTINCT` apply. Fixed in #458. The importing form `MATCH (x) CALL { WITH x ... }` is still a parse error |
-| | `FOREACH` | ❌ | Parse error |
+| | `FOREACH` | ✅ | Leading and trailing forms; `CREATE`/`SET` bodies. A relationship pattern in the body is refused (#467); `MERGE`/`DELETE`/nested bodies remain unimplemented (#465) |
 | **String Functions** | `toUpper`, `toLower` | ✅ | |
 | | `trim`, `replace` | ✅ | |
 | | `substring`, `left`, `right` | ✅ | |

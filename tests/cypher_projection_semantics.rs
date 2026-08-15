@@ -2343,3 +2343,47 @@ fn foreach_over_an_empty_list_is_a_no_op() {
         .unwrap();
     assert_eq!(s.node_count(), before);
 }
+
+// ---------------------------------------------------------------------------
+// Leading FOREACH (#465)
+//
+// `foreach_clause` existed only as a trailing clause of match_stmt/unwind_stmt,
+// so a FOREACH with nothing before it was a parse error at 1:1. It has no
+// pattern to drive it, so it runs against one empty row -- the same way a bare
+// RETURN does.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn leading_foreach_creates_with_the_loop_variable_bound() {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    e.execute_mut("FOREACH (i IN [1,2,3] | CREATE (:L {i: i}))", &mut s, "default").unwrap();
+    assert_eq!(bag(&s, "MATCH (l:L) RETURN l.i AS v"), vec!["v=1", "v=2", "v=3"]);
+}
+
+#[test]
+fn leading_foreach_over_an_empty_list_is_a_no_op() {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    e.execute_mut("FOREACH (i IN [] | CREATE (:Z {i: i}))", &mut s, "default").unwrap();
+    assert_eq!(s.node_count(), 0);
+}
+
+#[test]
+fn leading_foreach_is_a_write_and_the_read_executor_refuses_it() {
+    // The plan is marked is_write, so a read-only executor rejects it rather
+    // than running it and discarding the effects.
+    let e = QueryEngine::new();
+    let s = GraphStore::new();
+    assert!(e.execute("FOREACH (i IN [1] | CREATE (:RO {i: i}))", &s).is_err());
+}
+
+#[test]
+fn trailing_foreach_is_unaffected_by_the_leading_form() {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    e.execute_mut("CREATE (:P {n: 0})", &mut s, "default").unwrap();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [9] | CREATE (:M2 {i: i}))", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (m:M2) RETURN m.i AS v"), "v=9");
+}

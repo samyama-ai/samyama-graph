@@ -195,6 +195,15 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::merge_stmt => {
                 parse_merge_statement(inner, query)?;
             }
+            Rule::foreach_stmt => {
+                // A leading FOREACH: no pattern to match, so the clause is all
+                // there is. It runs against one empty row (see the planner).
+                for fe in inner.into_inner() {
+                    if fe.as_rule() == Rule::foreach_clause {
+                        query.foreach_clause = Some(parse_foreach_clause(fe)?);
+                    }
+                }
+            }
             Rule::match_stmt | Rule::unwind_stmt => {
                 // Same clause set, so the same builder applies -- it already dispatches on
                 // each inner rule rather than assuming a fixed clause order. The rule
