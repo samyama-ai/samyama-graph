@@ -7,7 +7,7 @@
 
 There is **no measured OpenCypher coverage percentage** in this document, and there will not be one until the openCypher TCK is actually run (#434). A previous version of this page claimed "~90% OpenCypher coverage"; that figure was self-assessed, never checked against the TCK, and an earlier internal assessment of the same engine put the number at 40–50%. Rather than pick between two unverified numbers, the claim is withdrawn.
 
-What this page reports instead is narrower and checkable: **78 probes, 74 supported, 4 not.** Each probe is one representative query for one feature. Re-run it with:
+What this page reports instead is narrower and checkable: **78 probes, 75 supported, 3 not.** Each probe is one representative query for one feature. Re-run it with:
 
 ```
 cargo run --release --example cypher_matrix_probe
@@ -17,13 +17,12 @@ A ✅ here means *the query executed*. It does not certify semantics — a const
 
 ## What is not supported
 
-Four things, all verified:
+Three things, all verified:
 
 | Feature | Behaviour | Tracking |
 | :--- | :--- | :--- |
 | `split()` | `Unknown function: split` | — |
 | `FOREACH` | Parse error | — |
-| `CALL {}` subquery | Parses, then `Variable not found` — the subquery's columns are never exported | #458 |
 | `algo.bfs`, `algo.dijkstra` | Do not exist under those names — use `algo.shortestPath` and `algo.weightedPath` | — |
 
 ## Feature Matrix
@@ -52,7 +51,7 @@ Four things, all verified:
 | | `UNWIND` | ✅ | Including leading `UNWIND` |
 | | `UNION` / `UNION ALL` | ✅ | |
 | | `EXISTS { }` subquery | ✅ | |
-| | `CALL { }` subquery | ❌ | Parses but exports nothing — #458 |
+| | `CALL { }` subquery | ✅ | Leading, non-correlated form. Exports its columns; outer `WHERE`/`DISTINCT` apply. Fixed in #458. The importing form `MATCH (x) CALL { WITH x ... }` is still a parse error |
 | | `FOREACH` | ❌ | Parse error |
 | **String Functions** | `toUpper`, `toLower` | ✅ | |
 | | `trim`, `replace` | ✅ | |

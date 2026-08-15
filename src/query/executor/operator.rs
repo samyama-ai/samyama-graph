@@ -6801,6 +6801,44 @@ impl PhysicalOperator for SingleRowOperator {
     }
 }
 
+/// Emits a fixed, already-computed set of records.
+///
+/// Used as the source when a `CALL {}` subquery has been executed and its
+/// results become the input stream for the enclosing query.
+pub struct MaterializedOperator {
+    records: Vec<Record>,
+    idx: usize,
+}
+
+impl MaterializedOperator {
+    /// Create an operator that replays `records` in order.
+    pub fn new(records: Vec<Record>) -> Self {
+        Self { records, idx: 0 }
+    }
+}
+
+impl PhysicalOperator for MaterializedOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.idx >= self.records.len() {
+            Ok(None)
+        } else {
+            let r = self.records[self.idx].clone();
+            self.idx += 1;
+            Ok(Some(r))
+        }
+    }
+
+    fn reset(&mut self) { self.idx = 0; }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Materialized".to_string(),
+            details: format!("{} rows", self.records.len()),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Algorithm operator: CALL algo.pageRank(...)
 pub struct AlgorithmOperator {
     /// Procedure name

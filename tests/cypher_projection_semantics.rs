@@ -1987,3 +1987,103 @@ fn ordinary_arithmetic_is_unaffected() {
     assert_eq!(scalar(&s, "RETURN \"a\" + \"b\" AS v"), "v=ab");
     assert_eq!(scalar(&s, "RETURN 7 % 3 AS v"), "v=1");
 }
+
+// ---------------------------------------------------------------------------
+// CALL {} subqueries (#458)
+//
+// The subquery was parsed into its own Query and then never executed -- it
+// only appeared as a "bail out of this optimisation" flag in the detectors --
+// so its columns were never bound and `CALL { RETURN 1 AS n } RETURN n` died
+// with `Variable not found: n`, blaming the user's variable name for an
+// engine gap.
+// ---------------------------------------------------------------------------
+
+fn three_p_nodes() -> GraphStore {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    for n in [1, 2, 2] {
+        e.execute_mut(&format!("CREATE (:P {{n: {n}}})"), &mut s, "default").unwrap();
+    }
+    s
+}
+
+#[test]
+fn call_subquery_exports_its_columns() {
+    // No graph access at all -- the simplest case, which also failed before.
+    assert_eq!(scalar(&GraphStore::new(), "CALL { RETURN 1 AS n } RETURN n"), "n=1");
+}
+
+#[test]
+fn call_subquery_over_a_match_exports_every_row() {
+    assert_eq!(
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } RETURN n"),
+        vec!["n=1", "n=2", "n=2"]
+    );
+}
+
+#[test]
+fn bare_call_subquery_yields_its_own_rows() {
+    // `CALL { ... }` with nothing after it is the subquery's result.
+    assert_eq!(
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n }").len(),
+        3
+    );
+}
+
+#[test]
+fn call_subquery_respects_outer_distinct_and_where() {
+    assert_eq!(
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } RETURN DISTINCT n"),
+        vec!["n=1", "n=2"]
+    );
+    assert_eq!(
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } WHERE n > 1 RETURN n"),
+        vec!["n=2", "n=2"]
+    );
+}
+
+#[test]
+fn call_subquery_can_aggregate_inside() {
+    assert_eq!(
+        scalar(&three_p_nodes(), "CALL { MATCH (p:P) RETURN count(p) AS c } RETURN c"),
+        "c=3"
+    );
+}
+
+#[test]
+fn unsupported_call_shapes_fail_loudly_rather_than_partially() {
+    let e = QueryEngine::new();
+    let s = three_p_nodes();
+
+    // A subquery followed by more pattern matching needs a real join; refusing
+    // is correct, silently dropping the MATCH would not be.
+    let err = e
+        .execute("CALL { MATCH (p:P) RETURN p.n AS n } MATCH (q:P) RETURN n", &s)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not supported"), "{err}");
+}
+
+#[test]
+fn a_write_inside_a_call_subquery_is_refused_and_writes_nothing() {
+    let e = QueryEngine::new();
+    let mut s = GraphStore::new();
+    let err = e
+        .execute_mut("CALL { CREATE (:X {a: 1}) }", &mut s, "default")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("CALL {} subquery"), "{err}");
+    assert_eq!(s.node_count(), 0, "a refused subquery must not write");
+}
+
+#[test]
+fn call_subquery_works_on_the_write_path_too() {
+    // HTTP and RESP route every statement through the mutable executor, so a
+    // fix that only landed on the read path would be invisible to them.
+    let e = QueryEngine::new();
+    let mut s = three_p_nodes();
+    let batch = e
+        .execute_mut("CALL { MATCH (p:P) RETURN p.n AS n } RETURN n", &mut s, "default")
+        .unwrap();
+    assert_eq!(batch.records.len(), 3);
+}

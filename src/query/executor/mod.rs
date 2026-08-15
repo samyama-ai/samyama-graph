@@ -167,6 +167,86 @@ impl<'a> QueryExecutor<'a> {
         self
     }
 
+    /// Execute a `CALL { ... }` subquery and apply the enclosing query to its rows.
+    ///
+    /// The subquery is parsed into its own `Query` but was never executed -- it
+    /// only ever appeared as a "bail out of this optimisation" flag in the
+    /// detectors -- so `CALL { RETURN 1 AS n } RETURN n` failed with
+    /// `Variable not found: n` (#458). An unsupported construct must raise a
+    /// typed error, not blame the user's variable names.
+    ///
+    /// Only the leading, non-correlated form reaches here: the grammar puts
+    /// `CALL` at the start of a statement, so the importing form
+    /// (`MATCH (x) CALL { WITH x ... }`) still fails at parse time. Shapes that
+    /// cannot be evaluated correctly return an error rather than a partial
+    /// answer -- a wrong row is worse than a refusal.
+    fn execute_call_subquery(&self, query: &Query, inner: &Query) -> ExecutionResult<RecordBatch> {
+        // Planning tells us whether the subquery writes. Say so plainly -- the
+        // read-only-executor message underneath is about internals the caller
+        // did not choose and cannot act on.
+        if self.planner.plan(inner, self.store).map(|p| p.is_write).unwrap_or(false) {
+            return Err(ExecutionError::RuntimeError(
+                "writes inside a CALL {} subquery are not supported".to_string(),
+            ));
+        }
+
+        let inner_batch = self.execute(inner)?;
+
+        // A subquery combined with further pattern matching would need a proper
+        // join against the outer pattern; refuse rather than guess.
+        if !query.match_clauses.is_empty() {
+            return Err(ExecutionError::RuntimeError(
+                "CALL {} subquery followed by MATCH is not supported".to_string(),
+            ));
+        }
+
+        // `CALL { ... }` with nothing after it yields the subquery's own rows.
+        let Some(return_clause) = &query.return_clause else {
+            return Ok(inner_batch);
+        };
+
+        let mut root: OperatorBox = Box::new(operator::MaterializedOperator::new(inner_batch.records));
+
+        if let Some(where_clause) = &query.where_clause {
+            root = Box::new(operator::FilterOperator::new(root, where_clause.predicate.clone()));
+        }
+
+        let projections: Vec<(crate::query::ast::Expression, String)> = return_clause
+            .items
+            .iter()
+            .map(|item| {
+                let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                    crate::query::ast::Expression::Variable(v) => v.clone(),
+                    crate::query::ast::Expression::Property { variable, property } => {
+                        format!("{variable}.{property}")
+                    }
+                    other => format!("{other:?}"),
+                });
+                (item.expression.clone(), alias)
+            })
+            .collect();
+        let columns: Vec<String> = projections.iter().map(|(_, alias)| alias.clone()).collect();
+        root = Box::new(operator::ProjectOperator::new(root, projections));
+
+        let mut records = Vec::new();
+        loop {
+            match root.next(self.store)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+
+        if return_clause.distinct {
+            let mut seen = std::collections::HashSet::new();
+            records.retain(|r| {
+                let key = format!("{:?}", r.bindings());
+                seen.insert(key)
+            });
+        }
+
+        Ok(RecordBatch { records, columns })
+    }
+
     /// Execute a read-only query and return results
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
         // Substitute parameters if any
@@ -180,6 +260,10 @@ impl<'a> QueryExecutor<'a> {
             query.clone()
         };
         let query = &query;
+
+        if let Some(inner) = &query.call_subquery {
+            return self.execute_call_subquery(query, inner);
+        }
 
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
@@ -348,6 +432,14 @@ impl<'a> MutQueryExecutor<'a> {
             query.clone()
         };
         let query = &query;
+
+        // A read-only `CALL {}` subquery goes through the same path as on the
+        // read executor. HTTP and RESP route every statement through here, so
+        // without this the fix would be invisible to almost every caller.
+        if let Some(inner) = &query.call_subquery {
+            let store_ref: &GraphStore = self.store;
+            return QueryExecutor::new(store_ref).execute_call_subquery(query, inner);
+        }
 
         // Plan the query (need immutable borrow temporarily)
         let plan = {
