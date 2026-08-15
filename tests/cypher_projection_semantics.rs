@@ -1750,3 +1750,102 @@ fn a_yielded_variable_can_be_referenced_by_a_later_where() {
         "n=1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Two long-standing semantic traps, pinned
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_quoted_strings_work_wherever_double_quoted_ones_do() {
+    // "double-quoted strings required in places" was a recorded trap. Both quote styles are
+    // valid openCypher and the engine now accepts either; this pins that, because a
+    // regression would be silent — a single-quoted literal that fails to parse looks like a
+    // typo in the caller's query rather than an engine limitation.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE (:P {name: \"alice\", age: 30})", &mut s, "default")
+        .unwrap();
+    engine
+        .execute_mut("CREATE (:P {name: 'bob', age: 40})", &mut s, "default")
+        .unwrap();
+
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.name = 'alice' RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: 'alice'}) RETURN count(p) AS n"), "n=1");
+    assert_eq!(
+        scalar(&s, "MATCH (p:P) WHERE p.name STARTS WITH 'al' RETURN count(p) AS n"),
+        "n=1"
+    );
+    assert_eq!(scalar(&s, "RETURN 'hello' AS v"), "v=hello");
+    // the single-quoted CREATE above must have stored a real value
+    assert_eq!(scalar(&s, "MATCH (p:P {name: 'bob'}) RETURN p.age AS v"), "v=40");
+}
+
+#[test]
+fn integers_and_floats_compare_across_types() {
+    // "float-vs-int WHERE silently returns empty" was a recorded trap, and silent is the
+    // operative word: the query succeeds and returns nothing, which reads as "no such data"
+    // rather than "your literal had the wrong type". Both directions are checked — an int
+    // property against a float literal and a float property against an int literal — since
+    // fixing one and not the other would leave half the trap in place.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE (:P {name: \"alice\", age: 30, score: 9.5})", &mut s, "default")
+        .unwrap();
+    engine
+        .execute_mut("CREATE (:P {name: \"bob\", age: 40, score: 8.0})", &mut s, "default")
+        .unwrap();
+
+    // integer property
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 30 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 30.0 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age > 35.5 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age < 35 RETURN count(p) AS n"), "n=1");
+
+    // float property
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score = 8 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score = 8.0 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score > 9 RETURN count(p) AS n"), "n=1");
+
+    // and a comparison that should genuinely match nothing still does
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 99 RETURN count(p) AS n"), "n=0");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score > 100.0 RETURN count(p) AS n"), "n=0");
+}
+
+#[test]
+fn counting_with_an_inline_property_filter_counts_only_the_matching_rows() {
+    // `MATCH (p:P {name: "alice"}) RETURN count(p)` returned the count of *every* :P. The
+    // O(1) label-count shortcut fires for a single unadorned count over one label, and it
+    // checked `where_clause.is_none()` but never looked at the pattern's inline properties
+    // — which are a filter the label metadata knows nothing about.
+    //
+    // The giveaway was that the same pattern behaved differently by projection: `RETURN p`
+    // gave the one correct row, `RETURN count(p)` gave three, and min/max/sum were correct
+    // because only count has the shortcut.
+    let mut s = GraphStore::new();
+    let engine = QueryEngine::new();
+    for (name, age) in [("alice", 30), ("bob", 40), ("carol", 50)] {
+        engine
+            .execute_mut(
+                &format!("CREATE (:P {{name: \"{name}\", age: {age}}})"),
+                &mut s, "default",
+            )
+            .unwrap();
+    }
+
+    // the filtered forms
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(*) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {age: 30}) RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"nobody\"}) RETURN count(p) AS n"), "n=0");
+
+    // consistency across projections of the *same* pattern — the property that was violated
+    assert_eq!(bag(&s, "MATCH (p:P {name: \"alice\"}) RETURN p.name AS v"), vec!["v=alice"]);
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN min(p.age) AS n"), "n=30");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN sum(p.age) AS n"), "n=30");
+
+    // and the shortcut must still apply when the pattern really is unadorned
+    assert_eq!(scalar(&s, "MATCH (p:P) RETURN count(p) AS n"), "n=3");
+    assert_eq!(scalar(&s, "MATCH (p:P) RETURN count(*) AS n"), "n=3");
+}

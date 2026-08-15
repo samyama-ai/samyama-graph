@@ -1659,6 +1659,21 @@ impl QueryPlanner {
                 && query.match_clauses.len() == 1
                 && query.match_clauses[0].pattern.paths.len() == 1
                 && query.match_clauses[0].pattern.paths[0].segments.is_empty()
+                // An inline property is a filter, and the label count knows nothing about
+                // it. Without this, `MATCH (p:P {name: "alice"}) RETURN count(p)` returned
+                // the count of *every* :P -- a fast, confident, wrong number, while the
+                // same pattern with `RETURN p` returned the single correct row. Same shape
+                // as #358 above: the shortcut may only fire when the pattern says nothing
+                // the metadata cannot express.
+                && query.match_clauses[0].pattern.paths[0]
+                    .start
+                    .properties
+                    .as_ref()
+                    .is_none_or(|p| p.is_empty())
+                && query.match_clauses[0].pattern.paths[0]
+                    .start
+                    .property_exprs
+                    .is_none()
                 && !query.match_clauses[0].pattern.paths[0].start.labels.is_empty();
 
             // Edge type count cache: O(1) shortcut for MATCH ()-[r]->() RETURN type(r), count(r)
