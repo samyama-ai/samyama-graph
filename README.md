@@ -333,7 +333,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 ## The 30-Second Tour
 
-**Cypher queries** — ~90% OpenCypher. MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions.
+**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. Coverage against the openCypher TCK is not yet measured; see [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe.
 
 ```cypher
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
