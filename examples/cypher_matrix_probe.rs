@@ -8,9 +8,55 @@
 //! test suites.
 //!
 //! Run: cargo run --release --example cypher_matrix_probe
+//!
+//! With `--json PATH` it also writes a conformance result envelope -- the
+//! shape spec 18 requires of any run that wants to be quotable: suite,
+//! requirement_ids, run_id, engine (with commit), hardware, dataset (with
+//! hash), measurements, status, artifacts. The harness that assembles
+//! `SCORECARD.json` does not exist yet; this is one suite emitting the
+//! envelope it will consume, which is step 1 of that build order.
 
 use samyama::graph::GraphStore;
 use samyama::query::QueryEngine;
+
+/// Short commit of the build under test, or "unknown" outside a checkout.
+fn engine_commit() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Stable digest of the fixture, so a changed fixture cannot be mistaken for a
+/// changed engine. FNV-1a is enough: this identifies a dataset, it does not
+/// defend against anyone.
+fn dataset_hash(stmts: &[&str]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for stmt in stmts {
+        for b in stmt.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("fnv1a64:{h:016x}")
+}
+
+fn json_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32).chars().collect(),
+            c => vec![c],
+        })
+        .collect()
+}
 
 fn main() {
     let engine = QueryEngine::new();
@@ -18,12 +64,13 @@ fn main() {
 
     // A small graph with the shapes the probes need: labels, a typed edge,
     // numeric + string + list properties.
-    for stmt in [
+    let fixture: [&str; 4] = [
         "CREATE (:Person {name: \"Ada\", age: 36, tags: [\"a\",\"b\"], score: 1.5})",
         "CREATE (:Person {name: \"Alan\", age: 41, tags: [\"b\"], score: 2.5})",
         "CREATE (:City {name: \"London\"})",
         "MATCH (p:Person {name: \"Ada\"}), (c:City {name: \"London\"}) CREATE (p)-[:LIVES_IN {since: 2020}]->(c)",
-    ] {
+    ];
+    for stmt in fixture {
         engine
             .execute_mut(stmt, &mut store, "default")
             .unwrap_or_else(|e| panic!("fixture failed: {stmt}\n  {e}"));
@@ -122,6 +169,7 @@ fn main() {
         ("Extensions", "algo.triangleCount", "CALL algo.triangleCount() YIELD nodeId, triangles RETURN count(*)", false),
     ];
 
+    let mut outcomes: Vec<(String, String, bool, String)> = Vec::new();
     let mut supported = 0usize;
     let mut unsupported = 0usize;
     let mut last_cat = "";
@@ -142,12 +190,14 @@ fn main() {
         match result {
             Ok(()) => {
                 supported += 1;
+                outcomes.push((cat.to_string(), feature.to_string(), true, String::new()));
                 println!("SUPPORTED    | {feature}");
             }
             Err(e) => {
                 unsupported += 1;
                 let msg = format!("{e}");
                 let first = msg.lines().next().unwrap_or("").trim().to_string();
+                outcomes.push((cat.to_string(), feature.to_string(), false, first.clone()));
                 println!("UNSUPPORTED  | {feature} | {first}");
             }
         }
@@ -155,4 +205,62 @@ fn main() {
 
     println!();
     println!("TOTAL {} probes: {} supported, {} unsupported", probes.len(), supported, unsupported);
+
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--json") {
+        let path = args.get(i + 1).cloned().unwrap_or_else(|| "cypher_matrix.json".to_string());
+        let commit = engine_commit();
+        // The run id is derived from what was measured, not from a clock: the
+        // same engine over the same fixture is the same run, and re-running it
+        // should not manufacture a new result.
+        let run_id = format!("cypher-matrix-{commit}-{}", &dataset_hash(&fixture)[8..16]);
+
+        let mut probe_json = String::new();
+        for (i, (cat, feature, ok, err)) in outcomes.iter().enumerate() {
+            if i > 0 { probe_json.push_str(",\n"); }
+            probe_json.push_str(&format!(
+                "      {{\"category\": \"{}\", \"feature\": \"{}\", \"supported\": {}, \"error\": \"{}\"}}",
+                json_escape(cat), json_escape(feature), ok, json_escape(err)
+            ));
+        }
+
+        // An unmeasured requirement counts as failing, never as passing
+        // (spec 18 rollup rule), so status is pass only with zero unsupported.
+        let status = if unsupported == 0 { "pass" } else { "fail" };
+
+        let envelope = format!(
+"{{
+  \"suite\": \"cypher-compatibility-matrix\",
+  \"requirement_ids\": [\"LANG-01\", \"TRUST-01\"],
+  \"run_id\": \"{run_id}\",
+  \"engine\": {{\"name\": \"samyama\", \"version\": \"{}\", \"commit\": \"{commit}\"}},
+  \"hardware\": {{\"note\": \"support probe; result is independent of hardware\"}},
+  \"dataset\": {{\"name\": \"inline-fixture\", \"statements\": {}, \"hash\": \"{}\"}},
+  \"measurements\": {{
+    \"probes_total\": {},
+    \"probes_supported\": {},
+    \"probes_unsupported\": {},
+    \"probes\": [
+{probe_json}
+    ]
+  }},
+  \"status\": \"{status}\",
+  \"artifacts\": [\"docs/CYPHER_COMPATIBILITY.md\", \"examples/cypher_matrix_probe.rs\"],
+  \"caveat\": \"A supported probe means the query executed. It does not certify semantics; correctness lives in the test suites.\"
+}}
+",
+            env!("CARGO_PKG_VERSION"),
+            fixture.len(),
+            dataset_hash(&fixture),
+            probes.len(), supported, unsupported
+        );
+
+        match std::fs::write(&path, envelope) {
+            Ok(()) => println!("wrote result envelope: {path}"),
+            Err(e) => {
+                eprintln!("could not write {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 }

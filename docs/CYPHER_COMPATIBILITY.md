@@ -13,6 +13,14 @@ What this page reports instead is narrower and checkable: **78 probes, 76 suppor
 cargo run --release --example cypher_matrix_probe
 ```
 
+For a machine-readable result, add `--json`:
+
+```
+cargo run --release --example cypher_matrix_probe -- --json cypher_matrix.json
+```
+
+That writes a conformance **result envelope** in the shape [spec 18](https://git.samyama.ai/Samyama.ai/samyama-cloud/src/branch/main/docs/product/spec/18-conformance-harness.md) requires of a quotable run — suite, requirement_ids, run_id, engine with commit, hardware, dataset with hash, measurements, status, artifacts. `status` is `pass` only when every probe is supported, following the rollup rule that an unmeasured requirement counts as failing rather than passing. The assembler that turns these into `SCORECARD.json` does not exist yet; this is one suite emitting the envelope it will consume.
+
 A ✅ here means *the query executed*. It does not certify semantics — a construct can run and still be wrong. Correctness lives in the test suites (`tests/cypher_projection_semantics.rs` and friends), and the one place where a ✅ construct is known to disagree with Cypher is called out inline below.
 
 ## What is not supported
