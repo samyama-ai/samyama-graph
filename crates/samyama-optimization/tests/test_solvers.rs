@@ -193,7 +193,12 @@ fn test_gsa_sphere() {
     let solver = GSASolver::new(config);
     let result = solver.solve(&problem);
 
-    assert!(result.best_fitness < 1.0, "GSA failed: fitness {}", result.best_fitness);
+    // Threshold set from the measured distribution, not picked by eye (#455).
+    // GSA over 2000 runs on this problem/config: p50 0.011, p99.9 0.669, max 1.025
+    // -- it crosses 1.0 about once in 2000 runs, so `< 1.0` is a ~0.05% flake.
+    // 5.0 clears the observed tail while leaving a ~450x margin against the
+    // median, so a solver that genuinely stopped converging still fails here.
+    assert!(result.best_fitness < 5.0, "GSA failed: fitness {}", result.best_fitness);
 }
 
 #[test]
@@ -203,7 +208,12 @@ fn test_hs_sphere() {
     let solver = HSSolver::new(config);
     let result = solver.solve(&problem);
 
-    assert!(result.best_fitness < 1.0, "HS failed: fitness {}", result.best_fitness);
+    // Threshold set from the measured distribution, not picked by eye (#455).
+    // HS over 2000 runs: p50 0.00094, p99 0.213, p99.9 0.539, max 2.259 -- this
+    // test is what actually failed a full workspace run, at a measured ~0.05%.
+    // 5.0 clears the worst observed value while leaving a ~5000x margin against
+    // the median. The real fix is a seedable RNG (#455); this stops the bleeding.
+    assert!(result.best_fitness < 5.0, "HS failed: fitness {}", result.best_fitness);
 }
 
 #[test]
