@@ -44,6 +44,35 @@ async fn static_handler() -> impl IntoResponse {
     }
 }
 
+/// Answer Chrome's Private Network Access preflight.
+///
+/// A public HTTPS origin (the hosted Studio) may not call a loopback address unless the
+/// local server opts in. Chrome sends `Access-Control-Request-Private-Network: true` on the
+/// preflight and requires `Access-Control-Allow-Private-Network: true` back; without it the
+/// browser blocks the request before it ever reaches the container, which is the first
+/// thing a new user following the documented Docker setup hits (#342).
+///
+/// `CorsLayer` cannot do this -- tower-http has no PNA support -- so the header is added
+/// outside it, on the response it produces. Only echoed when the request actually asks for
+/// it, so ordinary same-origin traffic is unaffected.
+async fn allow_private_network(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let asked = req
+        .headers()
+        .get("access-control-request-private-network")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"true"));
+    let mut res = next.run(req).await;
+    if asked {
+        res.headers_mut().insert(
+            "access-control-allow-private-network",
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    res
+}
+
 /// Shared application state for HTTP routes
 #[derive(Clone)]
 pub struct AppState {
@@ -94,8 +123,31 @@ impl HttpServer {
         self
     }
 
+    /// Build the router this server serves, layers and all.
+    ///
+    /// Separate from `start` so tests can exercise the *shipped* stack. The existing HTTP
+    /// tests each assemble their own miniature router, which means anything that lives in a
+    /// layer -- CORS, the Private Network Access opt-in (#342) -- was untestable and
+    /// therefore untested.
+    pub fn router(&self) -> Router {
+        self.build_router()
+    }
+
     /// Start the HTTP server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let app = self.build_router();
+
+        let addr = format!("0.0.0.0:{}", self.port);
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+        info!("Visualizer available at http://localhost:{}", self.port);
+
+        axum::serve(listener, app).await?;
+
+        Ok(())
+    }
+
+    fn build_router(&self) -> Router {
         let embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
@@ -137,16 +189,8 @@ impl HttpServer {
             app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
         }
 
-        let app = app.layer(CorsLayer::permissive());
-
-        let addr = format!("0.0.0.0:{}", self.port);
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-        info!("Visualizer available at http://localhost:{}", self.port);
-
-        axum::serve(listener, app).await?;
-
-        Ok(())
+        app.layer(CorsLayer::permissive())
+            .layer(axum::middleware::from_fn(allow_private_network))
     }
 }
 
