@@ -11,7 +11,7 @@ use std::time::Instant;
 use std::collections::HashSet;
 use rand::Rng;
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 const NUM_NODES: usize = 10_000;

@@ -1,6 +1,6 @@
 //! Shared benchmark setup: GPU status reporting.
 //!
-//! Each benchmark includes this via `#[path = "bench_setup.rs"] mod bench_setup;`
+//! Each benchmark includes this via `#[path = "common/bench_setup.rs"] mod bench_setup;`
 //! and calls `bench_setup::init()` at the top of `main()`.
 //!
 //! In OSS there is no license gate: GPU acceleration is on by default whenever a

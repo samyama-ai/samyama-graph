@@ -32,7 +32,7 @@ use samyama_graph_algorithms::{
     local_clustering_coefficient_directed,
 };
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 mod graphalytics_common;

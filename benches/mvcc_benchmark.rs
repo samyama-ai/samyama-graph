@@ -13,7 +13,7 @@ use samyama::graph::{GraphStore, Label, PropertyValue};
 use std::time::Instant;
 use std::hint::black_box;
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 const ARENA_NODES: usize = 1_000_000;

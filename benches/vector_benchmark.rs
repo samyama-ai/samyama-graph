@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 use rand::Rng;
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 fn format_number(n: usize) -> String {

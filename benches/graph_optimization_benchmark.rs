@@ -6,7 +6,7 @@ use rand::Rng;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 /// A Problem definition that wraps a reference to the Graph Store.

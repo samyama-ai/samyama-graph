@@ -14,7 +14,7 @@ use std::time::Instant;
 use std::sync::Arc;
 use rand::Rng;
 
-#[path = "bench_setup.rs"]
+#[path = "common/bench_setup.rs"]
 mod bench_setup;
 
 const VECTOR_DIM: usize = 128;
