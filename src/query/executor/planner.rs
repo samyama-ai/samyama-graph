@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator},
+    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -1666,7 +1666,58 @@ impl QueryPlanner {
                 && matches!(&group_by[0].0, Expression::Function { name, args, .. }
                     if name == "type" && args.len() == 1 && matches!(&args[0], Expression::Variable(_)));
 
-            if use_edge_type_count {
+            // O(1) count for a single edge type (or all edges): the metadata that already
+            // answers `type(r), count(r)` and node label counts can answer this too, but
+            // this shape fell through to a full Expand + Aggregate -- on a billion-edge
+            // graph, a timeout for a question the statistics already hold (#304).
+            //
+            // Requires the counted variable to be the *edge* (or `count(*)`): counting a
+            // node variable over the same expand is a different question once the pattern
+            // has labels, and the label-free case is handled below anyway.
+            let edge_var = if query.match_clauses.len() == 1
+                && query.match_clauses[0].pattern.paths.len() == 1
+                && query.match_clauses[0].pattern.paths[0].segments.len() == 1
+            {
+                query.match_clauses[0].pattern.paths[0].segments[0]
+                    .edge
+                    .variable
+                    .clone()
+            } else {
+                None
+            };
+            let use_edge_count = has_aggregation
+                && aggregates.len() == 1
+                && group_by.is_empty()
+                && matches!(aggregates[0].func, AggregateType::Count)
+                && !aggregates[0].distinct
+                && query.where_clause.is_none()
+                && query.with_clause.is_none()
+                && query.order_by.is_none()
+                && query.match_clauses.len() == 1
+                && query.match_clauses[0].pattern.paths.len() == 1
+                && query.match_clauses[0].pattern.paths[0].segments.len() == 1
+                && query.match_clauses[0].pattern.paths[0].start.labels.is_empty()
+                && query.match_clauses[0].pattern.paths[0].start.properties.as_ref().is_none_or(|p| p.is_empty())
+                && query.match_clauses[0].pattern.paths[0].segments[0].node.labels.is_empty()
+                && query.match_clauses[0].pattern.paths[0].segments[0].node.properties.as_ref().is_none_or(|p| p.is_empty())
+                && query.match_clauses[0].pattern.paths[0].segments[0].edge.length.is_none()
+                && query.match_clauses[0].pattern.paths[0].segments[0].edge.types.len() <= 1
+                && match &aggregates[0].expr {
+                    Expression::Literal(_) => true,
+                    Expression::Variable(v) => Some(v) == edge_var.as_ref(),
+                    _ => false,
+                };
+
+            if use_edge_count {
+                let edge_type = query.match_clauses[0].pattern.paths[0].segments[0]
+                    .edge
+                    .types
+                    .first()
+                    .map(|t| t.as_str().to_string());
+                let alias = aggregates[0].alias.clone();
+                operator = Box::new(EdgeCountOperator::new(edge_type, alias));
+                operator = Box::new(ProjectOperator::new(operator, post_projections));
+            } else if use_edge_type_count {
                 let type_alias = group_by[0].1.clone();
                 let count_alias = aggregates[0].alias.clone();
                 operator = Box::new(EdgeTypeCountOperator::new(type_alias, count_alias));

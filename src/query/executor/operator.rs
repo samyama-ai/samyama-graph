@@ -2396,6 +2396,70 @@ impl PhysicalOperator for LabelCountOperator {
     }
 }
 
+/// Edge count operator: resolves `MATCH ()-[r:TYPE]->() RETURN count(r)` from the stats
+/// cache, for one edge type or for all of them.
+///
+/// The *grouped* form (`RETURN type(r), count(r)`) already had an O(1) path, and node label
+/// counts have had one for longer -- but a count filtered to a single edge type fell back to
+/// a full Expand + Aggregate. On a billion-edge federation that is the difference between
+/// answering from metadata and hitting the 120s timeout (#304), while the structurally
+/// simpler grouped query returned instantly.
+pub struct EdgeCountOperator {
+    /// `None` counts every edge, whatever its type.
+    edge_type: Option<String>,
+    alias: String,
+    executed: bool,
+}
+
+impl EdgeCountOperator {
+    pub fn new(edge_type: Option<String>, alias: String) -> Self {
+        Self { edge_type, alias, executed: false }
+    }
+
+    fn count(&self, store: &GraphStore) -> i64 {
+        let stats = store.statistics();
+        match &self.edge_type {
+            Some(t) => stats
+                .edge_type_counts
+                .iter()
+                .find(|(et, _)| et.as_str() == t.as_str())
+                .map(|(_, c)| *c as i64)
+                .unwrap_or(0),
+            None => stats.edge_type_counts.values().map(|c| *c as i64).sum(),
+        }
+    }
+}
+
+impl PhysicalOperator for EdgeCountOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+        self.executed = true;
+        let mut record = Record::new();
+        record.bind(
+            self.alias.clone(),
+            Value::Property(PropertyValue::Integer(self.count(store))),
+        );
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "EdgeCount".to_string(),
+            details: match &self.edge_type {
+                Some(t) => format!("type={}, alias={}", t, self.alias),
+                None => format!("all types, alias={}", self.alias),
+            },
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Edge type count operator: resolves `MATCH ()-[r]->() RETURN type(r), count(r)` from stats cache.
 /// Returns one row per edge type with its count, avoiding a full edge scan.
 pub struct EdgeTypeCountOperator {
