@@ -669,6 +669,10 @@ async fn run_benchmark(
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     bench_setup::init();
+    // Opening calibration, before anything else competes for the CPU. Closed
+    // out at the end of the suite so a host that changed speed mid-run says so
+    // rather than being read as a code change (#529).
+    let calibration = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -951,6 +955,7 @@ async fn main() -> Result<(), Error> {
     if profile_mode {
         println!();
         println!("Profiled {} query/queries in {}.", queries.len(), format_duration(bench_time));
+        bench_setup::report_drift(calibration);
         if errors > 0 {
             std::process::exit(1);
         }
@@ -977,6 +982,8 @@ async fn main() -> Result<(), Error> {
     // Cache stats
     let stats = client.cache_stats();
     println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
+
+    bench_setup::report_drift(calibration);
 
     // Any empty read is a configuration failure, not a pass. A run with 17 of 21 reads
     // returning nothing measured nothing, and exiting 0 on it is how "21/21 passed in 32 ms"

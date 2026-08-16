@@ -27,6 +27,32 @@ The split follows from where a reader can act: a number you can reproduce
 belongs next to the code that produces it; a number that required another
 vendor's licensed software to obtain does not.
 
+## Comparing two numbers
+
+**A before/after claim requires both figures from one back-to-back session on
+one machine.** Not "the same machine" — the same *sitting*.
+
+This is not caution for its own sake. On a 16-core workstation, the same
+binary at the same commit ran LDBC IC9 in **2,822 ms in the morning and
+4,912 ms the same evening**, with nothing else on the CPU; two consecutive
+runs of one binary differed by **24%** (#529). Comparing an evening run
+against a morning baseline produced apparent 2–4x regressions in three
+queries, none of which existed.
+
+So:
+
+- **Check the calibration line first.** Every run prints a fixed CPU-bound
+  loop's duration at the start and again at the end, with the load average
+  and mean core frequency. Two runs whose calibration differs were taken on
+  hosts of different speed, whatever their milliseconds say. If the closing
+  figure differs from the opening one by more than 10%, the run says so and
+  its own numbers are not internally comparable either.
+- **Quote the ratio, not the milliseconds**, when the point is an
+  improvement. A ratio measured back to back survives a slow host; an
+  absolute figure does not survive being read next to one taken elsewhere.
+- **`SLT-2` is a ratio against a competitor.** A competitor figure measured
+  in a different session is not a baseline for one of ours.
+
 
 Two suites are documented here: the LDBC SNB Interactive results below, and **HIER**, the
 hierarchy category introduced with ADR-035.
