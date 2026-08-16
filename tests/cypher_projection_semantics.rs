@@ -2387,3 +2387,10 @@ fn trailing_foreach_is_unaffected_by_the_leading_form() {
         .unwrap();
     assert_eq!(scalar(&s, "MATCH (m:M2) RETURN m.i AS v"), "v=9");
 }
+
+#[test]
+fn deliberately_broken_to_prove_ci_catches_it() {
+    // Temporary: exists only to demonstrate that the CI gate added in #486
+    // actually fails a pull request. Removed immediately after.
+    assert_eq!(2 + 2, 5, "if CI is working, this must fail the PR check");
+}
