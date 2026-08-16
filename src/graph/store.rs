@@ -1250,24 +1250,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.node_columns.set_property(idx, &key_str, val.clone());
         self.update_hierarchies_for_property(node_id, &key_str, &val);
 
-        // Get access to versions
-        let versions = self.nodes.get_mut(idx).ok_or(GraphError::NodeNotFound(node_id))?;
-        let latest_node = versions.last().ok_or(GraphError::NodeNotFound(node_id))?;
+        // Scoped so the mutable borrow of `self.nodes` ends here; the indexing
+        // below needs `&self` and the node's labels at the same time, which is
+        // fine as two shared borrows but not while this one is live.
+        let old_val = {
+            let current_version = self.current_version;
+            let versions = self.nodes.get_mut(idx).ok_or(GraphError::NodeNotFound(node_id))?;
+            let latest_node = versions.last().ok_or(GraphError::NodeNotFound(node_id))?;
 
-        let old_val;
-        
-        if latest_node.version < self.current_version {
-            // COW: Create new version
-            let mut new_node = latest_node.clone();
-            new_node.version = self.current_version;
-            new_node.updated_at = chrono::Utc::now().timestamp_millis();
-            old_val = new_node.set_property(key_str.clone(), val.clone());
-            versions.push(new_node);
-        } else {
-            // Update in place (same transaction/version)
-            let node = versions.last_mut().unwrap();
-            old_val = node.set_property(key_str.clone(), val.clone());
-        }
+            if latest_node.version < current_version {
+                // COW: Create new version
+                let mut new_node = latest_node.clone();
+                new_node.version = current_version;
+                new_node.updated_at = chrono::Utc::now().timestamp_millis();
+                let old = new_node.set_property(key_str.clone(), val.clone());
+                versions.push(new_node);
+                old
+            } else {
+                // Update in place (same transaction/version)
+                let node = versions.last_mut().unwrap();
+                node.set_property(key_str.clone(), val.clone())
+            }
+        };
 
         // Record the new value so subsequent writes can see it. Without this the
         // constraint index only ever holds what the backfill put there at CREATE
@@ -1277,19 +1281,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 .constraint_insert(label, &key_str, val.clone(), node_id);
         }
 
-        let event = crate::graph::event::IndexEvent::PropertySet {
-            tenant_id: tenant_id.to_string(),
-            id: node_id,
-            labels: versions.last().unwrap().labels.iter().cloned().collect(),
-            key: key_str,
-            old_value: old_val,
-            new_value: val,
-        };
-
         if let Some(sender) = &self.index_sender {
-            let _ = sender.send(event);
+            let _ = sender.send(crate::graph::event::IndexEvent::PropertySet {
+                tenant_id: tenant_id.to_string(),
+                id: node_id,
+                labels: self.nodes[idx]
+                    .last()
+                    .map(|n| n.labels.iter().cloned().collect())
+                    .unwrap_or_default(),
+                key: key_str,
+                old_value: old_val,
+                new_value: val,
+            });
         } else {
-            self.handle_index_event(event, None);
+            // No subscriber: index directly from borrowed data rather than
+            // materialising an event only to take it apart again.
+            if let Some(labels) = self.nodes[idx].last().map(|n| &n.labels) {
+                self.apply_property_set(node_id, labels, &key_str, old_val.as_ref(), &val);
+            }
         }
 
         Ok(())
@@ -2847,6 +2856,36 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     // ============================================================
     // Event Handling
     // ============================================================
+
+    /// The `PropertySet` index update, taking borrowed arguments.
+    ///
+    /// `handle_index_event` needs an owned `IndexEvent` because the same type
+    /// crosses a channel to any subscriber. On the local path there is no
+    /// channel, and building one cost a tenant `String` the handler discards
+    /// (`tenant_id: _`), a `Vec<Label>` of cloned label strings, and clones of
+    /// the key and value -- per property set, on every bulk load (#491).
+    fn apply_property_set(
+        &self,
+        id: NodeId,
+        labels: &std::collections::HashSet<Label>,
+        key: &str,
+        old_value: Option<&PropertyValue>,
+        new_value: &PropertyValue,
+    ) {
+        if let Some(old) = old_value {
+            for label in labels {
+                self.property_index.index_remove(label, key, old, id);
+            }
+        }
+        for label in labels {
+            self.property_index.index_insert(label, key, new_value.clone(), id);
+        }
+        if let PropertyValue::Vector(vec) = new_value {
+            for label in labels {
+                let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+            }
+        }
+    }
 
     pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent, _tenant_manager: Option<Arc<crate::persistence::TenantManager>>) {
         use crate::graph::event::IndexEvent::*;
