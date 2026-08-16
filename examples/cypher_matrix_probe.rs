@@ -156,7 +156,7 @@ fn main() {
         ("Type Handling", "Temporal types", "RETURN date(\"2026-01-01\")", false),
         ("Type Handling", "Duration arithmetic", "RETURN duration({days: 1})", false),
 
-        ("Extensions", "CREATE VECTOR INDEX", "CREATE VECTOR INDEX probe_idx FOR (n:Person) ON (n.embedding) OPTIONS {dimension: 4, similarity: \"cosine\"}", true),
+        ("Extensions", "CREATE VECTOR INDEX", "CREATE VECTOR INDEX probe_idx FOR (n:Person) ON (n.embedding) OPTIONS {dimensions: 4, similarity: \"cosine\"}", true),
         ("Extensions", "algo.pageRank", "CALL algo.pageRank({iterations: 2}) YIELD nodeId, score RETURN count(*)", false),
         ("Extensions", "algo.wcc", "CALL algo.wcc() YIELD nodeId, componentId RETURN count(*)", false),
         ("Extensions", "algo.shortestPath", "CALL algo.shortestPath(0, 2) YIELD nodeId RETURN count(*)", false),

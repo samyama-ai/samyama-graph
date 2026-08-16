@@ -57,7 +57,14 @@ pub enum VectorError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Dimension mismatch: expected {expected}, got {got}")]
+    // Naming only the two numbers left the caller reading it as "my embedding is
+    // the wrong size", when the usual cause is an index configured with a
+    // dimension nobody chose -- CREATE VECTOR INDEX defaults to 1536 when
+    // `dimensions` is omitted (#474). Point at the index configuration, since
+    // that is the side that is adjustable and the side that is usually wrong.
+    #[error("Dimension mismatch: the index expects {expected}-dimensional vectors, got {got}. \
+Set the index dimension with CREATE VECTOR INDEX ... OPTIONS {{dimensions: {got}}} \
+(the default is 1536 when `dimensions` is omitted).")]
     DimensionMismatch { expected: usize, got: usize },
 
     #[error("Search failed: {0}")]

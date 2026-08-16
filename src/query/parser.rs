@@ -461,11 +461,50 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
             }
             Rule::options => {
                 let options_map = parse_properties(inner)?;
-                if let Some(PropertyValue::Integer(d)) = options_map.get("dimensions") {
-                    dimensions = *d as usize;
+
+                // Reject anything we do not honour. Silently discarding an
+                // unrecognised key builds an index the caller did not ask for
+                // and reports success: `{dimension: 4}` (singular) produced a
+                // 1536-dimension index, and the mismatch only surfaced later
+                // against the caller's *vector*, which is the wrong thing to
+                // blame (#474).
+                const ACCEPTED: [&str; 2] = ["dimensions", "similarity"];
+                let mut unknown: Vec<&String> = options_map
+                    .keys()
+                    .filter(|k| !ACCEPTED.contains(&k.as_str()))
+                    .collect();
+                if !unknown.is_empty() {
+                    unknown.sort();
+                    let listed = unknown
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(ParseError::SemanticError(format!(
+                        "CREATE VECTOR INDEX: unknown option {listed}. Accepted options are \
+`dimensions` (integer) and `similarity` (string)."
+                    )));
                 }
-                if let Some(PropertyValue::String(s)) = options_map.get("similarity") {
-                    similarity = s.clone();
+
+                if let Some(value) = options_map.get("dimensions") {
+                    match value {
+                        PropertyValue::Integer(d) if *d > 0 => dimensions = *d as usize,
+                        other => {
+                            return Err(ParseError::SemanticError(format!(
+                                "CREATE VECTOR INDEX: `dimensions` must be a positive integer, got {other:?}"
+                            )))
+                        }
+                    }
+                }
+                if let Some(value) = options_map.get("similarity") {
+                    match value {
+                        PropertyValue::String(s) => similarity = s.clone(),
+                        other => {
+                            return Err(ParseError::SemanticError(format!(
+                                "CREATE VECTOR INDEX: `similarity` must be a string, got {other:?}"
+                            )))
+                        }
+                    }
                 }
             }
             _ => {}
