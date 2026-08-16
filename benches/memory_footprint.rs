@@ -242,8 +242,13 @@ fn main() {
         }
     }
     if bulk {
-        // The whole point of the unsorted append: sort once, into CSR.
-        store.compact_adjacency();
+        // The full finishing sequence, not just compaction. Measuring only
+        // `compact_adjacency()` here overstated the bulk path badly: it made
+        // edge inserts look 5.1x faster while omitting the edge-type index,
+        // catalog and vector-index rebuilds that a bulk load must also do.
+        // On real LDBC SF1 those rebuilds cost 14.3 s and consumed the entire
+        // insert gain, leaving load time unchanged (#504).
+        store.finish_bulk_load();
     }
     let after_edges = live_heap();
     let calls_edges = alloc_calls();
