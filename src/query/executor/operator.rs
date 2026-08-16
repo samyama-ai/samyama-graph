@@ -4730,6 +4730,14 @@ pub struct SortOperator {
     records: Vec<Record>,
     current: usize,
     executed: bool,
+    /// Upper bound on the rows anything above this operator can observe, from
+    /// a `LIMIT` (plus any `SKIP`) pushed down through `try_push_limit`.
+    ///
+    /// `None` means every row is observable and the whole input must be
+    /// sorted. When it is set, only the first `k` rows in sort order can ever
+    /// be read, so the rest are discarded as they arrive instead of being
+    /// sorted and then thrown away (#518).
+    limit_hint: Option<usize>,
 }
 
 impl SortOperator {
@@ -4740,7 +4748,66 @@ impl SortOperator {
             records: Vec::new(),
             current: 0,
             executed: false,
+            limit_hint: None,
         }
+    }
+
+    /// The sort key for one record: each `ORDER BY` expression evaluated once.
+    ///
+    /// This is the whole of the fix in #518. The comparator used to evaluate
+    /// both sides' expressions on **every comparison**, so a sort of n rows
+    /// performed ~2·n·log₂(n) evaluations rather than n. On LDBC IC9 that was
+    /// 389,461 rows -> ~14.5 million property resolutions where 389,461 would
+    /// do, and `Sort` was 68.6% of the query.
+    fn key_of(&self, record: &Record, store: &GraphStore) -> Vec<PropertyValue> {
+        self.sort_items
+            .iter()
+            .map(|(expr, _)| {
+                // Errors are folded to Null, which is what the comparator did
+                // before and what ORDER BY over a missing property means.
+                Self::evaluate_expression(expr, record, store)
+                    .unwrap_or(Value::Null)
+                    .as_property()
+                    .cloned()
+                    .unwrap_or(PropertyValue::Null)
+            })
+            .collect()
+    }
+
+    /// Compare two precomputed keys under the per-column sort directions.
+    fn cmp_keys(a: &[PropertyValue], b: &[PropertyValue], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+        for (i, (_, ascending)) in items.iter().enumerate() {
+            let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
+                continue;
+            };
+            let ord = x.cmp(y);
+            if ord != std::cmp::Ordering::Equal {
+                return if *ascending { ord } else { ord.reverse() };
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Keep only the `k` smallest rows under the sort order, discarding the
+    /// rest.
+    ///
+    /// `select_nth_unstable_by` partitions in O(n) rather than sorting, so
+    /// trimming a buffer is cheaper than sorting it and is done repeatedly as
+    /// the input streams in. Rows tied with the k-th are dropped along with
+    /// the rest of the tail; Cypher does not define a tie-break for
+    /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
+    /// runs may therefore disagree about *which* — the same latitude the
+    /// unstable sort below already takes.
+    fn trim_to(keyed: &mut Vec<(Vec<PropertyValue>, Record)>, k: usize, items: &[(Expression, bool)]) {
+        if k == 0 {
+            keyed.clear();
+            return;
+        }
+        if keyed.len() <= k {
+            return;
+        }
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(&a.0, &b.0, items));
+        keyed.truncate(k);
     }
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
@@ -4819,6 +4886,23 @@ impl PhysicalOperator for SortOperator {
         vec![&mut self.input]
     }
 
+    /// Accept the hint, and stop it here.
+    ///
+    /// A sort does not change cardinality, so it is safe for it to know that
+    /// only the first `n` rows will ever be read -- that is exactly a top-N.
+    /// It is *not* safe to pass the hint further down: the input must still
+    /// produce every row, or the sort would be ordering an arbitrary prefix.
+    ///
+    /// Returning `true` records that the hint was consumed rather than
+    /// ignored, which is what the contract on this method means.
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        self.limit_hint = Some(match self.limit_hint {
+            Some(existing) => existing.min(n),
+            None => n,
+        });
+        true
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -4854,6 +4938,8 @@ impl PhysicalOperator for SortOperator {
         self.records.clear();
         self.current = 0;
         self.executed = false;
+        // `limit_hint` is deliberately kept: it is a property of the plan the
+        // planner built, not state from a previous execution.
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -4870,30 +4956,40 @@ impl PhysicalOperator for SortOperator {
 
 impl SortOperator {
     fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        // Materialize all records in batches
+        // Decorate-sort-undecorate: evaluate each ORDER BY expression once per
+        // row and sort the resulting keys, rather than re-evaluating both
+        // sides inside the comparator on every one of the ~n·log₂(n)
+        // comparisons (#518).
         let batch_size = 65536;
+        let bound = self.limit_hint;
+
+        // With a bound, the buffer is trimmed back to k whenever it grows
+        // past a working size, so peak memory is O(k) rather than O(n). The
+        // floor keeps the trimming amortised: for a small k the partition
+        // would otherwise run on nearly every batch.
+        let trim_at = bound.map(|k| k.saturating_mul(2).max(4096));
+
+        let mut keyed: Vec<(Vec<PropertyValue>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            self.records.extend(batch.records);
-        }
-
-        // Sort
-        let sort_items = &self.sort_items;
-        self.records.sort_by(|a, b| {
-            for (expr, ascending) in sort_items {
-                let val_a = Self::evaluate_expression(expr, a, store).unwrap_or(Value::Null);
-                let val_b = Self::evaluate_expression(expr, b, store).unwrap_or(Value::Null);
-
-                let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
-                let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
-
-                let ord = prop_a.cmp(prop_b);
-                if ord != std::cmp::Ordering::Equal {
-                    return if *ascending { ord } else { ord.reverse() };
+            keyed.reserve(batch.records.len());
+            for record in batch.records {
+                let key = self.key_of(&record, store);
+                keyed.push((key, record));
+            }
+            if let (Some(k), Some(threshold)) = (bound, trim_at) {
+                if keyed.len() >= threshold {
+                    Self::trim_to(&mut keyed, k, &self.sort_items);
                 }
             }
-            std::cmp::Ordering::Equal
-        });
+        }
+        if let Some(k) = bound {
+            Self::trim_to(&mut keyed, k, &self.sort_items);
+        }
 
+        let sort_items = &self.sort_items;
+        keyed.sort_by(|a, b| Self::cmp_keys(&a.0, &b.0, sort_items));
+
+        self.records = keyed.into_iter().map(|(_, record)| record).collect();
         self.executed = true;
         Ok(())
     }
@@ -7685,6 +7781,19 @@ impl SkipOperator {
 impl PhysicalOperator for SkipOperator {
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
+    }
+
+    /// Widen the hint by this operator's own skip before passing it on.
+    ///
+    /// If something above needs `n` rows and this operator discards the first
+    /// `k`, the subtree has to produce `n + k`. Forwarding `n` unchanged would
+    /// make a bounded sort below keep too few rows and silently lose the tail
+    /// of the page (#518).
+    ///
+    /// Before this, `SkipOperator` used the default and blocked the hint
+    /// entirely, so nothing below a SKIP ever terminated early.
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        self.input.try_push_limit(n.saturating_add(self.skip))
     }
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
