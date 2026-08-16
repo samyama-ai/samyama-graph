@@ -161,8 +161,23 @@ fn main() {
     };
     let scale: usize = arg("--scale").and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let avg_degree: usize = arg("--degree").and_then(|s| s.parse().ok()).unwrap_or(4);
+    // Bulk mode uses the stub inserts plus compact_adjacency() -- the path that
+    // only snapshot import takes today (#504). The stubs skip endpoint
+    // validation, the Edge struct, edge_type_index and the catalog, so this
+    // measures the ceiling of that route rather than a drop-in replacement.
+    let bulk = args.iter().any(|a| a == "--bulk");
+    // Compacting only at the end lowers steady-state memory but not the peak,
+    // because the whole write buffer is built before it is folded into CSR.
+    // `compact_adjacency_if_needed` exists for incremental compaction; this
+    // measures whether using it actually moves the peak.
+    let compact_every: usize = arg("--compact-every")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-    println!("Memory footprint — {scale} nodes, target degree {avg_degree}");
+    println!(
+        "Memory footprint — {scale} nodes, target degree {avg_degree}{}",
+        if bulk { "  [BULK: stub inserts + compact_adjacency]" } else { "" }
+    );
     println!("{}", "-".repeat(78));
 
     let base_heap = live_heap();
@@ -176,7 +191,11 @@ fn main() {
     let labels = ["Person", "Post", "Forum", "Tag"];
     let mut node_ids = Vec::with_capacity(scale);
     for i in 0..scale {
-        let id = store.create_node(labels[i % labels.len()]);
+        let id = if bulk {
+            store.create_node_stub(labels[i % labels.len()])
+        } else {
+            store.create_node(labels[i % labels.len()])
+        };
         node_ids.push(id);
     }
     let after_bare_nodes = live_heap();
@@ -209,10 +228,22 @@ fn main() {
     for (i, &src) in node_ids.iter().enumerate() {
         for d in 0..avg_degree {
             let tgt = node_ids[(i * 7 + d * 31 + 1) % scale];
-            if store.create_edge(src, tgt, edge_types[(i + d) % edge_types.len()]).is_ok() {
+            let ok = if bulk {
+                store.create_edge_stub(src, tgt, edge_types[(i + d) % edge_types.len()]).is_ok()
+            } else {
+                store.create_edge(src, tgt, edge_types[(i + d) % edge_types.len()]).is_ok()
+            };
+            if ok {
                 edges += 1;
             }
         }
+        if bulk && compact_every > 0 && i % compact_every == 0 && i > 0 {
+            store.compact_adjacency_if_needed(1);
+        }
+    }
+    if bulk {
+        // The whole point of the unsorted append: sort once, into CSR.
+        store.compact_adjacency();
     }
     let after_edges = live_heap();
     let calls_edges = alloc_calls();
