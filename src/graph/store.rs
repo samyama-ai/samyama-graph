@@ -2359,6 +2359,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// pathological plans on snapshot-imported graphs.
     ///
     /// Snapshot import calls this after `compact_adjacency()`.
+    /// Recompute the catalog from the current store contents.
+    ///
+    /// `create_edge_stub` skips `catalog.on_edge_created` for speed, so a
+    /// bulk-loaded graph has label counts (the node stub does maintain those)
+    /// and **no triple statistics at all**. `estimate_expand_out` then falls
+    /// back to "assume 1 edge per node" -- a 20x under-estimate on a graph
+    /// where each node has 20 outgoing edges, and worse as degree rises.
+    ///
+    /// That is the #303 failure mode in a different statistic: a plan chosen
+    /// from statistics that were never computed. Rebuild after any bulk load.
+    pub fn rebuild_catalog(&mut self) {
+        // The immutable borrow for the scan ends before the assignment.
+        let catalog = GraphCatalog::recompute_full(self);
+        self.catalog = catalog;
+    }
+
     pub fn rebuild_edge_type_index(&mut self) {
         self.edge_type_index.clear();
         let len = self.edge_type_ids.len();

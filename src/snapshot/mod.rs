@@ -667,6 +667,13 @@ fn import_tenant_inner(
         // MATCH plans against imported snapshots fall back to NodeScan(all)
         // and time out on multi-million-node stores.
         store.rebuild_edge_type_index();
+        // Triple statistics too: create_edge_stub skips catalog.on_edge_created,
+        // so without this the cost model sees zero triple stats and
+        // estimate_expand_out returns its "1 edge per node" default on every
+        // imported graph -- a 20x under-estimate at degree 20, and the same
+        // class of defect as #303 (a plan chosen from statistics that were
+        // never computed).
+        store.rebuild_catalog();
     }
 
     // Backfill HNSW vector indices from imported node properties.

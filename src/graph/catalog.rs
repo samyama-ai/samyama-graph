@@ -319,14 +319,16 @@ impl GraphCatalog {
             let outgoing = store.get_outgoing_edge_targets(node.id);
             for (_, _, target_id, edge_type) in &outgoing {
                 if let Some(target_node) = store.get_node(*target_id) {
-                    let src_labels: Vec<Label> = node.labels.iter().cloned().collect();
-                    let tgt_labels: Vec<Label> = target_node.labels.iter().cloned().collect();
+                    // Borrowed, not collected: `on_edge_created` is generic over
+                    // `IntoIterator<Item = &Label>` since #493, so a full rebuild
+                    // over 176M edges no longer allocates two Vecs and clones a
+                    // String per edge just to satisfy a `&[Label]` parameter.
                     catalog.on_edge_created(
                         node.id,
-                        &src_labels,
+                        &node.labels,
                         &edge_type,
                         *target_id,
-                        &tgt_labels,
+                        &target_node.labels,
                     );
                     // Undo the generation bump from on_edge_created (we'll set it at the end)
                     catalog.generation -= 1;
