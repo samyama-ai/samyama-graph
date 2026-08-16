@@ -8,11 +8,14 @@ pub struct PSOSolver {
     pub w: f64,  // Inertia weight
     pub c1: f64, // Cognitive weight (pbest)
     pub c2: f64, // Social weight (gbest)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl PSOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             w: 0.7,
             c1: 1.5,
@@ -20,8 +23,14 @@ impl PSOSolver {
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -66,8 +75,9 @@ impl PSOSolver {
             
             // We'll compute new state in parallel and then replace.
             let results: Vec<(Individual, Array1<f64>, Individual)> = swarm.par_iter().zip(velocities.par_iter()).zip(pbests.par_iter())
-                .map(|((particle, velocity), pbest)| {
-                    let mut local_rng = thread_rng();
+                .enumerate()
+                .map(|(__idx, ((particle, velocity), pbest))| {
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                     let mut new_vel = Array1::zeros(dim);
                     let mut new_vars = Array1::zeros(dim);
 

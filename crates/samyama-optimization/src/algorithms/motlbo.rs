@@ -4,15 +4,24 @@ use rand::prelude::*;
 
 pub struct MOTLBOSolver {
     pub config: SolverConfig,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl MOTLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { config }
+        Self {
+            seed: None, config }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: MultiObjectiveProblem>(&self, problem: &P) -> MultiObjectiveResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -43,8 +52,8 @@ impl MOTLBOSolver {
             let teacher_vars = population[teacher_idx].variables.clone();
             let mean_vars = self.calculate_mean(&population, dim);
 
-            for ind in &population {
-                let mut local_rng = thread_rng();
+            for (__idx, ind) in population.iter().enumerate() {
+                let mut local_rng = crate::common::rng::child_rng(self.seed, _iter, __idx);
                 let tf: f64 = local_rng.gen_range(1..3) as f64;
                 let mut new_vars = Array1::zeros(dim);
                 for j in 0..dim {
@@ -60,7 +69,7 @@ impl MOTLBOSolver {
 
             // Learner Phase
             for i in 0..pop_size {
-                let mut local_rng = thread_rng();
+                let mut local_rng = crate::common::rng::child_rng(self.seed, _iter, i);
                 let mut j;
                 loop {
                     j = local_rng.gen_range(0..pop_size);
@@ -128,7 +137,7 @@ impl MOTLBOSolver {
             .map(|(i, _)| i)
             .collect();
         
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         *first_rank.choose(&mut rng).unwrap_or(&0)
     }
 

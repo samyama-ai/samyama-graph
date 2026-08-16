@@ -7,14 +7,23 @@ use std::f64::consts::PI;
 pub struct FPASolver {
     pub config: SolverConfig,
     pub p: f64, // Switch probability (0.8)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl FPASolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             p: 0.8,
         }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     /// Levy flight random walk
@@ -26,7 +35,7 @@ impl FPASolver {
         let sigma_v = 1.0;
 
         let mut step = Array1::zeros(dim);
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
 
         for i in 0..dim {
             let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(&mut rng);
@@ -38,7 +47,7 @@ impl FPASolver {
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;

@@ -4,15 +4,24 @@ use rand::prelude::*;
 
 pub struct GWOSolver {
     pub config: SolverConfig,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl GWOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { config }
+        Self {
+            seed: None, config }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 

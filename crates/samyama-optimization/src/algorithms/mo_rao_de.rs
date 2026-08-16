@@ -20,11 +20,14 @@ pub struct MORaoDESolver {
     pub f: f64,
     /// DE crossover rate CR.
     pub cr: f64,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl MORaoDESolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
+            seed: None,
             config,
             p_de: 0.5,
             f: 0.5,
@@ -32,8 +35,14 @@ impl MORaoDESolver {
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: MultiObjectiveProblem>(&self, problem: &P) -> MultiObjectiveResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;

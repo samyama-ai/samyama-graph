@@ -6,19 +6,28 @@ pub struct GASolver {
     pub config: SolverConfig,
     pub crossover_rate: f64,
     pub mutation_rate: f64,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl GASolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
+            seed: None,
             config,
             crossover_rate: 0.8,
             mutation_rate: 0.1,
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -96,7 +105,7 @@ impl GASolver {
     }
 
     fn select<'a>(&self, population: &'a [Individual]) -> &'a Individual {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
         
@@ -108,7 +117,7 @@ impl GASolver {
     }
 
     fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = p1.len();
         let mut c1 = p1.clone();
         let mut c2 = p2.clone();
@@ -123,7 +132,7 @@ impl GASolver {
     }
 
     fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>) {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = vars.len();
 
         for i in 0..dim {

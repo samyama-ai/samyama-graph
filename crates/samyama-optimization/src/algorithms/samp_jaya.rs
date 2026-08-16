@@ -15,15 +15,24 @@ use rayon::prelude::*;
 pub struct SAMPJayaSolver {
     pub config: SolverConfig,
     pub m_max: Option<usize>,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl SAMPJayaSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { config, m_max: None }
+        Self {
+            seed: None, config, m_max: None }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -66,8 +75,9 @@ impl SAMPJayaSolver {
                 let sw_vars = sub[sw].variables.clone();
                 let updated: Vec<Individual> = sub
                     .par_iter()
-                    .map(|ind| {
-                        let mut local_rng = thread_rng();
+                    .enumerate()
+                .map(|(__idx, ind)| {
+                        let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                         let r1: f64 = local_rng.gen();
                         let r2: f64 = local_rng.gen();
                         let mut new_vars = Array1::zeros(dim);

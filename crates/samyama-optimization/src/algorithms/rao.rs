@@ -13,15 +13,24 @@ pub enum RaoVariant {
 pub struct RaoSolver {
     pub config: SolverConfig,
     pub variant: RaoVariant,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl RaoSolver {
     pub fn new(config: SolverConfig, variant: RaoVariant) -> Self {
-        Self { config, variant }
+        Self {
+            seed: None, config, variant }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -53,8 +62,9 @@ impl RaoSolver {
             // Update population
             population = population
                 .into_par_iter()
-                .map(|mut ind| {
-                    let mut local_rng = thread_rng();
+                .enumerate()
+                .map(|(__idx, mut ind)| {
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                     let mut new_vars = Array1::zeros(dim);
 
                     let r1: f64 = local_rng.gen();

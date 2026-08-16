@@ -23,15 +23,24 @@ use rayon::prelude::*;
 
 pub struct BMWRSolver {
     pub config: SolverConfig,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl BMWRSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { config }
+        Self {
+            seed: None, config }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -68,7 +77,7 @@ impl BMWRSolver {
                 .into_par_iter()
                 .enumerate()
                 .map(|(k, mut ind)| {
-                    let mut local_rng = thread_rng();
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, k);
                     let r1: f64 = local_rng.gen();
                     let r2: f64 = local_rng.gen();
                     let r3: f64 = local_rng.gen();

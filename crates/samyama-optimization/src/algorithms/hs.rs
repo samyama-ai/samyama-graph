@@ -7,11 +7,14 @@ pub struct HSSolver {
     pub hmcr: f64, // Harmony Memory Consideration Rate (0.7-0.95)
     pub par: f64,  // Pitch Adjustment Rate (0.1-0.5)
     pub bw: f64,   // Bandwidth (step size)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl HSSolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
+            seed: None,
             config,
             hmcr: 0.9,
             par: 0.3,
@@ -19,8 +22,14 @@ impl HSSolver {
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 

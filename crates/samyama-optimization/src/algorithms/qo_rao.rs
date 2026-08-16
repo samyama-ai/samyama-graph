@@ -21,15 +21,24 @@ use rayon::prelude::*;
 pub struct QORaoSolver {
     pub config: SolverConfig,
     pub variant: RaoVariant,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl QORaoSolver {
     pub fn new(config: SolverConfig, variant: RaoVariant) -> Self {
-        Self { config, variant }
+        Self {
+            seed: None, config, variant }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -48,8 +57,9 @@ impl QORaoSolver {
         // Initial QOBL seeding: combine population + quasi-opposite, keep best N.
         let qo_init: Vec<Individual> = population
             .par_iter()
-            .map(|ind| {
-                let mut local_rng = thread_rng();
+            .enumerate()
+                .map(|(__idx, ind)| {
+                let mut local_rng = crate::common::rng::child_rng(self.seed, 0, __idx);
                 let qo_vars = quasi_oppose(&ind.variables, &lower, &upper, &mut local_rng);
                 let fitness = problem.fitness(&qo_vars);
                 Individual::new(qo_vars, fitness)
@@ -75,8 +85,9 @@ impl QORaoSolver {
 
             population = population
                 .into_par_iter()
-                .map(|mut ind| {
-                    let mut local_rng = thread_rng();
+                .enumerate()
+                .map(|(__idx, mut ind)| {
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                     let r1: f64 = local_rng.gen();
                     let r2: f64 = local_rng.gen();
 

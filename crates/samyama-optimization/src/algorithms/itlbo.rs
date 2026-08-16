@@ -6,16 +6,24 @@ use rayon::prelude::*;
 pub struct ITLBOSolver {
     pub config: SolverConfig,
     pub elite_size: usize,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl ITLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
         let elite_size = std::cmp::max(1, config.population_size / 10); // 10% elite
-        Self { config, elite_size }
+        Self { config, elite_size, seed: None }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -52,8 +60,9 @@ impl ITLBOSolver {
             // 1. Teacher Phase
             population = population
                 .into_par_iter()
-                .map(|mut ind| {
-                    let mut local_rng = thread_rng();
+                .enumerate()
+                .map(|(__idx, mut ind)| {
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                     // Adaptive TF: Usually between 1 and 2. 
                     let tf: f64 = local_rng.gen_range(1.0..2.0); 
                     
@@ -84,7 +93,7 @@ impl ITLBOSolver {
                 .into_par_iter()
                 .enumerate()
                 .map(|(i, mut ind)| {
-                    let mut local_rng = thread_rng();
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, i);
                     
                     let mut learner_j_idx;
                     loop {

@@ -34,11 +34,14 @@ pub struct MOBMWRSolver {
     pub local_step: f64,
     /// Probability of edge boosting per iteration.
     pub edge_boost_prob: f64,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl MOBMWRSolver {
     pub fn new(config: SolverConfig, variant: MOBMWRVariant) -> Self {
         Self {
+            seed: None,
             config,
             variant,
             local_step: 0.05,
@@ -46,8 +49,14 @@ impl MOBMWRSolver {
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: MultiObjectiveProblem>(&self, problem: &P) -> MultiObjectiveResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -103,7 +112,7 @@ impl MOBMWRSolver {
             // --- Generate offspring via base update.
             let mut offspring: Vec<MultiObjectiveIndividual> = Vec::with_capacity(pop_size);
             for k in 0..pop_size {
-                let mut local_rng = thread_rng();
+                let mut local_rng = crate::common::rng::child_rng(self.seed, iter, k);
                 let r1: f64 = local_rng.gen();
                 let r2: f64 = local_rng.gen();
                 let r3: f64 = local_rng.gen();

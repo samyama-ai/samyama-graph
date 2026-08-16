@@ -7,19 +7,28 @@ pub struct DESolver {
     pub config: SolverConfig,
     pub f: f64,  // Scaling factor (default 0.5)
     pub cr: f64, // Crossover probability (default 0.9)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl DESolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             f: 0.5,
             cr: 0.9,
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -51,7 +60,7 @@ impl DESolver {
                 .into_par_iter()
                 .enumerate()
                 .map(|(i, mut target)| {
-                    let mut local_rng = thread_rng();
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, i);
                     
                     // Pick a, b, c distinct from i
                     let mut idxs = [0; 3];

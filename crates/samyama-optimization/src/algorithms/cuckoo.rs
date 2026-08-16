@@ -7,18 +7,27 @@ use std::f64::consts::PI;
 pub struct CuckooSolver {
     pub config: SolverConfig,
     pub pa: f64, // Probability of discovering an alien egg (abandonment rate)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl CuckooSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             pa: 0.25,
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn with_pa(config: SolverConfig, pa: f64) -> Self {
-        Self { config, pa }
+        Self { config, pa, seed: None }
     }
 
     /// Levy flight random walk
@@ -31,7 +40,7 @@ impl CuckooSolver {
         let sigma_v = 1.0;
 
         let mut step = Array1::zeros(dim);
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
 
         for i in 0..dim {
             let _u: f64 = rng.gen_range(0.0..1.0) * sigma_u; // Standard normal * sigma_u? No, usually Gaussian(0, sigma_u^2)
@@ -46,7 +55,7 @@ impl CuckooSolver {
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 

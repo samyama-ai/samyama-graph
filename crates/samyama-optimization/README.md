@@ -4,6 +4,26 @@ A high-performance library implementing **metaphor-less** and **nature-inspired*
 
 This engine allows you to solve complex resource allocation, scheduling, and engineering problems by defining an objective function and constraints.
 
+## Reproducibility
+
+Every solver accepts an optional seed. Without one, behaviour is unchanged (drawn from entropy);
+with one, the run can be re-derived exactly — same best fitness, same solution vector, same
+convergence history.
+
+```rust
+let result = DESolver::new(config).with_seed(4242).solve(&problem);
+```
+
+This matters for published results: a reported optimum that cannot be regenerated can only be
+re-sampled, which is not the same claim.
+
+The parallel solvers are the part worth understanding. Seeding only the top-level RNG and letting
+rayon workers draw from `thread_rng()` would give runs that *look* reproducible in a
+single-threaded test and are not — the seed would be recorded next to results it cannot
+regenerate. Each element's stream is instead derived from `(seed, iteration, index)`, so the
+answer does not depend on how work is scheduled. `tests/test_reproducibility.rs` asserts this
+directly: the same seed under a 1-thread pool and an 8-thread pool must give bit-identical results.
+
 ## Algorithms Supported
 
 We support 15+ algorithms across various families:

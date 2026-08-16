@@ -101,6 +101,53 @@ impl Default for SolverConfig {
     }
 }
 
+/// Reproducible randomness for the solvers.
+///
+/// Every solver drew from `thread_rng()`, so no run of this crate could be
+/// re-derived -- not by a test, and not by anyone reproducing a published
+/// result. Seeding is opt-in via `Solver::with_seed(u64)`; with no seed the
+/// behaviour is unchanged (entropy), so existing callers see no difference.
+///
+/// [`child_rng`] is the part that matters for the parallel solvers. Seeding
+/// only the outer RNG and letting rayon workers call `thread_rng()` would
+/// produce runs that *look* reproducible and are not, which is worse than
+/// admitting they are random: the seed would be recorded alongside results it
+/// cannot regenerate. Deriving each element's stream from (seed, iteration,
+/// index) instead makes the result independent of how work is scheduled across
+/// threads, which is the property reproducibility actually requires.
+pub mod rng {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    /// Odd 64-bit constants from SplitMix64, used to decorrelate the two
+    /// coordinates so that (iter 1, index 2) and (iter 2, index 1) do not
+    /// collide onto the same stream.
+    const ITER_ODD: u64 = 0x9E37_79B9_7F4A_7C15;
+    const INDEX_ODD: u64 = 0xBF58_476D_1CE4_E5B9;
+
+    /// The solver's own RNG: seeded if a seed was given, entropy otherwise.
+    pub fn solver_rng(seed: Option<u64>) -> StdRng {
+        match seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        }
+    }
+
+    /// A per-element RNG for work inside a parallel iterator.
+    ///
+    /// Deterministic in (seed, iteration, index) and therefore independent of
+    /// thread scheduling. Unseeded, it falls back to entropy exactly as before.
+    pub fn child_rng(seed: Option<u64>, iteration: usize, index: usize) -> StdRng {
+        match seed {
+            Some(s) => StdRng::seed_from_u64(
+                s ^ (iteration as u64).wrapping_mul(ITER_ODD)
+                  ^ (index as u64).wrapping_mul(INDEX_ODD),
+            ),
+            None => StdRng::from_entropy(),
+        }
+    }
+}
+
 /// The result of an optimization run.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OptimizationResult {

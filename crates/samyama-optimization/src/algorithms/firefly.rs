@@ -8,11 +8,14 @@ pub struct FireflySolver {
     pub alpha: f64,      // Randomization parameter (0.2)
     pub beta0: f64,      // Attractiveness at r=0 (1.0)
     pub gamma: f64,      // Light absorption coefficient (1.0)
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl FireflySolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             alpha: 0.2,
             beta0: 1.0,
@@ -20,12 +23,18 @@ impl FireflySolver {
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn with_params(config: SolverConfig, alpha: f64, beta0: f64, gamma: f64) -> Self {
-        Self { config, alpha, beta0, gamma }
+        Self { config, alpha, beta0, gamma, seed: None }
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
 
@@ -63,7 +72,7 @@ impl FireflySolver {
 
             // We can parallelize the outer loop (i)
             let new_positions: Vec<Option<Array1<f64>>> = (0..pop_size).into_par_iter().map(|i| {
-                let mut rng = thread_rng();
+                let mut rng = crate::common::rng::solver_rng(self.seed);
                 let mut moved = false;
                 let mut new_vars = old_population[i].variables.clone();
                 let fitness_i = old_population[i].fitness;

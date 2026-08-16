@@ -5,6 +5,8 @@ use rand::prelude::*;
 pub struct ABCSolver {
     pub config: SolverConfig,
     pub limit: usize, // Abandonment limit for scout bees
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl ABCSolver {
@@ -13,11 +15,18 @@ impl ABCSolver {
         Self { 
             config,
             limit: 100, // Placeholder, will be adjusted in solve
+            seed: None,
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;

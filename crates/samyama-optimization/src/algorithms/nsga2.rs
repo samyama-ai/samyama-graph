@@ -5,18 +5,27 @@ use rand::prelude::*;
 pub struct NSGA2Solver {
     pub config: SolverConfig,
     pub mutation_rate: f64,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl NSGA2Solver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { 
+        Self {
+            seed: None, 
             config,
             mutation_rate: 0.1,
         }
     }
 
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     pub fn solve<P: MultiObjectiveProblem>(&self, problem: &P) -> MultiObjectiveResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -205,7 +214,7 @@ impl NSGA2Solver {
     }
 
     fn tournament_select<'a>(&self, population: &'a [MultiObjectiveIndividual]) -> &'a MultiObjectiveIndividual {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
         
@@ -219,7 +228,7 @@ impl NSGA2Solver {
     }
 
     fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = p1.len();
         let mut c1 = p1.clone();
         let mut c2 = p2.clone();
@@ -245,7 +254,7 @@ impl NSGA2Solver {
     }
 
     fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>) {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         for i in 0..vars.len() {
             if rng.gen::<f64>() < self.mutation_rate {
                 let range = upper[i] - lower[i];

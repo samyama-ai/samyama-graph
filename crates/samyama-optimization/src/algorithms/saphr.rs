@@ -15,15 +15,24 @@ use rayon::prelude::*;
 pub struct SAPHRSolver {
     pub config: SolverConfig,
     pub epsilon: f64,
+    /// Seed for reproducible runs; `None` draws from entropy (#455).
+    pub seed: Option<u64>,
 }
 
 impl SAPHRSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { config, epsilon: 0.2 }
+        Self {
+            seed: None, config, epsilon: 0.2 }
+    }
+
+    /// Fix the seed so this solver's run can be re-derived (#455).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
-        let mut rng = thread_rng();
+        let mut rng = crate::common::rng::solver_rng(self.seed);
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
@@ -65,8 +74,9 @@ impl SAPHRSolver {
             // Updates per individual + count successes per variant.
             let updates: Vec<(Individual, usize, bool)> = population
                 .par_iter()
-                .map(|ind| {
-                    let mut local_rng = thread_rng();
+                .enumerate()
+                .map(|(__idx, ind)| {
+                    let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                     let pick: f64 = local_rng.gen();
                     let chosen = if local_rng.gen::<f64>() < self.epsilon {
                         local_rng.gen_range(0..3)
