@@ -581,11 +581,11 @@ impl QueryPlanner {
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         Self::reject_unevaluated_property_exprs(query)?;
-        let mut plan = self.plan_inner(query, store)?;
-        if query.return_clause.as_ref().is_some_and(|r| r.distinct) {
-            plan.root = Box::new(DistinctOperator::new(plan.root));
-        }
-        Ok(plan)
+        // `DISTINCT` is inserted inside `plan_inner`, below SKIP and LIMIT.
+        // Wrapping the finished plan here put it *above* them, so `LIMIT n`
+        // took n duplicate-bearing rows and DISTINCT then collapsed them --
+        // `RETURN DISTINCT p.city LIMIT 3` returned one row (#522).
+        self.plan_inner(query, store)
     }
 
     fn plan_inner(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
@@ -1853,6 +1853,25 @@ impl QueryPlanner {
                     output_columns.push(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
+        }
+
+        // DISTINCT, before SKIP and LIMIT.
+        //
+        // openCypher evaluates `RETURN DISTINCT` ahead of `ORDER BY`, `SKIP`
+        // and `LIMIT`: the projection is deduplicated, and only then is the
+        // result ordered and sliced. Deduplicating afterwards means `LIMIT n`
+        // slices a list that still contains duplicates, so fewer than n rows
+        // survive -- and `SKIP k` skips raw rows rather than distinct ones,
+        // which can leave the row it was meant to skip in the output (#522).
+        //
+        // `DistinctOperator` is a streaming, first-occurrence-wins filter, so
+        // placing it above the sort preserves the ordering the sort produced;
+        // no second sort is needed. Both plan shapes reach here with the
+        // projection already on top -- `Sort -> Project` when there is no
+        // aggregation, `Aggregate -> Project -> Sort` when there is -- so one
+        // insertion point covers both.
+        if query.return_clause.as_ref().is_some_and(|r| r.distinct) {
+            operator = Box::new(DistinctOperator::new(operator));
         }
 
         // Add SKIP if present

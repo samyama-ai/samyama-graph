@@ -7699,27 +7699,39 @@ impl PhysicalOperator for SkipOperator {
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
-        while self.skipped < self.skip {
-            if let Some(batch) = self.input.next_batch(store, batch_size)? {
-                for record in batch.records {
-                    self.skipped += 1;
-                    if self.skipped >= self.skip {
-                        // We may have extra records in this batch — collect remaining
-                        let mut remaining = vec![record];
-                        // Continue pulling from current batch not possible since we consumed it,
-                        // but we've finished skipping
-                        break;
-                    }
-                }
-                if self.skipped >= self.skip {
-                    // Start fresh from next batch
-                    break;
-                }
-            } else {
+        // Return the *remainder* of the batch the skip lands in.
+        //
+        // The previous version consumed a whole batch to count off `skip`
+        // records and then discarded it, rows past the boundary included,
+        // before asking the input for another batch it had already exhausted.
+        // `execute_plan` pulls 1024 rows at a time, so any result of 1024 rows
+        // or fewer arrives in one batch and `SKIP n` returned nothing at all
+        // (#523).
+        //
+        // `SKIP … LIMIT` hid it: `LimitOperator` requests exactly as many rows
+        // as remain under its limit, so with `SKIP 2 LIMIT 2` the skip
+        // consumed a 2-row batch and the next request returned the right two.
+        // The boundary aligning with the batch size is not a partial fix.
+        loop {
+            let Some(batch) = self.input.next_batch(store, batch_size)? else {
                 return Ok(None);
+            };
+
+            let available = batch.records.len();
+            if self.skipped + available <= self.skip {
+                // The whole batch falls inside the skip.
+                self.skipped += available;
+                continue;
             }
+
+            let drop = self.skip - self.skipped;
+            self.skipped += drop;
+            let records: Vec<Record> = batch.records.into_iter().skip(drop).collect();
+            if records.is_empty() {
+                continue;
+            }
+            return Ok(Some(RecordBatch { records, columns: batch.columns }));
         }
-        self.input.next_batch(store, batch_size)
     }
 
     fn reset(&mut self) {
