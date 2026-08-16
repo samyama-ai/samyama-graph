@@ -103,16 +103,27 @@ impl GraphCatalog {
     ///
     /// For a multi-label source and multi-label target, this generates
     /// one triple entry per (src_label, edge_type, tgt_label) combination.
-    pub fn on_edge_created(
+    /// Generic over the label collections so a caller holding a `HashSet<Label>`
+    /// -- which `Node` does -- can pass it directly. `GraphStore::create_edge`
+    /// previously collected two `Vec<Label>` per edge purely to satisfy a
+    /// `&[Label]` parameter, cloning every label `String` on every insert
+    /// (#491). `&[Label]` still coerces, so existing callers are unchanged.
+    pub fn on_edge_created<'a, S, T>(
         &mut self,
         source_id: NodeId,
-        src_labels: &[Label],
+        src_labels: S,
         edge_type: &EdgeType,
         target_id: NodeId,
-        tgt_labels: &[Label],
-    ) {
+        tgt_labels: T,
+    ) where
+        S: IntoIterator<Item = &'a Label>,
+        // Clone because the inner loop re-iterates the targets for every
+        // source. `&[Label]` and `&HashSet<Label>` are both references, so the
+        // clone is a pointer copy and costs nothing.
+        T: IntoIterator<Item = &'a Label> + Clone,
+    {
         for src_label in src_labels {
-            for tgt_label in tgt_labels {
+            for tgt_label in tgt_labels.clone() {
                 let pattern = TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
 
                 // Update source degree tracking

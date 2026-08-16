@@ -1500,16 +1500,44 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_type_ids[idx] = type_id;
 
-        // Update edge type index
-        self.edge_type_index
-            .entry(edge_type.clone())
-            .or_insert_with(HashSet::new)
-            .insert(edge_id);
+        // Update edge type index. `get_mut` first so the common case -- a type
+        // already seen, which after the first few edges is every case -- does
+        // not clone the type string just to hand `entry()` a key it will throw
+        // away (#491).
+        match self.edge_type_index.get_mut(&edge_type) {
+            Some(set) => {
+                set.insert(edge_id);
+            }
+            None => {
+                self.edge_type_index
+                    .entry(edge_type.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(edge_id);
+            }
+        }
 
         // Update catalog triple stats
-        let src_labels: Vec<Label> = self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-        let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-        self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
+        // Borrow the label sets straight from the nodes rather than collecting
+        // two `Vec<Label>` per edge. The collect existed only to end the borrow
+        // on `self` before touching `self.catalog`; borrowing the two fields
+        // disjointly does the same thing without cloning a `String` per label
+        // on every single insert (#491).
+        let version = self.current_version;
+        let nodes = &self.nodes;
+        let label_set = |id: NodeId| -> Option<&std::collections::HashSet<Label>> {
+            nodes
+                .get(id.as_u64() as usize)?
+                .iter()
+                .rev()
+                .find(|n| n.version <= version)
+                .map(|n| &n.labels)
+        };
+        static NO_LABELS: std::sync::OnceLock<std::collections::HashSet<Label>> =
+            std::sync::OnceLock::new();
+        let empty = NO_LABELS.get_or_init(std::collections::HashSet::new);
+        let src_labels = label_set(source).unwrap_or(empty);
+        let tgt_labels = label_set(target).unwrap_or(empty);
+        self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
         Ok(edge_id)
     }
@@ -1579,16 +1607,44 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_properties.insert(edge_id, edge.properties.clone());
         }
 
-        // Update edge type index
-        self.edge_type_index
-            .entry(edge_type.clone())
-            .or_insert_with(HashSet::new)
-            .insert(edge_id);
+        // Update edge type index. `get_mut` first so the common case -- a type
+        // already seen, which after the first few edges is every case -- does
+        // not clone the type string just to hand `entry()` a key it will throw
+        // away (#491).
+        match self.edge_type_index.get_mut(&edge_type) {
+            Some(set) => {
+                set.insert(edge_id);
+            }
+            None => {
+                self.edge_type_index
+                    .entry(edge_type.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(edge_id);
+            }
+        }
 
         // Update catalog triple stats
-        let src_labels: Vec<Label> = self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-        let tgt_labels: Vec<Label> = self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
-        self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
+        // Borrow the label sets straight from the nodes rather than collecting
+        // two `Vec<Label>` per edge. The collect existed only to end the borrow
+        // on `self` before touching `self.catalog`; borrowing the two fields
+        // disjointly does the same thing without cloning a `String` per label
+        // on every single insert (#491).
+        let version = self.current_version;
+        let nodes = &self.nodes;
+        let label_set = |id: NodeId| -> Option<&std::collections::HashSet<Label>> {
+            nodes
+                .get(id.as_u64() as usize)?
+                .iter()
+                .rev()
+                .find(|n| n.version <= version)
+                .map(|n| &n.labels)
+        };
+        static NO_LABELS: std::sync::OnceLock<std::collections::HashSet<Label>> =
+            std::sync::OnceLock::new();
+        let empty = NO_LABELS.get_or_init(std::collections::HashSet::new);
+        let src_labels = label_set(source).unwrap_or(empty);
+        let tgt_labels = label_set(target).unwrap_or(empty);
+        self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
         Ok(edge_id)
     }

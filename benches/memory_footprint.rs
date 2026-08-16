@@ -145,6 +145,7 @@ fn main() {
     let base_heap = live_heap();
     let base_calls = alloc_calls();
     let base_rss = rss();
+    let t_start = std::time::Instant::now();
 
     // Phase 1: nodes only.
     let mut store = GraphStore::new();
@@ -156,6 +157,7 @@ fn main() {
     }
     let after_bare_nodes = live_heap();
     let calls_bare_nodes = alloc_calls();
+    let t_nodes = t_start.elapsed();
 
     // Phase 2: node properties.
     for (i, &id) in node_ids.iter().enumerate() {
@@ -174,6 +176,7 @@ fn main() {
     }
     let after_props = live_heap();
     let calls_props = alloc_calls();
+    let t_props = t_start.elapsed();
 
     // Phase 3: edges.
     let edge_types = ["KNOWS", "LIKES", "MEMBER_OF", "HAS_TAG"];
@@ -188,6 +191,7 @@ fn main() {
     }
     let after_edges = live_heap();
     let calls_edges = alloc_calls();
+    let t_edges = t_start.elapsed();
 
     // Phase 4: statistics (the planner's view; built lazily elsewhere).
     let _stats = store.statistics();
@@ -220,6 +224,15 @@ fn main() {
         (calls_props - calls_bare_nodes) as f64 / scale as f64,
         calls_edges - calls_props,
         if edges > 0 { (calls_edges - calls_props) as f64 / edges as f64 } else { 0.0 },
+    );
+    // Throughput matters as much as bytes here: allocation count caps insert
+    // rate independently of how much memory each object ends up occupying,
+    // which is the PERF-14 half of this measurement.
+    let edge_secs = (t_edges - t_props).as_secs_f64();
+    println!(
+        "insert rate: {:.0} nodes/s, {:.0} edges/s",
+        scale as f64 / t_nodes.as_secs_f64().max(1e-9),
+        edges as f64 / edge_secs.max(1e-9),
     );
     println!();
     println!("nodes: {scale}    edges: {edges}");
