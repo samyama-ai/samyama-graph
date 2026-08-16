@@ -944,17 +944,29 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.incoming.resize(idx + 1, Vec::new());
         }
 
-        let event = crate::graph::event::IndexEvent::NodeCreated {
-            tenant_id: "default".to_string(),
-            id: node_id,
-            labels: node.labels.iter().cloned().collect(),
-            properties: node.properties.clone(),
-        };
-
+        // Build the event only where it is actually consumed. A subscriber may
+        // care about a bare node creation, so the sender path always gets one;
+        // the local path only indexes *properties*, and `Node::new` starts with
+        // none, so constructing the event there allocated a tenant String, a
+        // Vec of cloned labels and a properties clone to feed a loop that
+        // iterates zero times (#491).
         if let Some(sender) = &self.index_sender {
-            let _ = sender.send(event);
-        } else {
-            self.handle_index_event(event, None);
+            let _ = sender.send(crate::graph::event::IndexEvent::NodeCreated {
+                tenant_id: "default".to_string(),
+                id: node_id,
+                labels: node.labels.iter().cloned().collect(),
+                properties: node.properties.clone(),
+            });
+        } else if !node.properties.is_empty() {
+            self.handle_index_event(
+                crate::graph::event::IndexEvent::NodeCreated {
+                    tenant_id: "default".to_string(),
+                    id: node_id,
+                    labels: node.labels.iter().cloned().collect(),
+                    properties: node.properties.clone(),
+                },
+                None,
+            );
         }
 
         self.nodes[idx].push(node);
@@ -1004,17 +1016,26 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.incoming.resize(idx + 1, Vec::new());
         }
 
-        let event = crate::graph::event::IndexEvent::NodeCreated {
-            tenant_id: tenant_id.to_string(),
-            id: node_id,
-            labels: node.labels.iter().cloned().collect(),
-            properties: node.properties.clone(),
-        };
-
+        // Same as `create_node`: the local path only indexes properties, so
+        // building the event for a property-less node allocates to feed a loop
+        // that iterates zero times (#491).
         if let Some(sender) = &self.index_sender {
-            let _ = sender.send(event);
-        } else {
-            self.handle_index_event(event, None);
+            let _ = sender.send(crate::graph::event::IndexEvent::NodeCreated {
+                tenant_id: tenant_id.to_string(),
+                id: node_id,
+                labels: node.labels.iter().cloned().collect(),
+                properties: node.properties.clone(),
+            });
+        } else if !node.properties.is_empty() {
+            self.handle_index_event(
+                crate::graph::event::IndexEvent::NodeCreated {
+                    tenant_id: tenant_id.to_string(),
+                    id: node_id,
+                    labels: node.labels.iter().cloned().collect(),
+                    properties: node.properties.clone(),
+                },
+                None,
+            );
         }
 
         self.nodes[idx].push(node);
