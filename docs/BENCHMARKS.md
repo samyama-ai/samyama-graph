@@ -16,9 +16,9 @@ cargo bench --bench hierarchy_benchmark        # index micro-benchmarks
 ```
 
 Every query is answered twice — once with the hierarchy indexes declared, once without —
-and the unindexed run is the ground truth. **108/108 agree**; 4 (class H9,
-hierarchy-filtered vector search) are specified but blocked by a `CALL … YIELD`
-composition gap.
+and the unindexed run is the ground truth. **112/112 agree.** Class H9
+(hierarchy-filtered vector search) was specified but skipped behind a `CALL … YIELD`
+composition gap; #443 removed that skip and its four queries now run and agree.
 
 | Class | n | Speedup | Class | n | Speedup |
 |---|---:|---:|---|---:|---:|
@@ -26,7 +26,13 @@ composition gap.
 | H2 single roll-up | 24 | **8596×** | H7 lowest common ancestor | 10 | 1.7× |
 | H3 level roll-up | 9 | 5.9× | H8 top-k over roll-up | 8 | 5.3× |
 | H4 cross-hierarchy | 12 | 1.1× | H10 temporal windows | 10 | 108.5× |
-| H5 hierarchy × traversal | 10 | **27.4×** | **All** | **108** | **3.0×** |
+| H5 hierarchy × traversal | 10 | **27.4×** | H9 hierarchy × vector | 4 | 0.9× |
+| | | | **All** | **112** | **see note** |
+
+> **Provenance.** The per-class speedups above were measured before #443 unblocked H9, so they
+> cover 108 of the 112 queries. H9 itself measures ~0.9× — vector × hierarchy composes but is not
+> ordered by selectivity (#445). The class figures need a re-run on the documented hardware; the
+> 112/112 agreement above is from the current corpus and is not hardware-dependent.
 
 Against **Neo4j** on an identical graph: H2 **1124×**, H10 144×, H3 88×, H1 9.1×, H5 8.2× —
 **94× across the 58 queries expressible on both engines**, with no class losing. Without the
@@ -41,6 +47,12 @@ including the engine gaps the corpus surfaced.
 ## LDBC SNB Interactive
 
 Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/benchmarks/snb/) read workload (IS1–IS7 short reads, IC1–IC14 complex reads), at two scale factors. In-process (embedded) timing, 1 warm-up + 3 timed runs, median latency. Provenance: commit `31a7e77`, id-indexes built on all anchor labels.
+
+> **These numbers are unverified and should not be quoted.** They were produced by a harness that
+> counted a read returning **zero rows as a pass** (#449), so it could not distinguish a fast query
+> from one that measured nothing. #450 fixed that, adding an `EMPTY` status and making the run exit
+> non-zero on any empty read. Which cells below are affected cannot be determined retroactively, so
+> the table needs a re-run on the documented hardware under the fixed harness before it is used.
 
 | Scale | Nodes | Edges | Load |
 |---|---|---|---|
