@@ -1,28 +1,58 @@
 //! Columnar storage implementation for node and edge properties.
 //!
-//! Sparse HashMap-based columns: only entries that exist are stored.
+//! Sparse hash-map-based columns: only entries that exist are stored.
 //! No memory waste for multi-label graphs where properties differ per label.
 //! E.g., "title" only stored for Article nodes, not for Author/MeSH/Chemical nodes.
+//!
+//! # Cost of a read, and what it is not
+//!
+//! A property read is **two hash lookups**: the property name to a column, then
+//! the row index to a value. Measured over a million integer reads in id order
+//! (#531):
+//!
+//! | access | ns |
+//! |---|---:|
+//! | `get_property` with `std::collections::HashMap` | 222.4 |
+//! | `get_property` with `FxHashMap` (this) | see the bench |
+//! | a dense `Vec<i64>` index | 1.3 |
+//!
+//! The hash function is the part this module can cheaply control, and that is
+//! what `FxHashMap` addresses here — `std`'s `SipHash` is a DoS-resistant hash
+//! being asked to hash a `usize`, which is not the threat model of a row index.
+//!
+//! **Most of the remaining cost is not the hash.** At a million rows the inner
+//! table is tens of megabytes and the hash scatters access, so a scan in id
+//! order — the friendliest order there is — still misses cache on nearly every
+//! row. Fixing that means a dense array with a presence bitmap for the columns
+//! that are dense enough to deserve one, which is #531's Phase 2 and a real
+//! design task: the sparsity argument above is genuine, and a dense array over
+//! a rare property in a 66M-node graph would be worse than what is here.
+//!
+//! So: this is the cheap half, it is measured, and it does not close #531.
 
 use crate::graph::PropertyValue;
 use crate::graph::types::NodeId;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
-/// A single property column — sparse HashMap indexed by node/edge index.
+/// A single property column — sparse map indexed by node/edge index.
 /// Only entries that are explicitly set consume memory.
+///
+/// Keyed with `FxHashMap`: the key is a row index, and `std`'s `SipHash` costs
+/// more to compute than the lookup it protects (#531).
 #[derive(Debug, Clone)]
 pub enum Column {
-    Int(HashMap<usize, i64>),
-    Float(HashMap<usize, f64>),
-    String(HashMap<usize, String>),
-    Bool(HashMap<usize, bool>),
+    Int(FxHashMap<usize, i64>),
+    Float(FxHashMap<usize, f64>),
+    String(FxHashMap<usize, String>),
+    Bool(FxHashMap<usize, bool>),
 }
 
 impl Column {
-    pub fn new_int() -> Self { Column::Int(HashMap::new()) }
-    pub fn new_float() -> Self { Column::Float(HashMap::new()) }
-    pub fn new_string() -> Self { Column::String(HashMap::new()) }
-    pub fn new_bool() -> Self { Column::Bool(HashMap::new()) }
+    pub fn new_int() -> Self { Column::Int(FxHashMap::default()) }
+    pub fn new_float() -> Self { Column::Float(FxHashMap::default()) }
+    pub fn new_string() -> Self { Column::String(FxHashMap::default()) }
+    pub fn new_bool() -> Self { Column::Bool(FxHashMap::default()) }
 
     pub fn set(&mut self, idx: usize, value: PropertyValue) {
         match (self, value) {
@@ -79,8 +109,11 @@ impl Column {
 /// Manages multiple property columns.
 #[derive(Debug, Default, Clone)]
 pub struct ColumnStore {
-    /// Mapping from property key -> Column
-    columns: HashMap<String, Column>,
+    /// Mapping from property key -> Column.
+    ///
+    /// Also `FxHashMap`: property names are short, the set of them is small
+    /// and fixed after load, and this lookup happens on every property read.
+    columns: FxHashMap<String, Column>,
 }
 
 impl ColumnStore {

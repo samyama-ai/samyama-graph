@@ -108,6 +108,14 @@ samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.0" }
 http-body-util = "0.1"
 
 [[bench]]
+name = "aggregate_throughput"
+harness = false
+
+[[bench]]
+name = "property_access"
+harness = false
+
+[[bench]]
 name = "ingest_profile"
 harness = false
 
