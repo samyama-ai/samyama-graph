@@ -1,3 +1,26 @@
-{"personId": 24189255816110, "person2Id": 24189255820514, "postId": 1236950581248, "messageId": 1236950581248,
- "firstName": "Christopher", "tagName": "Hamid_Karzai", "countryX": "India", "countryY": "Pakistan",
- "tagClassName": "MusicalArtist", "maxDate": 1354320000000, "startDate": 1338508800000, "endDate": 1341100800000}
+{
+  "_comment": [
+    "Substitution parameters for benches/ldbc_benchmark.rs at SF1.",
+    "",
+    "LDBC ids are assigned per `datagen` run and are NOT portable between",
+    "extracts. These values match the dataset that scripts/download_ldbc_snb.sh",
+    "fetches, and are the same as the benchmark's built-in defaults -- so on that",
+    "dataset you do not need this file at all.",
+    "",
+    "It exists as a template for other scale factors and other extracts. If your",
+    "reads come back EMPTY, the ids do not match your data: derive new ones from",
+    "your own CSVs rather than editing these by hand."
+  ],
+  "personId": 933,
+  "person2Id": 4139,
+  "postId": 1236950581248,
+  "messageId": 1236950581249,
+  "firstName": "Mahinda",
+  "tagName": "Hamid_Karzai",
+  "countryX": "India",
+  "countryY": "Pakistan",
+  "tagClassName": "MusicalArtist",
+  "maxDate": 1354320000000,
+  "startDate": 1338508800000,
+  "endDate": 1341100800000
+}
