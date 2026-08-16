@@ -181,6 +181,40 @@ docs(quickstart): clarify RESP connection steps
 
 Small, well-scoped PRs are reviewed and merged faster than large ones.
 
+### What CI runs, and when
+
+| Workflow | Trigger | What it does | Typical time |
+|---|---|---|---|
+| **CI** (`ci.yml`) | every PR, push to `main` | `cargo test --workspace` (dev profile) and `cargo check --all-targets` | ~7 min |
+| **Nightly sweep** (`nightly.yml`) | 02:30 UTC, or manual dispatch | `scripts/verify-sweep.sh` — tests, every example, every bench, every case study | ~50 min |
+| **GPU CI** (`gpu-ci.yml`) | manual dispatch only | GPU-path tests on a self-hosted runner | — |
+
+**`test (ubuntu-latest)` is a required check on `main`.** A PR cannot merge until
+it passes.
+
+Tests run in the **dev** profile, not release. Release compilation of the test
+binaries is what costs the wall-clock time; the tests themselves run in under a
+second either way. If your change needs release-profile timings, it belongs in
+the nightly sweep.
+
+`cargo fmt --check` and `cargo clippy -D warnings` are **not** currently gated —
+the tree has ~5,000 format diffs and ~680 clippy warnings, so either gate would
+be red from its first run. Adopting them is tracked in
+[#487](https://github.com/samyama-ai/samyama-graph/issues/487). Please do not
+reformat files you are not otherwise touching; it makes review harder and the
+mechanical reformat is planned as a single reviewable commit.
+
+You can run the fast lane locally before pushing:
+
+```bash
+cargo test --workspace          # what the PR check runs
+./scripts/verify-sweep.sh       # what the nightly runs
+```
+
+The nightly's bench timings come from a shared hosted runner and are **not
+comparable between runs** — they answer "does it still run", not "how fast".
+Published numbers come from a recorded host.
+
 ## Where to Start
 
 Good first contributions, roughly easiest to hardest:
