@@ -202,8 +202,26 @@ pub struct PropertyStats {
     /// Estimated number of distinct values
     pub distinct_count: usize,
     /// Selectivity: probability of matching a random value (1/distinct_count)
+    ///
+    /// This is the uniform-distribution assumption. It is exactly right when
+    /// the data is uniform and wrong in both directions at once when it is
+    /// not -- measured at 30% of values within 2x under heavy skew, with the
+    /// most common value underestimated 5x while the rarest was overestimated
+    /// 20x (`benches/cardinality_accuracy.rs`, #478). `most_common` is what
+    /// corrects the head of the distribution, where that damage concentrates.
     pub selectivity: f64,
+    /// The most frequently observed values and their sampled frequency, as a
+    /// fraction of non-null observations. Bounded to `MAX_MCV` entries.
+    ///
+    /// Empty when a property was never sampled, which is why the value-aware
+    /// estimator falls back rather than assuming absence means rarity.
+    pub most_common: Vec<(PropertyValue, f64)>,
 }
+
+/// How many values to retain per (label, property). Small on purpose: the
+/// point is to capture the head of a skewed distribution, and the tail is what
+/// histograms are for.
+pub const MAX_MCV: usize = 16;
 
 impl GraphStatistics {
     /// Estimate the number of rows from a label scan
@@ -219,12 +237,58 @@ impl GraphStatistics {
         }
     }
 
-    /// Estimate selectivity of an equality filter on a property
+    /// Estimate selectivity of an equality filter on a property.
+    ///
+    /// Value-agnostic, and therefore uniform-assuming. Prefer
+    /// [`Self::estimate_equality_selectivity_for_value`] wherever the compared
+    /// value is known -- which, at the one planner call site, it is.
     pub fn estimate_equality_selectivity(&self, label: &Label, property: &str) -> f64 {
         self.property_stats
             .get(&(label.clone(), property.to_string()))
             .map(|ps| ps.selectivity)
             .unwrap_or(0.1) // Default 10% selectivity
+    }
+
+    /// Estimate selectivity of `property = value`, using the most-common-value
+    /// list when the value is in it.
+    ///
+    /// The uniform estimate is `1/distinct_count` for every value alike. Under
+    /// skew that is wrong in both directions simultaneously -- too low for the
+    /// values that dominate the scan and too high for the ones that barely
+    /// occur -- which inverts the plan ordering rather than merely blurring it.
+    /// An MCV hit answers with the frequency actually observed.
+    ///
+    /// A miss deliberately does **not** assume the value is rare. It could be
+    /// absent from the list because it is genuinely uncommon, or because the
+    /// sample missed it; guessing "rare" on the second case reintroduces the
+    /// under-estimate this exists to remove. Instead the residual mass not
+    /// covered by the MCVs is spread over the remaining distinct values, which
+    /// is the standard treatment and degrades to the old answer when there are
+    /// no MCVs at all.
+    pub fn estimate_equality_selectivity_for_value(
+        &self,
+        label: &Label,
+        property: &str,
+        value: &PropertyValue,
+    ) -> f64 {
+        let Some(ps) = self.property_stats.get(&(label.clone(), property.to_string())) else {
+            return 0.1;
+        };
+        if let Some((_, freq)) = ps.most_common.iter().find(|(v, _)| v == value) {
+            return *freq;
+        }
+        if ps.most_common.is_empty() {
+            return ps.selectivity;
+        }
+        let mcv_mass: f64 = ps.most_common.iter().map(|(_, f)| *f).sum();
+        let remaining_mass = (1.0 - mcv_mass).max(0.0);
+        let remaining_distinct = ps.distinct_count.saturating_sub(ps.most_common.len());
+        if remaining_distinct == 0 {
+            // Every distinct value is in the list and this is not one of them.
+            // Still not zero: the sample may simply not have seen it.
+            return ps.selectivity.min(remaining_mass.max(f64::EPSILON));
+        }
+        remaining_mass / remaining_distinct as f64
     }
 
     /// Format statistics as human-readable text
@@ -2440,6 +2504,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             let sample_size = node_ids.len().min(1000);
             let mut property_presence: HashMap<String, usize> = HashMap::new();
             let mut property_distinct: HashMap<String, HashSet<u64>> = HashMap::new();
+            // Observed counts per value, keyed by hash with one representative
+            // value retained, so the most common values can be reported without
+            // holding every distinct value seen.
+            let mut property_values: HashMap<String, HashMap<u64, (PropertyValue, usize)>> =
+                HashMap::new();
 
             for (i, &node_id) in node_ids.iter().enumerate() {
                 if i >= sample_size { break; }
@@ -2461,6 +2530,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                             hasher.finish()
                         };
                         property_distinct.entry(key.clone()).or_default().insert(hash);
+
+                        let counts = property_values.entry(key.clone()).or_default();
+                        // Bound the working set: once enough distinct values
+                        // have been seen to pick a head from, stop adding new
+                        // ones and only keep counting the ones already tracked.
+                        if counts.len() < MAX_MCV * 8 || counts.contains_key(&hash) {
+                            let slot = counts.entry(hash).or_insert_with(|| (val.clone(), 0));
+                            slot.1 += 1;
+                        }
                     }
                 }
             }
@@ -2468,10 +2546,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             for (prop, count) in &property_presence {
                 let distinct = property_distinct.get(prop).map(|s| s.len()).unwrap_or(0);
                 let selectivity = if distinct > 0 { 1.0 / distinct as f64 } else { 1.0 };
+
+                // Most common values, as a fraction of the non-null
+                // observations for this property.
+                let mut most_common: Vec<(PropertyValue, f64)> = Vec::new();
+                if let Some(counts) = property_values.get(prop) {
+                    let observed = *count as f64;
+                    if observed > 0.0 {
+                        let mut ranked: Vec<&(PropertyValue, usize)> = counts.values().collect();
+                        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+                        most_common = ranked
+                            .into_iter()
+                            .take(MAX_MCV)
+                            .map(|(v, c)| (v.clone(), *c as f64 / observed))
+                            .collect();
+                    }
+                }
+
                 property_stats.insert((label.clone(), prop.clone()), PropertyStats {
                     null_fraction: 1.0 - (*count as f64 / sample_size as f64),
                     distinct_count: distinct,
                     selectivity,
+                    most_common,
                 });
             }
         }

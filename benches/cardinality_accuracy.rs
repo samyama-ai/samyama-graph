@@ -135,34 +135,63 @@ fn main() {
         println!("  {:<8} {:>10} {:>12} {:>10}", "value", "actual", "estimate", "est/actual");
 
         let mut ratios: Vec<f64> = Vec::new();
+        let mut mcv_ratios: Vec<f64> = Vec::new();
         let mut sorted: Vec<(&String, &usize)> = truth.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
+        println!("  {:<8} {:>10} {:>12} {:>10} {:>12} {:>10}", "", "", "uniform", "", "value-aware", "");
         for (value, actual) in &sorted {
             let ratio = if **actual > 0 { estimated_rows / **actual as f64 } else { f64::INFINITY };
             ratios.push(ratio);
-            println!("  {:<8} {:>10} {:>12.0} {:>9.2}x", value, actual, estimated_rows, ratio);
+
+            let mcv_sel = stats.estimate_equality_selectivity_for_value(
+                &label,
+                "prop",
+                &PropertyValue::String((*value).clone()),
+            );
+            let mcv_rows = label_count as f64 * mcv_sel;
+            let mcv_ratio = if **actual > 0 { mcv_rows / **actual as f64 } else { f64::INFINITY };
+            mcv_ratios.push(mcv_ratio);
+
+            println!(
+                "  {:<8} {:>10} {:>12.0} {:>9.2}x {:>12.0} {:>9.2}x",
+                value, actual, estimated_rows, ratio, mcv_rows, mcv_ratio
+            );
         }
 
         // The question PERF-08 actually asks.
-        let within_2x = ratios.iter().filter(|r| **r >= 0.5 && **r <= 2.0).count();
-        let worst = ratios.iter().cloned().fold(1.0f64, |a, b| {
-            let err = if b >= 1.0 { b } else { 1.0 / b };
-            a.max(err)
-        });
+        let score = |rs: &[f64]| -> (usize, f64) {
+            let w = rs.iter().filter(|r| **r >= 0.5 && **r <= 2.0).count();
+            let worst = rs.iter().cloned().fold(1.0f64, |a, b| {
+                let err = if b >= 1.0 { b } else { 1.0 / b };
+                a.max(err)
+            });
+            (w, worst)
+        };
+        let (within_2x, worst) = score(&ratios);
+        let (mcv_within_2x, mcv_worst) = score(&mcv_ratios);
         println!(
-            "  within 2x: {}/{} ({:.0}%)   worst error: {:.1}x",
+            "  uniform      within 2x: {}/{} ({:.0}%)   worst: {:.1}x",
             within_2x,
             ratios.len(),
             100.0 * within_2x as f64 / ratios.len() as f64,
             worst
         );
+        println!(
+            "  value-aware  within 2x: {}/{} ({:.0}%)   worst: {:.1}x",
+            mcv_within_2x,
+            mcv_ratios.len(),
+            100.0 * mcv_within_2x as f64 / mcv_ratios.len() as f64,
+            mcv_worst
+        );
 
         json_cases.push(format!(
-            "{{\"case\": \"{}\", \"values\": {}, \"within_2x\": {}, \"worst_error\": {:.2}}}",
+            "{{\"case\": \"{}\", \"values\": {}, \"within_2x_uniform\": {}, \"worst_error_uniform\": {:.2}, \"within_2x_value_aware\": {}, \"worst_error_value_aware\": {:.2}}}",
             case.name,
             ratios.len(),
             within_2x,
-            worst
+            worst,
+            mcv_within_2x,
+            mcv_worst
         ));
     }
 

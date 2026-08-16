@@ -3367,8 +3367,12 @@ fn choose_anchor_index(nodes: &[PathNodeRef], path_preds: &[Expression], store: 
                 Some(n) => n as f64,
                 None => {
                     let base = stats.estimate_label_scan(&label) as f64;
+                    // Value-aware: the uniform `1/distinct_count` answer is
+                    // wrong in both directions under skew, which inverts the
+                    // ordering between common and rare anchors rather than
+                    // just blurring it (#478).
                     let selectivity = if matches!(op, BinaryOp::Eq) {
-                        stats.estimate_equality_selectivity(&label, &property)
+                        stats.estimate_equality_selectivity_for_value(&label, &property, &val)
                     } else {
                         0.3
                     };
