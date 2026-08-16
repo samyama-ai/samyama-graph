@@ -33,6 +33,14 @@ struct Fixture {
     store: GraphStore,
     /// Row indices to read, in ascending order.
     rows: Vec<usize>,
+    /// Node ids carrying the same values in *row* storage rather than columns.
+    ///
+    /// The engine has two property paths and they perform very differently.
+    /// `set_node_property` writes both; snapshot import writes only columns;
+    /// and the LDBC loader writes only rows, via `node.set_property`. So the
+    /// benchmark suite every performance decision rests on exercises the path
+    /// that published `.sgsnap` KGs do not use (#534).
+    row_nodes: Vec<samyama::graph::NodeId>,
 }
 
 /// `rows` nodes, of which one in `fill` carries the `sparse` property.
@@ -58,7 +66,19 @@ fn build(rows: usize, fill: usize) -> Fixture {
         }
         indices.push(id.as_u64() as usize);
     }
-    Fixture { store, rows: indices }
+
+    // A second population whose properties live only in row storage, written
+    // the way the LDBC loader writes them.
+    let mut row_nodes = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let id = store.create_node("RowStored");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("row_int", PropertyValue::Integer(i as i64));
+        }
+        row_nodes.push(id);
+    }
+
+    Fixture { store, rows: indices, row_nodes }
 }
 
 fn time<F: FnMut() -> u64>(label: &str, count: usize, mut f: F) -> f64 {
@@ -147,6 +167,19 @@ fn main() {
             for &idx in ids {
                 if let PropertyValue::Integer(v) = col.get(idx) {
                     acc = acc.wrapping_add(v as u64);
+                }
+            }
+        }
+        acc
+    });
+
+    let row_nodes = &fx.row_nodes;
+    time("row storage, node.properties HashMap", rows, || {
+        let mut acc = 0u64;
+        for &id in row_nodes {
+            if let Some(node) = fx.store.get_node(id) {
+                if let Some(PropertyValue::Integer(v)) = node.get_property("row_int") {
+                    acc = acc.wrapping_add(*v as u64);
                 }
             }
         }

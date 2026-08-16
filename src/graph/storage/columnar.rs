@@ -35,31 +35,314 @@ use crate::graph::types::NodeId;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
-/// A single property column — sparse map indexed by node/edge index.
-/// Only entries that are explicitly set consume memory.
+/// How one column stores its values.
 ///
-/// Keyed with `FxHashMap`: the key is a row index, and `std`'s `SipHash` costs
-/// more to compute than the lookup it protects (#531).
+/// A column is dense whenever dense is *smaller*; see [`dense_is_smaller`].
+/// That rule serves both goals at once -- reads become an indexed load rather
+/// than a hash lookup (`PERF-05`), and the store never grows (`PERF-10`,
+/// `SLT-3`, currently red) -- which is why the decision is computed rather
+/// than tuned.
+#[derive(Debug, Clone)]
+pub enum ColumnData<T> {
+    /// Scattered rows: a hash map from row index to value.
+    Sparse(FxHashMap<usize, T>),
+    /// A contiguous band of rows: `values[idx - base]`, with a presence bit
+    /// per slot so an absent row is distinguishable from a stored default.
+    ///
+    /// `base` is not decoration. Node indices run from a counter, but a
+    /// *label's* rows sit in a contiguous band inside that range -- LDBC loads
+    /// Places, Organisations, Tags, Persons, Forums, Posts, then Comments, so
+    /// `Post.content` is 1.19M consecutive indices starting above 1.1M. Without
+    /// a base, a dense array for it would allocate the whole unused prefix.
+    Dense {
+        base: usize,
+        values: Vec<T>,
+        /// One bit per slot, `present[i / 64] & (1 << (i % 64))`.
+        present: Vec<u64>,
+        /// How many slots are present.
+        ///
+        /// Kept rather than counted: `len()` is consulted on every write that
+        /// lands outside the span, and popcounting the bitmap there would make
+        /// loading a column quadratic in its length.
+        count: usize,
+    },
+}
+
+/// Is a dense array smaller than a hash map for this shape?
+///
+/// `hashbrown` stores `(usize, T)` plus one control byte per bucket at a load
+/// factor of 7/8, so a sparse entry costs `(8 + size_of::<T>() + 1) * 8/7`.
+/// A dense slot costs `size_of::<T>()` plus one presence bit, whether or not
+/// the row is present -- so the comparison is per *span*, not per entry.
+///
+/// The break-even fill factor therefore depends on the element size, and a
+/// single global threshold would either waste memory on `String` columns or
+/// leave speed unclaimed on `bool` ones:
+///
+/// | T | sparse B/entry | dense B/slot | break-even fill |
+/// |---|---:|---:|---:|
+/// | `bool` | 11.4 | 1.125 | 0.10 |
+/// | `i64`, `f64` | 19.4 | 8.125 | 0.42 |
+/// | `String` | 37.7 | 24.125 | 0.64 |
+///
+/// String *contents* are heap-allocated either way and cancel out; only the
+/// 24-byte `String` header is counted here.
+pub fn dense_is_smaller(span: usize, entries: usize, elem_bytes: usize) -> bool {
+    if span == 0 || entries == 0 {
+        return false;
+    }
+    // Scaled by 8 throughout to stay in integer arithmetic: a floating-point
+    // threshold in a storage decision invites a platform-dependent layout.
+    let dense_bits = span.saturating_mul(elem_bytes.saturating_mul(8) + 1);
+    let sparse_bits = entries
+        .saturating_mul((8 + elem_bytes + 1) * 8 * 8)
+        / 7;
+    dense_bits < sparse_bits
+}
+
+impl<T: Clone + Default> ColumnData<T> {
+    fn new() -> Self {
+        ColumnData::Sparse(FxHashMap::default())
+    }
+
+    fn get(&self, idx: usize) -> Option<&T> {
+        match self {
+            ColumnData::Sparse(m) => m.get(&idx),
+            ColumnData::Dense { base, values, present, .. } => {
+                let slot = idx.checked_sub(*base)?;
+                if slot >= values.len() || !bit(present, slot) {
+                    return None;
+                }
+                Some(&values[slot])
+            }
+        }
+    }
+
+    fn has(&self, idx: usize) -> bool {
+        self.get(idx).is_some()
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            ColumnData::Sparse(m) => m.len(),
+            ColumnData::Dense { count, .. } => *count,
+        }
+    }
+
+    fn remove(&mut self, idx: usize) {
+        match self {
+            ColumnData::Sparse(m) => {
+                m.remove(&idx);
+            }
+            ColumnData::Dense { base, values, present, count } => {
+                // Clear the presence bit and the value. Node ids are recycled
+                // through a free list, so a deleted node's slot goes to the
+                // next `create_node`; leaving the old value behind is how
+                // deleted data reappeared on new nodes (#364). Clearing the
+                // bit alone would be enough for `get`, but not for anything
+                // that walks `values` directly.
+                if let Some(slot) = idx.checked_sub(*base) {
+                    if slot < values.len() && bit(present, slot) {
+                        clear_bit(present, slot);
+                        values[slot] = T::default();
+                        *count -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn set(&mut self, idx: usize, value: T) {
+        match self {
+            ColumnData::Sparse(m) => {
+                m.insert(idx, value);
+                self.maybe_promote();
+            }
+            ColumnData::Dense { base, values, present, count } => {
+                if idx >= *base && idx - *base < values.len() {
+                    let slot = idx - *base;
+                    if !bit(present, slot) {
+                        set_bit(present, slot);
+                        *count += 1;
+                    }
+                    values[slot] = value;
+                    return;
+                }
+
+                // Outside the span. Extend if the wider span is still smaller
+                // than a map would be; otherwise fall back to sparse rather
+                // than allocate a range for one far-away row. One rule decides
+                // both directions, so there is no second policy to keep
+                // consistent with the first.
+                let entries = *count + 1;
+                let elem = std::mem::size_of::<T>();
+
+                if idx >= *base {
+                    // Growing upward -- the common case, and the one a load
+                    // does once per row. `Vec::resize` reserves geometrically,
+                    // so repeatedly extending by one is amortised O(1);
+                    // rebuilding into a fresh exactly-sized Vec each time (as
+                    // an earlier draft did) makes a 1M-row load quadratic.
+                    let new_span = idx - *base + 1;
+                    if dense_is_smaller(new_span, entries, elem) {
+                        values.resize(new_span, T::default());
+                        present.resize(new_span.div_ceil(64), 0);
+                        let slot = idx - *base;
+                        set_bit(present, slot);
+                        values[slot] = value;
+                        *count += 1;
+                        return;
+                    }
+                } else {
+                    // Below the base. Rare -- properties arrive in id order --
+                    // and it needs every slot shifted, so it rebuilds.
+                    let new_base = idx;
+                    let new_span = *base + values.len() - new_base;
+                    if dense_is_smaller(new_span, entries, elem) {
+                        self.rebase(new_base, new_span);
+                        let ColumnData::Dense { base, values, present, count } = self else {
+                            unreachable!("rebase leaves the column dense")
+                        };
+                        let slot = idx - *base;
+                        set_bit(present, slot);
+                        values[slot] = value;
+                        *count += 1;
+                        return;
+                    }
+                }
+
+                self.demote_to_sparse();
+                let ColumnData::Sparse(m) = self else {
+                    unreachable!("demote leaves the column sparse")
+                };
+                m.insert(idx, value);
+            }
+        }
+    }
+
+    /// Shift a dense column down to a lower base.
+    ///
+    /// Every slot moves, so this rebuilds. Only reached when a row arrives
+    /// below everything already stored, which properties loaded in id order
+    /// never do.
+    fn rebase(&mut self, new_base: usize, new_span: usize) {
+        let ColumnData::Dense { base, values, present, count } = self else {
+            return;
+        };
+        let shift = *base - new_base;
+        let mut next_values = vec![T::default(); new_span];
+        let mut next_present = vec![0u64; new_span.div_ceil(64)];
+        for slot in 0..values.len() {
+            if bit(present, slot) {
+                next_values[slot + shift] = values[slot].clone();
+                set_bit(&mut next_present, slot + shift);
+            }
+        }
+        *self = ColumnData::Dense {
+            base: new_base,
+            values: next_values,
+            present: next_present,
+            count: *count,
+        };
+    }
+
+    fn demote_to_sparse(&mut self) {
+        let ColumnData::Dense { base, values, present, .. } = self else {
+            return;
+        };
+        let mut m = FxHashMap::default();
+        for slot in 0..values.len() {
+            if bit(present, slot) {
+                m.insert(*base + slot, values[slot].clone());
+            }
+        }
+        *self = ColumnData::Sparse(m);
+    }
+
+    /// Consider promoting a sparse column to dense.
+    ///
+    /// Deciding needs the index range, which costs a scan of the map, so it is
+    /// only considered when `len` crosses a power of two at or above
+    /// [`PROMOTE_MIN_ENTRIES`]. That is amortised O(1) per insert -- checking
+    /// on every insert would make loading a column O(n^2) -- and a column that
+    /// is going to be dense becomes dense early in a load rather than at the
+    /// end of one.
+    fn maybe_promote(&mut self) {
+        let ColumnData::Sparse(m) = self else { return };
+        let len = m.len();
+        if len < PROMOTE_MIN_ENTRIES || !len.is_power_of_two() {
+            return;
+        }
+        let (Some(&min), Some(&max)) = (m.keys().min(), m.keys().max()) else {
+            return;
+        };
+        let span = max - min + 1;
+        if !dense_is_smaller(span, len, std::mem::size_of::<T>()) {
+            return;
+        }
+        let mut values = vec![T::default(); span];
+        let mut present = vec![0u64; span.div_ceil(64)];
+        for (&idx, value) in m.iter() {
+            let slot = idx - min;
+            values[slot] = value.clone();
+            set_bit(&mut present, slot);
+        }
+        *self = ColumnData::Dense { base: min, values, present, count: len };
+    }
+}
+
+/// Below this, the map is small enough that the representation does not
+/// matter and the scan to decide would cost more than it saves.
+const PROMOTE_MIN_ENTRIES: usize = 1024;
+
+#[inline]
+fn bit(words: &[u64], slot: usize) -> bool {
+    words
+        .get(slot / 64)
+        .is_some_and(|w| w & (1u64 << (slot % 64)) != 0)
+}
+
+#[inline]
+fn set_bit(words: &mut [u64], slot: usize) {
+    if let Some(w) = words.get_mut(slot / 64) {
+        *w |= 1u64 << (slot % 64);
+    }
+}
+
+#[inline]
+fn clear_bit(words: &mut [u64], slot: usize) {
+    if let Some(w) = words.get_mut(slot / 64) {
+        *w &= !(1u64 << (slot % 64));
+    }
+}
+
+/// A single property column. Only rows that are explicitly set are readable;
+/// everything else reads as [`PropertyValue::Null`].
+///
+/// The Null distinction is load-bearing rather than cosmetic: `resolve_property`
+/// treats a Null from this store as "not here, try row storage", so a dense
+/// column returning `T::default()` for an absent slot would turn a missing
+/// property into `0` or `""` -- a wrong answer rather than a slow one.
 #[derive(Debug, Clone)]
 pub enum Column {
-    Int(FxHashMap<usize, i64>),
-    Float(FxHashMap<usize, f64>),
-    String(FxHashMap<usize, String>),
-    Bool(FxHashMap<usize, bool>),
+    Int(ColumnData<i64>),
+    Float(ColumnData<f64>),
+    String(ColumnData<String>),
+    Bool(ColumnData<bool>),
 }
 
 impl Column {
-    pub fn new_int() -> Self { Column::Int(FxHashMap::default()) }
-    pub fn new_float() -> Self { Column::Float(FxHashMap::default()) }
-    pub fn new_string() -> Self { Column::String(FxHashMap::default()) }
-    pub fn new_bool() -> Self { Column::Bool(FxHashMap::default()) }
+    pub fn new_int() -> Self { Column::Int(ColumnData::new()) }
+    pub fn new_float() -> Self { Column::Float(ColumnData::new()) }
+    pub fn new_string() -> Self { Column::String(ColumnData::new()) }
+    pub fn new_bool() -> Self { Column::Bool(ColumnData::new()) }
 
     pub fn set(&mut self, idx: usize, value: PropertyValue) {
         match (self, value) {
-            (Column::Int(m), PropertyValue::Integer(val)) => { m.insert(idx, val); }
-            (Column::Float(m), PropertyValue::Float(val)) => { m.insert(idx, val); }
-            (Column::String(m), PropertyValue::String(val)) => { m.insert(idx, val); }
-            (Column::Bool(m), PropertyValue::Boolean(val)) => { m.insert(idx, val); }
+            (Column::Int(m), PropertyValue::Integer(val)) => m.set(idx, val),
+            (Column::Float(m), PropertyValue::Float(val)) => m.set(idx, val),
+            (Column::String(m), PropertyValue::String(val)) => m.set(idx, val),
+            (Column::Bool(m), PropertyValue::Boolean(val)) => m.set(idx, val),
             _ => {
                 // Type mismatch or unsupported columnar type (Map/Array/Vector)
             }
@@ -69,29 +352,29 @@ impl Column {
     /// Remove this row's value from the column, if present.
     pub fn remove(&mut self, idx: usize) {
         match self {
-            Column::Int(m) => { m.remove(&idx); }
-            Column::Float(m) => { m.remove(&idx); }
-            Column::String(m) => { m.remove(&idx); }
-            Column::Bool(m) => { m.remove(&idx); }
+            Column::Int(m) => m.remove(idx),
+            Column::Float(m) => m.remove(idx),
+            Column::String(m) => m.remove(idx),
+            Column::Bool(m) => m.remove(idx),
         }
     }
 
     pub fn get(&self, idx: usize) -> PropertyValue {
         match self {
-            Column::Int(m) => m.get(&idx).map(|&v| PropertyValue::Integer(v)).unwrap_or(PropertyValue::Null),
-            Column::Float(m) => m.get(&idx).map(|&v| PropertyValue::Float(v)).unwrap_or(PropertyValue::Null),
-            Column::Bool(m) => m.get(&idx).map(|&v| PropertyValue::Boolean(v)).unwrap_or(PropertyValue::Null),
-            Column::String(m) => m.get(&idx).map(|s| PropertyValue::String(s.clone())).unwrap_or(PropertyValue::Null),
+            Column::Int(m) => m.get(idx).map(|&v| PropertyValue::Integer(v)).unwrap_or(PropertyValue::Null),
+            Column::Float(m) => m.get(idx).map(|&v| PropertyValue::Float(v)).unwrap_or(PropertyValue::Null),
+            Column::Bool(m) => m.get(idx).map(|&v| PropertyValue::Boolean(v)).unwrap_or(PropertyValue::Null),
+            Column::String(m) => m.get(idx).map(|s| PropertyValue::String(s.clone())).unwrap_or(PropertyValue::Null),
         }
     }
 
     /// Check if a value exists at the given index.
     pub fn has(&self, idx: usize) -> bool {
         match self {
-            Column::Int(m) => m.contains_key(&idx),
-            Column::Float(m) => m.contains_key(&idx),
-            Column::String(m) => m.contains_key(&idx),
-            Column::Bool(m) => m.contains_key(&idx),
+            Column::Int(m) => m.has(idx),
+            Column::Float(m) => m.has(idx),
+            Column::String(m) => m.has(idx),
+            Column::Bool(m) => m.has(idx),
         }
     }
 
@@ -102,6 +385,17 @@ impl Column {
             Column::Float(m) => m.len(),
             Column::String(m) => m.len(),
             Column::Bool(m) => m.len(),
+        }
+    }
+
+    /// Whether this column is stored densely. Diagnostics and tests only --
+    /// no caller should behave differently based on it.
+    pub fn is_dense(&self) -> bool {
+        match self {
+            Column::Int(m) => matches!(m, ColumnData::Dense { .. }),
+            Column::Float(m) => matches!(m, ColumnData::Dense { .. }),
+            Column::String(m) => matches!(m, ColumnData::Dense { .. }),
+            Column::Bool(m) => matches!(m, ColumnData::Dense { .. }),
         }
     }
 }
@@ -172,6 +466,232 @@ impl ColumnStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enough consecutive rows to cross `PROMOTE_MIN_ENTRIES` at a power of
+    /// two, which is when promotion is considered.
+    const DENSE_N: usize = 2048;
+
+    fn dense_int_column(base: usize) -> Column {
+        let mut col = Column::new_int();
+        for i in 0..DENSE_N {
+            col.set(base + i, PropertyValue::Integer(i as i64));
+        }
+        col
+    }
+
+    #[test]
+    fn break_even_matches_the_documented_fill_factors() {
+        // The table in `dense_is_smaller`'s docs is the contract. If these
+        // move, the doc is wrong and a footprint claim built on it is too.
+        let span = 100_000;
+
+        // i64: break-even ~0.42
+        assert!(!dense_is_smaller(span, (span as f64 * 0.35) as usize, 8));
+        assert!(dense_is_smaller(span, (span as f64 * 0.50) as usize, 8));
+
+        // String header (24 B): break-even ~0.64
+        assert!(!dense_is_smaller(span, (span as f64 * 0.55) as usize, 24));
+        assert!(dense_is_smaller(span, (span as f64 * 0.75) as usize, 24));
+
+        // bool: break-even ~0.10, so a fairly sparse bool column still wins
+        assert!(dense_is_smaller(span, (span as f64 * 0.20) as usize, 1));
+        assert!(!dense_is_smaller(span, (span as f64 * 0.05) as usize, 1));
+    }
+
+    #[test]
+    fn break_even_is_never_true_for_an_empty_or_degenerate_column() {
+        assert!(!dense_is_smaller(0, 0, 8));
+        assert!(!dense_is_smaller(1000, 0, 8));
+        assert!(!dense_is_smaller(0, 1000, 8));
+    }
+
+    #[test]
+    fn break_even_does_not_overflow_on_an_absurd_span() {
+        // One property written at a very high index. The arithmetic must not
+        // wrap into "dense is smaller" and allocate the universe.
+        assert!(!dense_is_smaller(usize::MAX, 1, 8));
+        assert!(!dense_is_smaller(usize::MAX / 2, 1000, 24));
+    }
+
+    #[test]
+    fn a_contiguous_run_becomes_dense_and_reads_back_identically() {
+        let col = dense_int_column(0);
+        assert!(col.is_dense(), "a fully packed run should be stored densely");
+        assert_eq!(col.len(), DENSE_N);
+        for i in 0..DENSE_N {
+            assert_eq!(col.get(i), PropertyValue::Integer(i as i64), "row {i}");
+        }
+    }
+
+    #[test]
+    fn a_dense_column_offset_from_zero_keeps_its_base() {
+        // `Post.content` in LDBC starts above index 1.1M. A dense array that
+        // allocated from zero would waste the whole prefix.
+        let base = 1_100_000;
+        let col = dense_int_column(base);
+        assert!(col.is_dense());
+        assert_eq!(col.get(base), PropertyValue::Integer(0));
+        assert_eq!(col.get(base + DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(col.get(0), PropertyValue::Null, "nothing below the base");
+        assert_eq!(col.get(base - 1), PropertyValue::Null);
+        assert_eq!(col.get(base + DENSE_N), PropertyValue::Null);
+    }
+
+    #[test]
+    fn an_absent_slot_in_a_dense_column_reads_null_not_a_default() {
+        // The distinction `resolve_property` depends on: a Null means "not
+        // here, try row storage". Returning `T::default()` would turn a
+        // missing property into 0 or "" -- a wrong answer, not a slow one.
+        let mut col = Column::new_int();
+        for i in 0..DENSE_N {
+            if i % 3 != 1 {
+                col.set(i, PropertyValue::Integer(i as i64));
+            }
+        }
+        for i in 0..DENSE_N {
+            if i % 3 == 1 {
+                assert_eq!(col.get(i), PropertyValue::Null, "row {i} was never set");
+            } else {
+                assert_eq!(col.get(i), PropertyValue::Integer(i as i64), "row {i}");
+            }
+        }
+
+        let mut strings = Column::new_string();
+        for i in 0..DENSE_N {
+            if i % 2 == 0 {
+                strings.set(i, PropertyValue::String(format!("v{i}")));
+            }
+        }
+        assert_eq!(strings.get(1), PropertyValue::Null, "not an empty string");
+        assert_eq!(strings.get(0), PropertyValue::String("v0".to_string()));
+    }
+
+    #[test]
+    fn a_zero_value_is_still_present() {
+        // The inverse of the test above: a stored 0 must not read as absent.
+        let mut col = Column::new_int();
+        for i in 0..DENSE_N {
+            col.set(i, PropertyValue::Integer(0));
+        }
+        assert!(col.is_dense());
+        assert_eq!(col.get(5), PropertyValue::Integer(0));
+        assert!(col.has(5));
+        assert_eq!(col.len(), DENSE_N);
+    }
+
+    #[test]
+    fn a_sparse_column_stays_sparse() {
+        // One property on one node in fifty must not allocate a slot per node.
+        let mut col = Column::new_int();
+        for i in 0..DENSE_N {
+            col.set(i * 50, PropertyValue::Integer(i as i64));
+        }
+        assert!(!col.is_dense(), "a 1-in-50 column should not go dense");
+        assert_eq!(col.len(), DENSE_N);
+        assert_eq!(col.get(50), PropertyValue::Integer(1));
+        assert_eq!(col.get(51), PropertyValue::Null);
+    }
+
+    #[test]
+    fn one_far_away_row_demotes_rather_than_allocating_the_span() {
+        // The pathology the growth rule exists to prevent.
+        let mut col = dense_int_column(0);
+        assert!(col.is_dense());
+        col.set(50_000_000, PropertyValue::Integer(7));
+        assert!(!col.is_dense(), "extending to 50M slots for one row is the wrong trade");
+        // And nothing was lost on the way out.
+        assert_eq!(col.get(50_000_000), PropertyValue::Integer(7));
+        assert_eq!(col.get(0), PropertyValue::Integer(0));
+        assert_eq!(col.get(DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(col.len(), DENSE_N + 1);
+    }
+
+    #[test]
+    fn a_dense_column_grows_upward_when_the_span_still_pays() {
+        let mut col = dense_int_column(0);
+        col.set(DENSE_N, PropertyValue::Integer(-1));
+        assert!(col.is_dense(), "one row past the end is still dense");
+        assert_eq!(col.get(DENSE_N), PropertyValue::Integer(-1));
+        assert_eq!(col.get(0), PropertyValue::Integer(0));
+        assert_eq!(col.len(), DENSE_N + 1);
+    }
+
+    #[test]
+    fn a_dense_column_grows_downward_below_its_base() {
+        let base = 10_000;
+        let mut col = dense_int_column(base);
+        col.set(base - 1, PropertyValue::Integer(-1));
+        assert!(col.is_dense());
+        assert_eq!(col.get(base - 1), PropertyValue::Integer(-1));
+        assert_eq!(col.get(base), PropertyValue::Integer(0), "the old base survived the shift");
+        assert_eq!(col.get(base + DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(col.get(base - 2), PropertyValue::Null);
+        assert_eq!(col.len(), DENSE_N + 1);
+    }
+
+    #[test]
+    fn removing_from_a_dense_column_clears_the_row() {
+        // Node ids are recycled through a free list, so a deleted node's slot
+        // goes to the next create_node. A value left behind reappears on new
+        // data (#364).
+        let mut col = dense_int_column(0);
+        col.remove(10);
+        assert_eq!(col.get(10), PropertyValue::Null);
+        assert!(!col.has(10));
+        assert_eq!(col.len(), DENSE_N - 1);
+        assert_eq!(col.get(9), PropertyValue::Integer(9), "neighbours untouched");
+        assert_eq!(col.get(11), PropertyValue::Integer(11));
+
+        // And the slot is reusable.
+        col.set(10, PropertyValue::Integer(999));
+        assert_eq!(col.get(10), PropertyValue::Integer(999));
+        assert_eq!(col.len(), DENSE_N);
+    }
+
+    #[test]
+    fn removing_outside_the_span_is_a_no_op() {
+        let mut col = dense_int_column(1000);
+        col.remove(0);
+        col.remove(usize::MAX);
+        assert_eq!(col.len(), DENSE_N);
+    }
+
+    #[test]
+    fn overwriting_a_row_does_not_double_count_it() {
+        let mut col = dense_int_column(0);
+        col.set(5, PropertyValue::Integer(42));
+        assert_eq!(col.get(5), PropertyValue::Integer(42));
+        assert_eq!(col.len(), DENSE_N);
+    }
+
+    #[test]
+    fn every_column_type_round_trips_when_dense() {
+        let mut floats = Column::new_float();
+        let mut strings = Column::new_string();
+        let mut bools = Column::new_bool();
+        for i in 0..DENSE_N {
+            floats.set(i, PropertyValue::Float(i as f64 * 0.25));
+            strings.set(i, PropertyValue::String(format!("s{i}")));
+            bools.set(i, PropertyValue::Boolean(i % 2 == 0));
+        }
+        assert!(floats.is_dense() && strings.is_dense() && bools.is_dense());
+        assert_eq!(floats.get(7), PropertyValue::Float(1.75));
+        assert_eq!(strings.get(7), PropertyValue::String("s7".to_string()));
+        assert_eq!(bools.get(7), PropertyValue::Boolean(false));
+        assert_eq!(bools.get(8), PropertyValue::Boolean(true));
+        assert_eq!(floats.get(DENSE_N), PropertyValue::Null);
+    }
+
+    #[test]
+    fn a_type_mismatch_is_still_dropped_rather_than_stored() {
+        // Unchanged behaviour, asserted so the rewrite did not quietly alter
+        // it: a String into an Int column is ignored.
+        let mut col = Column::new_int();
+        col.set(0, PropertyValue::Integer(1));
+        col.set(1, PropertyValue::String("nope".to_string()));
+        assert_eq!(col.get(1), PropertyValue::Null);
+        assert_eq!(col.len(), 1);
+    }
 
     #[test]
     fn test_sparse_column_string() {
