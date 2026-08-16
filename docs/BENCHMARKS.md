@@ -56,8 +56,22 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 
 | Scale | Nodes | Edges | Load |
 |---|---|---|---|
-| **SF1** | 3,181,724 | 17,256,038 | 78.5 s |
+| **SF1** | 3,727,429 | 21,140,212 | 78.5 s |
 | **SF10** | 29,987,835 | 176,623,433 | 575 s |
+
+> **SF1 counts, and how they were obtained.** Counted from the source CSVs in
+> `social_network-sf1-CsvBasic-LongDateFormatter/`, independent of the loader: the 8 entity
+> files sum to **3,727,429** rows, and the 25 relationship files sum to 21,161,452. The
+> loader reports **21,140,212** edges; the 21,240 difference is exactly
+> `person_email_emailaddress` (10,620) plus `person_speaks_language` (10,620), which are
+> attributes stored as node properties rather than as edges. Both figures account to the row.
+>
+> The previously documented 3,181,724 / 17,256,038 matched neither, and was 17% and 22% low
+> (#500). Anything divided by those counts was wrong by the same margin.
+>
+> The load time above is unchanged: it was measured on the host recorded at the foot of this
+> section, and substituting a figure from a different machine would trade a stale number for
+> an unprovenanced one.
 
 ## Short reads (IS1–IS7)
 
