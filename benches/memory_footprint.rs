@@ -220,6 +220,7 @@ fn main() {
     }
     let after_props = live_heap();
     let calls_props = alloc_calls();
+    let hist_props = hist_snapshot();
     let t_props = t_start.elapsed();
 
     // Phase 3: edges.
@@ -252,6 +253,7 @@ fn main() {
     }
     let after_edges = live_heap();
     let calls_edges = alloc_calls();
+    let hist_edges = hist_snapshot();
     let t_edges = t_start.elapsed();
 
     // Phase 4: statistics (the planner's view; built lazily elsewhere).
@@ -316,6 +318,32 @@ fn main() {
         shown = true;
     }
     if !shown {
+        println!("  (none)");
+    }
+
+    // Same for the edge phase. The node histogram is what located the 512-byte
+    // MVCC version vector (#495); this is the equivalent view of the 14.5
+    // allocations each edge still costs.
+    println!();
+    println!("edge-phase allocations by size class:");
+    let mut shown_e = false;
+    for i in 0..BUCKETS {
+        let n = hist_edges[i].saturating_sub(hist_props[i]);
+        if n == 0 {
+            continue;
+        }
+        let lo = if i == 0 { 0 } else { 1usize << i };
+        let hi = (1usize << (i + 1)) - 1;
+        println!(
+            "  {:>6}..{:<6} B  {:>10} allocs  {:>6.2}/edge",
+            lo,
+            hi,
+            n,
+            if edges > 0 { n as f64 / edges as f64 } else { 0.0 }
+        );
+        shown_e = true;
+    }
+    if !shown_e {
         println!("  (none)");
     }
 

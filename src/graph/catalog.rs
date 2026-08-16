@@ -126,25 +126,54 @@ impl GraphCatalog {
             for tgt_label in tgt_labels.clone() {
                 let pattern = TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
 
-                // Update source degree tracking
-                let src_degree = self.source_degrees
-                    .entry(pattern.clone())
-                    .or_default()
-                    .entry(source_id)
-                    .or_insert(0);
-                *src_degree += 1;
-                let new_src_degree = *src_degree;
+                // `entry(k)` takes the key by value, so `entry(pattern.clone())`
+                // clones three Strings on every call whether or not the entry
+                // already exists -- and after the first few edges of a given
+                // (label, type, label) shape it always exists. Three maps meant
+                // nine clones per edge on top of the three in `new` above; the
+                // allocation histogram showed 12 short-string allocations per
+                // edge, all of them here. `get_mut` first, `entry` only on the
+                // genuinely-new path.
+                let src_degree_val = match self.source_degrees.get_mut(&pattern) {
+                    Some(m) => {
+                        let d = m.entry(source_id).or_insert(0);
+                        *d += 1;
+                        *d
+                    }
+                    None => {
+                        let d = self
+                            .source_degrees
+                            .entry(pattern.clone())
+                            .or_default()
+                            .entry(source_id)
+                            .or_insert(0);
+                        *d += 1;
+                        *d
+                    }
+                };
+                let new_src_degree = src_degree_val;
 
-                // Update target degree tracking
-                let tgt_degree = self.target_degrees
-                    .entry(pattern.clone())
-                    .or_default()
-                    .entry(target_id)
-                    .or_insert(0);
-                *tgt_degree += 1;
+                match self.target_degrees.get_mut(&pattern) {
+                    Some(m) => {
+                        *m.entry(target_id).or_insert(0) += 1;
+                    }
+                    None => {
+                        *self
+                            .target_degrees
+                            .entry(pattern.clone())
+                            .or_default()
+                            .entry(target_id)
+                            .or_insert(0) += 1;
+                    }
+                }
 
-                // Update triple stats
-                let stats = self.triple_stats.entry(pattern.clone()).or_insert_with(TripleStats::new);
+                let stats = match self.triple_stats.get_mut(&pattern) {
+                    Some(s) => s,
+                    None => self
+                        .triple_stats
+                        .entry(pattern.clone())
+                        .or_insert_with(TripleStats::new),
+                };
                 stats.count += 1;
 
                 // Recompute distinct sources/targets from degree maps
