@@ -1,5 +1,33 @@
 # Samyama Graph — Benchmarks
 
+## What is on this page, and what is not
+
+**On this page: Samyama's own numbers**, each with the commit and host it was
+measured on. Every figure here has a reproducer in this repository that you can
+run yourself:
+
+| Suite | Run it with |
+|---|---|
+| LDBC SNB Interactive | `cargo bench --bench ldbc_benchmark` (data: `scripts/download_ldbc_snb.sh`) |
+| LDBC SNB BI | `cargo bench --bench ldbc_bi_benchmark` |
+| FinBench | `cargo bench --bench finbench_benchmark` |
+| Graphalytics | `cargo bench --bench graphalytics_benchmark` |
+| HIER (hierarchy) | `cargo run --release --example hier_benchmark` (corpus: `benchmarks/hier/`) |
+| Memory footprint | `cargo bench --bench memory_footprint` |
+| Cardinality accuracy | `cargo bench --bench cardinality_accuracy` |
+| Ingestion profile | `cargo bench --bench ingest_profile` |
+
+**Not on this page: cross-engine comparisons.** Results against Neo4j,
+FalkorDB and TigerGraph are maintained internally alongside the competitor
+configurations and licence terms those runs depend on, and are published
+selectively rather than continuously. The Neo4j figures quoted in the HIER
+section below come from that work.
+
+The split follows from where a reader can act: a number you can reproduce
+belongs next to the code that produces it; a number that required another
+vendor's licensed software to obtain does not.
+
+
 Two suites are documented here: the LDBC SNB Interactive results below, and **HIER**, the
 hierarchy category introduced with ADR-035.
 
