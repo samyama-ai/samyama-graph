@@ -1,0 +1,78 @@
+name: CI
+
+# The lane that gates merges. Until this existed, 2500+ tests gated nothing:
+# the only workflow that ran tests was `workflow_dispatch`-only, because its
+# self-hosted GPU runner is offline (#480).
+#
+# Two tiers, because the full sweep (scripts/verify-sweep.sh — tests, every
+# example, 12 benches, 11 case studies) takes ~50 minutes. That is the right
+# shape for a nightly and the wrong shape for a pull request.
+#
+#   this file  : fast lane, every PR and push to main
+#   nightly.yml: full sweep, once a day
+#
+# Tests run in the dev profile deliberately. Release compilation of the test
+# binaries dominates the wall clock (~8 minutes even warm); the tests
+# themselves take under a second. Dev builds far faster and runs them just as
+# thoroughly. Anything that genuinely needs release timings belongs in the
+# nightly sweep, not here.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug symbols are the bulk of the target dir and nothing here reads them.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        # libclang is required by zstd-sys and is the single most common
+        # first-build failure on a clean host (CONTRIBUTING documents it).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev clang libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Share the cache across jobs in this workflow; key on Cargo.lock.
+          shared-key: ci-test
+
+      # `cargo fmt --check` and `cargo clippy -D warnings` are deliberately NOT
+      # here yet. The tree currently has ~5,000 rustfmt diffs and ~680 clippy
+      # warnings, so either gate would be red on arrival -- and a gate that is
+      # always red is one everybody learns to ignore, which is worse than not
+      # having it. Adopting both needs a mechanical reformat commit and a lint
+      # ratchet; tracked separately so this lane can start green and mean
+      # something from its first run.
+
+      - name: Tests
+        # --no-fail-fast so one failing crate does not hide the rest; a PR
+        # author should see every failure in one run, not one per push.
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Examples and benches compile
+        # The sweep runs these; here we only prove they still build, which is
+        # what actually breaks when a signature changes.
+        run: cargo check --workspace --all-targets

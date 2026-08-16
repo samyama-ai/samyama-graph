@@ -1,0 +1,75 @@
+name: Nightly sweep
+
+# The full verification sweep: tests, every example, every bench, every case
+# study. This is what has been catching the defects a plain `cargo test` does
+# not -- an example that panics instead of saying what data it needs (#433), a
+# bench reporting success while measuring nothing (#449), a case study whose
+# snapshot URL was never filled in (#442).
+#
+# It takes ~50 minutes, which is why it is nightly rather than per-PR (see
+# ci.yml for the fast lane).
+#
+# PASS/FAIL ONLY. The bench timings produced here are on a shared hosted
+# runner and are not comparable between runs -- do not quote them. Published
+# numbers come from a fixed machine with a recorded host, per spec 18. This
+# job answers "does everything still run", not "how fast is it".
+
+on:
+  schedule:
+    # 02:30 UTC daily. Off the hour to avoid the top-of-hour scheduling crowd.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-sweep
+
+      - name: Run the full sweep
+        id: sweep
+        # --provision installs the system dependencies the script documents.
+        run: ./scripts/verify-sweep.sh --provision --out "${{ runner.temp }}/sweep"
+
+      - name: Upload results
+        # Always: the results are most useful precisely when the step above failed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-results
+          path: ${{ runner.temp }}/sweep/results/
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-logs
+          path: ${{ runner.temp }}/sweep/logs/
+          retention-days: 14
+
+      - name: Summarise into the run page
+        if: always()
+        run: |
+          {
+            echo '## Nightly sweep'
+            echo '```'
+            cat "${{ runner.temp }}/sweep/results/run.txt" 2>/dev/null || echo "(no run.txt)"
+            echo
+            for f in tests examples benches case-studies; do
+              echo "--- $f ---"
+              cat "${{ runner.temp }}/sweep/results/$f.txt" 2>/dev/null || echo "(missing)"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
