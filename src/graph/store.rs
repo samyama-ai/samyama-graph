@@ -2359,6 +2359,31 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// pathological plans on snapshot-imported graphs.
     ///
     /// Snapshot import calls this after `compact_adjacency()`.
+    /// Finish a bulk load: compact adjacency and rebuild everything the stub
+    /// inserts deliberately skipped.
+    ///
+    /// `create_node_stub` and `create_edge_stub` are fast because they omit
+    /// index and statistics maintenance. That is a good trade only if the
+    /// omitted work is done once at the end, and the failure mode when it is
+    /// not is silent: the data is all present and correct, and only the
+    /// planner is wrong.
+    ///
+    /// That has now happened twice. The edge-type index was missing after
+    /// import until someone noticed `OPTIONAL MATCH` falling back to
+    /// `NodeScan(all)` and timing out; the catalog's triple statistics were
+    /// missing until `estimate_expand_out` was found returning its "1 edge per
+    /// node" default on every imported graph. Both were a rebuild call nobody
+    /// had added to a list that was not written down anywhere.
+    ///
+    /// So the list lives here, and callers take all of it or none. Each step
+    /// no-ops on an empty store, so this is safe to call unconditionally.
+    pub fn finish_bulk_load(&mut self) {
+        self.compact_adjacency();
+        self.rebuild_edge_type_index();
+        self.rebuild_catalog();
+        self.rebuild_vector_index();
+    }
+
     /// Recompute the catalog from the current store contents.
     ///
     /// `create_edge_stub` skips `catalog.on_edge_created` for speed, so a

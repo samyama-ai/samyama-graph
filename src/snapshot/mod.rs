@@ -658,31 +658,13 @@ fn import_tenant_inner(
         // Skip unrecognized lines
     }
 
-    // Compact adjacency lists to CSR for memory efficiency (DS-07)
-    if imported_edge_count > 0 {
-        store.compact_adjacency();
-        // Bulk-loaded edges go through create_edge_stub which intentionally
-        // skips edge_type_index updates for speed. Rebuild the index so the
-        // planner can see the imported edge types — without this, OPTIONAL
-        // MATCH plans against imported snapshots fall back to NodeScan(all)
-        // and time out on multi-million-node stores.
-        store.rebuild_edge_type_index();
-        // Triple statistics too: create_edge_stub skips catalog.on_edge_created,
-        // so without this the cost model sees zero triple stats and
-        // estimate_expand_out returns its "1 edge per node" default on every
-        // imported graph -- a 20x under-estimate at degree 20, and the same
-        // class of defect as #303 (a plan chosen from statistics that were
-        // never computed).
-        store.rebuild_catalog();
-    }
-
-    // Backfill HNSW vector indices from imported node properties.
-    // create_node_stub / create_node bypass the event loop that normally calls
-    // add_vector, so Vector properties are readable via Cypher but invisible to
-    // queryNodes. Rebuild here mirrors rebuild_edge_type_index above.
-    // No-op when no vector indices are registered (common case).
-    if imported_node_count > 0 {
-        store.rebuild_vector_index();
+    // Everything the stub inserts skipped: CSR compaction, the edge-type index,
+    // the catalog's triple statistics, and the HNSW vector index. Kept as one
+    // call because taking half of this list is exactly how the edge-type index
+    // and then the catalog each came to be missing after import -- both times
+    // leaving data that was entirely correct and a planner that was not.
+    if imported_node_count > 0 || imported_edge_count > 0 {
+        store.finish_bulk_load();
     }
 
     if merged_node_count > 0 {
