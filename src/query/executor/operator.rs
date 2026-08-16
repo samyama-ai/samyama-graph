@@ -2102,6 +2102,16 @@ pub trait PhysicalOperator: Send {
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
 
+    /// The predicate this operator filters on, if it is a filter.
+    ///
+    /// Exists so the planner can tell whether a filter it is about to add is
+    /// the one already sitting underneath. `x AND x` is idempotent, so the
+    /// second evaluation is pure cost -- ~130 ms on LDBC IC9, where the same
+    /// compound predicate was evaluated 389,461 times twice over (#519).
+    fn filter_predicate(&self) -> Option<&Expression> {
+        None
+    }
+
     /// The operators this one pulls from, in the order `describe()` lists
     /// them.
     ///
@@ -2998,6 +3008,10 @@ impl FilterOperator {
 impl PhysicalOperator for FilterOperator {
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
+    }
+
+    fn filter_predicate(&self) -> Option<&Expression> {
+        Some(&self.predicate)
     }
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {

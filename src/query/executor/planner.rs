@@ -1365,7 +1365,72 @@ impl QueryPlanner {
         // would fail because the WithBarrier projects away referenced variables.
         if query.with_clause.is_none() {
             if let Some(where_clause) = &query.where_clause {
-                operator = Box::new(FilterOperator::new(operator, where_clause.predicate.clone()));
+                // Apply only the conjuncts the plan below is not already
+                // applying.
+                //
+                // The decomposition above hands each MATCH the conjuncts that
+                // reference only its own variables, and the match planners
+                // attach them as filters inside the subplan -- often at the
+                // scan, which is the whole point of pushing them down. This
+                // line then re-applied the *entire* WHERE on top. For
+                // `WHERE p.age > 10 AND f.age < 40` over `(p)-[:KNOWS]->(f)`
+                // the result was three evaluations of the same work:
+                //
+                //     Filter (p.age > 10 AND f.age < 40)     <- here
+                //       Filter (f.age < 40)
+                //         Expand
+                //           Filter (p.age > 10)
+                //             NodeScan
+                //
+                // On LDBC IC9 the redundant pass cost ~130 ms over 389,461
+                // rows and removed nothing (#519).
+                //
+                // What is dropped is decided by reading the plan that was
+                // actually built, not by trusting that the planner pushed what
+                // it was given: there are several planning paths and none of
+                // them promises to attach every predicate it receives.
+                //
+                // Two shapes make re-application load-bearing rather than
+                // redundant, and both are excluded rather than reasoned about:
+                //
+                //   * OPTIONAL MATCH -- a left outer join can leave a variable
+                //     NULL for unmatched rows. A filter pushed inside the
+                //     optional side never sees those rows; the top-level one
+                //     does, and rejects them. Dropping it would admit rows
+                //     that should have been excluded.
+                //   * a leading UNWIND -- predicates on its variable are
+                //     deliberately left out of the decomposition, because the
+                //     Unwind that binds them sits above the matches. They are
+                //     not in any descendant filter, so they survive the
+                //     subtraction anyway; excluding the case as well makes the
+                //     reasoning independent of that.
+                //
+                // With those excluded, every operator between a pushed filter
+                // and this point only *adds* bindings -- Expand, ExpandInto,
+                // Join on shared equal values, CartesianProduct -- so a
+                // conjunct proved below stays true here.
+                let has_optional = query.match_clauses.iter().any(|mc| mc.optional);
+                let has_late_bound = !Self::late_bound_variables(query).is_empty();
+
+                let predicate = if has_optional || has_late_bound {
+                    Some(where_clause.predicate.clone())
+                } else {
+                    let mut applied = Vec::new();
+                    Self::collect_applied_predicates(&mut operator, &mut applied);
+                    let remaining: Vec<Expression> = flatten_and_predicates(&where_clause.predicate)
+                        .into_iter()
+                        .filter(|conjunct| !applied.contains(conjunct))
+                        .collect();
+                    remaining.into_iter().reduce(|acc, pred| Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    })
+                };
+
+                if let Some(predicate) = predicate {
+                    operator = Box::new(FilterOperator::new(operator, predicate));
+                }
             }
         }
 
@@ -1987,6 +2052,20 @@ impl QueryPlanner {
 
     /// Dispatch to graph-native or legacy planner based on configuration.
     /// Falls back to legacy planner if graph-native fails (e.g., label-free patterns).
+    /// Every conjunct any `Filter` in this subtree is already applying.
+    ///
+    /// Read off the built plan rather than tracked during construction: the
+    /// planner has several paths into a match subplan and the question here is
+    /// what the chosen one *did*, not what it was asked to do.
+    fn collect_applied_predicates(op: &mut OperatorBox, out: &mut Vec<Expression>) {
+        if let Some(predicate) = op.filter_predicate() {
+            out.extend(flatten_and_predicates(predicate));
+        }
+        for child in op.children_mut() {
+            Self::collect_applied_predicates(child, out);
+        }
+    }
+
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if self.config.graph_native {
             match self.plan_match_native(match_clause, where_clause, store) {
