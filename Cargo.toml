@@ -108,6 +108,10 @@ samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.0" }
 http-body-util = "0.1"
 
 [[bench]]
+name = "ingest_profile"
+harness = false
+
+[[bench]]
 name = "cardinality_accuracy"
 harness = false
 
