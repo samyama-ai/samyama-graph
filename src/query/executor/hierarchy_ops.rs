@@ -381,6 +381,10 @@ fn record_node_id(record: &Record, var: &str) -> Option<NodeId> {
 }
 
 impl PhysicalOperator for HierarchyOrderTestOperator {
+    fn children_mut(&mut self) -> Vec<&mut crate::query::executor::operator::OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         let entry = store.hierarchy_index.get(&self.index_name).ok_or_else(|| {
             ExecutionError::RuntimeError(format!(

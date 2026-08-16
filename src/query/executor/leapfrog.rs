@@ -351,6 +351,10 @@ impl TrieJoinOperator {
 }
 
 impl PhysicalOperator for TrieJoinOperator {
+    fn children_mut(&mut self) -> Vec<&mut crate::query::executor::operator::OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             // Emit buffered matches

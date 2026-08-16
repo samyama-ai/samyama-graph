@@ -2102,6 +2102,21 @@ pub trait PhysicalOperator: Send {
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
 
+    /// The operators this one pulls from, in the order `describe()` lists
+    /// them.
+    ///
+    /// Defaults to none, which is right for every leaf (scans, DDL, static
+    /// inputs). Operators that hold an input must override it, or a tree walk
+    /// stops at them.
+    ///
+    /// This exists so a pass can rewrite the tree in place — `PROFILE` wraps
+    /// every node to attribute wall-clock (`CH-PROFILE-01`), and it is the
+    /// mutable counterpart of the children `describe()` already returns for
+    /// EXPLAIN.
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        Vec::new()
+    }
+
     /// Returns true if this operator mutates the graph store
     fn is_mutating(&self) -> bool {
         false
@@ -2981,6 +2996,10 @@ impl FilterOperator {
 }
 
 impl PhysicalOperator for FilterOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next(store)? {
             if self.evaluate_predicate(&record, store)? {
@@ -3156,6 +3175,10 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             // If we have edges from current record, return them
@@ -3482,6 +3505,10 @@ fn reconstruct_path(
 }
 
 impl PhysicalOperator for VarLengthExpandOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             if let Some(rec) = self.pending.pop_front() {
@@ -3621,6 +3648,10 @@ impl ProjectOperator {
 }
 
 impl PhysicalOperator for ProjectOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next(store)? {
             let mut new_record = Record::new();
@@ -4086,6 +4117,10 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -4528,6 +4563,10 @@ impl AdjacencyCountAggregateOperator {
 }
 
 impl PhysicalOperator for AdjacencyCountAggregateOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         // Grouped path: accumulate per-(prop_values) counts on first call,
         // then emit one record per group. Correctness-preserving fast path
@@ -4626,6 +4665,10 @@ impl LimitOperator {
 }
 
 impl PhysicalOperator for LimitOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.count >= self.limit {
             return Ok(None);
@@ -4772,6 +4815,10 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -5102,6 +5149,10 @@ impl CartesianProductOperator {
 }
 
 impl PhysicalOperator for CartesianProductOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.left, &mut self.right]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.materialize_left(store)?;
         if self.left_records.is_empty() {
@@ -5257,6 +5308,10 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.left, &mut self.right]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.materialize(store)?;
 
@@ -5415,6 +5470,10 @@ impl LeftOuterJoinOperator {
 }
 
 impl PhysicalOperator for LeftOuterJoinOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.left, &mut self.right]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.materialize(store)?;
 
@@ -5996,6 +6055,10 @@ impl DistinctOperator {
 }
 
 impl PhysicalOperator for DistinctOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next(store)? {
             if self.seen.insert(Self::key(&record)) {
@@ -6331,6 +6394,10 @@ impl CreateEdgeOperator {
 }
 
 impl PhysicalOperator for CreateEdgeOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        self.input.iter_mut().collect()
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
             "CreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
@@ -6445,6 +6512,10 @@ impl CreateNodesAndEdgesOperator {
 }
 
 impl PhysicalOperator for CreateNodesAndEdgesOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.node_operator]
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
             "CreateNodesAndEdgesOperator requires mutable store access. Use next_mut instead.".to_string()
@@ -6576,6 +6647,10 @@ impl MatchCreateEdgeOperator {
 }
 
 impl PhysicalOperator for MatchCreateEdgeOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
             "MatchCreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
@@ -6719,6 +6794,10 @@ impl MatchMergeEdgeOperator {
 }
 
 impl PhysicalOperator for MatchMergeEdgeOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError("MatchMergeEdgeOperator requires mutable store access".to_string()))
     }
@@ -7604,6 +7683,10 @@ impl SkipOperator {
 }
 
 impl PhysicalOperator for SkipOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while self.skipped < self.skip {
             if self.input.next(store)?.is_some() {
@@ -7667,6 +7750,10 @@ impl DeleteOperator {
 }
 
 impl PhysicalOperator for DeleteOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.input.next(store)
     }
@@ -7733,6 +7820,10 @@ impl SetPropertyOperator {
 }
 
 impl PhysicalOperator for SetPropertyOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.input.next(store)
     }
@@ -7811,6 +7902,10 @@ impl RemovePropertyOperator {
 }
 
 impl PhysicalOperator for RemovePropertyOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.input.next(store)
     }
@@ -7876,6 +7971,10 @@ impl UnwindOperator {
 }
 
 impl PhysicalOperator for UnwindOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             if self.buffer_idx < self.buffer.len() {
@@ -8277,6 +8376,10 @@ impl ForeachOperator {
 }
 
 impl PhysicalOperator for ForeachOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
             "ForeachOperator requires mutable store access. Use next_mut instead.".to_string()
@@ -8540,6 +8643,10 @@ impl ShortestPathOperator {
 }
 
 impl PhysicalOperator for ShortestPathOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -8836,6 +8943,10 @@ impl WithBarrierOperator {
 }
 
 impl PhysicalOperator for WithBarrierOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -8922,6 +9033,10 @@ impl ExpandIntoOperator {
 }
 
 impl PhysicalOperator for ExpandIntoOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             let record = match self.input.next(store)? {

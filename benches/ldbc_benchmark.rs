@@ -692,6 +692,12 @@ async fn main() -> Result<(), Error> {
         None
     };
 
+    // `--profile` runs each selected query once under PROFILE and prints the
+    // per-operator breakdown instead of a timing table. This is the
+    // `CH-PROFILE-01` deliverable: the gate is "at least 90% of wall-clock
+    // attributed" for IC1/IC6/IC9, and a total by itself attributes nothing.
+    let profile_mode = args.iter().any(|a| a == "--profile");
+
     let include_updates = args.iter().any(|a| a == "--updates");
     let include_deletes = args.iter().any(|a| a == "--deletes");
 
@@ -885,6 +891,35 @@ async fn main() -> Result<(), Error> {
 
         let cypher = params.apply(query.cypher);
 
+
+        if profile_mode {
+            match client.query("default", &format!("PROFILE {}", cypher)).await {
+                Ok(batch) => {
+                    println!("\n================ {} — {} ================", query.id, query.name);
+                    println!("{}", cypher);
+                    println!();
+                    // PROFILE returns a single row whose one column holds the
+                    // annotated plan. Printing the JSON value directly would
+                    // escape every newline and make the tree unreadable, so
+                    // unwrap the string.
+                    for record in &batch.records {
+                        for cell in record {
+                            match cell.as_str() {
+                                Some(text) => println!("{}", text),
+                                None => println!("{}", cell),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("\n================ {} — {} ================", query.id, query.name);
+                    println!("ERROR: {}", e);
+                    errors += 1;
+                }
+            }
+            continue;
+        }
+
         let result = run_benchmark(&client, query, &cypher, runs).await;
 
         if let Some(ref err) = result.error {
@@ -912,6 +947,16 @@ async fn main() -> Result<(), Error> {
     }
 
     let bench_time = bench_start.elapsed();
+
+    if profile_mode {
+        println!();
+        println!("Profiled {} query/queries in {}.", queries.len(), format_duration(bench_time));
+        if errors > 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
 
     // ========================================================================
     // Summary

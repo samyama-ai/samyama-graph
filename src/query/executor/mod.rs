@@ -85,6 +85,7 @@ pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
 pub mod operator;
+pub mod profile;
 pub mod physical_planner;
 pub mod plan_enumerator;
 pub mod planner;
@@ -280,19 +281,44 @@ impl<'a> QueryExecutor<'a> {
             ));
         }
 
-        // Handle PROFILE - execute query and return plan + timing info (like EXPLAIN)
+        // Handle PROFILE - execute the query and attribute the wall-clock to
+        // the operators that spent it (`CH-PROFILE-01`).
+        //
+        // The plan is built and run twice: once with every node wrapped, to
+        // get the breakdown, and once plain, to get a total that instrumenting
+        // did not inflate. Reporting only the instrumented total would
+        // overstate the query's real cost; reporting only the plain one would
+        // leave the breakdown unattributable.
+        //
+        // Instrumented first, plain second, deliberately: the second run reads
+        // a warm cache, so the reported instrumentation overhead is if
+        // anything too high. Flattering our own tooling in a measurement whose
+        // whole purpose is to decide what to optimise is the failure mode
+        // worth designing against.
         if query.profile {
             use crate::graph::PropertyValue;
 
             let plan_text = plan.root.describe().format(0);
-            let start = std::time::Instant::now();
-            let result = self.execute_plan(plan)?;
-            let elapsed = start.elapsed();
+
+            let mut instrumented = plan;
+            let nodes = profile::instrument(&mut instrumented.root);
+            let profiled_start = std::time::Instant::now();
+            let _ = self.execute_plan(instrumented)?;
+            let profiled_elapsed = profiled_start.elapsed();
+
+            let plain_plan = self.planner.plan(query, self.store)?;
+            let plain_start = std::time::Instant::now();
+            let result = self.execute_plan(plain_plan)?;
+            let plain_elapsed = plain_start.elapsed();
 
             let stats = self.store.statistics();
             let profile_text = format!(
-                "{}\n\n--- Profile ---\nRows: {}, Execution time: {:.3}ms\n\n--- Statistics ---\n{}",
-                plan_text, result.records.len(), elapsed.as_secs_f64() * 1000.0, stats.format()
+                "{}\n\n--- Profile ---\nRows: {}, Execution time: {:.3}ms\n\n{}\n--- Statistics ---\n{}",
+                plan_text,
+                result.records.len(),
+                plain_elapsed.as_secs_f64() * 1000.0,
+                profile::report(&nodes, profiled_elapsed, Some(plain_elapsed)),
+                stats.format()
             );
 
             let mut record = Record::new();
