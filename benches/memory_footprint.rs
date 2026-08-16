@@ -31,12 +31,27 @@ static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static FREED: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
+/// Allocation-size histogram, bucketed by power of two (index = log2 of size,
+/// capped). Knowing *what sizes* are being allocated is what turns "620 bytes
+/// of overhead per node" into a specific structure to go and look at.
+const BUCKETS: usize = 20;
+static SIZE_HIST: [AtomicUsize; BUCKETS] = [const { AtomicUsize::new(0) }; BUCKETS];
+
+fn bucket_of(size: usize) -> usize {
+    if size == 0 {
+        return 0;
+    }
+    let b = usize::BITS - size.leading_zeros();
+    ((b as usize).saturating_sub(1)).min(BUCKETS - 1)
+}
+
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        SIZE_HIST[bucket_of(layout.size())].fetch_add(1, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -66,6 +81,14 @@ fn live_heap() -> usize {
 /// per-object overhead is what a "collapse these Vecs" change removes.
 fn alloc_calls() -> usize {
     ALLOC_CALLS.load(Ordering::Relaxed)
+}
+
+fn hist_snapshot() -> [usize; BUCKETS] {
+    let mut out = [0usize; BUCKETS];
+    for (i, slot) in SIZE_HIST.iter().enumerate() {
+        out[i] = slot.load(Ordering::Relaxed);
+    }
+    out
 }
 
 /// Resident set size in bytes, or `None` off Linux.
@@ -144,6 +167,7 @@ fn main() {
 
     let base_heap = live_heap();
     let base_calls = alloc_calls();
+    let hist_base = hist_snapshot();
     let base_rss = rss();
     let t_start = std::time::Instant::now();
 
@@ -157,6 +181,7 @@ fn main() {
     }
     let after_bare_nodes = live_heap();
     let calls_bare_nodes = alloc_calls();
+    let hist_bare_nodes = hist_snapshot();
     let t_nodes = t_start.elapsed();
 
     // Phase 2: node properties.
@@ -234,6 +259,30 @@ fn main() {
         scale as f64 / t_nodes.as_secs_f64().max(1e-9),
         edges as f64 / edge_secs.max(1e-9),
     );
+    // Where the node-phase allocations went, by size class.
+    println!();
+    println!("node-phase allocations by size class:");
+    let mut shown = false;
+    for i in 0..BUCKETS {
+        let n = hist_bare_nodes[i].saturating_sub(hist_base[i]);
+        if n == 0 {
+            continue;
+        }
+        let lo = if i == 0 { 0 } else { 1usize << i };
+        let hi = (1usize << (i + 1)) - 1;
+        println!(
+            "  {:>6}..{:<6} B  {:>10} allocs  {:>6.2}/node",
+            lo,
+            hi,
+            n,
+            n as f64 / scale as f64
+        );
+        shown = true;
+    }
+    if !shown {
+        println!("  (none)");
+    }
+
     println!();
     println!("nodes: {scale}    edges: {edges}");
     println!("{:<28} {:>10.1}", "bytes/node (heap)", total_heap as f64 / scale as f64);

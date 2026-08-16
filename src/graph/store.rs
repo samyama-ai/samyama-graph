@@ -969,7 +969,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             );
         }
 
-        self.nodes[idx].push(node);
+        // `Vec` grows 0 -> capacity 4 on first push, and `Node` is 128 bytes, so
+        // the default path allocates 512 B per node for an MVCC version chain
+        // that holds one entry in the overwhelming majority of cases -- 384 B
+        // of it never used. Reserve exactly one; later versions grow normally
+        // from there, which is the rare path (#491).
+        {
+            let versions = &mut self.nodes[idx];
+            if versions.capacity() == 0 {
+                versions.reserve_exact(1);
+            }
+            versions.push(node);
+        }
         node_id
     }
 
@@ -1038,7 +1049,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             );
         }
 
-        self.nodes[idx].push(node);
+        // `Vec` grows 0 -> capacity 4 on first push, and `Node` is 128 bytes, so
+        // the default path allocates 512 B per node for an MVCC version chain
+        // that holds one entry in the overwhelming majority of cases -- 384 B
+        // of it never used. Reserve exactly one; later versions grow normally
+        // from there, which is the rare path (#491).
+        {
+            let versions = &mut self.nodes[idx];
+            if versions.capacity() == 0 {
+                versions.reserve_exact(1);
+            }
+            versions.push(node);
+        }
         node_id
     }
 
@@ -1122,7 +1144,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.incoming.resize(idx + 1, Vec::new());
         }
 
-        self.nodes[idx].push(node);
+        // `Vec` grows 0 -> capacity 4 on first push, and `Node` is 128 bytes, so
+        // the default path allocates 512 B per node for an MVCC version chain
+        // that holds one entry in the overwhelming majority of cases -- 384 B
+        // of it never used. Reserve exactly one; later versions grow normally
+        // from there, which is the rare path (#491).
+        {
+            let versions = &mut self.nodes[idx];
+            if versions.capacity() == 0 {
+                versions.reserve_exact(1);
+            }
+            versions.push(node);
+        }
         node_id
     }
 
@@ -2941,7 +2974,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         // Insert the node
-        self.nodes[idx].push(node);
+        // `Vec` grows 0 -> capacity 4 on first push, and `Node` is 128 bytes, so
+        // the default path allocates 512 B per node for an MVCC version chain
+        // that holds one entry in the overwhelming majority of cases -- 384 B
+        // of it never used. Reserve exactly one; later versions grow normally
+        // from there, which is the rare path (#491).
+        {
+            let versions = &mut self.nodes[idx];
+            if versions.capacity() == 0 {
+                versions.reserve_exact(1);
+            }
+            versions.push(node);
+        }
 
         // Update next_node_id to be higher than any recovered node
         if node_id.as_u64() >= self.next_node_id {
