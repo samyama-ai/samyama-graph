@@ -57,6 +57,11 @@ struct Params {
     country_y: String,
     tag_name: String,
     tag_class_name: String,
+    /// IC11's employer. This was hard-coded in the query template as
+    /// `"MDLR_Airlines"` -- a substitution parameter that was never
+    /// parameterised, so IC11 returned nothing on any extract but the one it
+    /// was written against (#505).
+    organisation_name: String,
     max_date: i64,
     start_date: i64,
     end_date: i64,
@@ -74,9 +79,30 @@ impl Default for Params {
             country_y: "Pakistan".into(),
             tag_name: "Hamid_Karzai".into(),
             tag_class_name: "MusicalArtist".into(),
+            organisation_name: "MDLR_Airlines".into(),
             max_date: 1354320000000,
             start_date: 1338508800000,
             end_date: 1341100800000,
+        }
+    }
+}
+
+impl From<ldbc_common::params::Derived> for Params {
+    fn from(d: ldbc_common::params::Derived) -> Self {
+        Params {
+            person_id: d.person_id,
+            person2_id: d.person2_id,
+            message_id: d.message_id,
+            post_id: d.post_id,
+            first_name: d.first_name,
+            country_x: d.country_x,
+            country_y: d.country_y,
+            tag_name: d.tag_name,
+            tag_class_name: d.tag_class_name,
+            organisation_name: d.organisation_name,
+            max_date: d.max_date,
+            start_date: d.start_date,
+            end_date: d.end_date,
         }
     }
 }
@@ -99,6 +125,7 @@ impl Params {
             .replace("{{countryY}}", &self.country_y)
             .replace("{{tagName}}", &self.tag_name)
             .replace("{{tagClassName}}", &self.tag_class_name)
+            .replace("{{organisationName}}", &self.organisation_name)
             .replace("{{maxDate}}", &self.max_date.to_string())
             .replace("{{startDate}}", &self.start_date.to_string())
             .replace("{{endDate}}", &self.end_date.to_string())
@@ -350,7 +377,7 @@ LIMIT 10",
             // Friends-of-friends who worked at a company before a given year
             cypher: "\
 MATCH (p:Person {id: {{personId}}})-[:KNOWS*1..2]-(friend:Person)-[wa:WORK_AT]->(org:Organisation)
-WHERE friend.id <> {{personId}} AND org.name = \"MDLR_Airlines\" AND wa.workFrom < 2012
+WHERE friend.id <> {{personId}} AND org.name = \"{{organisationName}}\" AND wa.workFrom < 2012
 RETURN DISTINCT friend.id, friend.firstName, friend.lastName, wa.workFrom, org.name
 ORDER BY wa.workFrom
 LIMIT 10",
@@ -668,16 +695,23 @@ async fn main() -> Result<(), Error> {
     let include_updates = args.iter().any(|a| a == "--updates");
     let include_deletes = args.iter().any(|a| a == "--deletes");
 
-    // Substitution parameters: --params-file <json> (per scale factor), else SF1 defaults.
-    let params = if let Some(pos) = args.iter().position(|a| a == "--params-file") {
-        let p = args.get(pos + 1).expect("--params-file requires a path argument");
-        Params::load(p).unwrap_or_else(|e| {
-            eprintln!("ERROR loading params file: {}", e);
-            std::process::exit(1);
-        })
-    } else {
-        Params::default()
-    };
+    // Substitution parameters, in precedence order:
+    //   --derive-params [percentile]  sample them from this dataset (#505)
+    //   --params-file <json>          a set someone already derived
+    //   (neither)                     the built-in defaults, which resolve
+    //                                 against exactly one extract
+    //
+    // `--write-params <path>` dumps whatever was derived, so a run can be
+    // repeated later without re-deriving and the file records its own origin.
+    let derive_percentile: Option<u8> = args.iter().position(|a| a == "--derive-params").map(|pos| {
+        args.get(pos + 1)
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(50)
+    });
+    let write_params: Option<String> = args
+        .iter()
+        .position(|a| a == "--write-params")
+        .map(|pos| args.get(pos + 1).expect("--write-params requires a path").clone());
 
     if !data_dir.exists() {
         // An explicitly requested directory that does not exist is a mistake worth failing
@@ -693,6 +727,40 @@ async fn main() -> Result<(), Error> {
         eprintln!("      Skipping rather than failing: the benchmark did not run, it did not break.");
         return Ok(());
     }
+
+    // Resolve the parameters now that the dataset is known to be present:
+    // derivation reads the source CSVs, deliberately not the loaded graph, so
+    // the same parameters can be handed to a competitor engine unchanged.
+    let (params, param_provenance): (Params, String) = if let Some(pct) = derive_percentile {
+        let derived = ldbc_common::params::derive(&data_dir, pct).unwrap_or_else(|e| {
+            eprintln!("ERROR deriving parameters: {}", e);
+            std::process::exit(1);
+        });
+        let provenance = derived.provenance.format();
+        if let Some(path) = &write_params {
+            if let Err(e) = std::fs::write(path, derived.to_json()) {
+                eprintln!("WARN: could not write {}: {}", path, e);
+            } else {
+                eprintln!("Wrote derived parameters to {}", path);
+            }
+        }
+        (derived.into(), provenance)
+    } else if let Some(pos) = args.iter().position(|a| a == "--params-file") {
+        let p = args.get(pos + 1).expect("--params-file requires a path argument");
+        let loaded = Params::load(p).unwrap_or_else(|e| {
+            eprintln!("ERROR loading params file: {}", e);
+            std::process::exit(1);
+        });
+        (loaded, format!("Parameter provenance: file {}\n", p))
+    } else {
+        (
+            Params::default(),
+            "Parameter provenance: built-in defaults — these resolve against one \
+             particular extract only.\n  Pass --derive-params to sample them from \
+             the dataset in front of you instead (#505).\n"
+                .to_string(),
+        )
+    };
 
     // ========================================================================
     // Load dataset
@@ -745,9 +813,18 @@ async fn main() -> Result<(), Error> {
 
     eprintln!("Runs per query: {}", runs);
     eprintln!(
-        "Params: personId={} person2Id={} postId={} firstName=\"{}\" tagName=\"{}\"",
-        params.person_id, params.person2_id, params.post_id, params.first_name, params.tag_name
+        "Params: personId={} person2Id={} postId={} messageId={} firstName=\"{}\" tagName=\"{}\"",
+        params.person_id, params.person2_id, params.post_id, params.message_id,
+        params.first_name, params.tag_name
     );
+    eprintln!(
+        "        countryX=\"{}\" countryY=\"{}\" tagClass=\"{}\" org=\"{}\" window=[{}, {}) maxDate={}",
+        params.country_x, params.country_y, params.tag_class_name, params.organisation_name,
+        params.start_date, params.end_date, params.max_date
+    );
+    // A table of timings cannot be read without knowing what it measured, so
+    // the provenance goes above it rather than in a separate artifact (#505).
+    eprint!("{}", param_provenance);
     eprintln!();
 
     // ========================================================================
@@ -807,6 +884,7 @@ async fn main() -> Result<(), Error> {
         eprint!("  Running {}...\r", query.id);
 
         let cypher = params.apply(query.cypher);
+
         let result = run_benchmark(&client, query, &cypher, runs).await;
 
         if let Some(ref err) = result.error {

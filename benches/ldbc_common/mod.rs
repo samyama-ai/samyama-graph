@@ -2,6 +2,8 @@
 //!
 //! Used by both `ldbc_loader` and `ldbc_benchmark` examples.
 
+pub mod params;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal};
