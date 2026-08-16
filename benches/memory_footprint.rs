@@ -29,12 +29,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static FREED: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -57,6 +59,13 @@ static GLOBAL: Counting = Counting;
 /// Live heap bytes: everything allocated minus everything freed.
 fn live_heap() -> usize {
     ALLOCATED.load(Ordering::Relaxed).saturating_sub(FREED.load(Ordering::Relaxed))
+}
+
+/// Number of allocation calls so far. Allocation *count* matters
+/// independently of bytes: each one carries a header and rounding, and the
+/// per-object overhead is what a "collapse these Vecs" change removes.
+fn alloc_calls() -> usize {
+    ALLOC_CALLS.load(Ordering::Relaxed)
 }
 
 /// Resident set size in bytes, or `None` off Linux.
@@ -134,6 +143,7 @@ fn main() {
     println!("{}", "-".repeat(78));
 
     let base_heap = live_heap();
+    let base_calls = alloc_calls();
     let base_rss = rss();
 
     // Phase 1: nodes only.
@@ -145,6 +155,7 @@ fn main() {
         node_ids.push(id);
     }
     let after_bare_nodes = live_heap();
+    let calls_bare_nodes = alloc_calls();
 
     // Phase 2: node properties.
     for (i, &id) in node_ids.iter().enumerate() {
@@ -162,6 +173,7 @@ fn main() {
         );
     }
     let after_props = live_heap();
+    let calls_props = alloc_calls();
 
     // Phase 3: edges.
     let edge_types = ["KNOWS", "LIKES", "MEMBER_OF", "HAS_TAG"];
@@ -175,6 +187,7 @@ fn main() {
         }
     }
     let after_edges = live_heap();
+    let calls_edges = alloc_calls();
 
     // Phase 4: statistics (the planner's view; built lazily elsewhere).
     let _stats = store.statistics();
@@ -199,6 +212,16 @@ fn main() {
     println!("{:<24} {:>14}", "total (live heap)", total_heap);
     println!();
 
+    println!(
+        "allocations: {:>10} for nodes ({:.2}/node), {:>10} for properties ({:.2}/node), {:>10} for edges ({:.2}/edge)",
+        calls_bare_nodes - base_calls,
+        (calls_bare_nodes - base_calls) as f64 / scale as f64,
+        calls_props - calls_bare_nodes,
+        (calls_props - calls_bare_nodes) as f64 / scale as f64,
+        calls_edges - calls_props,
+        if edges > 0 { (calls_edges - calls_props) as f64 / edges as f64 } else { 0.0 },
+    );
+    println!();
     println!("nodes: {scale}    edges: {edges}");
     println!("{:<28} {:>10.1}", "bytes/node (heap)", total_heap as f64 / scale as f64);
     println!(
