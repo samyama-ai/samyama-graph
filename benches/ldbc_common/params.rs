@@ -177,6 +177,19 @@ fn for_each_row<F: FnMut(&[&str])>(path: &Path, mut f: F) -> Result<(), String> 
     Ok(())
 }
 
+/// Parse an LDBC identifier.
+///
+/// Not every id column is written as an integer: `comment_replyOf_post_0_0.csv`
+/// holds `1236950581248.0`, a float that `datagen` produced and that a plain
+/// `parse::<i64>()` rejects. The loader already carries this workaround
+/// (`ldbc_common::load_edges`); derivation needs it too, and the failure mode
+/// if it does not is silent — every row fails to parse, the resulting set is
+/// empty, and a filter built from that set matches everything instead of
+/// nothing.
+fn parse_id(s: &str) -> Option<i64> {
+    s.parse().ok().or_else(|| s.split('.').next()?.parse().ok())
+}
+
 /// The value at `percentile` of a sorted slice, clamped to its bounds.
 ///
 /// Nearest-rank, not interpolated: every parameter here is an identifier or a
@@ -228,7 +241,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let (Ok(a), Ok(b)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) {
+        if let (Some(a), Some(b)) = (parse_id(f[0]), parse_id(f[1])) {
             adj.entry(a).or_default().insert(b);
             adj.entry(b).or_default().insert(a);
         }
@@ -287,7 +300,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 3 {
             return;
         }
-        let Ok(id) = f[1].parse::<i64>() else { return };
+        let Some(id) = parse_id(f[1]) else { return };
         let name = f[2].to_string();
         if hop3.contains(&id) && id != person_id {
             *names_in_hop3.entry(name.clone()).or_insert(0) += 1;
@@ -311,7 +324,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let (Ok(p), Ok(c)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) {
+        if let (Some(p), Some(c)) = (parse_id(f[0]), parse_id(f[1])) {
             post_creator.insert(p, c);
         }
     })?;
@@ -320,7 +333,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let (Ok(d), Ok(id)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) {
+        if let (Some(d), Some(id)) = (parse_id(f[0]), parse_id(f[1])) {
             post_date.insert(id, d);
         }
     })?;
@@ -384,7 +397,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let Ok(post) = f[1].parse::<i64>() {
+        if let Some(post) = parse_id(f[1]) {
             posts_with_replies.insert(post);
         }
     })?;
@@ -396,7 +409,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let (Ok(c), Ok(p)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) {
+        if let (Some(c), Some(p)) = (parse_id(f[0]), parse_id(f[1])) {
             comment_creator.insert(c, p);
         }
     })?;
@@ -414,7 +427,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let Ok(id) = f[0].parse::<i64>() {
+        if let Some(id) = parse_id(f[0]) {
             tag_name_of.insert(id, f[1].to_string());
         }
     })?;
@@ -424,7 +437,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Ok(post), Ok(tag)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) else { return };
+        let (Some(post), Some(tag)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if post_creator.get(&post).is_some_and(|c| hop2.contains(c)) {
             hop2_tag_ids.insert(tag);
             if let Some(name) = tag_name_of.get(&tag) {
@@ -448,7 +461,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 4 {
             return;
         }
-        if let Ok(id) = f[0].parse::<i64>() {
+        if let Some(id) = parse_id(f[0]) {
             place_name.insert(id, f[1].to_string());
             if f[3] == "Country" {
                 is_country.insert(id);
@@ -460,7 +473,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Ok(post), Ok(place)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) else { return };
+        let (Some(post), Some(place)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if !is_country.contains(&place) {
             return;
         }
@@ -495,7 +508,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        if let Ok(id) = f[0].parse::<i64>() {
+        if let Some(id) = parse_id(f[0]) {
             tagclass_name.insert(id, f[1].to_string());
         }
     })?;
@@ -504,7 +517,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Ok(tag), Ok(class)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) else { return };
+        let (Some(tag), Some(class)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if hop2_tag_ids.contains(&tag) {
             if let Some(name) = tagclass_name.get(&class) {
                 *class_counts.entry(name.clone()).or_insert(0) += 1;
@@ -527,7 +540,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 3 {
             return;
         }
-        if let Ok(id) = f[0].parse::<i64>() {
+        if let Some(id) = parse_id(f[0]) {
             org_name.insert(id, f[2].to_string());
         }
     })?;
@@ -536,8 +549,8 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 3 {
             return;
         }
-        let (Ok(p), Ok(o)) = (f[0].parse::<i64>(), f[1].parse::<i64>()) else { return };
-        let Ok(from) = f[2].parse::<i64>() else { return };
+        let (Some(p), Some(o)) = (parse_id(f[0]), parse_id(f[1])) else { return };
+        let Some(from) = parse_id(f[2]) else { return };
         if from < 2012 && hop2.contains(&p) {
             if let Some(name) = org_name.get(&o) {
                 *employer_counts.entry(name.clone()).or_insert(0) += 1;
@@ -627,6 +640,19 @@ mod tests {
             assert_eq!(sample_by_frequency(&counts, 50), first);
         }
         assert_eq!(first, Some(("b".into(), 3)));
+    }
+
+    #[test]
+    fn ids_written_as_floats_still_parse() {
+        // `comment_replyOf_post_0_0.csv` holds `1236950581248.0`. Rejecting
+        // those rows silently emptied the "posts that have replies" set, and
+        // an empty filter matches everything rather than nothing -- so the
+        // derivation happily returned a post with no replies and IS7 came back
+        // empty while claiming otherwise.
+        assert_eq!(parse_id("1236950581248"), Some(1236950581248));
+        assert_eq!(parse_id("1236950581248.0"), Some(1236950581248));
+        assert_eq!(parse_id(""), None);
+        assert_eq!(parse_id("Person.id"), None);
     }
 
     #[test]

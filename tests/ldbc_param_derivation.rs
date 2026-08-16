@@ -52,6 +52,41 @@ fn derives_a_usable_parameter_set_from_the_shipped_sf1_extract() {
 }
 
 #[test]
+fn every_derived_id_resolves_to_a_row_its_query_can_answer() {
+    // The check that would have caught the float-id bug: `postId` is read by
+    // IS7 via its *replies*, so a post with no replies makes IS7 return
+    // nothing -- a fast, green-looking zero.
+    let Some(dir) = sf1_dir() else {
+        eprintln!("SKIP: LDBC SF1 extract not present");
+        return;
+    };
+
+    let d = params::derive(&dir, 50).unwrap();
+
+    let replies = std::fs::read_to_string(dir.join("dynamic/comment_replyOf_post_0_0.csv")).unwrap();
+    let post_has_replies = replies.lines().skip(1).any(|line| {
+        line.split('|')
+            .nth(1)
+            .and_then(|f| f.split('.').next())
+            .is_some_and(|f| f == d.post_id.to_string())
+    });
+    assert!(
+        post_has_replies,
+        "postId {} has no replies, so IS7 would return nothing",
+        d.post_id
+    );
+
+    let knows = std::fs::read_to_string(dir.join("dynamic/person_knows_person_0_0.csv")).unwrap();
+    let anchor_has_friends = knows.lines().skip(1).any(|line| {
+        let mut f = line.split('|');
+        let a = f.next().unwrap_or("");
+        let b = f.next().unwrap_or("");
+        a == d.person_id.to_string() || b == d.person_id.to_string()
+    });
+    assert!(anchor_has_friends, "personId {} has no KNOWS edges", d.person_id);
+}
+
+#[test]
 fn the_median_anchor_is_not_the_busiest_person() {
     // The point of #505. Deriving by "pick the most connected person" chose a
     // 104x degree outlier at SF10; every friend-traversal query inherited it,
