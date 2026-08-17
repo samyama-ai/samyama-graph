@@ -39,14 +39,26 @@
 //! names, returned to the caller after query execution completes.
 
 use crate::graph::{Edge, Node, NodeId, EdgeId, EdgeType, PropertyValue, GraphStore};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// A single record flowing through the query pipeline
 #[derive(Debug, Clone)]
 pub struct Record {
-    /// Variable bindings (variable name -> value)
-    bindings: HashMap<String, Value>,
+    /// Variable bindings (variable name -> value).
+    ///
+    /// `FxHashMap`, not `std`'s: a record is created, cloned and read several
+    /// times per row, and every read hashes a variable name. `SipHash` is a
+    /// DoS-resistant hash being asked to hash `"friend"` — not the threat
+    /// model of a query-plan variable, which the planner chose itself.
+    ///
+    /// Measured on LDBC IC5, whose `Aggregate` consumes 1,678,980 records at
+    /// ~1,275 ns each: per row the engine does a map clone, a `String`
+    /// allocation per binding, and four to six string-keyed lookups. This is
+    /// the cheap half of that (#546); the structural half is giving records a
+    /// slot layout so a variable is an index rather than a name.
+    bindings: FxHashMap<String, Value>,
 }
 
 /// Value types that can be bound to variables in a query record.
@@ -132,7 +144,7 @@ impl Record {
     /// Create a new empty record
     pub fn new() -> Self {
         Self {
-            bindings: HashMap::new(),
+            bindings: FxHashMap::default(),
         }
     }
 
@@ -147,7 +159,7 @@ impl Record {
     }
 
     /// Get all bindings
-    pub fn bindings(&self) -> &HashMap<String, Value> {
+    pub fn bindings(&self) -> &FxHashMap<String, Value> {
         &self.bindings
     }
 
