@@ -173,22 +173,22 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 
 | Query | Name | SF1 | previous SF1 | SF10 |
 |---|---|---|---|---|
-| IC1 | Transitive Friends by Name | **62.0 ms** | 71.7 ms | 14.0 s |
-| IC2 | Recent Friend Posts | **12.2 ms** | 16.5 ms | 306 ms |
-| IC3 | Friends in Countries | **1044 ms** | 1101 ms | 15.7 s |
-| IC4 | Popular Tags in Period | **18.0 ms** | 16.2 ms | 527 ms |
-| IC5 | New Forum Members | **1874 ms** | 2614 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | **173 ms** | 259 ms | 31.5 s |
-| IC7 | Recent Likers | **0.07 ms** | 0.07 ms | 1.70 ms |
-| IC8 | Recent Replies | **0.18 ms** | 0.18 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | **1329 ms** | 1379 ms | 26.3 s |
-| IC10 | Friend Recommendation | **138 ms** | 160 ms | 2.3 s |
-| IC11 | Job Referral | **36.3 ms** | 44.8 ms | 4.5 s |
-| IC12 | Expert Reply | **151 ms** | 208 ms | 3.2 s |
-| IC13 | Single Shortest Path | **45.2 ms** | 46.3 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | **53.0 ms** | 54.0 ms | 696 ms |
+| IC1 | Transitive Friends by Name | **58.6 ms** | 62.0 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **14.1 ms** | 12.2 ms | 306 ms |
+| IC3 | Friends in Countries | **990 ms** | 1044 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **18.9 ms** | 18.0 ms | 527 ms |
+| IC5 | New Forum Members | **1828 ms** | 1874 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **174 ms** | 173 ms | 31.5 s |
+| IC7 | Recent Likers | **0.06 ms** | 0.07 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.17 ms** | 0.18 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **1260 ms** | 1329 ms | 26.3 s |
+| IC10 | Friend Recommendation | **136 ms** | 138 ms | 2.3 s |
+| IC11 | Job Referral | **36.4 ms** | 36.3 ms | 4.5 s |
+| IC12 | Expert Reply | **121 ms** | 151 ms | 3.2 s |
+| IC13 | Single Shortest Path | **43.5 ms** | 45.2 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **49.4 ms** | 53.0 ms | 696 ms |
 
-**Whole suite: 20.3 s, 21/21 passed, 0 empty, 0 errors.**
+**Whole suite: 19.3 s, 21/21 passed, 0 empty, 0 errors.**
 
 ### What the "previous SF1" column is
 
@@ -197,11 +197,15 @@ derived parameters (#505), so the two columns differ only by engine changes.
 Both were taken with the host calibration reported and matching, which is what
 makes them comparable at all (#529).
 
-This round: `id()` predicates now anchor a scan instead of filtering one (#538),
-aggregates group on identity and resolve their keys once per group (#521),
-property columns are located once per query rather than once per row (#557), and
-`Filter` decides whether to go parallel from the predicate's cost rather than
-from the batch size (#559). The last of those is most of IC1 and IC3.
+This round: a record is cloned with room for the bindings about to be added,
+so deriving a row no longer reallocates it (#562).
+
+The round before that — which the previous column reflects — was `id()`
+predicates anchoring a scan instead of filtering one (#538), aggregates grouping
+on identity and resolving their keys once per group (#521), property columns
+located once per query rather than once per row (#557), and `Filter` deciding
+whether to go parallel from the predicate's cost rather than the batch size
+(#559). Together those took the suite from 24.2 s to 20.3 s.
 
 Nothing here is a parameter change. The parameter shift that made several
 queries look slower — deriving substitution parameters from the dataset at the

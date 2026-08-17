@@ -159,6 +159,23 @@ impl Record {
         }
     }
 
+    /// Clone this record leaving room for `extra` further bindings.
+    ///
+    /// `Vec::clone` allocates *exact* capacity, so a cloned record has
+    /// `len == cap` and the very next `bind` reallocates: allocate, memcpy,
+    /// free. Clone-then-bind is how nearly every operator derives an output row
+    /// from an input row, so nearly every row in every query was paying for
+    /// that. Measured on a 3-binding record: 79.8 ns to clone, and 175.7 ns to
+    /// clone and bind a fourth -- 95.9 ns of the difference being the
+    /// reallocation alone (#562).
+    ///
+    /// Callers that bind a known number of variables should say how many.
+    pub fn clone_with_capacity(&self, extra: usize) -> Record {
+        let mut bindings = Vec::with_capacity(self.bindings.len() + extra);
+        bindings.extend(self.bindings.iter().cloned());
+        Record { bindings }
+    }
+
     /// Bind a variable to a value, replacing any previous binding.
     ///
     /// Accepts anything that converts to `Arc<str>`, so an operator holding

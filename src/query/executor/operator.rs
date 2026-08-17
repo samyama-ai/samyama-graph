@@ -708,7 +708,7 @@ fn eval_predicate_function(
 
     let mut true_count = 0usize;
     for item in &items {
-        let mut inner_record = record.clone();
+        let mut inner_record = record.clone_with_capacity(1);
         inner_record.bind(variable.to_string(), Value::Property(item.clone()));
         let result = eval_expression(predicate, &inner_record, store)?;
         if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
@@ -831,7 +831,7 @@ fn eval_pattern_comprehension(
                                 if !matches { continue; }
                             } else { continue; }
                         }
-                        let mut temp_record = record.clone();
+                        let mut temp_record = record.clone_with_capacity(2);
                         if let Some(var) = start_var {
                             temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
                         }
@@ -3361,7 +3361,14 @@ impl PhysicalOperator for ExpandOperator {
                 let (edge_id, src, tgt) = self.current_edges[self.edge_index];
                 self.edge_index += 1;
 
-                let mut new_record = self.current_record.as_ref().unwrap().clone();
+                // Room for the target, and for the edge and path variables when
+                // the pattern names them -- otherwise the first bind below
+                // reallocates a Vec that was cloned at exact capacity (#562).
+                let extra = 1
+                    + self.edge_var.is_some() as usize
+                    + self.path_variable.is_some() as usize;
+                let mut new_record =
+                    self.current_record.as_ref().unwrap().clone_with_capacity(extra);
 
                 // Determine target node based on direction
                 let target_id = match self.direction {
@@ -3419,7 +3426,14 @@ impl PhysicalOperator for ExpandOperator {
 
                 for i in 0..take {
                     let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
-                    let mut new_record = self.current_record.as_ref().unwrap().clone();
+                    // Room for the target, and for the edge and path variables when
+                // the pattern names them -- otherwise the first bind below
+                // reallocates a Vec that was cloned at exact capacity (#562).
+                let extra = 1
+                    + self.edge_var.is_some() as usize
+                    + self.path_variable.is_some() as usize;
+                let mut new_record =
+                    self.current_record.as_ref().unwrap().clone_with_capacity(extra);
 
                     let target_id = match self.direction {
                         Direction::Outgoing => tgt,

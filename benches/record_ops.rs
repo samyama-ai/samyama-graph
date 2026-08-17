@@ -145,7 +145,7 @@ fn main() {
     });
 
     // Binding, which every operator does to derive a row.
-    time("bind a 4th binding onto a 3-binding record", n / 5, || {
+    let grow_ns = time("clone, then bind a 4th (clone sized exactly)", n / 5, || {
         let mut acc = 0u64;
         for i in 0..(n / 5) {
             let mut copy = record.clone();
@@ -155,6 +155,32 @@ fn main() {
         acc
     });
 
+    let reserved_ns = time("clone_with_capacity(1), then bind a 4th", n / 5, || {
+        let mut acc = 0u64;
+        for i in 0..(n / 5) {
+            let mut copy = record.clone_with_capacity(1);
+            copy.bind("extra", Value::Property(PropertyValue::Integer(i as i64)));
+            acc = acc.wrapping_add(copy.bindings().len() as u64);
+        }
+        acc
+    });
+
+    // What an Expand binding a target and an edge variable pays.
+    time("clone_with_capacity(2), then bind two more", n / 5, || {
+        let mut acc = 0u64;
+        for i in 0..(n / 5) {
+            let mut copy = record.clone_with_capacity(2);
+            copy.bind("edge", Value::Property(PropertyValue::Integer(i as i64)));
+            copy.bind("target", Value::NodeRef(NodeId::from(i as u64)));
+            acc = acc.wrapping_add(copy.bindings().len() as u64);
+        }
+        acc
+    });
+
+    println!();
+    println!("Deriving a row: {grow_ns:.1} ns to clone and bind against {reserved_ns:.1} ns when the clone");
+    println!("reserves the room first. `Vec::clone` allocates exact capacity, so the next bind");
+    println!("reallocates -- and clone-then-bind is how nearly every operator derives a row (#562).");
     println!();
     println!("Lookup: {last:.1} ns by name against {by_slot:.1} ns by slot, and a name that is");
     println!("not bound costs {missing:.1} ns because the scan has to finish. Position matters --");
