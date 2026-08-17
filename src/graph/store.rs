@@ -2056,17 +2056,30 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Compare an edge's interned type against a filter.
     ///
-    /// `None` accepts everything; `Some(ids)` accepts only those ids, so
-    /// `Some(&[])` accepts nothing.
+    /// `None` accepts every *typed* edge; `Some(ids)` accepts only those ids,
+    /// so `Some(&[])` accepts nothing.
+    ///
+    /// An edge whose type is `EDGE_TYPE_UNSET` is rejected either way. Deleting
+    /// an edge sets its slot to `UNSET`, and the owned-tuple accessors this
+    /// replaced dropped such edges implicitly -- they resolved the type with
+    /// `if let Some(et) = self.get_edge_type(eid)` and skipped the `None`.
+    /// Keeping the exclusion explicit here preserves that, including for the
+    /// wildcard case where a filter-based check would otherwise let a stale
+    /// adjacency entry through.
     #[inline]
     fn edge_type_matches(&self, edge_id: EdgeId, type_ids: Option<&[u16]>) -> bool {
-        let Some(ids) = type_ids else { return true };
         let id = self
             .edge_type_ids
             .get(edge_id.as_u64() as usize)
             .copied()
             .unwrap_or(Self::EDGE_TYPE_UNSET);
-        ids.contains(&id)
+        if id == Self::EDGE_TYPE_UNSET {
+            return false;
+        }
+        match type_ids {
+            None => true,
+            Some(ids) => ids.contains(&id),
+        }
     }
 
     pub fn get_outgoing_edge_targets_owned(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {

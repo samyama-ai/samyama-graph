@@ -3091,12 +3091,21 @@ pub struct ExpandOperator {
     direction: Direction,
     /// Current input record
     current_record: Option<Record>,
-    /// Current edges as lightweight tuples (EdgeId, source, target, EdgeType) — no Edge clone
-    current_edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)>,
+    /// Current edges as `(EdgeId, source, target)`.
+    ///
+    /// The edge *type* is deliberately absent. It is read only when the
+    /// pattern binds an edge variable, and resolving it means cloning a
+    /// `String`; carrying it here cost one clone per surviving edge — 409,960
+    /// of them on LDBC IC9, whose pattern binds no edge variable at all
+    /// (#520).
+    current_edges: Vec<(crate::graph::EdgeId, NodeId, NodeId)>,
     /// Current edge index
     edge_index: usize,
     /// Path variable name for named paths (CY-04)
     path_variable: Option<String>,
+    /// `edge_types` resolved to interned ids, cached after the first use.
+    /// `Some(vec)` once resolved; the wildcard case never populates it.
+    type_ids: Option<Vec<u16>>,
 }
 
 impl ExpandOperator {
@@ -3121,6 +3130,7 @@ impl ExpandOperator {
             current_edges: Vec::new(),
             edge_index: 0,
             path_variable: None,
+            type_ids: None,
         }
     }
 
@@ -3136,6 +3146,27 @@ impl ExpandOperator {
         self
     }
 
+    /// The edge-type filter as interned ids, resolved once per query.
+    ///
+    /// `None` means the pattern named no types — the wildcard. A pattern that
+    /// named types none of which exist returns `Some(empty)`, which matches
+    /// nothing; conflating the two makes `-[:NO_SUCH_TYPE]->` follow every
+    /// edge in the graph (#520).
+    fn type_ids(&mut self, store: &GraphStore) -> Option<Vec<u16>> {
+        if self.edge_types.is_empty() {
+            return None;
+        }
+        if self.type_ids.is_none() {
+            let ids = self
+                .edge_types
+                .iter()
+                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+                .collect();
+            self.type_ids = Some(ids);
+        }
+        self.type_ids.clone()
+    }
+
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record.get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
@@ -3143,30 +3174,46 @@ impl ExpandOperator {
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
-        // Get edge tuples with owned EdgeType — works for both full and stub edges.
-        // Uses compact edge_type_ids array (DS-07c) when Edge objects are not available.
-        let edges: Vec<(crate::graph::EdgeId, NodeId, NodeId, EdgeType)> = match self.direction {
-            Direction::Outgoing => store.get_outgoing_edge_targets_owned(node_id),
-            Direction::Incoming => store.get_incoming_edge_sources_owned(node_id),
-            Direction::Both => {
-                let mut all = store.get_outgoing_edge_targets_owned(node_id);
-                all.extend(store.get_incoming_edge_sources_owned(node_id));
-                all
-            }
-        };
+        // Filter on the interned edge-type id *during* the adjacency walk, and
+        // resolve the `EdgeType` string only for the edges that survive.
+        //
+        // This used to materialise every incident edge as
+        // `(EdgeId, NodeId, NodeId, EdgeType)` -- cloning a type string per
+        // edge -- and filter the resulting Vec by comparing those strings. An
+        // LDBC `Person` has ~41 `KNOWS` edges and ~900 others (inbound
+        // `HAS_CREATOR` from every post and comment they wrote, `LIKES`,
+        // `HAS_MEMBER`, `HAS_INTEREST`), so a `[:KNOWS]` expansion cloned ~900
+        // strings to keep 41 (#520).
+        let type_ids = self.type_ids(store);
+        let type_filter = type_ids.as_deref();
 
-        // Filter by edge type if specified
-        self.current_edges = if self.edge_types.is_empty() {
-            edges
-        } else {
-            edges.into_iter()
-                .filter(|(_, _, _, et)| self.edge_types.iter().any(|t| et.as_str() == t))
-                .collect()
-        };
+        let mut collected: Vec<(crate::graph::EdgeId, NodeId, NodeId)> = Vec::new();
+        match self.direction {
+            Direction::Outgoing => {
+                store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                    collected.push((eid, node_id, target));
+                });
+            }
+            Direction::Incoming => {
+                store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                    collected.push((eid, source, node_id));
+                });
+            }
+            Direction::Both => {
+                store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                    collected.push((eid, node_id, target));
+                });
+                store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                    collected.push((eid, source, node_id));
+                });
+            }
+        }
+
+        self.current_edges = collected;
 
         // Filter by target node labels if specified
         if !self.target_labels.is_empty() {
-            self.current_edges.retain(|(_, src, tgt, _)| {
+            self.current_edges.retain(|(_, src, tgt)| {
                 let target_id = match self.direction {
                     Direction::Outgoing => *tgt,
                     Direction::Incoming => *src,
@@ -3197,7 +3244,7 @@ impl PhysicalOperator for ExpandOperator {
         loop {
             // If we have edges from current record, return them
             if self.edge_index < self.current_edges.len() {
-                let (edge_id, src, tgt, ref edge_type) = self.current_edges[self.edge_index];
+                let (edge_id, src, tgt) = self.current_edges[self.edge_index];
                 self.edge_index += 1;
 
                 let mut new_record = self.current_record.as_ref().unwrap().clone();
@@ -3216,7 +3263,12 @@ impl PhysicalOperator for ExpandOperator {
                 new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
 
                 if let Some(edge_var) = &self.edge_var {
-                    new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
+                    // Resolved here rather than carried: only a pattern that
+                    // names the edge ever reads its type.
+                    let edge_type = store
+                        .get_edge_type(edge_id)
+                        .unwrap_or_else(|| EdgeType::new(""));
+                    new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
                 }
 
                 // CY-04: Materialize named path variable
@@ -3252,7 +3304,7 @@ impl PhysicalOperator for ExpandOperator {
                 let take = (batch_size - expanded_records.len()).min(self.current_edges.len() - self.edge_index);
 
                 for i in 0..take {
-                    let (edge_id, src, tgt, ref edge_type) = self.current_edges[self.edge_index + i];
+                    let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
                     let mut new_record = self.current_record.as_ref().unwrap().clone();
 
                     let target_id = match self.direction {
@@ -3267,7 +3319,12 @@ impl PhysicalOperator for ExpandOperator {
 
                     new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
                     if let Some(edge_var) = &self.edge_var {
-                        new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type.clone()));
+                        // Resolved here rather than carried: only a pattern
+                        // that names the edge ever reads its type.
+                        let edge_type = store
+                            .get_edge_type(edge_id)
+                            .unwrap_or_else(|| EdgeType::new(""));
+                        new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
                     }
                     // CY-04: Materialize named path variable in batch mode
                     if let Some(ref path_var) = self.path_variable {
