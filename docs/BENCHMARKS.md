@@ -16,6 +16,16 @@ run yourself:
 | Memory footprint | `cargo bench --bench memory_footprint` |
 | Cardinality accuracy | `cargo bench --bench cardinality_accuracy` |
 | Ingestion profile | `cargo bench --bench ingest_profile` |
+| Operator micro-benchmarks | `cargo bench --bench aggregate_grouping`, `--bench varlength_expand`, `--bench property_access`, `--bench aggregate_throughput` |
+
+**Reading the operator micro-benchmarks.** These report ns per row for a single
+operator, and each prints the operator the planner actually chose. Check that
+column before drawing a conclusion: the planner rewrites several shapes, and a
+case that was rewritten measures the rewrite rather than the operator named in
+the row. `aggregate_grouping` reported 88 ns/row for LDBC IC5's shape until that
+column was added — `RETURN f.x, count(i)` over an expand becomes
+`AdjacencyCountAggregate`, which reads degrees off the adjacency index and never
+groups anything. The honest figure for that shape was 12× higher.
 
 **Not on this page: cross-engine comparisons.** Results against Neo4j,
 FalkorDB and TigerGraph are maintained internally alongside the competitor

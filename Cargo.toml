@@ -183,3 +183,7 @@ harness = false
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "aggregate_grouping"
+harness = false

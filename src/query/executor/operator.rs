@@ -3954,6 +3954,24 @@ impl CountDistinctSet {
             Self::Props(s) => s.len(),
         }
     }
+
+    /// Absorb another set. Used when two group identities turn out to share a
+    /// key tuple and their partial aggregates have to become one.
+    fn merge(&mut self, other: Self) {
+        match other {
+            Self::Empty => {}
+            Self::Ids(ids) => {
+                for id in ids {
+                    self.insert_id(id);
+                }
+            }
+            Self::Props(props) => {
+                for p in props {
+                    self.insert_prop(p);
+                }
+            }
+        }
+    }
 }
 
 impl AggregatorState {
@@ -4082,6 +4100,66 @@ impl AggregatorState {
                     else if let Some(i) = prop.as_integer() { values.push(i as f64); }
                 }
             }
+        }
+    }
+
+    /// Fold another partial aggregate of the same shape into this one.
+    ///
+    /// Every aggregate here is associative and commutative, which is what makes
+    /// grouping on identity and merging afterwards legal: partial states over a
+    /// partition of the input combine to the state over the whole input.
+    /// `collect` is the one to look at twice — list order is the order rows
+    /// arrived, which was already unspecified across groups, and concatenation
+    /// keeps each partial run contiguous.
+    fn merge(&mut self, other: Self) {
+        match (self, other) {
+            (AggregatorState::Count(a), AggregatorState::Count(b)) => *a += b,
+            (AggregatorState::CountDistinct(a), AggregatorState::CountDistinct(b)) => a.merge(b),
+            (
+                AggregatorState::Sum { int_acc, float_acc, int_only },
+                AggregatorState::Sum { int_acc: bi, float_acc: bf, int_only: bint },
+            ) => {
+                if *int_only && bint {
+                    *int_acc += bi;
+                } else {
+                    // Whichever side is still integral has to be promoted
+                    // before the two float accumulators can be added.
+                    if *int_only {
+                        *int_only = false;
+                        *float_acc = *int_acc as f64;
+                    }
+                    *float_acc += if bint { bi as f64 } else { bf };
+                }
+            }
+            (AggregatorState::Avg { sum, count }, AggregatorState::Avg { sum: bs, count: bc }) => {
+                *sum += bs;
+                *count += bc;
+            }
+            (AggregatorState::Min(a), AggregatorState::Min(b)) => {
+                if let Some(b) = b {
+                    if a.is_none() || &b < a.as_ref().unwrap() {
+                        *a = Some(b);
+                    }
+                }
+            }
+            (AggregatorState::Max(a), AggregatorState::Max(b)) => {
+                if let Some(b) = b {
+                    if a.is_none() || &b > a.as_ref().unwrap() {
+                        *a = Some(b);
+                    }
+                }
+            }
+            (AggregatorState::Collect(a), AggregatorState::Collect(b)) => a.extend(b),
+            (AggregatorState::CollectDistinct(a), AggregatorState::CollectDistinct(b)) => a.extend(b),
+            (AggregatorState::Percentile { values, .. }, AggregatorState::Percentile { values: b, .. }) => {
+                values.extend(b)
+            }
+            (AggregatorState::StDev { values, .. }, AggregatorState::StDev { values: b, .. }) => {
+                values.extend(b)
+            }
+            // Both sides are built from the same `AggregateFunction`, so a
+            // mismatch is a construction bug rather than bad input.
+            (a, b) => debug_assert!(false, "cannot merge {a:?} with {b:?}"),
         }
     }
 
@@ -4281,15 +4359,184 @@ impl PhysicalOperator for AggregateOperator {
     }
 }
 
-impl AggregateOperator {
-    fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        // Fast path: single group-by key avoids Vec allocation per record
-        if self.group_by.len() == 1 {
-            return self.execute_all_single_key(store);
+/// The group key of a row, before the key expressions are evaluated.
+///
+/// Grouping on a node's *identity* is at least as fine as grouping on any
+/// tuple of its properties: two rows with the same node necessarily agree on
+/// every property of it. It is not equivalent — two *different* nodes may
+/// share a key tuple — which is why the identity path has a merge step.
+///
+/// The point of the enum is that building one costs nothing for a node: a
+/// `u64` copy, against resolving and cloning a property per row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum IdentityKey {
+    Node(u64),
+    Edge(u64),
+    /// Anything else, cloned. Reached only where a key expression reads a
+    /// property of something that is not a graph element, which is a
+    /// degenerate query rather than a hot path.
+    Other(Value),
+}
+
+impl IdentityKey {
+    fn of(value: Option<&Value>) -> Self {
+        match value {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => IdentityKey::Node(id.0),
+            Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => IdentityKey::Edge(id.0),
+            Some(other) => IdentityKey::Other(other.clone()),
+            None => IdentityKey::Other(Value::Null),
         }
+    }
+}
+
+impl AggregateOperator {
+    /// True when every aggregate can be satisfied by counting rows, so the
+    /// argument expressions never have to be evaluated.
+    ///
+    /// Valid only when the argument cannot be null per row — `count(*)` (a
+    /// literal) or `count(var)` for a bound node or edge. `count(x.prop)`
+    /// counts *non-null values*, so skipping the evaluation there counts rows
+    /// instead and reports every row as a value (#358).
+    fn all_simple_count(aggregates: &[AggregateFunction]) -> bool {
+        aggregates.iter().all(|a| {
+            matches!(a.func, AggregateType::Count)
+                && !a.distinct
+                && matches!(a.expr, Expression::Literal(_) | Expression::Variable(_))
+        })
+    }
+
+    /// The single variable every group-by key is a property of, if there is one.
+    ///
+    /// `RETURN forum.id, forum.title, count(*)` — LDBC IC5's shape — keys on
+    /// two properties of one node. Evaluating them per row resolves a property
+    /// (and clones a string) 1.7M times to distinguish 96,862 groups that the
+    /// node id already distinguishes.
+    fn identity_group_variable(&self) -> Option<String> {
+        let mut found: Option<&str> = None;
+        for (expr, _) in &self.group_by {
+            match expr {
+                Expression::Property { variable, .. } => match found {
+                    None => found = Some(variable),
+                    Some(v) if v == variable => {}
+                    Some(_) => return None,
+                },
+                _ => return None,
+            }
+        }
+        found.map(|v| v.to_string())
+    }
+
+    /// Group on the identity of `var`, then resolve the key expressions once
+    /// per group rather than once per row (#521).
+    ///
+    /// Two phases, because identity grouping is finer than key grouping:
+    ///
+    /// 1. fold rows into partial aggregates keyed by `var`'s identity — no
+    ///    property resolution, no allocation, a `u64` hash per row;
+    /// 2. resolve each group's key tuple once and merge any groups whose
+    ///    tuples are equal.
+    ///
+    /// Phase 2 is what keeps this exactly equivalent to the general path. Two
+    /// distinct nodes carrying the same `(id, title)` are one group in Cypher,
+    /// and without the merge they would come out as two.
+    fn execute_all_by_identity(&mut self, var: &str, store: &GraphStore) -> ExecutionResult<()> {
+        let all_simple_count = Self::all_simple_count(&self.aggregates);
+
+        // The representative is the first `Value` seen for an identity, kept so
+        // phase 2 has something to resolve properties against. Cloned once per
+        // group, not once per row -- which is the whole point.
+        let mut groups: rustc_hash::FxHashMap<IdentityKey, (Value, Vec<AggregatorState>)> =
+            rustc_hash::FxHashMap::default();
+
+        let batch_size = 65536;
+        let mut batch_count = 0u64;
+        while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            batch_count += 1;
+            if batch_count % 10 == 0 {
+                check_deadline()?;
+            }
+            for record in batch.records {
+                let bound = record.get(var);
+                let key = IdentityKey::of(bound);
+                let (_, states) = groups.entry(key).or_insert_with(|| {
+                    (
+                        bound.cloned().unwrap_or(Value::Null),
+                        self.aggregates
+                            .iter()
+                            .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                            .collect(),
+                    )
+                });
+
+                if all_simple_count {
+                    for state in states.iter_mut() {
+                        if let AggregatorState::Count(c) = state {
+                            *c += 1;
+                        }
+                    }
+                } else {
+                    for (i, agg) in self.aggregates.iter().enumerate() {
+                        let val = Self::evaluate_expression(&agg.expr, &record, store)?;
+                        states[i].update(&val);
+                    }
+                }
+            }
+        }
+
+        // Phase 2. Every key expression is a property of `var` (that is what
+        // `identity_group_variable` established), so a record binding `var`
+        // alone is enough to evaluate them.
+        let mut merged: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
+            rustc_hash::FxHashMap::with_capacity_and_hasher(groups.len(), Default::default());
+        for (_, (representative, states)) in groups {
+            let mut probe = Record::new();
+            probe.bind(var.to_string(), representative);
+            let mut tuple = Vec::with_capacity(self.group_by.len());
+            for (expr, _) in &self.group_by {
+                tuple.push(Self::evaluate_expression(expr, &probe, store)?);
+            }
+            match merged.entry(tuple) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    for (dst, src) in slot.get_mut().iter_mut().zip(states) {
+                        dst.merge(src);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(states);
+                }
+            }
+        }
+
+        let mut output_records = Vec::with_capacity(merged.len());
+        for (tuple, states) in merged {
+            let mut record = Record::new();
+            for (i, (_, alias)) in self.group_by.iter().enumerate() {
+                record.bind(alias.clone(), tuple[i].clone());
+            }
+            for (i, agg) in self.aggregates.iter().enumerate() {
+                record.bind(agg.alias.clone(), states[i].result());
+            }
+            output_records.push(record);
+        }
+
+        self.results = output_records.into_iter();
+        self.executed = true;
+        Ok(())
+    }
+
+    fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Fast path: no group-by (global aggregate) — avoids HashMap entirely
         if self.group_by.is_empty() {
             return self.execute_all_no_group(store);
+        }
+        // Fast path: the keys are all properties of one variable, so its
+        // identity groups the rows and the properties are resolved per group.
+        if let Some(var) = self.identity_group_variable() {
+            return self.execute_all_by_identity(&var, store);
+        }
+        // Fast path: single group-by key avoids Vec allocation per record
+        if self.group_by.len() == 1 {
+            return self.execute_all_single_key(store);
         }
 
         // FxHashMap is 2-3x faster than std HashMap on simple keys (no
@@ -4297,6 +4544,13 @@ impl AggregateOperator {
         // each insert ~1M (group_key, aggregator) pairs.
         let mut groups: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
+        let all_simple_count = Self::all_simple_count(&self.aggregates);
+
+        // Reused across rows. `entry` needs an owned key, so building the tuple
+        // straight into the map allocated a `Vec` per input row and freed it
+        // again on every hit -- 1.68M allocations for 96,862 groups on IC5.
+        // Probing first means the allocation happens once per group.
+        let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
         let batch_size = 65536;
         let mut batch_count = 0u64;
@@ -4304,18 +4558,29 @@ impl AggregateOperator {
             batch_count += 1;
             if batch_count % 10 == 0 { check_deadline()?; }
             for record in batch.records {
-                let mut key = Vec::with_capacity(self.group_by.len());
+                scratch.clear();
                 for (expr, _) in &self.group_by {
-                    key.push(Self::evaluate_expression(expr, &record, store)?);
+                    scratch.push(Self::evaluate_expression(expr, &record, store)?);
                 }
 
-                let states = groups.entry(key).or_insert_with(|| {
-                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
-                });
+                let states = match groups.get_mut(&scratch) {
+                    Some(states) => states,
+                    None => groups.entry(scratch.clone()).or_insert_with(|| {
+                        self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
+                    }),
+                };
 
-                for (i, agg) in self.aggregates.iter().enumerate() {
-                    let val = Self::evaluate_expression(&agg.expr, &record, store)?;
-                    states[i].update(&val);
+                if all_simple_count {
+                    for state in states.iter_mut() {
+                        if let AggregatorState::Count(c) = state {
+                            *c += 1;
+                        }
+                    }
+                } else {
+                    for (i, agg) in self.aggregates.iter().enumerate() {
+                        let val = Self::evaluate_expression(&agg.expr, &record, store)?;
+                        states[i].update(&val);
+                    }
                 }
             }
         }
@@ -4343,16 +4608,7 @@ impl AggregateOperator {
             rustc_hash::FxHashMap::default();
         let group_expr = &self.group_by[0].0;
 
-        // Check if all aggregates are simple count (non-distinct) — can skip aggregate expression evaluation
-        // Fast path: count rows without evaluating the argument. Valid only when the
-        // argument cannot be null per row — `count(*)` (a literal) or `count(var)` for a
-        // bound node or edge. `count(x.prop)` counts *non-null values*, so skipping the
-        // evaluation there counted rows instead and reported every row as a value (#358).
-        let all_simple_count = self.aggregates.iter().all(|a| {
-            matches!(a.func, AggregateType::Count)
-                && !a.distinct
-                && matches!(a.expr, Expression::Literal(_) | Expression::Variable(_))
-        });
+        let all_simple_count = Self::all_simple_count(&self.aggregates);
 
         let batch_size = 65536;
         let mut batch_count = 0u64;
@@ -4404,15 +4660,7 @@ impl AggregateOperator {
             .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
             .collect();
 
-        // Fast path: count rows without evaluating the argument. Valid only when the
-        // argument cannot be null per row — `count(*)` (a literal) or `count(var)` for a
-        // bound node or edge. `count(x.prop)` counts *non-null values*, so skipping the
-        // evaluation there counted rows instead and reported every row as a value (#358).
-        let all_simple_count = self.aggregates.iter().all(|a| {
-            matches!(a.func, AggregateType::Count)
-                && !a.distinct
-                && matches!(a.expr, Expression::Literal(_) | Expression::Variable(_))
-        });
+        let all_simple_count = Self::all_simple_count(&self.aggregates);
 
         let batch_size = 65536;
         let mut batch_count = 0u64;
