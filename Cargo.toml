@@ -199,3 +199,7 @@ harness = false
 [[bench]]
 name = "adjacency_walk"
 harness = false
+
+[[bench]]
+name = "sort_topn"
+harness = false

@@ -5312,6 +5312,38 @@ impl SortOperator {
             .collect()
     }
 
+    /// `key_of`, but reading each `x.prop` key through a cursor that located
+    /// its column once (#557).
+    ///
+    /// Only plain property expressions take the cursor; anything else -- an
+    /// arithmetic expression, a function call -- falls back to `key_of`'s
+    /// walker, and produces the same value either way.
+    fn key_of_cached(
+        readers: &mut [PropertyCursor],
+        sort_items: &[(Expression, bool)],
+        record: &Record,
+        store: &GraphStore,
+    ) -> Vec<PropertyValue> {
+        let mut key = Vec::with_capacity(sort_items.len());
+        let mut cursor = readers.iter_mut();
+        for (expr, _) in sort_items {
+            match expr {
+                Expression::Property { .. } => {
+                    let c = cursor.next().expect("one cursor per property key");
+                    key.push(c.read(record, store));
+                }
+                other => key.push(
+                    Self::evaluate_expression(other, record, store)
+                        .unwrap_or(Value::Null)
+                        .as_property()
+                        .cloned()
+                        .unwrap_or(PropertyValue::Null),
+                ),
+            }
+        }
+        key
+    }
+
     /// Compare two precomputed keys under the per-column sort directions.
     fn cmp_keys(a: &[PropertyValue], b: &[PropertyValue], items: &[(Expression, bool)]) -> std::cmp::Ordering {
         for (i, (_, ascending)) in items.iter().enumerate() {
@@ -5507,11 +5539,24 @@ impl SortOperator {
         // would otherwise run on nearly every batch.
         let trim_at = bound.map(|k| k.saturating_mul(2).max(4096));
 
+        // One cursor per property-valued sort key, in the order those keys
+        // appear, so `key_of_cached` can walk the two together.
+        let mut readers: Vec<PropertyCursor> = self
+            .sort_items
+            .iter()
+            .filter_map(|(expr, _)| match expr {
+                Expression::Property { variable, property } => {
+                    Some(PropertyCursor::new(variable.as_str(), property.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+
         let mut keyed: Vec<(Vec<PropertyValue>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
-                let key = self.key_of(&record, store);
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store);
                 keyed.push((key, record));
             }
             if let (Some(k), Some(threshold)) = (bound, trim_at) {
