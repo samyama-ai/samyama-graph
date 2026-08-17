@@ -106,9 +106,19 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 >
 > The SF1 column below was re-run under the fixed harness (#450), which reports an `EMPTY` status and
 > exits non-zero if any read returns zero rows. Result: **21/21 passed, 0 empty, 0 errors** — so every
-> figure is a measurement of an actual traversal rather than of an empty result set.
-> Provenance: commit `b20ab99`, Vultr 12 vCPU / 23 GB AMD EPYC-Rome, 1 warm-up + 3 timed runs, median
-> reported, dataset from `scripts/download_ldbc_snb.sh` with the benchmark's built-in SF1 parameters.
+> figure is a measurement of an actual traversal rather than of an empty result set. This is the first
+> clean 21/21: IC14 timed out at 120 s until #539.
+>
+> Provenance: commit `4f0253e`, **Vultr voc-c-16c-32gb dedicated CPU** (16 vCPU / 31 GB, AMD EPYC-Rome,
+> fixed 1996 MHz), 1 warm-up + 3 timed runs, median reported, dataset from
+> `scripts/download_ldbc_snb.sh`. Host calibration was flat across the run — 43 ms opening and closing,
+> 1.00x (#529).
+>
+> Substitution parameters were **derived from the dataset** at the median of the KNOWS-degree
+> distribution rather than taken from the benchmark's built-in defaults (#505): anchor degree 23
+> against a median of 23 and a maximum of 977. Reproduce with
+> `cargo bench --bench ldbc_benchmark -- --runs 3 --derive-params 50`, which prints the provenance of
+> every parameter above the table.
 >
 > **The SF10 column is still unverified** and should not be quoted. It predates #450, when the harness
 > counted a zero-row read as a pass, so it cannot be told apart from an empty result. It needs the same
@@ -142,31 +152,51 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 | Query | Name | SF1 | SF10 |
 |---|---|---|---|
 | IS1 | Person Profile | 0.03 ms | 0.02 ms |
-| IS2 | Recent Posts by Person | 0.85 ms | 1.10 ms |
-| IS3 | Friends of Person | 0.17 ms | 1.80 ms |
+| IS2 | Recent Posts by Person | 0.08 ms | 1.10 ms |
+| IS3 | Friends of Person | 0.08 ms | 1.80 ms |
 | IS4 | Post Content | 0.01 ms | 0.01 ms |
 | IS5 | Post Creator | 0.02 ms | 0.02 ms |
-| IS6 | Forum of Post | 0.05 ms | 0.06 ms |
-| IS7 | Replies to Post | 0.39 ms | 11.50 ms |
+| IS6 | Forum of Post | 0.03 ms | 0.06 ms |
+| IS7 | Replies to Post | 1.2 ms | 11.50 ms |
 
 ## Complex reads (IC1–IC14)
 
-| Query | Name | SF1 | SF10 |
-|---|---|---|---|
-| IC1 | Transitive Friends by Name | 533 ms | 14.0 s |
-| IC2 | Recent Friend Posts | 27.6 ms | 306 ms |
-| IC3 | Friends in Countries | 997 ms | 15.7 s |
-| IC4 | Popular Tags in Period | 44.4 ms | 527 ms |
-| IC5 | New Forum Members | 1431 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | 1300 ms | 31.5 s |
-| IC7 | Recent Likers | 0.33 ms | 1.70 ms |
-| IC8 | Recent Replies | 0.49 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | 2246 ms | 26.3 s |
-| IC10 | Friend Recommendation | 144 ms | 2.3 s |
-| IC11 | Job Referral | 145 ms | 4.5 s |
-| IC12 | Expert Reply | 176 ms | 3.2 s |
-| IC13 | Single Shortest Path | 2.3 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | 37.0 ms | 696 ms |
+| Query | Name | SF1 | previous SF1 | SF10 |
+|---|---|---|---|---|
+| IC1 | Transitive Friends by Name | **71.7 ms** | 533 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **16.5 ms** | 27.6 ms | 306 ms |
+| IC3 | Friends in Countries | **1101 ms** | 997 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **16.2 ms** | 44.4 ms | 527 ms |
+| IC5 | New Forum Members | **2614 ms** | 1431 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **259 ms** | 1300 ms | 31.5 s |
+| IC7 | Recent Likers | **0.07 ms** | 0.33 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.18 ms** | 0.49 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **1379 ms** | 2246 ms | 26.3 s |
+| IC10 | Friend Recommendation | **160 ms** | 144 ms | 2.3 s |
+| IC11 | Job Referral | **44.8 ms** | 145 ms | 4.5 s |
+| IC12 | Expert Reply | **208 ms** | 176 ms | 3.2 s |
+| IC13 | Single Shortest Path | **46.3 ms** | 2.3 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **54.0 ms** | 37.0 ms | 696 ms |
+
+**Whole suite: 24.2 s, 21/21 passed, 0 empty, 0 errors.**
+
+### Why the "previous SF1" column is here rather than deleted
+
+Three of these got *slower* and the reason is the parameters, not the engine.
+The previous column was measured with the benchmark's built-in defaults; this
+one derives its substitution parameters from the dataset at the median of the
+KNOWS-degree distribution (#505), which asks a harder and more representative
+question than the built-in anchor did. IC3, IC5, IC10, IC12, IC13 and IC14 all
+traverse further as a result — IC13 and IC14 in particular now have their
+endpoints three hops apart rather than adjacent.
+
+Comparing a number in one column against a number in the other is therefore
+not a measure of anything. They are kept side by side so that nobody does it
+by accident having found only one of them.
+
+The improvements within the new column, measured back-to-back against the
+immediately preceding commit in each case, are real: IC6 9.9x and IC14 from a
+120 s timeout come from #543 and #539 respectively.
 
 ## Notes
 
