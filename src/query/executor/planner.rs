@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
+    operator::{NodeScanOperator, NodeByIdOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -2257,7 +2257,23 @@ impl QueryPlanner {
             // Optimization: Check for index usage (using this path's assigned predicates).
             // Recognizes both `n.prop OP literal` and `literal OP n.prop` operand orders.
             let mut remaining_predicates: Vec<Expression> = per_path_preds[path_idx].clone();
-            let mut path_operator: OperatorBox = if let Some((idx, label, property, op, val)) =
+            let mut path_operator: OperatorBox = if let Some((idx, ids)) =
+                find_id_predicate(&start_var, &remaining_predicates)
+            {
+                // `id()` before any index: it is unique by construction, so
+                // there is nothing for a cost model to weigh. Without this,
+                // `MATCH (n) WHERE id(n) = 5` scanned the whole label and
+                // filtered (#538).
+                //
+                // The label, if the pattern named one, still has to be
+                // checked -- `MATCH (n:Person) WHERE id(n) = 5` must not
+                // match a node of another label that happens to hold that id.
+                remaining_predicates.remove(idx);
+                Box::new(
+                    NodeByIdOperator::new(ids, start_var.clone())
+                        .with_labels(path.start.labels.clone()),
+                )
+            } else if let Some((idx, label, property, op, val)) =
                 find_index_predicate(&start_var, &path.start.labels, &remaining_predicates, store)
             {
                 remaining_predicates.remove(idx);
@@ -2584,7 +2600,17 @@ impl QueryPlanner {
         }
         candidates.extend(anchor_only_preds);
 
-        let mut path_operator: OperatorBox = if let Some((idx, label, property, op, val)) =
+        // `id()` first: it is unique by construction, so it beats any index
+        // and needs no statistics to know that (#538).
+        let mut path_operator: OperatorBox = if let Some((idx, ids)) =
+            find_id_predicate(&anchor_var, &candidates)
+        {
+            candidates.remove(idx);
+            Box::new(
+                NodeByIdOperator::new(ids, anchor_var.clone())
+                    .with_labels(anchor.labels.clone()),
+            )
+        } else if let Some((idx, label, property, op, val)) =
             find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
         {
             candidates.remove(idx);
@@ -3530,6 +3556,71 @@ fn flip_comparison_op(op: &BinaryOp) -> BinaryOp {
 /// either operand order (`var.prop OP literal` or `literal OP var.prop`).
 /// Returns the predicate's index within `preds` plus the matched label,
 /// property, normalized operator, and literal value.
+/// Find an `id(var) = <literal>` or `id(var) IN [...]` predicate.
+///
+/// Returns the predicate's position and the node ids it pins, so the caller
+/// can drop it and scan those ids directly.
+///
+/// `id()` is unique by construction, so this needs no cost model and no
+/// statistics: the predicate selects at most one node per literal. Without it
+/// `MATCH (n) WHERE id(n) = 5` lowered to a full label scan plus a filter, and
+/// `shortestPath((a)-[:KNOWS*]-(b)) WHERE id(a) = 1 AND id(b) = 3500` ran
+/// ~1000x slower than the same query written with inline properties (#538).
+fn find_id_predicate(var: &str, preds: &[Expression]) -> Option<(usize, Vec<crate::graph::NodeId>)> {
+    /// `id(x)` applied to exactly this variable.
+    fn is_id_of(expr: &Expression, var: &str) -> bool {
+        matches!(
+            expr,
+            Expression::Function { name, args, .. }
+                if name.eq_ignore_ascii_case("id")
+                    && args.len() == 1
+                    && matches!(&args[0], Expression::Variable(v) if v == var)
+        )
+    }
+
+    fn as_node_id(value: &PropertyValue) -> Option<crate::graph::NodeId> {
+        match value {
+            // Negative ids cannot exist, and `as u64` would wrap one into a
+            // very large positive id that matches nothing slowly.
+            PropertyValue::Integer(i) if *i >= 0 => Some(crate::graph::NodeId::new(*i as u64)),
+            _ => None,
+        }
+    }
+
+    for (i, pred) in preds.iter().enumerate() {
+        let Expression::Binary { left, op, right } = pred else {
+            continue;
+        };
+        // Accept the literal on either side: `id(n) = 5` and `5 = id(n)`.
+        let literal = match (left.as_ref(), right.as_ref()) {
+            (l, Expression::Literal(v)) if is_id_of(l, var) => Some(v),
+            (Expression::Literal(v), r) if is_id_of(r, var) => Some(v),
+            _ => None,
+        };
+        let Some(literal) = literal else { continue };
+
+        match op {
+            BinaryOp::Eq => {
+                if let Some(id) = as_node_id(literal) {
+                    return Some((i, vec![id]));
+                }
+            }
+            BinaryOp::In => {
+                if let PropertyValue::Array(items) = literal {
+                    let ids: Vec<crate::graph::NodeId> = items.iter().filter_map(as_node_id).collect();
+                    // Only if every element was a usable id -- dropping one
+                    // silently would lose rows.
+                    if !ids.is_empty() && ids.len() == items.len() {
+                        return Some((i, ids));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn find_index_predicate(
     var: &str,
     labels: &[Label],
@@ -3593,6 +3684,12 @@ fn anchor_cardinality(
         }
     }
     candidates.extend(path_preds.iter().cloned());
+
+    // `id()` pins exactly one node per literal, whatever the label holds.
+    if let Some((_, ids)) = find_id_predicate(&node.var, &candidates) {
+        let n = ids.len() as f64;
+        return (n, n);
+    }
 
     if let Some((_, label, property, op, val)) =
         find_index_predicate(&node.var, &node.labels, &candidates, store)

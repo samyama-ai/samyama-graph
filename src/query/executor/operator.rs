@@ -9468,6 +9468,12 @@ pub struct NodeByIdOperator {
     node_ids: Vec<NodeId>,
     position: usize,
     variable: String,
+    /// Labels the pattern required, checked per id.
+    ///
+    /// A scan by id bypasses the label index, so `MATCH (n:Person) WHERE
+    /// id(n) = 5` would otherwise match a node of any label that happens to
+    /// hold that id (#538).
+    labels: Vec<Label>,
 }
 
 impl NodeByIdOperator {
@@ -9476,7 +9482,14 @@ impl NodeByIdOperator {
             node_ids,
             position: 0,
             variable,
+            labels: Vec::new(),
         }
+    }
+
+    /// Require the node to carry every one of these labels.
+    pub fn with_labels(mut self, labels: Vec<Label>) -> Self {
+        self.labels = labels;
+        self
     }
 }
 
@@ -9486,8 +9499,12 @@ impl PhysicalOperator for NodeByIdOperator {
             let node_id = self.node_ids[self.position];
             self.position += 1;
 
-            // Verify node still exists
-            if store.has_node(node_id) {
+            // Verify the node still exists and carries the pattern's labels.
+            let matches = match store.get_node(node_id) {
+                Some(node) => self.labels.iter().all(|l| node.has_label(l)),
+                None => false,
+            };
+            if matches {
                 let mut record = Record::new();
                 record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 return Ok(Some(record));
