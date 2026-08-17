@@ -270,8 +270,12 @@ pub async fn schema_handler(
             .label_index_ids(label)
             .and_then(|ids| ids.iter().next())
         {
-            if let Some(node) = store_guard.get_node(sample_id) {
-                for (key, val) in &node.properties {
+            // Merged, not `node.properties`: a snapshot-imported graph keeps
+            // its properties in the columnar store and its row maps are
+            // empty, so reading the row reported "this label has no
+            // properties" for every published `.sgsnap` (#554).
+            if store_guard.get_node(sample_id).is_some() {
+                for (key, val) in &store_guard.node_properties_merged(sample_id) {
                     let prop_type = match val {
                         PropertyValue::String(_) => "String",
                         PropertyValue::Integer(_) => "Integer",
@@ -407,9 +411,12 @@ pub async fn sample_handler(
             if i % stride == 0 {
                 sampled_ids.insert(node.id);
 
-                // Build node JSON with all properties
+                // Merged, not `node.properties`: an imported graph's row
+                // maps are empty and every node came back with `{}` and a
+                // numeric name (#554).
+                let merged = store_guard.node_properties_merged(node.id);
                 let mut props = serde_json::Map::new();
-                for (k, v) in &node.properties {
+                for (k, v) in &merged {
                     props.insert(k.clone(), match v {
                         PropertyValue::String(s) => json!(s),
                         PropertyValue::Integer(i) => json!(i),
@@ -421,10 +428,10 @@ pub async fn sample_handler(
                 }
 
                 // Determine node name (first string property, or id)
-                let name = node.properties.iter()
-                    .find(|(k, _)| k.as_str() == "name" || k.as_str() == "title" || k.as_str() == "label")
-                    .and_then(|(_, v)| match v {
-                        PropertyValue::String(s) => Some(s.clone()),
+                let name = ["name", "title", "label"]
+                    .iter()
+                    .find_map(|k| match merged.get(*k) {
+                        Some(PropertyValue::String(s)) => Some(s.clone()),
                         _ => None,
                     })
                     .unwrap_or_else(|| format!("{}", node.id.as_u64()));
@@ -809,6 +816,111 @@ mod tests {
             .route("/api/status", get(status_handler))
             .with_state(state.clone());
         (app, state)
+    }
+
+    /// A graph whose properties live only in the columnar store, as every
+    /// snapshot-imported graph's do.
+    ///
+    /// Built by exporting and re-importing rather than by poking the store
+    /// directly, so the fixture is the real thing: `import_tenant` writes
+    /// columns and leaves `Node.properties` empty.
+    fn imported_graph() -> GraphStore {
+        use crate::graph::PropertyValue;
+        let mut built = GraphStore::new();
+        for i in 0..5 {
+            let id = built.create_node("Person");
+            let _ = built.set_node_property(
+                "default",
+                id,
+                "name".to_string(),
+                PropertyValue::String(format!("p{i}")),
+            );
+            let _ = built.set_node_property(
+                "default",
+                id,
+                "age".to_string(),
+                PropertyValue::Integer(i),
+            );
+        }
+
+        let mut bytes = Vec::new();
+        crate::snapshot::export_tenant(&built, &mut bytes).expect("export");
+        let mut restored = GraphStore::new();
+        crate::snapshot::import_tenant(&mut restored, bytes.as_slice()).expect("import");
+
+        // The premise of the test: the row maps really are empty.
+        let first = restored.get_node(crate::graph::NodeId::new(1)).expect("node 1");
+        assert!(
+            first.properties.is_empty(),
+            "fixture is wrong: an imported graph should keep properties in columns only"
+        );
+        restored
+    }
+
+    #[tokio::test]
+    async fn schema_lists_properties_of_an_imported_graph() {
+        // Reading `node.properties` here reported "this label has no
+        // properties" for every published .sgsnap (#554).
+        let state = AppState {
+            store: Arc::new(RwLock::new(imported_graph())),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        };
+        let app = Router::new()
+            .route("/api/schema", get(schema_handler))
+            .with_state(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/api/schema").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let person = json["node_types"]
+            .as_array()
+            .and_then(|types| types.iter().find(|t| t["label"] == "Person"))
+            .expect("Person label in schema");
+        let props = person["properties"].as_object().expect("properties object");
+
+        assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("String"), "{json}");
+        assert_eq!(props.get("age").and_then(|v| v.as_str()), Some("Integer"), "{json}");
+    }
+
+    #[test]
+    fn merged_properties_prefer_the_column_over_the_row() {
+        use crate::graph::PropertyValue;
+        // The column holds the current value; the row can hold a superseded
+        // one, so the column wins -- the same order `resolve_property` uses.
+        let mut store = GraphStore::new();
+        let id = store.create_node("N");
+        if let Some(node) = store.get_node_mut(id) {
+            node.set_property("k", PropertyValue::Integer(1));
+            node.set_property("row_only", PropertyValue::Integer(9));
+        }
+        store.set_column_property(id, "k", PropertyValue::Integer(2));
+
+        let merged = store.node_properties_merged(id);
+        assert_eq!(merged.get("k"), Some(&PropertyValue::Integer(2)), "column wins");
+        assert_eq!(
+            merged.get("row_only"),
+            Some(&PropertyValue::Integer(9)),
+            "a row-only property is still returned"
+        );
+    }
+
+    #[test]
+    fn merged_properties_of_an_imported_graph_are_not_empty() {
+        use crate::graph::PropertyValue;
+        let store = imported_graph();
+        let merged = store.node_properties_merged(crate::graph::NodeId::new(1));
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert_eq!(merged.get("name"), Some(&PropertyValue::String("p0".to_string())));
+        assert_eq!(merged.get("age"), Some(&PropertyValue::Integer(0)));
     }
 
     /// Helper: send a POST /api/query with the given body and return (status, json).

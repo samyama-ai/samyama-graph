@@ -1974,6 +1974,35 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get outgoing edge targets with owned EdgeType — works for both full and stub edges.
     /// Uses compact edge_type_ids array (DS-07c) when Edge objects are not available.
+    /// Every property a node has, from wherever it is stored.
+    ///
+    /// A graph built through the API writes both the columnar store and the
+    /// row map on the `Node`; a graph restored from a `.sgsnap` writes only
+    /// the columns, so its row maps are empty. `resolve_property` handles that
+    /// by reading the column first and falling back to the row, and anything
+    /// that reads `node.properties` directly gets nothing on an imported graph
+    /// -- which is what #554 was.
+    ///
+    /// Columns win on a clash, matching `resolve_property`: the column holds
+    /// the current value, the row can hold a superseded one.
+    pub fn node_properties_merged(&self, node_id: NodeId) -> PropertyMap {
+        let idx = node_id.as_u64() as usize;
+        let mut merged: PropertyMap = PropertyMap::new();
+
+        if let Some(node) = self.get_node(node_id) {
+            for (key, value) in &node.properties {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        for key in self.node_columns.get_property_keys(idx) {
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                merged.insert(key, value);
+            }
+        }
+        merged
+    }
+
     /// The interned id of an edge type, if the graph has ever seen one.
     ///
     /// `None` means no edge in the graph has this type, so a filter on it
