@@ -2339,6 +2339,11 @@ impl QueryPlanner {
             } else {
                 // Normal path: use ExpandOperator for each segment
                 let mut current_var = start_var.clone();
+                // Variables bound so far, so a deferred predicate can be
+                // applied the moment its last variable arrives rather than
+                // after the whole path (#328).
+                let mut bound: HashSet<String> = HashSet::new();
+                bound.insert(start_var.clone());
                 for (seg_idx, segment) in path.segments.iter().enumerate() {
                     let target_var = path_nodes[seg_idx + 1].var.clone();
 
@@ -2374,6 +2379,15 @@ impl QueryPlanner {
                                 path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                             }
                         }
+                        bound.insert(target_var.clone());
+                        if let Some(ev) = &segment.edge.variable {
+                            bound.insert(ev.clone());
+                        }
+                        path_operator = Self::apply_ready_predicates(
+                            path_operator,
+                            &mut deferred_predicates,
+                            &bound,
+                        );
                         current_var = target_var;
                         continue;
                     }
@@ -2406,6 +2420,16 @@ impl QueryPlanner {
                             path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                         }
                     }
+
+                    bound.insert(target_var.clone());
+                    if let Some(ev) = &segment.edge.variable {
+                        bound.insert(ev.clone());
+                    }
+                    path_operator = Self::apply_ready_predicates(
+                        path_operator,
+                        &mut deferred_predicates,
+                        &bound,
+                    );
 
                     current_var = target_var;
                 }
@@ -2465,6 +2489,56 @@ impl QueryPlanner {
         Ok(result)
     }
 
+    /// Attach any deferred predicate whose variables are all bound by now.
+    ///
+    /// The path builders used to hold every predicate that mentions a
+    /// non-anchor variable until the **whole path** was expanded. On LDBC IC3
+    /// that meant `m.creationDate >= … AND m.creationDate < …` -- which
+    /// references only `m`, bound by the *first* expand -- was evaluated after
+    /// the second expand had already produced 409,960 rows, of which 622
+    /// survived. The predicate could have cut the second expand's input by
+    /// ~80% (#328).
+    ///
+    /// Applying a conjunct as soon as its variables are bound cannot change
+    /// the answer of a conjunctive pattern: the rows it removes are rows the
+    /// later filter would have removed. `OPTIONAL MATCH` is not affected --
+    /// this runs inside a single path of a single MATCH, and the outer join is
+    /// built above it.
+    fn apply_ready_predicates(
+        operator: OperatorBox,
+        deferred: &mut Vec<Expression>,
+        bound: &HashSet<String>,
+    ) -> OperatorBox {
+        if deferred.is_empty() {
+            return operator;
+        }
+        let mut ready: Vec<Expression> = Vec::new();
+        deferred.retain(|pred| {
+            let mut vars = HashSet::new();
+            Self::collect_expression_variables(pred, &mut vars);
+            // A predicate with no variables at all is a constant; leave it to
+            // the existing early-predicate path rather than moving it here.
+            if !vars.is_empty() && vars.iter().all(|v| bound.contains(v)) {
+                ready.push(pred.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if ready.is_empty() {
+            return operator;
+        }
+        let filter_expr = ready
+            .into_iter()
+            .reduce(|acc, pred| Expression::Binary {
+                left: Box::new(acc),
+                op: BinaryOp::And,
+                right: Box::new(pred),
+            })
+            .unwrap();
+        Box::new(FilterOperator::new(operator, filter_expr))
+    }
+
     /// Build a path plan anchored at `nodes[anchor_idx]` instead of the pattern's first
     /// node. Traverses backward (reversed edge direction) toward earlier-written nodes
     /// and forward (written direction) toward later-written nodes. Only invoked when
@@ -2522,6 +2596,14 @@ impl QueryPlanner {
             path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
         }
 
+        // Variables bound so far, so a deferred predicate can be applied the
+        // moment its last variable arrives rather than after the whole path
+        // (#328). This builder is the one that runs whenever the cheapest
+        // anchor is not the pattern's first node -- which on LDBC IC3 and IC6
+        // is most of the time.
+        let mut bound: HashSet<String> = HashSet::new();
+        bound.insert(anchor_var.clone());
+
         // Walk backward toward earlier-written nodes using reversed edge direction:
         // the anchor is now the traversal source, so an originally-outgoing edge from
         // the earlier node must be read as incoming from the anchor's perspective.
@@ -2548,6 +2630,12 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
+            bound.insert(target.var.clone());
+            if let Some(ev) = &segment.edge.variable {
+                bound.insert(ev.clone());
+            }
+            path_operator =
+                Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
             current_var = target.var.clone();
         }
 
@@ -2570,6 +2658,12 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
+            bound.insert(target.var.clone());
+            if let Some(ev) = &segment.edge.variable {
+                bound.insert(ev.clone());
+            }
+            path_operator =
+                Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
             current_var = target.var.clone();
         }
 
@@ -3678,6 +3772,17 @@ impl QueryPlanner {
             if let Some(ref ev) = edge_var {
                 vars.insert(ev.clone());
             }
+            // Apply any deferred conjunct whose variables are now all bound,
+            // rather than holding it until the whole path is expanded (#328).
+            //
+            // This is the builder LDBC IC3, IC6 and IC9 actually use -- their
+            // second MATCH starts from a variable bound by a preceding WITH,
+            // so neither of the other two path builders runs. IC3 carried
+            // 409,960 rows through `(m)-[:IS_LOCATED_IN]->(place)` before
+            // applying a date filter on `m` that only 622 rows survive, and
+            // `m` is bound by the expand before it.
+            path_operator =
+                Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &vars);
             current_var = target_var;
         }
 
