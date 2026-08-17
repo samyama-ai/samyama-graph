@@ -195,3 +195,7 @@ harness = false
 [[bench]]
 name = "record_ops"
 harness = false
+
+[[bench]]
+name = "adjacency_walk"
+harness = false
