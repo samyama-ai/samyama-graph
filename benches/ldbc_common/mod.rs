@@ -86,15 +86,30 @@ where
 
         let node_id = graph.create_node(label);
 
-        // Set properties
+        // Properties go through `GraphStore::set_node_property`, which is what
+        // `CREATE` and CSV import use.
+        //
+        // This used to write `node.set_property(...)` directly on the `Node`,
+        // which reaches row storage and never the columnar store. That is a
+        // path no user takes: `CREATE` writes both, and snapshot import --
+        // every published `.sgsnap` KG -- writes only columns. So the suite
+        // every performance decision rests on exercised a third path, and one
+        // that costs 61.7 ns per property read against the column store's
+        // 10.5 ns (#534).
+        //
+        // Going through the store also means the columnar work in #532 and
+        // #535 is visible here at all; before this, an 11.4x improvement to a
+        // property read moved LDBC by nothing.
         let props = parse_props(&headers, &fields);
-        if let Some(node) = graph.get_node_mut(node_id) {
-            for (key, val) in props {
-                node.set_property(key, val);
-            }
-            // Store the LDBC id as a property too
-            node.set_property("id", ldbc_id);
+        for (key, val) in props {
+            let _ = graph.set_node_property("default", node_id, key.to_string(), val);
         }
+        let _ = graph.set_node_property(
+            "default",
+            node_id,
+            "id".to_string(),
+            PropertyValue::Integer(ldbc_id),
+        );
 
         id_map.insert(ldbc_id, node_id);
         count += 1;
