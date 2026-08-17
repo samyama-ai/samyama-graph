@@ -39,26 +39,37 @@
 //! names, returned to the caller after query execution completes.
 
 use crate::graph::{Edge, Node, NodeId, EdgeId, EdgeType, PropertyValue, GraphStore};
-use rustc_hash::FxHashMap;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::hash::{Hash, Hasher};
 
 /// A single record flowing through the query pipeline
 #[derive(Debug, Clone)]
 pub struct Record {
-    /// Variable bindings (variable name -> value).
+    /// Variable bindings, in the order they were bound.
     ///
-    /// `FxHashMap`, not `std`'s: a record is created, cloned and read several
-    /// times per row, and every read hashes a variable name. `SipHash` is a
-    /// DoS-resistant hash being asked to hash `"friend"` — not the threat
-    /// model of a query-plan variable, which the planner chose itself.
+    /// A flat vector, not a hash map. A query plan binds a handful of
+    /// variables — three or four is typical, a dozen is a lot — and at that
+    /// size a linear scan comparing short strings beats hashing one.
+    ///
+    /// What a `HashMap<String, Value>` cost, per row:
+    ///
+    /// * a **table allocation** for every record;
+    /// * a **`String` allocation per binding** on every clone, and operators
+    ///   clone a record per output row (`ExpandOperator::next` does exactly
+    ///   that);
+    /// * a **`SipHash` over a variable name** on every read, several times per
+    ///   row — once in the expand, once per property access inside
+    ///   `evaluate_expression`.
     ///
     /// Measured on LDBC IC5, whose `Aggregate` consumes 1,678,980 records at
-    /// ~1,275 ns each: per row the engine does a map clone, a `String`
-    /// allocation per binding, and four to six string-keyed lookups. This is
-    /// the cheap half of that (#546); the structural half is giving records a
-    /// slot layout so a variable is an index rather than a name.
-    bindings: FxHashMap<String, Value>,
+    /// ~1,275 ns each while its group key accounts for perhaps 200 ns of that
+    /// (#546).
+    ///
+    /// `Arc<str>` rather than `String` is the other half: cloning a record now
+    /// copies a vector of pointer pairs and bumps refcounts, where before it
+    /// allocated a fresh `String` for every variable name on every row.
+    bindings: Vec<(Arc<str>, Value)>,
 }
 
 /// Value types that can be bound to variables in a query record.
@@ -144,44 +155,73 @@ impl Record {
     /// Create a new empty record
     pub fn new() -> Self {
         Self {
-            bindings: FxHashMap::default(),
+            bindings: Vec::new(),
         }
     }
 
-    /// Bind a variable to a value
-    pub fn bind(&mut self, variable: String, value: Value) {
-        self.bindings.insert(variable, value);
+    /// Bind a variable to a value, replacing any previous binding.
+    ///
+    /// Accepts anything that converts to `Arc<str>`, so an operator holding
+    /// its variable name as an `Arc<str>` binds with a refcount bump; passing
+    /// a `String` copies once, as inserting into the old map did.
+    pub fn bind(&mut self, variable: impl Into<Arc<str>>, value: Value) {
+        let variable = variable.into();
+        match self.bindings.iter_mut().find(|(name, _)| *name == variable) {
+            Some(slot) => slot.1 = value,
+            None => self.bindings.push((variable, value)),
+        }
     }
 
     /// Get a bound value
     pub fn get(&self, variable: &str) -> Option<&Value> {
-        self.bindings.get(variable)
+        self.bindings
+            .iter()
+            .find(|(name, _)| &**name == variable)
+            .map(|(_, value)| value)
     }
 
-    /// Get all bindings
-    pub fn bindings(&self) -> &FxHashMap<String, Value> {
+    /// All bindings, in binding order.
+    pub fn bindings(&self) -> &[(Arc<str>, Value)] {
         &self.bindings
+    }
+
+    /// The bound values, without their names.
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.bindings.iter().map(|(_, value)| value)
     }
 
     /// Check if a variable is bound
     pub fn has(&self, variable: &str) -> bool {
-        self.bindings.contains_key(variable)
+        self.get(variable).is_some()
     }
 
-    /// Merge another record into this one
+    /// Merge another record into this one, `other` winning on a clash.
     pub fn merge(&mut self, other: Record) {
-        self.bindings.extend(other.bindings);
+        for (name, value) in other.bindings {
+            self.bind(name, value);
+        }
     }
 
     /// Clone with only specified variables
     pub fn project(&self, variables: &[String]) -> Record {
         let mut new_record = Record::new();
         for var in variables {
-            if let Some(value) = self.bindings.get(var) {
-                new_record.bind(var.clone(), value.clone());
+            if let Some((name, value)) = self.bindings.iter().find(|(n, _)| &**n == var.as_str()) {
+                new_record.bind(name.clone(), value.clone());
             }
         }
         new_record
+    }
+
+    /// A deterministic key for deduplication: bindings sorted by name.
+    ///
+    /// Sorted because binding *order* is an artefact of how a plan was built,
+    /// not part of a row's identity — two records binding the same values in a
+    /// different order are the same row and must collide.
+    pub fn dedup_key(&self) -> Vec<(Arc<str>, Value)> {
+        let mut key = self.bindings.clone();
+        key.sort_by(|a, b| a.0.cmp(&b.0));
+        key
     }
 }
 
@@ -802,8 +842,53 @@ mod tests {
 
         let bindings = r.bindings();
         assert_eq!(bindings.len(), 2);
-        assert!(bindings.contains_key("x"));
-        assert!(bindings.contains_key("y"));
+        assert!(r.has("x"));
+        assert!(r.has("y"));
+        // Bindings keep insertion order now, which `dedup_key` normalises
+        // away for identity. Order is observable here and deliberately not
+        // relied on anywhere else.
+        assert_eq!(&*bindings[0].0, "x");
+        assert_eq!(&*bindings[1].0, "y");
+    }
+
+    #[test]
+    fn rebinding_a_variable_replaces_it_rather_than_duplicating() {
+        let mut r = Record::new();
+        r.bind("x".to_string(), Value::Property(PropertyValue::Integer(1)));
+        r.bind("x".to_string(), Value::Property(PropertyValue::Integer(2)));
+        assert_eq!(r.bindings().len(), 1, "a flat vector must not accumulate duplicates");
+        assert_eq!(r.get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
+    }
+
+    #[test]
+    fn the_dedup_key_ignores_binding_order() {
+        // Two records with the same bindings in a different order are the same
+        // row. The previous key was `format!("{:?}", bindings)` over a hash
+        // map, so it depended on iteration order for identity.
+        let mut a = Record::new();
+        a.bind("x".to_string(), Value::Property(PropertyValue::Integer(1)));
+        a.bind("y".to_string(), Value::Property(PropertyValue::Integer(2)));
+
+        let mut b = Record::new();
+        b.bind("y".to_string(), Value::Property(PropertyValue::Integer(2)));
+        b.bind("x".to_string(), Value::Property(PropertyValue::Integer(1)));
+
+        assert_eq!(a.dedup_key(), b.dedup_key());
+    }
+
+    #[test]
+    fn merge_lets_the_incoming_record_win() {
+        let mut a = Record::new();
+        a.bind("x".to_string(), Value::Property(PropertyValue::Integer(1)));
+        a.bind("y".to_string(), Value::Property(PropertyValue::Integer(9)));
+
+        let mut b = Record::new();
+        b.bind("x".to_string(), Value::Property(PropertyValue::Integer(2)));
+
+        a.merge(b);
+        assert_eq!(a.bindings().len(), 2);
+        assert_eq!(a.get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
+        assert_eq!(a.get("y"), Some(&Value::Property(PropertyValue::Integer(9))));
     }
 
     #[test]

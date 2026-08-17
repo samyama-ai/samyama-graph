@@ -6235,7 +6235,7 @@ impl PhysicalOperator for DropIndexOperator {
 /// deduplicate against each other.
 pub struct DistinctOperator {
     input: OperatorBox,
-    seen: HashSet<Vec<(String, Value)>>,
+    seen: HashSet<Vec<(std::sync::Arc<str>, Value)>>,
 }
 
 impl DistinctOperator {
@@ -6249,14 +6249,8 @@ impl DistinctOperator {
 
     /// The deduplication key: every binding, ordered by column name so that two records
     /// that bound the same columns in a different order still collide.
-    fn key(record: &Record) -> Vec<(String, Value)> {
-        let mut key: Vec<(String, Value)> = record
-            .bindings()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        key.sort_by(|a, b| a.0.cmp(&b.0));
-        key
+    fn key(record: &Record) -> Vec<(std::sync::Arc<str>, Value)> {
+        record.dedup_key()
     }
 }
 
@@ -6735,8 +6729,8 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 // Extract variable and node from record
                 for (var, value) in record.bindings().iter() {
                     if let Value::Node(node_id, node) = value {
-                        self.var_to_node_id.insert(var.clone(), *node_id);
-                        self.results.push((Some(var.clone()), Value::Node(*node_id, node.clone())));
+                        self.var_to_node_id.insert(var.to_string(), *node_id);
+                        self.results.push((Some(var.to_string()), Value::Node(*node_id, node.clone())));
                     }
                 }
             }
@@ -9255,11 +9249,8 @@ impl WithBarrierOperator {
         if self.distinct {
             let mut seen: HashSet<Vec<Value>> = HashSet::new();
             output_records.retain(|record| {
-                let mut key: Vec<(String, Value)> = record.bindings().iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                key.sort_by(|a, b| a.0.cmp(&b.0));
-                let vals: Vec<Value> = key.into_iter().map(|(_, v)| v).collect();
+                let vals: Vec<Value> =
+                    record.dedup_key().into_iter().map(|(_, v)| v).collect();
                 seen.insert(vals)
             });
         }

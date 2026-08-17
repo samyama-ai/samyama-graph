@@ -294,7 +294,7 @@ fn timed(engine: &QueryEngine, store: &GraphStore, q: &str, reps: usize) -> (f64
         match r {
             Ok(b) => {
                 val = b.records.first().and_then(|rec| {
-                    rec.bindings().values().next().and_then(|v| match v {
+                    rec.values().next().and_then(|v| match v {
                         samyama::query::executor::record::Value::Property(
                             PropertyValue::Integer(i),
                         ) => Some(*i),

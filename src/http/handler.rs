@@ -51,7 +51,7 @@ fn merged_node_properties(
     batch
         .records
         .iter()
-        .flat_map(|r| r.bindings().values())
+        .flat_map(|r| r.values())
         .filter_map(|v| match v {
             Value::Node(id, _) => Some(*id),
             Value::NodeRef(id) => Some(*id),

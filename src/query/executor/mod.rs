@@ -238,11 +238,13 @@ impl<'a> QueryExecutor<'a> {
         }
 
         if return_clause.distinct {
+            // `dedup_key` sorts by variable name. The previous key was
+            // `format!("{:?}", r.bindings())` over a hash map, so it depended
+            // on iteration order for its identity -- two records binding the
+            // same values could hash to different strings, and did not
+            // deduplicate. It also formatted a string per row.
             let mut seen = std::collections::HashSet::new();
-            records.retain(|r| {
-                let key = format!("{:?}", r.bindings());
-                seen.insert(key)
-            });
+            records.retain(|r| seen.insert(r.dedup_key()));
         }
 
         Ok(RecordBatch { records, columns })
