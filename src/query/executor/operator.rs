@@ -8734,6 +8734,9 @@ pub struct ShortestPathOperator {
     all_paths: bool,  // false = shortestPath, true = allShortestPaths
     results: std::vec::IntoIter<Record>,
     executed: bool,
+    /// `edge_types` resolved to interned ids, cached after the first use.
+    /// `None` from `type_ids()` means the pattern named no types.
+    type_ids: Option<Vec<u16>>,
 }
 
 impl ShortestPathOperator {
@@ -8756,11 +8759,48 @@ impl ShortestPathOperator {
             all_paths,
             results: Vec::new().into_iter(),
             executed: false,
+            type_ids: None,
+        }
+    }
+
+    /// The edge-type filter as interned ids. `None` is the wildcard; an
+    /// unknown type yields `Some(empty)`, which matches nothing.
+    fn type_ids(&mut self, store: &GraphStore) -> Option<Vec<u16>> {
+        if self.edge_types.is_empty() {
+            return None;
+        }
+        if self.type_ids.is_none() {
+            let ids = self
+                .edge_types
+                .iter()
+                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+                .collect();
+            self.type_ids = Some(ids);
+        }
+        self.type_ids.clone()
+    }
+
+    fn for_each_neighbor(
+        &self,
+        node: NodeId,
+        type_ids: Option<&[u16]>,
+        store: &GraphStore,
+        mut visit: impl FnMut(NodeId, crate::graph::EdgeId),
+    ) {
+        match self.direction {
+            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut visit),
+            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut visit),
+            Direction::Both => {
+                store.for_each_outgoing_neighbor(node, type_ids, &mut visit);
+                store.for_each_incoming_neighbor(node, type_ids, &mut visit);
+            }
         }
     }
 
     fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let mut all_results = Vec::new();
+        let type_ids = self.type_ids(store);
+        let type_filter = type_ids.as_deref();
 
         while let Some(record) = self.input.next(store)? {
             let source_id = record.get(&self.source_var)
@@ -8771,7 +8811,7 @@ impl ShortestPathOperator {
                 .ok_or_else(|| ExecutionError::RuntimeError("shortestPath target not a node".to_string()))?;
 
             // BFS to find shortest path(s)
-            let paths = self.bfs_shortest(store, source_id, target_id);
+            let paths = self.bfs_shortest(store, source_id, target_id, type_filter);
 
             if self.all_paths {
                 for path in paths {
@@ -8801,81 +8841,170 @@ impl ShortestPathOperator {
         Ok(())
     }
 
-    fn bfs_shortest(&self, store: &GraphStore, source: NodeId, target: NodeId) -> Vec<(Vec<NodeId>, Vec<crate::graph::EdgeId>)> {
-        use std::collections::VecDeque;
-
+    /// Every shortest path from `source` to `target`, or one of them.
+    ///
+    /// # What this replaced, and why it timed out
+    ///
+    /// The previous implementation carried a full `Vec<NodeId>` and
+    /// `Vec<EdgeId>` on every queue entry and — for `allShortestPaths` —
+    /// **disabled the visited set entirely**:
+    ///
+    /// ```text
+    /// if !visited.contains(&next_node) || self.all_paths {
+    ///     if !self.all_paths { visited.insert(next_node); }
+    /// ```
+    ///
+    /// So it enumerated every *walk* of length ≤ d rather than every shortest
+    /// path, cloning both path vectors at each expansion, and materialised a
+    /// full `Edge` per incident edge to read its type. On LDBC with the
+    /// endpoints three hops apart and an average undirected degree around 41,
+    /// that is on the order of 41³ ≈ 69,000 walks, each enumerating ~900
+    /// incident edges as owned `Edge` objects. It did not finish inside 120 s
+    /// (#516).
+    ///
+    /// # What this does
+    ///
+    /// The textbook two-phase approach:
+    ///
+    /// 1. **A level BFS** that records, for each node, its distance and *all*
+    ///    predecessors that reach it at that distance — a shortest-path DAG.
+    ///    Each node is expanded once, so this is O(V + E), and it stops at the
+    ///    level where the target appears.
+    /// 2. **Backtracking** from the target through that DAG to enumerate
+    ///    paths. The cost is proportional to the paths actually returned
+    ///    rather than to the walks that might have led anywhere.
+    ///
+    /// Neighbours come from the allocation-free visitor with the edge type
+    /// filtered on its interned id, so an incident edge of the wrong type
+    /// costs a comparison rather than an `Edge` clone (#520).
+    fn bfs_shortest(
+        &self,
+        store: &GraphStore,
+        source: NodeId,
+        target: NodeId,
+        type_ids: Option<&[u16]>,
+    ) -> Vec<(Vec<NodeId>, Vec<crate::graph::EdgeId>)> {
         if source == target {
             return vec![(vec![source], vec![])];
         }
 
-        let mut queue: VecDeque<(NodeId, Vec<NodeId>, Vec<crate::graph::EdgeId>)> = VecDeque::new();
-        let mut visited: HashSet<NodeId> = HashSet::new();
-        let mut results = Vec::new();
-        let mut found_distance: Option<usize> = None;
+        // Phase 1: level BFS building the shortest-path DAG.
+        let mut dist: rustc_hash::FxHashMap<NodeId, u32> = rustc_hash::FxHashMap::default();
+        let mut preds: rustc_hash::FxHashMap<NodeId, Vec<(NodeId, crate::graph::EdgeId)>> =
+            rustc_hash::FxHashMap::default();
+        dist.insert(source, 0);
 
-        queue.push_back((source, vec![source], vec![]));
-        visited.insert(source);
+        let mut frontier = vec![source];
+        let mut depth = 0u32;
+        let mut reached = false;
 
-        while let Some((current, path_nodes, path_edges)) = queue.pop_front() {
-            if let Some(max_dist) = found_distance {
-                if path_nodes.len() > max_dist {
-                    break;
-                }
+        while !frontier.is_empty() && !reached {
+            depth += 1;
+            let mut next = Vec::new();
+            for &current in &frontier {
+                self.for_each_neighbor(current, type_ids, store, |neighbour, edge_id| {
+                    match dist.get(&neighbour) {
+                        None => {
+                            dist.insert(neighbour, depth);
+                            preds.entry(neighbour).or_default().push((current, edge_id));
+                            next.push(neighbour);
+                            if neighbour == target {
+                                reached = true;
+                            }
+                        }
+                        // Another predecessor at the *same* distance is another
+                        // shortest way in, and `allShortestPaths` wants it. A
+                        // node already seen at a shorter distance is not.
+                        Some(&d) if d == depth && self.all_paths => {
+                            preds.entry(neighbour).or_default().push((current, edge_id));
+                        }
+                        _ => {}
+                    }
+                });
             }
-
-            let edges = match self.direction {
-                Direction::Outgoing => store.get_outgoing_edges(current),
-                Direction::Incoming => store.get_incoming_edges(current),
-                Direction::Both => {
-                    let mut all = store.get_outgoing_edges(current);
-                    all.extend(store.get_incoming_edges(current));
-                    all
-                }
-            };
-
-            for edge in &edges {
-                if !self.edge_types.is_empty() && !self.edge_types.iter().any(|t| t == edge.edge_type.as_str()) {
-                    continue;
-                }
-                let next_node = if edge.source == current { edge.target } else { edge.source };
-
-                if next_node == target {
-                    let mut new_nodes = path_nodes.clone();
-                    new_nodes.push(target);
-                    let mut new_edges = path_edges.clone();
-                    new_edges.push(edge.id);
-
-                    if found_distance.is_none() {
-                        found_distance = Some(new_nodes.len());
-                    }
-                    results.push((new_nodes, new_edges));
-
-                    if !self.all_paths {
-                        return results;
-                    }
-                    continue;
-                }
-
-                if !visited.contains(&next_node) || self.all_paths {
-                    if !self.all_paths {
-                        visited.insert(next_node);
-                    }
-                    let mut new_nodes = path_nodes.clone();
-                    new_nodes.push(next_node);
-                    let mut new_edges = path_edges.clone();
-                    new_edges.push(edge.id);
-                    queue.push_back((next_node, new_nodes, new_edges));
-                }
-            }
+            frontier = next;
         }
 
+        if !reached {
+            return Vec::new();
+        }
+
+        // Phase 2: walk the DAG backwards from the target.
+        let mut results = Vec::new();
+        let mut nodes_rev = vec![target];
+        let mut edges_rev = Vec::new();
+        self.collect_paths(
+            target,
+            source,
+            &preds,
+            &mut nodes_rev,
+            &mut edges_rev,
+            &mut results,
+        );
         results
+    }
+
+    /// Depth-first backtrack through the predecessor DAG, emitting one path
+    /// per distinct chain. Stops after the first path when only one is wanted.
+    fn collect_paths(
+        &self,
+        current: NodeId,
+        source: NodeId,
+        preds: &rustc_hash::FxHashMap<NodeId, Vec<(NodeId, crate::graph::EdgeId)>>,
+        nodes_rev: &mut Vec<NodeId>,
+        edges_rev: &mut Vec<crate::graph::EdgeId>,
+        results: &mut Vec<(Vec<NodeId>, Vec<crate::graph::EdgeId>)>,
+    ) {
+        if !self.all_paths && !results.is_empty() {
+            return;
+        }
+        if current == source {
+            let mut nodes: Vec<NodeId> = nodes_rev.clone();
+            nodes.reverse();
+            let mut edges: Vec<crate::graph::EdgeId> = edges_rev.clone();
+            edges.reverse();
+            results.push((nodes, edges));
+            return;
+        }
+        let Some(parents) = preds.get(&current) else {
+            return;
+        };
+        for &(parent, edge_id) in parents {
+            nodes_rev.push(parent);
+            edges_rev.push(edge_id);
+            self.collect_paths(parent, source, preds, nodes_rev, edges_rev, results);
+            nodes_rev.pop();
+            edges_rev.pop();
+            if !self.all_paths && !results.is_empty() {
+                return;
+            }
+        }
     }
 }
 
 impl PhysicalOperator for ShortestPathOperator {
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
+    }
+
+    /// Without this, EXPLAIN and PROFILE rendered a shortest-path plan as
+    /// `Unknown` — the operator inherited the trait's default. A plan nobody
+    /// can read is a plan nobody profiles, which is how #516 went unexamined.
+    fn describe(&self) -> OperatorDescription {
+        let kind = if self.all_paths { "AllShortestPaths" } else { "ShortestPath" };
+        let types = if self.edge_types.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", self.edge_types.join("|"))
+        };
+        OperatorDescription {
+            name: kind.to_string(),
+            details: format!(
+                "({})-[{}*]-({}), {:?}",
+                self.source_var, types, self.target_var, self.direction
+            ),
+            children: vec![self.input.describe()],
+        }
     }
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
