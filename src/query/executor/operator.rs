@@ -4542,10 +4542,13 @@ impl RowReader {
 enum IdentityKey {
     Node(u64),
     Edge(u64),
-    /// Anything else, cloned. Reached only where a key expression reads a
-    /// property of something that is not a graph element, which is a
-    /// degenerate query rather than a hot path.
-    Other(Value),
+    /// Anything else. Boxed because `Value` is 144 bytes -- `Value::Node`
+    /// embeds a whole `Node` inline (#570) -- and carrying that inline would
+    /// set the width of every entry in the group table for the sake of a case
+    /// that is reached only where a key expression reads a property of
+    /// something that is not a graph element. That is a degenerate query, not
+    /// a hot path.
+    Other(Box<Value>),
 }
 
 impl IdentityKey {
@@ -4553,8 +4556,35 @@ impl IdentityKey {
         match value {
             Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => IdentityKey::Node(id.0),
             Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => IdentityKey::Edge(id.0),
-            Some(other) => IdentityKey::Other(other.clone()),
-            None => IdentityKey::Other(Value::Null),
+            Some(other) => IdentityKey::Other(Box::new(other.clone())),
+            None => IdentityKey::Other(Box::new(Value::Null)),
+        }
+    }
+
+    /// A `Value` to evaluate the group-by expressions against, rebuilt from the
+    /// key rather than stored beside it.
+    ///
+    /// Keeping a representative `Value` per group cost 144 bytes an entry on
+    /// top of the key, for something the id already determines. `NodeRef`
+    /// resolves properties from the store, which is what a materialised
+    /// `Value::Node` would do here too -- this is the read executor, and a
+    /// node's properties come from the store either way.
+    fn probe_value(&self, store: &GraphStore) -> Value {
+        match self {
+            IdentityKey::Node(id) => Value::NodeRef(NodeId(*id)),
+            IdentityKey::Edge(id) => {
+                let edge_id = crate::graph::EdgeId(*id);
+                match store.get_edge(edge_id) {
+                    Some(edge) => Value::EdgeRef(
+                        edge_id,
+                        edge.source,
+                        edge.target,
+                        edge.edge_type.clone(),
+                    ),
+                    None => Value::Null,
+                }
+            }
+            IdentityKey::Other(value) => (**value).clone(),
         }
     }
 }
@@ -4614,10 +4644,11 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        // The representative is the first `Value` seen for an identity, kept so
-        // phase 2 has something to resolve properties against. Cloned once per
-        // group, not once per row -- which is the whole point.
-        let mut groups: rustc_hash::FxHashMap<IdentityKey, (Value, Vec<AggregatorState>)> =
+        // Keyed on identity alone. Phase 2 rebuilds what it needs to resolve
+        // properties against from the key itself, so no `Value` is stored per
+        // group -- which at IC5's 96,862 groups took the table from ~320 bytes
+        // an entry to ~40 (#570).
+        let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
         let batch_size = 65536;
@@ -4628,16 +4659,12 @@ impl AggregateOperator {
                 check_deadline()?;
             }
             for record in batch.records {
-                let bound = record.get(var);
-                let key = IdentityKey::of(bound);
-                let (_, states) = groups.entry(key).or_insert_with(|| {
-                    (
-                        bound.cloned().unwrap_or(Value::Null),
-                        self.aggregates
-                            .iter()
-                            .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
-                            .collect(),
-                    )
+                let key = IdentityKey::of(record.get(var));
+                let states = groups.entry(key).or_insert_with(|| {
+                    self.aggregates
+                        .iter()
+                        .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                        .collect()
                 });
 
                 if all_simple_count {
@@ -4660,9 +4687,9 @@ impl AggregateOperator {
         // alone is enough to evaluate them.
         let mut merged: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::with_capacity_and_hasher(groups.len(), Default::default());
-        for (_, (representative, states)) in groups {
+        for (key, states) in groups {
             let mut probe = Record::new();
-            probe.bind(var.to_string(), representative);
+            probe.bind(var.to_string(), key.probe_value(store));
             let mut tuple = Vec::with_capacity(self.group_by.len());
             for (expr, _) in &self.group_by {
                 tuple.push(Self::evaluate_expression(expr, &probe, store)?);

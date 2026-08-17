@@ -302,3 +302,51 @@ fn explain_is_unchanged_by_the_grouping_strategy() {
     };
     assert!(text.contains("Aggregate (group_by="), "{text}");
 }
+
+#[test]
+fn grouping_on_edge_properties_rebuilds_the_edge() {
+    // The group table keys on identity and stores no `Value` (#570), so phase 2
+    // rebuilds one from the key. For an edge that means going back to the store
+    // for its endpoints and type. If that rebuild returned Null, every group
+    // would collapse into one and the counts would be wrong rather than absent.
+    let mut store = GraphStore::new();
+    let hub = store.create_node("Hub");
+    for i in 0..60i64 {
+        let n = store.create_node("N");
+        let e = store.create_edge(n, hub, "IN").unwrap();
+        // Three distinct edge weights, so there should be three groups.
+        let _ = store.set_edge_property(e, "w", PropertyValue::Integer(i % 3));
+        let _ = store.set_node_property("default", n, "v".to_string(), PropertyValue::Integer(i));
+    }
+
+    let got = rows(
+        &store,
+        "MATCH (n:N)-[r:IN]->(h:Hub) RETURN r.w AS w, count(n) AS c, sum(n.v) AS s",
+    );
+    assert_eq!(got.len(), 3, "three distinct edge weights: {got:?}");
+    // 60 edges over 3 weights.
+    assert!(
+        got.iter().all(|r| r.iter().any(|c| c.contains("Integer(20)"))),
+        "each group holds 20 edges: {got:?}"
+    );
+}
+
+#[test]
+fn grouping_on_a_property_of_a_map_still_works() {
+    // The `Other` arm: the group variable is bound to a `PropertyValue`, not a
+    // graph element, so the key carries the value itself. Boxing it must not
+    // change what the group key is.
+    let store = GraphStore::new();
+    let cypher = "UNWIND [{a: 1, b: 10}, {a: 2, b: 20}, {a: 1, b: 30}] AS m \
+                  RETURN m.a AS a, count(m) AS c, sum(m.b) AS s";
+    assert_hash_aggregate(&store, cypher);
+    let got = rows(&store, cypher);
+    assert_eq!(got.len(), 2, "two distinct values of a: {got:?}");
+
+    let group_one = got
+        .iter()
+        .find(|r| r.iter().any(|c| c == "a=Property(Integer(1))"))
+        .unwrap_or_else(|| panic!("{got:?}"));
+    assert!(group_one.iter().any(|c| c.contains("Integer(2)")), "count 2: {group_one:?}");
+    assert!(group_one.iter().any(|c| c.contains("Integer(40)")), "10 + 30: {group_one:?}");
+}

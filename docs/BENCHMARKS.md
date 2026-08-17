@@ -173,22 +173,22 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 
 | Query | Name | SF1 | previous SF1 | SF10 |
 |---|---|---|---|---|
-| IC1 | Transitive Friends by Name | **58.9 ms** | 59.5 ms | 14.0 s |
-| IC2 | Recent Friend Posts | **8.1 ms** | 9.7 ms | 306 ms |
-| IC3 | Friends in Countries | **862 ms** | 861 ms | 15.7 s |
-| IC4 | Popular Tags in Period | **13.9 ms** | 14.1 ms | 527 ms |
-| IC5 | New Forum Members | **1203 ms** | 1204 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | **185 ms** | 185 ms | 31.5 s |
-| IC7 | Recent Likers | **0.09 ms** | 0.06 ms | 1.70 ms |
-| IC8 | Recent Replies | **0.16 ms** | 0.15 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | **1131 ms** | 1194 ms | 26.3 s |
-| IC10 | Friend Recommendation | **104 ms** | 102 ms | 2.3 s |
-| IC11 | Job Referral | **32.2 ms** | 31.4 ms | 4.5 s |
-| IC12 | Expert Reply | **84.7 ms** | 86.2 ms | 3.2 s |
-| IC13 | Single Shortest Path | **43.4 ms** | 43.1 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | **49.8 ms** | 50.9 ms | 696 ms |
+| IC1 | Transitive Friends by Name | **61.6 ms** | 58.9 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **7.8 ms** | 8.1 ms | 306 ms |
+| IC3 | Friends in Countries | **866 ms** | 862 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **13.5 ms** | 13.9 ms | 527 ms |
+| IC5 | New Forum Members | **1028 ms** | 1203 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **177 ms** | 185 ms | 31.5 s |
+| IC7 | Recent Likers | **0.05 ms** | 0.09 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.15 ms** | 0.16 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **1170 ms** | 1131 ms | 26.3 s |
+| IC10 | Friend Recommendation | **99.9 ms** | 104 ms | 2.3 s |
+| IC11 | Job Referral | **31.5 ms** | 32.2 ms | 4.5 s |
+| IC12 | Expert Reply | **86.3 ms** | 84.7 ms | 3.2 s |
+| IC13 | Single Shortest Path | **44.9 ms** | 43.4 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **49.9 ms** | 49.8 ms | 696 ms |
 
-**Whole suite: 15.6 s, 21/21 passed, 0 empty, 0 errors.**
+**Whole suite: 14.9 s, 21/21 passed, 0 empty, 0 errors.**
 
 ### What the "previous SF1" column is
 
@@ -197,11 +197,14 @@ derived parameters (#505), so the two columns differ only by engine changes.
 Both were taken with the host calibration reported and matching, which is what
 makes them comparable at all (#529).
 
-This round: `Sort` locates its key columns once instead of once per input row
-(#568). It is a small change and most of the table moves by less than the
-run-to-run noise; IC9, which spends 22% of itself sorting, moves 5%.
+This round: the aggregate's group table no longer stores a `Value` per group
+(#570). `Value` is 144 bytes — `Value::Node` embeds a whole `Node` inline — so
+an entry that is logically a node id and a counter was ~320 bytes wide. IC5's
+`Aggregate` drops 23%, and IC5 with it.
 
-Before that: `Expand` holds its variable names as `Arc<str>`, so binding one on
+Before that: `Sort` locates its key columns once instead of once per input row
+(#568), worth 5% on IC9, which spends a fifth of itself sorting. And before
+that: `Expand` holds its variable names as `Arc<str>`, so binding one on
 an output row is a refcount bump rather than two heap allocations, and it
 refills its edge buffer instead of allocating a new one per source record
 (#564). IC5 was a third faster on that alone.
@@ -214,8 +217,8 @@ columns located once per query rather than once per row (#557); and `Filter`
 deciding whether to go parallel from the predicate's cost rather than the batch
 size (#559).
 
-Together, over this sequence, the suite went from **24.2 s to 15.6 s** on the
-same host at the same derived parameters — a 36% reduction, all of it in
+Together, over this sequence, the suite went from **24.2 s to 14.9 s** on the
+same host at the same derived parameters — a 38% reduction, all of it in
 per-row constants rather than in algorithms.
 
 Nothing here is a parameter change. The parameter shift that made several
