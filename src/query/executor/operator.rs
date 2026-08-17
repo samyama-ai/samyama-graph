@@ -64,6 +64,7 @@
 //! - `HashMap` — build phase of hash joins in `JoinOperator`
 //! - `BTreeSet` — sorted unique results where ordering matters
 
+use std::sync::Arc;
 use crate::query::executor::record::PropertyCursor;
 use crate::graph::{GraphStore, Label, NodeId, EdgeType};
 use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
@@ -3191,12 +3192,18 @@ impl PhysicalOperator for FilterOperator {
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
-    /// Source variable
-    source_var: String,
+    /// Source variable.
+    ///
+    /// `Arc<str>` rather than `String` because `Record::bind` takes
+    /// `impl Into<Arc<str>>`: passing a `String` allocates twice per bind --
+    /// once to clone the `String`, once to build the `Arc<str>` from it -- for
+    /// a name that is fixed for the whole query. On IC5 that was 3.4 million
+    /// allocations for the target variable alone (#564).
+    source_var: Arc<str>,
     /// Target variable
-    target_var: String,
+    target_var: Arc<str>,
     /// Edge variable (optional)
-    edge_var: Option<String>,
+    edge_var: Option<Arc<str>>,
     /// Edge types to expand (empty = all types)
     edge_types: Vec<String>,
     /// Target node labels to filter (empty = any label)
@@ -3234,9 +3241,9 @@ impl ExpandOperator {
     ) -> Self {
         Self {
             input,
-            source_var,
-            target_var,
-            edge_var,
+            source_var: source_var.into(),
+            target_var: target_var.into(),
+            edge_var: edge_var.map(Into::into),
             edge_types,
             target_labels: Vec::new(),
             direction,
@@ -3250,7 +3257,7 @@ impl ExpandOperator {
 
     /// Set path variable for named path materialization (CY-04)
     pub fn with_path_variable(mut self, var: String) -> Self {
-        self.path_variable = Some(var);
+        self.path_variable = Some(var.into());
         self
     }
 
@@ -3266,24 +3273,21 @@ impl ExpandOperator {
     /// named types none of which exist returns `Some(empty)`, which matches
     /// nothing; conflating the two makes `-[:NO_SUCH_TYPE]->` follow every
     /// edge in the graph (#520).
-    fn type_ids(&mut self, store: &GraphStore) -> Option<Vec<u16>> {
-        if self.edge_types.is_empty() {
-            return None;
+    fn ensure_type_ids(&mut self, store: &GraphStore) {
+        if self.edge_types.is_empty() || self.type_ids.is_some() {
+            return;
         }
-        if self.type_ids.is_none() {
-            let ids = self
-                .edge_types
-                .iter()
-                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
-                .collect();
-            self.type_ids = Some(ids);
-        }
-        self.type_ids.clone()
+        let ids = self
+            .edge_types
+            .iter()
+            .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+            .collect();
+        self.type_ids = Some(ids);
     }
 
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record.get(&self.source_var)
-            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
+            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
 
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
@@ -3298,10 +3302,15 @@ impl ExpandOperator {
         // `HAS_CREATOR` from every post and comment they wrote, `LIKES`,
         // `HAS_MEMBER`, `HAS_INTEREST`), so a `[:KNOWS]` expansion cloned ~900
         // strings to keep 41 (#520).
-        let type_ids = self.type_ids(store);
-        let type_filter = type_ids.as_deref();
+        self.ensure_type_ids(store);
 
-        let mut collected: Vec<(crate::graph::EdgeId, NodeId, NodeId)> = Vec::new();
+        // Refill the existing buffer. Allocating a fresh `Vec` per source
+        // record meant one allocation plus roughly log2(degree) reallocations
+        // as it doubled, and a free of the previous one -- once per source, for
+        // a buffer that is the same shape every time (#564).
+        let mut collected = std::mem::take(&mut self.current_edges);
+        collected.clear();
+        let type_filter = self.type_ids.as_deref();
         match self.direction {
             Direction::Outgoing => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
@@ -3590,19 +3599,16 @@ impl VarLengthExpandOperator {
     /// `Some(empty)`, which matches nothing. Collapsing those two cases makes
     /// `-[:NO_SUCH_TYPE*1..3]->` follow every edge in the graph; a test does
     /// exactly that, and it failed against the first version of this.
-    fn type_ids(&mut self, store: &GraphStore) -> Option<Vec<u16>> {
-        if self.edge_types.is_empty() {
-            return None;
+    fn ensure_type_ids(&mut self, store: &GraphStore) {
+        if self.edge_types.is_empty() || self.type_ids.is_some() {
+            return;
         }
-        if self.type_ids.is_none() {
-            let ids = self
-                .edge_types
-                .iter()
-                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
-                .collect();
-            self.type_ids = Some(ids);
-        }
-        self.type_ids.clone()
+        let ids = self
+            .edge_types
+            .iter()
+            .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+            .collect();
+        self.type_ids = Some(ids);
     }
 
     /// Visit each one-hop neighbour of `node` honouring direction and the
@@ -3658,7 +3664,11 @@ impl VarLengthExpandOperator {
             self.buffer(record, source_id, &parent, source_id);
         }
 
-        let type_ids: Option<Vec<u16>> = self.type_ids(store);
+        // Cloned rather than borrowed: the BFS below calls `&mut self` methods
+        // to buffer output records, so an outstanding borrow of `self.type_ids`
+        // would not live. This is once per source record, not once per row.
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
         let type_filter = type_ids.as_deref();
 
         let mut frontier = vec![source_id];
@@ -9177,19 +9187,16 @@ impl ShortestPathOperator {
 
     /// The edge-type filter as interned ids. `None` is the wildcard; an
     /// unknown type yields `Some(empty)`, which matches nothing.
-    fn type_ids(&mut self, store: &GraphStore) -> Option<Vec<u16>> {
-        if self.edge_types.is_empty() {
-            return None;
+    fn ensure_type_ids(&mut self, store: &GraphStore) {
+        if self.edge_types.is_empty() || self.type_ids.is_some() {
+            return;
         }
-        if self.type_ids.is_none() {
-            let ids = self
-                .edge_types
-                .iter()
-                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
-                .collect();
-            self.type_ids = Some(ids);
-        }
-        self.type_ids.clone()
+        let ids = self
+            .edge_types
+            .iter()
+            .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+            .collect();
+        self.type_ids = Some(ids);
     }
 
     fn for_each_neighbor(
@@ -9211,7 +9218,10 @@ impl ShortestPathOperator {
 
     fn execute_all(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let mut all_results = Vec::new();
-        let type_ids = self.type_ids(store);
+        // Cloned rather than borrowed: the loop below pulls from `self.input`,
+        // which needs `&mut self`. Once per query, not once per row.
+        self.ensure_type_ids(store);
+        let type_ids = self.type_ids.clone();
         let type_filter = type_ids.as_deref();
 
         while let Some(record) = self.input.next(store)? {
