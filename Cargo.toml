@@ -187,3 +187,11 @@ codegen-units = 1
 [[bench]]
 name = "aggregate_grouping"
 harness = false
+
+[[bench]]
+name = "filter_throughput"
+harness = false
+
+[[bench]]
+name = "record_ops"
+harness = false

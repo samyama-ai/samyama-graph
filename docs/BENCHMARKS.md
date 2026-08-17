@@ -173,40 +173,42 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 
 | Query | Name | SF1 | previous SF1 | SF10 |
 |---|---|---|---|---|
-| IC1 | Transitive Friends by Name | **71.7 ms** | 533 ms | 14.0 s |
-| IC2 | Recent Friend Posts | **16.5 ms** | 27.6 ms | 306 ms |
-| IC3 | Friends in Countries | **1101 ms** | 997 ms | 15.7 s |
-| IC4 | Popular Tags in Period | **16.2 ms** | 44.4 ms | 527 ms |
-| IC5 | New Forum Members | **2614 ms** | 1431 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | **259 ms** | 1300 ms | 31.5 s |
-| IC7 | Recent Likers | **0.07 ms** | 0.33 ms | 1.70 ms |
-| IC8 | Recent Replies | **0.18 ms** | 0.49 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | **1379 ms** | 2246 ms | 26.3 s |
-| IC10 | Friend Recommendation | **160 ms** | 144 ms | 2.3 s |
-| IC11 | Job Referral | **44.8 ms** | 145 ms | 4.5 s |
-| IC12 | Expert Reply | **208 ms** | 176 ms | 3.2 s |
-| IC13 | Single Shortest Path | **46.3 ms** | 2.3 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | **54.0 ms** | 37.0 ms | 696 ms |
+| IC1 | Transitive Friends by Name | **62.0 ms** | 71.7 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **12.2 ms** | 16.5 ms | 306 ms |
+| IC3 | Friends in Countries | **1044 ms** | 1101 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **18.0 ms** | 16.2 ms | 527 ms |
+| IC5 | New Forum Members | **1874 ms** | 2614 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **173 ms** | 259 ms | 31.5 s |
+| IC7 | Recent Likers | **0.07 ms** | 0.07 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.18 ms** | 0.18 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **1329 ms** | 1379 ms | 26.3 s |
+| IC10 | Friend Recommendation | **138 ms** | 160 ms | 2.3 s |
+| IC11 | Job Referral | **36.3 ms** | 44.8 ms | 4.5 s |
+| IC12 | Expert Reply | **151 ms** | 208 ms | 3.2 s |
+| IC13 | Single Shortest Path | **45.2 ms** | 46.3 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **53.0 ms** | 54.0 ms | 696 ms |
 
-**Whole suite: 24.2 s, 21/21 passed, 0 empty, 0 errors.**
+**Whole suite: 20.3 s, 21/21 passed, 0 empty, 0 errors.**
 
-### Why the "previous SF1" column is here rather than deleted
+### What the "previous SF1" column is
 
-Three of these got *slower* and the reason is the parameters, not the engine.
-The previous column was measured with the benchmark's built-in defaults; this
-one derives its substitution parameters from the dataset at the median of the
-KNOWS-degree distribution (#505), which asks a harder and more representative
-question than the built-in anchor did. IC3, IC5, IC10, IC12, IC13 and IC14 all
-traverse further as a result — IC13 and IC14 in particular now have their
-endpoints three hops apart rather than adjacent.
+The measurement immediately before this one, on the same host with the same
+derived parameters (#505), so the two columns differ only by engine changes.
+Both were taken with the host calibration reported and matching, which is what
+makes them comparable at all (#529).
 
-Comparing a number in one column against a number in the other is therefore
-not a measure of anything. They are kept side by side so that nobody does it
-by accident having found only one of them.
+This round: `id()` predicates now anchor a scan instead of filtering one (#538),
+aggregates group on identity and resolve their keys once per group (#521),
+property columns are located once per query rather than once per row (#557), and
+`Filter` decides whether to go parallel from the predicate's cost rather than
+from the batch size (#559). The last of those is most of IC1 and IC3.
 
-The improvements within the new column, measured back-to-back against the
-immediately preceding commit in each case, are real: IC6 9.9x and IC14 from a
-120 s timeout come from #543 and #539 respectively.
+Nothing here is a parameter change. The parameter shift that made several
+queries look slower — deriving substitution parameters from the dataset at the
+median of the KNOWS-degree distribution, rather than using the benchmark's
+built-in anchors — happened in the round before, and those harder parameters are
+still in force.
+
 
 ## Notes
 
