@@ -3821,12 +3821,12 @@ impl ProjectOperator {
                     Value::NodeRef(id) => {
                         let node = store.get_node(id)
                             .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", id)))?;
-                        Ok(Value::Node(id, node.clone()))
+                        Ok(Value::Node(id, Box::new(node.clone())))
                     }
                     Value::EdgeRef(id, ..) => {
                         let edge = store.get_edge(id)
                             .ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {:?} not found", id)))?;
-                        Ok(Value::Edge(id, edge.clone()))
+                        Ok(Value::Edge(id, Box::new(edge.clone())))
                     }
                     other => Ok(other),
                 }
@@ -6373,7 +6373,7 @@ impl PhysicalOperator for CreateNodeOperator {
             Some(var) => var.clone(),
             None => format!("__created_node_{}", self.current - 1),
         };
-        record.bind(bind_name, Value::Node(*node_id, node.clone()));
+        record.bind(bind_name, Value::Node(*node_id, Box::new(node.clone())));
 
         Ok(Some(record))
     }
@@ -7154,7 +7154,7 @@ impl PhysicalOperator for CreateEdgeOperator {
             Some(var) => var.clone(),
             None => format!("__created_edge_{}", self.current - 1),
         };
-        record.bind(bind_name, Value::Edge(*edge_id, edge.clone()));
+        record.bind(bind_name, Value::Edge(*edge_id, Box::new(edge.clone())));
 
         Ok(Some(record))
     }
@@ -7256,7 +7256,7 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 // Always track created edges for persistence (even without variable names)
                 if let Some(edge) = store.get_edge(edge_id) {
                     let var_name = edge_var.clone().or_else(|| Some(format!("__created_edge_{}", self.created_edges.len())));
-                    self.results.push((var_name, Value::Edge(edge_id, edge.clone())));
+                    self.results.push((var_name, Value::Edge(edge_id, Box::new(edge.clone()))));
                     self.created_edges.push((edge_id, edge, edge_var.clone()));
                 }
             }
@@ -7402,7 +7402,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         }
                     }
                     if let Some(node) = store.get_node(node_id) {
-                        record.bind(handle.clone(), Value::Node(node_id, node.clone()));
+                        record.bind(handle.clone(), Value::Node(node_id, Box::new(node.clone())));
                     }
                 }
 
@@ -7432,7 +7432,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     // Build result record with the created edge
                     let mut result_record = record.clone();
                     if let Some(edge) = store.get_edge(edge_id) {
-                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, edge));
+                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, Box::new(edge)));
                     }
                     self.results.push(result_record);
                 }
@@ -7532,7 +7532,7 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         }
                         if let Some(ref ev) = edge_var {
                             if let Some(edge) = store.get_edge(edge_id) {
-                                result_record.bind(ev.clone(), Value::Edge(edge_id, edge.clone()));
+                                result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
                             }
                         }
                     } else {
@@ -7555,7 +7555,7 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
 
                         if let Some(ref ev) = edge_var {
                             if let Some(edge) = store.get_edge(edge_id) {
-                                result_record.bind(ev.clone(), Value::Edge(edge_id, edge.clone()));
+                                result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
                             }
                         }
                     }
@@ -7739,7 +7739,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
-                record.bind("node".to_string(), Value::Node(node_id, node.clone()));
+                record.bind("node".to_string(), Value::Node(node_id, Box::new(node.clone())));
                 record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
                 self.results.push(record);
             }
@@ -7833,7 +7833,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
-                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
                 record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
                 self.results.push(record);
             }
@@ -7884,7 +7884,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
-                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
                 record.bind(
                     "communityId".to_string(),
                     Value::Property(PropertyValue::Integer(community_id as i64)),
@@ -7930,7 +7930,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
-                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
                 record.bind(
                     "coefficient".to_string(),
                     Value::Property(PropertyValue::Float(coeff)),
@@ -8211,10 +8211,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             
             let mut record = Record::new();
             if let Some(node_u) = store.get_node(u) {
-                record.bind("source".to_string(), Value::Node(u, node_u.clone()));
+                record.bind("source".to_string(), Value::Node(u, Box::new(node_u.clone())));
             }
             if let Some(node_v) = store.get_node(v) {
-                record.bind("target".to_string(), Value::Node(v, node_v.clone()));
+                record.bind("target".to_string(), Value::Node(v, Box::new(node_v.clone())));
             }
             record.bind("weight".to_string(), Value::Property(PropertyValue::Float(w)));
             self.results.push(record);
@@ -8245,7 +8245,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
-                record.bind("node".to_string(), Value::Node(nid, node.clone()));
+                record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
                 record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
                 self.results.push(record);
             }

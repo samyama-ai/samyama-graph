@@ -95,12 +95,22 @@ pub struct Record {
 /// three-valued logic (true/false/null).
 #[derive(Debug, Clone)]
 pub enum Value {
-    /// A fully materialized node
-    Node(NodeId, Node),
+    /// A fully materialized node.
+    ///
+    /// Boxed. `Node` is 128 bytes -- a `HashSet<Label>` and a `PropertyMap`
+    /// held inline, plus id, version and two timestamps -- and carrying it
+    /// inline made `Value` 144 bytes. `Value` is the executor's universal cell,
+    /// so that width was paid by every binding in every record, every hash
+    /// entry holding one, and every sort key.
+    ///
+    /// Late materialization (ADR-012) exists so scans produce `NodeRef` and
+    /// this variant stays rare, which is exactly what makes the indirection
+    /// cheap and the saving broad (#570).
+    Node(NodeId, Box<Node>),
     /// A lazy node reference (no property clone)
     NodeRef(NodeId),
-    /// A fully materialized edge
-    Edge(EdgeId, Edge),
+    /// A fully materialized edge. Boxed, for the same reason as `Node`.
+    Edge(EdgeId, Box<Edge>),
     /// A lazy edge reference (structural data only, no property clone)
     EdgeRef(EdgeId, NodeId, NodeId, EdgeType),
     /// A property value
@@ -336,7 +346,7 @@ impl Value {
         match self {
             Value::NodeRef(id) => {
                 if let Some(node) = store.get_node(id) {
-                    Value::Node(id, node.clone())
+                    Value::Node(id, Box::new(node.clone()))
                 } else {
                     Value::Null
                 }
@@ -351,7 +361,7 @@ impl Value {
         match self {
             Value::EdgeRef(id, ..) => {
                 if let Some(edge) = store.get_edge(id) {
-                    Value::Edge(id, edge.clone())
+                    Value::Edge(id, Box::new(edge.clone()))
                 } else {
                     Value::Null
                 }
@@ -505,7 +515,7 @@ mod tests {
         let mut record = Record::new();
         let node = Node::new(NodeId::new(1), Label::new("Person"));
 
-        record.bind("n".to_string(), Value::Node(NodeId::new(1), node));
+        record.bind("n".to_string(), Value::Node(NodeId::new(1), Box::new(node)));
 
         assert!(record.has("n"));
         assert!(record.get("n").is_some());
@@ -541,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_value_types() {
-        let node_val = Value::Node(NodeId::new(1), Node::new(NodeId::new(1), Label::new("Test")));
+        let node_val = Value::Node(NodeId::new(1), Box::new(Node::new(NodeId::new(1), Label::new("Test"))));
         assert!(node_val.as_node().is_some());
         assert!(node_val.as_edge().is_none());
 
@@ -573,7 +583,7 @@ mod tests {
             NodeId::new(20),
             crate::graph::EdgeType::new("KNOWS"),
         );
-        let val = Value::Edge(EdgeId::new(1), edge);
+        let val = Value::Edge(EdgeId::new(1), Box::new(edge));
         let (eid, e) = val.as_edge().unwrap();
         assert_eq!(eid, EdgeId::new(1));
         assert_eq!(e.source, NodeId::new(10));
@@ -588,7 +598,7 @@ mod tests {
     fn test_node_id() {
         // From Node
         let node = Node::new(NodeId::new(5), Label::new("Person"));
-        let val = Value::Node(NodeId::new(5), node);
+        let val = Value::Node(NodeId::new(5), Box::new(node));
         assert_eq!(val.node_id(), Some(NodeId::new(5)));
 
         // From NodeRef
@@ -609,7 +619,7 @@ mod tests {
             NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
-        let val = Value::Edge(EdgeId::new(3), edge);
+        let val = Value::Edge(EdgeId::new(3), Box::new(edge));
         assert_eq!(val.edge_id(), Some(EdgeId::new(3)));
 
         // From EdgeRef
@@ -634,7 +644,7 @@ mod tests {
             NodeId::new(20),
             crate::graph::EdgeType::new("E"),
         );
-        let val = Value::Edge(EdgeId::new(1), edge);
+        let val = Value::Edge(EdgeId::new(1), Box::new(edge));
         assert_eq!(val.edge_endpoints(), Some((NodeId::new(10), NodeId::new(20))));
 
         // From EdgeRef
@@ -658,7 +668,7 @@ mod tests {
             NodeId::new(2),
             crate::graph::EdgeType::new("KNOWS"),
         );
-        let val = Value::Edge(EdgeId::new(1), edge);
+        let val = Value::Edge(EdgeId::new(1), Box::new(edge));
         assert_eq!(val.edge_type().unwrap().as_str(), "KNOWS");
 
         let val = Value::EdgeRef(
@@ -675,7 +685,7 @@ mod tests {
     #[test]
     fn test_is_node_is_edge() {
         let node = Node::new(NodeId::new(1), Label::new("A"));
-        assert!(Value::Node(NodeId::new(1), node).is_node());
+        assert!(Value::Node(NodeId::new(1), Box::new(node)).is_node());
         assert!(Value::NodeRef(NodeId::new(1)).is_node());
         assert!(!Value::Null.is_node());
         assert!(!Value::Property(PropertyValue::Integer(1)).is_node());
@@ -684,7 +694,7 @@ mod tests {
             EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
-        assert!(Value::Edge(EdgeId::new(1), edge).is_edge());
+        assert!(Value::Edge(EdgeId::new(1), Box::new(edge)).is_edge());
         assert!(Value::EdgeRef(
             EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
@@ -713,7 +723,7 @@ mod tests {
 
         // Already materialized stays the same
         let node = store.get_node(id).unwrap().clone();
-        let val = Value::Node(id, node).materialize_node(&store);
+        let val = Value::Node(id, Box::new(node)).materialize_node(&store);
         assert!(matches!(val, Value::Node(..)));
 
         // Non-existent NodeRef becomes Null
@@ -767,7 +777,7 @@ mod tests {
 
         // Resolve from Node (materialized)
         let node = store.get_node(id).unwrap().clone();
-        let val = Value::Node(id, node);
+        let val = Value::Node(id, Box::new(node));
         let prop = val.resolve_property("name", &store);
         assert_eq!(prop, PropertyValue::String("Alice".to_string()));
 
@@ -807,7 +817,7 @@ mod tests {
 
         // From Edge
         let edge = store.get_edge(eid).unwrap();
-        let val = Value::Edge(eid, edge);
+        let val = Value::Edge(eid, Box::new(edge));
         let prop = val.resolve_property("since", &store);
         assert_eq!(prop, PropertyValue::Integer(2020));
     }
@@ -932,7 +942,7 @@ mod tests {
     fn test_value_partial_eq_cross_variant() {
         // Node == NodeRef with same ID
         let node = Node::new(NodeId::new(5), Label::new("A"));
-        let v1 = Value::Node(NodeId::new(5), node.clone());
+        let v1 = Value::Node(NodeId::new(5), Box::new(node.clone()));
         let v2 = Value::NodeRef(NodeId::new(5));
         assert_eq!(v1, v2);
         assert_eq!(v2, v1);
@@ -946,7 +956,7 @@ mod tests {
             EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
-        let ev1 = Value::Edge(EdgeId::new(1), edge);
+        let ev1 = Value::Edge(EdgeId::new(1), Box::new(edge));
         let ev2 = Value::EdgeRef(
             EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
@@ -978,7 +988,7 @@ mod tests {
 
         // Node and NodeRef with same ID should hash the same
         let node = Node::new(NodeId::new(5), Label::new("A"));
-        let v1 = Value::Node(NodeId::new(5), node);
+        let v1 = Value::Node(NodeId::new(5), Box::new(node));
         let v2 = Value::NodeRef(NodeId::new(5));
         assert_eq!(hash_value(&v1), hash_value(&v2));
 
@@ -987,7 +997,7 @@ mod tests {
             EdgeId::new(3), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
-        let ev1 = Value::Edge(EdgeId::new(3), edge);
+        let ev1 = Value::Edge(EdgeId::new(3), Box::new(edge));
         let ev2 = Value::EdgeRef(
             EdgeId::new(3), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
