@@ -259,6 +259,25 @@ impl<T: Clone + Default> ColumnData<T> {
         *self = ColumnData::Sparse(m);
     }
 
+    /// Visit every present `(row index, value)` pair. Used when a column has
+    /// to give up its typed representation for one it cannot hold.
+    fn for_each(&self, mut visit: impl FnMut(usize, &T)) {
+        match self {
+            ColumnData::Sparse(m) => {
+                for (idx, value) in m {
+                    visit(*idx, value);
+                }
+            }
+            ColumnData::Dense { base, values, present, .. } => {
+                for slot in 0..values.len() {
+                    if bit(present, slot) {
+                        visit(base + slot, &values[slot]);
+                    }
+                }
+            }
+        }
+    }
+
     /// Consider promoting a sparse column to dense.
     ///
     /// Deciding needs the index range, which costs a scan of the map, so it is
@@ -329,6 +348,24 @@ pub enum Column {
     Float(ColumnData<f64>),
     String(ColumnData<String>),
     Bool(ColumnData<bool>),
+    /// Anything the typed columns cannot hold, kept as whole values.
+    ///
+    /// Two things land here:
+    ///
+    /// * **variants with no typed column** — `DateTime`, `Array`, `Map`,
+    ///   `Vector`, `Duration`. Before this they were dropped on the way in and
+    ///   survived only because row storage kept a second copy of every
+    ///   property. That made the duplication load-bearing rather than
+    ///   redundant, and blocked removing it (#545).
+    /// * **a property whose type is not consistent across rows** — one node
+    ///   with `score: 5` and another with `score: "high"`. The typed column
+    ///   silently discarded the mismatch; now the column promotes and keeps
+    ///   both.
+    ///
+    /// Deliberately a plain map rather than a `ColumnData`: these are the rare
+    /// and irregular values, a dense array of `PropertyValue` would be 56
+    /// bytes a slot, and nothing scans them.
+    Other(FxHashMap<usize, PropertyValue>),
 }
 
 impl Column {
@@ -337,16 +374,54 @@ impl Column {
     pub fn new_string() -> Self { Column::String(ColumnData::new()) }
     pub fn new_bool() -> Self { Column::Bool(ColumnData::new()) }
 
+    /// A column that can hold every `PropertyValue`, chosen from the first
+    /// value written to it.
+    pub fn for_value(value: &PropertyValue) -> Self {
+        match value {
+            PropertyValue::Integer(_) => Column::new_int(),
+            PropertyValue::Float(_) => Column::new_float(),
+            PropertyValue::String(_) => Column::new_string(),
+            PropertyValue::Boolean(_) => Column::new_bool(),
+            _ => Column::Other(FxHashMap::default()),
+        }
+    }
+
     pub fn set(&mut self, idx: usize, value: PropertyValue) {
-        match (self, value) {
+        match (&mut *self, value) {
             (Column::Int(m), PropertyValue::Integer(val)) => m.set(idx, val),
             (Column::Float(m), PropertyValue::Float(val)) => m.set(idx, val),
             (Column::String(m), PropertyValue::String(val)) => m.set(idx, val),
             (Column::Bool(m), PropertyValue::Boolean(val)) => m.set(idx, val),
-            _ => {
-                // Type mismatch or unsupported columnar type (Map/Array/Vector)
+            (Column::Other(m), value) => {
+                m.insert(idx, value);
+            }
+            // A value the typed column cannot hold. Promote the whole column
+            // rather than drop it: silently discarding here is what made row
+            // storage load-bearing, because the value was only readable from
+            // the copy kept there (#545).
+            (_, value) => {
+                self.promote_to_other();
+                if let Column::Other(m) = self {
+                    m.insert(idx, value);
+                }
             }
         }
+    }
+
+    /// Move every value into an untyped map, preserving what is already here.
+    fn promote_to_other(&mut self) {
+        if matches!(self, Column::Other(_)) {
+            return;
+        }
+        let mut spilled: FxHashMap<usize, PropertyValue> = FxHashMap::default();
+        match self {
+            Column::Int(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Integer(*v)); }),
+            Column::Float(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Float(*v)); }),
+            Column::Bool(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Boolean(*v)); }),
+            Column::String(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::String(v.clone())); }),
+            Column::Other(_) => unreachable!("checked above"),
+        }
+        *self = Column::Other(spilled);
     }
 
     /// Remove this row's value from the column, if present.
@@ -356,6 +431,9 @@ impl Column {
             Column::Float(m) => m.remove(idx),
             Column::String(m) => m.remove(idx),
             Column::Bool(m) => m.remove(idx),
+            Column::Other(m) => {
+                m.remove(&idx);
+            }
         }
     }
 
@@ -365,6 +443,7 @@ impl Column {
             Column::Float(m) => m.get(idx).map(|&v| PropertyValue::Float(v)).unwrap_or(PropertyValue::Null),
             Column::Bool(m) => m.get(idx).map(|&v| PropertyValue::Boolean(v)).unwrap_or(PropertyValue::Null),
             Column::String(m) => m.get(idx).map(|s| PropertyValue::String(s.clone())).unwrap_or(PropertyValue::Null),
+            Column::Other(m) => m.get(&idx).cloned().unwrap_or(PropertyValue::Null),
         }
     }
 
@@ -375,6 +454,7 @@ impl Column {
             Column::Float(m) => m.has(idx),
             Column::String(m) => m.has(idx),
             Column::Bool(m) => m.has(idx),
+            Column::Other(m) => m.contains_key(&idx),
         }
     }
 
@@ -385,6 +465,7 @@ impl Column {
             Column::Float(m) => m.len(),
             Column::String(m) => m.len(),
             Column::Bool(m) => m.len(),
+            Column::Other(m) => m.len(),
         }
     }
 
@@ -396,6 +477,8 @@ impl Column {
             Column::Float(m) => matches!(m, ColumnData::Dense { .. }),
             Column::String(m) => matches!(m, ColumnData::Dense { .. }),
             Column::Bool(m) => matches!(m, ColumnData::Dense { .. }),
+            // Irregular values are never worth a dense array.
+            Column::Other(_) => false,
         }
     }
 }
@@ -419,14 +502,11 @@ impl ColumnStore {
         if let Some(col) = self.columns.get_mut(key) {
             col.set(idx, value);
         } else {
-            // Create new column based on type
-            let mut col = match value {
-                PropertyValue::Integer(_) => Column::new_int(),
-                PropertyValue::Float(_) => Column::new_float(),
-                PropertyValue::String(_) => Column::new_string(),
-                PropertyValue::Boolean(_) => Column::new_bool(),
-                _ => return, // Don't index complex types in columns for now
-            };
+            // Every `PropertyValue` gets a column. Returning early for the
+            // ones without a typed representation is what made row storage
+            // load-bearing: the value was readable only from the copy kept
+            // there, so the duplication could not be removed (#545).
+            let mut col = Column::for_value(&value);
             col.set(idx, value);
             self.columns.insert(key.to_string(), col);
         }
@@ -683,14 +763,83 @@ mod tests {
     }
 
     #[test]
-    fn a_type_mismatch_is_still_dropped_rather_than_stored() {
-        // Unchanged behaviour, asserted so the rewrite did not quietly alter
-        // it: a String into an Int column is ignored.
+    fn a_type_mismatch_promotes_the_column_instead_of_dropping_the_value() {
+        // This used to drop the mismatched value on the floor. It survived
+        // only because row storage kept a second copy of every property, which
+        // is what made that duplication impossible to remove (#545).
         let mut col = Column::new_int();
         col.set(0, PropertyValue::Integer(1));
-        col.set(1, PropertyValue::String("nope".to_string()));
-        assert_eq!(col.get(1), PropertyValue::Null);
-        assert_eq!(col.len(), 1);
+        col.set(1, PropertyValue::String("high".to_string()));
+
+        assert_eq!(col.get(1), PropertyValue::String("high".to_string()));
+        assert_eq!(col.get(0), PropertyValue::Integer(1), "the earlier value survived promotion");
+        assert_eq!(col.len(), 2);
+    }
+
+    #[test]
+    fn promotion_carries_a_dense_column_across_intact() {
+        // The promotion path has to read whichever representation the column
+        // was using. A dense column's values live in an array behind a
+        // presence bitmap, not in a map.
+        let mut col = dense_int_column(0);
+        assert!(col.is_dense());
+        col.set(DENSE_N + 1, PropertyValue::String("odd one out".to_string()));
+
+        assert!(!col.is_dense(), "an untyped column is never dense");
+        assert_eq!(col.len(), DENSE_N + 1);
+        assert_eq!(col.get(0), PropertyValue::Integer(0));
+        assert_eq!(col.get(DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(col.get(DENSE_N + 1), PropertyValue::String("odd one out".to_string()));
+        assert_eq!(col.get(DENSE_N), PropertyValue::Null, "the gap is still a gap");
+    }
+
+    #[test]
+    fn every_property_value_variant_round_trips() {
+        // The point of the spill column. Before it, five of these were
+        // dropped on the way in and readable only from row storage.
+        let cases = vec![
+            PropertyValue::Integer(7),
+            PropertyValue::Float(1.5),
+            PropertyValue::String("s".to_string()),
+            PropertyValue::Boolean(true),
+            PropertyValue::DateTime(1_700_000_000_000),
+            PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Integer(2)]),
+            PropertyValue::Vector(vec![0.5, 0.25]),
+            PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
+        ];
+        for value in cases {
+            let mut store = ColumnStore::new();
+            store.set_property(3, "p", value.clone());
+            assert_eq!(store.get_property(3, "p"), value, "round trip failed for {value:?}");
+            assert_eq!(store.get_property(4, "p"), PropertyValue::Null);
+        }
+
+        let mut store = ColumnStore::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("k".to_string(), PropertyValue::Integer(1));
+        store.set_property(0, "m", PropertyValue::Map(map.clone()));
+        assert_eq!(store.get_property(0, "m"), PropertyValue::Map(map));
+    }
+
+    #[test]
+    fn an_untyped_column_still_clears_a_recycled_row() {
+        // #364 applies to the spill column too: a deleted node's slot goes to
+        // the next create_node.
+        let mut store = ColumnStore::new();
+        store.set_property(5, "tags", PropertyValue::Array(vec![PropertyValue::Integer(1)]));
+        assert!(store.get_property(5, "tags") != PropertyValue::Null);
+        store.clear_row(5);
+        assert_eq!(store.get_property(5, "tags"), PropertyValue::Null);
+    }
+
+    #[test]
+    fn get_property_keys_sees_untyped_columns() {
+        let mut store = ColumnStore::new();
+        store.set_property(1, "when", PropertyValue::DateTime(1));
+        store.set_property(1, "n", PropertyValue::Integer(2));
+        let mut keys = store.get_property_keys(1);
+        keys.sort();
+        assert_eq!(keys, vec!["n".to_string(), "when".to_string()]);
     }
 
     #[test]
