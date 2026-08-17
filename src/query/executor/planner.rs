@@ -2216,17 +2216,20 @@ impl QueryPlanner {
             }
             let start_var = path_nodes[0].var.clone();
 
-            // QP-05: Anchor selection — pick the cheapest node in the pattern (by index
-            // lookup or label cardinality) to start the scan from, instead of always
-            // scanning from the first written node. Traversal toward earlier-written
-            // nodes then uses reversed edge direction. Restricted to simple linear
-            // chains: no variable-length hops, no shortestPath, no named path variable
-            // (path materialization assumes forward traversal order from the start).
+            // QP-05: Anchor selection — pick the node the *whole path* is
+            // cheapest from, not the node with the cheapest scan. Traversal
+            // toward earlier-written nodes uses the reversed edge direction.
+            //
+            // shortestPath and named path variables stay excluded: both
+            // materialise a path and assume forward traversal order from the
+            // start. Variable-length hops used to be excluded too, which meant
+            // any pattern containing a `*` always started at its first written
+            // node — LDBC IC6 among them. `build_path_from_anchor` now
+            // reverses those segments, so the restriction is no longer needed.
             let anchor_eligible = path.path_variable.is_none()
-                && !matches!(path.path_type, PathType::Shortest | PathType::AllShortest)
-                && !path.segments.iter().any(|s| s.edge.length.is_some());
+                && !matches!(path.path_type, PathType::Shortest | PathType::AllShortest);
             let anchor_idx = if anchor_eligible {
-                choose_anchor_index(&path_nodes, &per_path_preds[path_idx], store)
+                choose_anchor_index(path, &path_nodes, &per_path_preds[path_idx], store)
             } else {
                 0
             };
@@ -2618,11 +2621,38 @@ impl QueryPlanner {
                 Direction::Incoming => Direction::Outgoing,
                 Direction::Both => Direction::Both,
             };
-            let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, reversed_dir);
-            path_operator = if !target.labels.is_empty() {
-                Box::new(expand.with_target_labels(target.labels.clone()))
+            path_operator = if let Some(length) = &segment.edge.length {
+                // A variable-length segment traversed against the written
+                // direction is the same relation read the other way:
+                // `(a)-[:R*1..2]->(b)` from `b` is `(b)<-[:R*1..2]-(a)`. The
+                // pairs are identical, and the BFS deduplicates by node at
+                // whichever end it starts from.
+                //
+                // Before this, any path containing a `*` was excluded from
+                // anchor selection outright, which is why LDBC IC6 always
+                // started at the person and expanded to 400,257 rows rather
+                // than starting at the tag that selects seven.
+                let expand = VarLengthExpandOperator::new(
+                    path_operator,
+                    current_var.clone(),
+                    target.var.clone(),
+                    edge_types,
+                    reversed_dir,
+                    length.min.unwrap_or(1),
+                    length.max.unwrap_or(usize::MAX),
+                );
+                if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                } else {
+                    Box::new(expand) as OperatorBox
+                }
             } else {
-                Box::new(expand)
+                let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, reversed_dir);
+                if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                } else {
+                    Box::new(expand) as OperatorBox
+                }
             };
             if let Some(ref props) = target.properties {
                 if !props.is_empty() {
@@ -2646,11 +2676,28 @@ impl QueryPlanner {
             let target = &nodes[seg_idx + 1];
             let edge_var = segment.edge.variable.clone();
             let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
-            let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, segment.edge.direction.clone());
-            path_operator = if !target.labels.is_empty() {
-                Box::new(expand.with_target_labels(target.labels.clone()))
+            path_operator = if let Some(length) = &segment.edge.length {
+                let expand = VarLengthExpandOperator::new(
+                    path_operator,
+                    current_var.clone(),
+                    target.var.clone(),
+                    edge_types,
+                    segment.edge.direction.clone(),
+                    length.min.unwrap_or(1),
+                    length.max.unwrap_or(usize::MAX),
+                );
+                if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                } else {
+                    Box::new(expand) as OperatorBox
+                }
             } else {
-                Box::new(expand)
+                let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, segment.edge.direction.clone());
+                if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                } else {
+                    Box::new(expand) as OperatorBox
+                }
             };
             if let Some(ref props) = target.properties {
                 if !props.is_empty() {
@@ -3519,64 +3566,264 @@ fn find_index_predicate(
 /// falling back to plain label-scan cardinality, and finally an all-nodes scan
 /// for label-free nodes. Ties favor the earliest (first-written) node so
 /// behavior is unchanged when no node is strictly cheaper than the start.
-fn choose_anchor_index(nodes: &[PathNodeRef], path_preds: &[Expression], store: &GraphStore) -> usize {
+/// What the anchor scan reads, and how many rows survive its own predicates.
+///
+/// These are different numbers and conflating them is what made anchor
+/// selection pick the wrong end. A `Tag {name: "…"}` with no index on `name`
+/// must **read** all 16,080 tags, but it **emits** one — and it is the emitted
+/// row count that every subsequent expand multiplies.
+fn anchor_cardinality(
+    node: &PathNodeRef,
+    path_preds: &[Expression],
+    store: &GraphStore,
+) -> (f64, f64) {
     let stats = store.statistics();
+
+    let mut candidates: Vec<Expression> = Vec::new();
+    if let Some(props) = &node.properties {
+        for (prop_name, prop_value) in props {
+            candidates.push(Expression::Binary {
+                left: Box::new(Expression::Property {
+                    variable: node.var.clone(),
+                    property: prop_name.clone(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expression::Literal(prop_value.clone())),
+            });
+        }
+    }
+    candidates.extend(path_preds.iter().cloned());
+
+    if let Some((_, label, property, op, val)) =
+        find_index_predicate(&node.var, &node.labels, &candidates, store)
+    {
+        // An indexed equality: ask the index how many nodes match rather than
+        // estimating. `estimate_equality_selectivity` falls back to 10% when a
+        // property has no statistics, which on a large label costed an index
+        // lookup at a tenth of the label -- more than a full scan of a smaller
+        // one -- and inverted the choice (#303). One probe at plan time also
+        // makes a missing anchor cost 0, so the plan short-circuits.
+        let exact = if matches!(op, BinaryOp::Eq) {
+            store.property_index.indexed_equality_count(&label, &property, &val)
+        } else {
+            None
+        };
+        let rows = match exact {
+            Some(n) => n as f64,
+            None => {
+                let base = stats.estimate_label_scan(&label) as f64;
+                let selectivity = if matches!(op, BinaryOp::Eq) {
+                    stats.estimate_equality_selectivity_for_value(&label, &property, &val)
+                } else {
+                    0.3
+                };
+                (base * selectivity).max(1.0)
+            }
+        };
+        // An index read costs what it returns.
+        return (rows, rows);
+    }
+
+    let Some(label) = node.labels.first() else {
+        return (f64::MAX, f64::MAX);
+    };
+    let scan = stats.estimate_label_scan(label) as f64;
+
+    // No index, so the scan reads the whole label -- but an equality on a
+    // property still cuts what comes *out* of it, and that is what the rest of
+    // the path multiplies.
+    let mut emitted = scan;
+    if let Some(props) = &node.properties {
+        for (prop_name, prop_value) in props {
+            emitted *= stats.estimate_equality_selectivity_for_value(label, prop_name, prop_value);
+        }
+    }
+    (scan, emitted.max(1.0))
+}
+
+/// Rows out per row in, for one traversal step.
+///
+/// `forward` is the direction the pattern was written; anchoring elsewhere in
+/// the path means traversing some segments against it, and the fan-out of an
+/// edge type is not symmetric -- `HAS_CREATOR` is ~1 outgoing from a Post and
+/// ~337 incoming to a Person.
+fn segment_fanout(
+    segment: &crate::query::ast::PathSegment,
+    from: &PathNodeRef,
+    to: &PathNodeRef,
+    forward: bool,
+    store: &GraphStore,
+) -> f64 {
+    let catalog = store.catalog();
+    let edge_types = &segment.edge.types;
+
+    let step = |source: &PathNodeRef, target: &PathNodeRef, outgoing: bool| -> f64 {
+        if edge_types.is_empty() {
+            // No type named: fall back to the graph-wide average degree.
+            return store.statistics().estimate_expand(None).max(1.0);
+        }
+        edge_types
+            .iter()
+            .map(|et| {
+                if outgoing {
+                    match source.labels.first() {
+                        Some(l) => catalog.estimate_expand_out(l, et),
+                        None => store.statistics().estimate_expand(Some(et)),
+                    }
+                } else {
+                    match target.labels.first() {
+                        Some(l) => catalog.estimate_expand_in(l, et),
+                        None => store.statistics().estimate_expand(Some(et)),
+                    }
+                }
+            })
+            .sum::<f64>()
+            .max(0.01)
+    };
+
+    let one_hop = match (&segment.edge.direction, forward) {
+        (Direction::Outgoing, true) | (Direction::Incoming, false) => step(from, to, true),
+        (Direction::Incoming, true) | (Direction::Outgoing, false) => step(to, from, false),
+        // Undirected reads both adjacencies.
+        (Direction::Both, _) => step(from, to, true) + step(to, from, false),
+    };
+
+    // A variable-length segment compounds: reaching depth k costs roughly
+    // d + d^2 + … + d^k. Capped, because an unbounded `*` would otherwise
+    // produce infinity and make every anchor look equally bad.
+    match &segment.edge.length {
+        None => one_hop,
+        Some(length) => {
+            let max_hops = length.max.unwrap_or(3).min(6) as i32;
+            let mut total = 0.0;
+            for hop in 1..=max_hops.max(1) {
+                total += one_hop.powi(hop);
+            }
+            total.min(1e12)
+        }
+    }
+}
+
+/// Total intermediate rows for a plan anchored at `nodes[anchor]`.
+///
+/// The sum of every operator's output, not just the scan's. That distinction
+/// is the whole point: anchoring LDBC IC6 on the person costs 1 row to start
+/// and then 3,272 -> 409,960 -> 400,257, while anchoring on the tag costs
+/// 16,080 rows to scan and almost nothing after it.
+fn estimate_path_cost(
+    path: &PathPattern,
+    nodes: &[PathNodeRef],
+    anchor: usize,
+    path_preds: &[Expression],
+    store: &GraphStore,
+) -> f64 {
+    let (scan_rows, anchor_rows) = anchor_cardinality(&nodes[anchor], path_preds, store);
+    if scan_rows == f64::MAX {
+        return f64::MAX;
+    }
+    let mut total = scan_rows;
+
+    // Backward toward earlier-written nodes, against the written direction.
+    let mut rows = anchor_rows;
+    for seg_idx in (0..anchor).rev() {
+        rows = step_rows(
+            rows,
+            &path.segments[seg_idx],
+            &nodes[seg_idx + 1],
+            &nodes[seg_idx],
+            false,
+            path_preds,
+            store,
+        );
+        total += rows;
+        if !total.is_finite() {
+            return f64::MAX;
+        }
+    }
+
+    // Forward toward later-written nodes.
+    let mut rows = anchor_rows;
+    for seg_idx in anchor..path.segments.len() {
+        rows = step_rows(
+            rows,
+            &path.segments[seg_idx],
+            &nodes[seg_idx],
+            &nodes[seg_idx + 1],
+            true,
+            path_preds,
+            store,
+        );
+        total += rows;
+        if !total.is_finite() {
+            return f64::MAX;
+        }
+    }
+
+    total
+}
+
+/// Rows after one traversal step, bounded by **both** ends.
+///
+/// A step cannot produce more rows than its destination can supply. Multiplying
+/// the incoming rows by a fan-out ignores that, and on a pattern whose far end
+/// is pinned it is wrong by orders of magnitude: LDBC IC6 anchors `p` with
+/// `{id: …}`, so traversing `KNOWS*1..2` *toward* `p` is a check against one
+/// person, not a 41² expansion. Costing it as an expansion made every
+/// alternative anchor look expensive and the planner never left the first node.
+///
+/// The bound is the standard one for a join: the result is at most what either
+/// side can produce, so take the smaller of "rows in × fan-out forward" and
+/// "rows the destination has × fan-out back".
+fn step_rows(
+    rows_in: f64,
+    segment: &crate::query::ast::PathSegment,
+    from: &PathNodeRef,
+    to: &PathNodeRef,
+    forward: bool,
+    path_preds: &[Expression],
+    store: &GraphStore,
+) -> f64 {
+    let forward_estimate = rows_in * segment_fanout(segment, from, to, forward, store);
+
+    // What the destination side can supply, if it is constrained at all.
+    let (_, dest_rows) = anchor_cardinality(to, path_preds, store);
+    if dest_rows == f64::MAX {
+        return forward_estimate;
+    }
+    let reverse_estimate = dest_rows * segment_fanout(segment, to, from, !forward, store);
+
+    forward_estimate.min(reverse_estimate).max(1.0)
+}
+
+/// Which node to start the scan from.
+///
+/// Costed by the **whole path**, not by the anchor's own scan. The previous
+/// version compared only scan cardinalities and therefore always preferred an
+/// indexed endpoint, however expensive the traversal away from it was. On
+/// LDBC IC6:
+///
+/// ```text
+///   anchored on p:Person {id: …}   scan 1     -> 3,272 -> 409,960 -> 400,257
+///   anchored on tag:Tag {name: …}  scan 16,080 -> ~1 -> a handful
+/// ```
+///
+/// Scanning 16,080 rows to avoid 800,000 is the better trade, and only a model
+/// that sums the intermediates can see it.
+fn choose_anchor_index(
+    path: &PathPattern,
+    nodes: &[PathNodeRef],
+    path_preds: &[Expression],
+    store: &GraphStore,
+) -> usize {
     let mut best_idx = 0usize;
     let mut best_cost = f64::MAX;
 
-    for (i, node) in nodes.iter().enumerate() {
-        let mut candidates: Vec<Expression> = Vec::new();
-        if let Some(props) = &node.properties {
-            for (prop_name, prop_value) in props {
-                candidates.push(Expression::Binary {
-                    left: Box::new(Expression::Property { variable: node.var.clone(), property: prop_name.clone() }),
-                    op: BinaryOp::Eq,
-                    right: Box::new(Expression::Literal(prop_value.clone())),
-                });
-            }
-        }
-        candidates.extend(path_preds.iter().cloned());
-
-        let cost = if let Some((_, label, property, op, val)) = find_index_predicate(&node.var, &node.labels, &candidates, store) {
-            // For an indexed equality, ask the index how many nodes actually match instead
-            // of estimating. `estimate_equality_selectivity` falls back to 10% when a
-            // property has no statistics, so on a large label an index lookup was costed at
-            // a tenth of the label -- more than a full scan of a smaller one, and the
-            // planner would anchor on the *other* end of the pattern and scan it. That is
-            // why structurally identical anchored 1-hops differed by six orders of
-            // magnitude, and why an anchor value that does not exist still scanned (#303).
-            //
-            // The lookup is one index probe at plan time, and it makes a missing anchor cost
-            // 0 -- so the plan short-circuits instead of scanning.
-            let exact = if matches!(op, BinaryOp::Eq) {
-                store
-                    .property_index
-                    .indexed_equality_count(&label, &property, &val)
-            } else {
-                None
-            };
-            match exact {
-                Some(n) => n as f64,
-                None => {
-                    let base = stats.estimate_label_scan(&label) as f64;
-                    // Value-aware: the uniform `1/distinct_count` answer is
-                    // wrong in both directions under skew, which inverts the
-                    // ordering between common and rare anchors rather than
-                    // just blurring it (#478).
-                    let selectivity = if matches!(op, BinaryOp::Eq) {
-                        stats.estimate_equality_selectivity_for_value(&label, &property, &val)
-                    } else {
-                        0.3
-                    };
-                    (base * selectivity).max(1.0)
-                }
-            }
-        } else if let Some(label) = node.labels.first() {
-            stats.estimate_label_scan(label) as f64
-        } else {
-            f64::MAX
-        };
-
+    for i in 0..nodes.len() {
+        let cost = estimate_path_cost(path, nodes, i, path_preds, store);
+        // Strict, so node 0 wins ties: re-anchoring has a real cost the model
+        // does not capture (a reversed traversal reads the other adjacency,
+        // which may be colder), and the written order is the better default
+        // when the estimate cannot tell them apart.
         if cost < best_cost {
             best_cost = cost;
             best_idx = i;

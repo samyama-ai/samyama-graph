@@ -268,3 +268,59 @@ fn a_large_traversal_reaches_the_same_set_as_a_hand_computed_bfs() {
         reachable.len()
     );
 }
+
+#[test]
+fn a_directed_variable_length_segment_survives_anchor_reversal() {
+    // Anchor selection may start a path at its far end and traverse a
+    // variable-length segment against the written direction (#328). That is
+    // sound — `(a)-[:R*1..2]->(b)` read from `b` is `(b)<-[:R*1..2]-(a)`, the
+    // same relation — but only if the direction is actually reversed rather
+    // than dropped. Dropping it would make the pattern undirected and admit
+    // rows that do not satisfy it.
+    let mut store = GraphStore::new();
+    let mk = |s: &mut GraphStore, label: &str, name: &str| {
+        let id = s.create_node(label);
+        let _ = s.set_node_property(
+            "default",
+            id,
+            "name".to_string(),
+            PropertyValue::String(name.to_string()),
+        );
+        id
+    };
+
+    // One Tag, many People — so the cheapest anchor is the tag end and the
+    // planner is forced to traverse the KNOWS segment backwards.
+    let tag = mk(&mut store, "Tag", "T");
+    let people: Vec<_> = (0..200).map(|i| mk(&mut store, "Person", &format!("p{i}"))).collect();
+
+    // Reachable: p0 -KNOWS-> p1 -WROTE-> post0 -HAS_TAG-> T
+    let post0 = mk(&mut store, "Post", "post0");
+    store.create_edge(people[0], people[1], "KNOWS").unwrap();
+    store.create_edge(people[1], post0, "WROTE").unwrap();
+    store.create_edge(post0, tag, "HAS_TAG").unwrap();
+
+    // Decoy: p5 wrote post1, which carries the tag — but nobody KNOWS p5, so
+    // no `(p)-[:KNOWS*1..2]->(p5)` exists and post1 must not appear.
+    let post1 = mk(&mut store, "Post", "post1");
+    store.create_edge(people[5], post1, "WROTE").unwrap();
+    store.create_edge(post1, tag, "HAS_TAG").unwrap();
+
+    let query = parse_query(
+        "MATCH (p:Person)-[:KNOWS*1..2]->(f:Person)-[:WROTE]->(m:Post)-[:HAS_TAG]->(t:Tag) \
+         WHERE t.name = \"T\" RETURN m.name AS n",
+    )
+    .unwrap();
+    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
+    let mut got: Vec<String> = batch
+        .records
+        .iter()
+        .map(|r| match r.get("n") {
+            Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    got.sort();
+    got.dedup();
+    assert_eq!(got, vec!["post0".to_string()], "the decoy has no inbound KNOWS path");
+}
