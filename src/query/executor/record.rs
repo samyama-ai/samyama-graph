@@ -400,6 +400,20 @@ impl Value {
                     PropertyValue::Null
                 }
             }
+            // Map property access: `m.a` where `m` is a map, from a literal, an
+            // `UNWIND` over a list of maps, or a map-valued node property.
+            //
+            // Without this arm `m.a` fell through to `Null` -- and it did so
+            // *silently*, so a query over map values returned confidently wrong
+            // answers rather than failing. Grouping was the sharpest case:
+            // distinct keys collapsed into one `Null` group while the row count
+            // stayed plausible (#571).
+            //
+            // An absent key is still `Null`, which is Cypher's answer for it.
+            Value::Property(PropertyValue::Map(entries)) => entries
+                .get(property)
+                .cloned()
+                .unwrap_or(PropertyValue::Null),
             // Temporal component access: dt.year, dt.month, dur.days, etc.
             Value::Property(PropertyValue::DateTime(millis)) => {
                 use chrono::{Datelike, Timelike, TimeZone};
