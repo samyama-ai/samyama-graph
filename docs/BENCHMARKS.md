@@ -38,6 +38,14 @@ The split follows from where a reader can act: a number you can reproduce
 belongs next to the code that produces it; a number that required another
 vendor's licensed software to obtain does not.
 
+**Not on this page either: the scorecard.** Every figure here is one suite's
+result. The single file that says where the product stands against all 254
+requirements — measured, unmeasured, or measured only by proxy — is
+`SCORECARD.json`, assembled by the conformance harness from run envelopes. It
+lives with the cross-engine results for the same reason they do. This page
+stays the reproducible own-engine record; the scorecard is what a claim gets
+checked against.
+
 ## Comparing two numbers
 
 **A before/after claim requires both figures from one back-to-back session on
@@ -123,13 +131,27 @@ cargo run --release --example tck_runner -- --features <openCypher>/tck/features
 |---|---:|
 | scenarios in the TCK | 1,615 |
 | **evaluated** by the harness | **1,049** (65.0%) |
-| pass | 486 |
-| wrong result | 285 |
+| pass | 489 |
+| wrong result | 282 |
 | errored | 278 |
 | skipped | 566 |
-| **pass rate, of evaluated** | **46.3%** |
-| pass rate, of all 1,615 | 30.1% |
+| **pass rate, of evaluated** | **46.6%** |
+| pass rate, of all 1,615 | 30.3% |
 | gate `CH-TCK ≥ 85%` | **not met** |
+
+Measured at `f295b73` on `vultr-bench-16c-32g-blr`, via the conformance
+harness's `CH-TCK` suite; the envelope is in
+`samyama-graph-competitor-benchmarks/harness/runs/`.
+
+**This number was nondeterministic until 2026-08-18.** Running the TCK five
+times at a fixed commit gave 484, 485, 486 and 487 passes while `errored`
+stayed constant — three scenarios were changing their *answer* between
+processes, because `RandomState` seeds each process's hash maps differently
+and that order was reaching results. Any single figure published before then,
+including the 486 previously on this page, was one sample of a distribution.
+The three defects behind it are fixed (#610); the count is stable now, and
+`--failures-manifest` exists so the check is one diff rather than an
+inference.
 
 **Both numbers have to be quoted together.** The pass rate says what the engine
 gets right among the scenarios this harness can judge; the coverage says how
@@ -158,7 +180,7 @@ Weakest areas, among features with at least 5 evaluated scenarios — all at 0%:
 ### How this relates to the hand-written sweeps
 
 Four hand-written sweeps in `examples/cypher_probe*.rs` (168 cases) pass
-100%, 100%, 100% and 29/30. That is not in tension with 46.3% — those sweeps
+100%, 100%, 100% and 29/30. That is not in tension with 46.6% — those sweeps
 were written to probe areas suspected of being wrong, and every case in them was
 either already correct or has since been fixed. They found seven silent
 wrong answers; they were never a coverage measurement. **The TCK is the coverage
