@@ -577,6 +577,22 @@ pub struct SetClause {
     /// struct read by field in several places, and an enum would touch all of
     /// them for no gain. `RemoveItem` is an enum because it always was.
     pub label_items: Vec<SetLabelItem>,
+    /// Whole-entity assignment: `SET n = {…}` and `SET n += {…}`.
+    pub entity_items: Vec<SetEntityItem>,
+}
+
+/// `SET n = <expr>` (replace every property) or `SET n += <expr>` (merge).
+///
+/// The right-hand side evaluates to a map, or to another node or relationship
+/// whose properties are copied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetEntityItem {
+    /// Variable naming the entity being assigned to.
+    pub variable: String,
+    /// `true` for `+=` (merge), `false` for `=` (replace).
+    pub merge: bool,
+    /// The map, or entity, to take properties from.
+    pub value: Expression,
 }
 
 /// SET item adding labels: `n:Admin`, `n:A:B`

@@ -181,9 +181,10 @@ published:
 | 39 | user-defined procedures |
 | 34 | query parameters |
 | 19 | named fixture graphs (`binary-tree-N`) |
+| 7 | the scenario's setup still does not parse |
 | 3 | the scenario's setup did not run |
 
-The 197 "setup did not parse" skips are **gone**: they were ordinary `CREATE`
+"setup did not parse" fell from **197 to 7**: they were ordinary `CREATE`
 statements the parser rejected, and fixing that moved them into the judged set
 — which is where most of the coverage gain came from. `Scenario Outline`
 expansion is now the single largest remaining skip category and is a harness

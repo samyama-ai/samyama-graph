@@ -104,10 +104,19 @@ delete_clause = { ^"DETACH"? ~ ^"DELETE" ~ expression ~ ("," ~ expression)* }
 set_clause = { ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 // `set_item` is tried first and needs a `.`, so `p:Admin` falls through to the
 // label form rather than being mistaken for a property assignment.
-set_entry = _{ set_item | set_label_item }
+// Order matters: `set_item` needs a `.`, so `n = {...}` and `n += {...}` fall
+// through to the entity form, and `p:Admin` falls through to the label form.
+// `set_entity_item` must precede `set_label_item` because both start with a
+// bare variable.
+set_entry = _{ set_item | set_entity_item | set_label_item }
 set_item = { property_access ~ "=" ~ expression }
 // `SET n:A` and `SET n:A:B`, mirroring `remove_item`'s label form (#596).
 set_label_item = { variable ~ (":" ~ label)+ }
+// Whole-entity assignment: `SET n = {a: 1}` replaces every property,
+// `SET n += {a: 1}` merges. The right-hand side may also be another entity,
+// which copies its properties (`SET a = b`).
+set_entity_item = { variable ~ set_entity_op ~ expression }
+set_entity_op = { "+=" | "=" }
 remove_clause = { ^"REMOVE" ~ remove_item ~ ("," ~ remove_item)* }
 // `REMOVE n:L1:L3` removes both labels in one item, exactly as `SET n:A:B`
 // adds both. Accepting only one label made the multi-label form a syntax

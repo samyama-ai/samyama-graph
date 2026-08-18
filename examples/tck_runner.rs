@@ -35,6 +35,7 @@
 //!   cargo run --release --example tck_runner -- --features /path/to/tck/features
 //!   cargo run --release --example tck_runner -- --features PATH --json /tmp/tck.json
 //!   cargo run --release --example tck_runner -- --features PATH --failures-manifest /tmp/f.tsv
+//!   cargo run --release --example tck_runner -- --features PATH --failures-detail /tmp/d.tsv
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -631,7 +632,10 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     let mut store = GraphStore::new();
     for stmt in &s.setup {
         let Ok(q) = parse_query(stmt) else {
-            return (Outcome::Skipped, "setup did not parse".into());
+            return (
+                Outcome::Skipped,
+                format!("setup did not parse: {}", stmt.replace('\n', " ")),
+            );
         };
         let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
         if m.execute(&q).is_err() {
@@ -646,7 +650,13 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
         Err(e) => {
             return match expect {
                 Expect::Error(_) => (Outcome::Pass, String::new()),
-                _ => (Outcome::Errored, format!("parse: {}", short(&format!("{e:?}")))),
+                _ => (
+                    Outcome::Errored,
+                    // The pest error lists the grammar rules that *could* have
+                    // matched, which does not say what syntax the engine is
+                    // missing. The query does.
+                    format!("parse: {}", query.replace('\n', " ")),
+                ),
             }
         }
     };
@@ -801,7 +811,15 @@ fn main() {
                 failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail)); }
             Outcome::Errored => { err += 1; entry.1 += 1;
                 failures.push((s.feature.clone(), s.name.clone(), "errored", detail)); }
-            Outcome::Skipped => { skip += 1; *skip_reasons.entry(detail).or_insert(0) += 1; }
+            Outcome::Skipped => {
+                skip += 1;
+                // Group on the category, not the whole detail. "setup did not
+                // parse" now carries the offending query so it can be fixed,
+                // and counting those verbatim would make every row unique and
+                // the histogram useless.
+                let category = detail.split_once(": ").map_or(detail.as_str(), |(head, _)| head).to_string();
+                *skip_reasons.entry(category).or_insert(0) += 1;
+            }
         }
     }
 
@@ -873,6 +891,24 @@ fn main() {
         lines.sort();
         let _ = std::fs::write(&path, lines.join("\n") + "\n");
         println!("wrote failure manifest ({} scenarios): {path}", lines.len());
+    }
+
+    // Full detail, one scenario per line, for grouping failures by cause.
+    // Kept separate from `--failures-manifest` on purpose: the detail text
+    // embeds row dumps, which differ between runs for unordered results, and
+    // CH-DETERM compares manifests as sets. Mixing them would make the
+    // determinism suite flag its own diagnostics as nondeterminism.
+    if let Some(path) = arg("--failures-detail") {
+        let mut lines: Vec<String> = failures
+            .iter()
+            .map(|(f, n, o, d)| {
+                let one_line = d.replace('\n', " ");
+                format!("{o}\t{f}\t{n}\t{one_line}")
+            })
+            .collect();
+        lines.sort();
+        let _ = std::fs::write(&path, lines.join("\n") + "\n");
+        println!("wrote failure detail ({} scenarios): {path}", lines.len());
     }
 
     if arg("--show-failures").is_some() {

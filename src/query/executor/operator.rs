@@ -8942,11 +8942,45 @@ impl PhysicalOperator for DeleteOperator {
 pub struct SetPropertyOperator {
     input: OperatorBox,
     items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
+    /// Whole-entity assignments: `(variable, merge, value)`. `merge` is `+=`.
+    entity_items: Vec<(String, bool, Expression)>,
 }
 
 impl SetPropertyOperator {
     pub fn new(input: OperatorBox, items: Vec<(String, String, Expression)>) -> Self {
-        Self { input, items }
+        Self { input, items, entity_items: Vec::new() }
+    }
+
+    /// With whole-entity assignments (`SET n = {…}`, `SET n += {…}`).
+    pub fn with_entity_items(
+        input: OperatorBox,
+        items: Vec<(String, String, Expression)>,
+        entity_items: Vec<(String, bool, Expression)>,
+    ) -> Self {
+        Self { input, items, entity_items }
+    }
+
+    /// The properties a right-hand side contributes.
+    ///
+    /// A map contributes its entries; a node or relationship contributes its
+    /// own properties, which is what makes `SET a = b` a copy. Anything else
+    /// is a type error rather than a silent no-op — assigning a scalar to an
+    /// entity has no sensible meaning and guessing one would hide the mistake.
+    fn source_properties(
+        value: &Value,
+        store: &GraphStore,
+    ) -> ExecutionResult<HashMap<String, PropertyValue>> {
+        match value {
+            Value::Property(PropertyValue::Map(m)) => Ok(m.clone().into_iter().collect()),
+            Value::Node(id, _) | Value::NodeRef(id) => {
+                Ok(store.node_properties_full(*id).into_iter().collect())
+            }
+            Value::Edge(_, e) => Ok(e.properties.clone().into_iter().collect()),
+            Value::Property(PropertyValue::Null) => Ok(HashMap::new()),
+            other => Err(ExecutionError::TypeError(format!(
+                "SET <entity> = expects a map or another entity, got {other:?}"
+            ))),
+        }
     }
 }
 
@@ -8994,6 +9028,54 @@ impl PhysicalOperator for SetPropertyOperator {
                     }
                 }
             }
+
+            // Whole-entity assignment. Evaluated after the per-property items
+            // so that `SET n.a = 1, n = {b: 2}` behaves as written rather than
+            // as ordered by implementation detail.
+            for (var, merge, expr) in &self.entity_items {
+                let Some(target) = record.get(var).cloned() else { continue };
+                let value = eval_expression(expr, &record, store)?;
+                let incoming = Self::source_properties(&value, store)?;
+
+                match target {
+                    Value::NodeRef(id) | Value::Node(id, _) => {
+                        if !merge {
+                            // `=` replaces: every property not in the incoming
+                            // map goes away. Removing them first, then writing,
+                            // keeps the two spellings from differing only in
+                            // leftovers.
+                            for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
+                                if !incoming.contains_key(&key) {
+                                    let _ = store.remove_node_property(id, &key);
+                                }
+                            }
+                        }
+                        for (k, v) in incoming {
+                            store
+                                .set_node_property(tenant_id, id, k, v)
+                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                        }
+                    }
+                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                        if !merge {
+                            let existing: Vec<String> = store
+                                .get_edge(id)
+                                .map(|e| e.properties.keys().cloned().collect())
+                                .unwrap_or_default();
+                            for key in existing {
+                                if !incoming.contains_key(&key) {
+                                    let _ = store.remove_edge_property(id, &key);
+                                }
+                            }
+                        }
+                        for (k, v) in incoming {
+                            let _ = store.set_edge_property(id, k, v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             Ok(Some(record))
         } else {
             Ok(None)
@@ -9009,7 +9091,10 @@ impl PhysicalOperator for SetPropertyOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let sets: Vec<String> = self.items.iter().map(|(v, p, e)| format!("{}.{} = {}", v, p, format_expression(e))).collect();
+        let mut sets: Vec<String> = self.items.iter().map(|(v, p, e)| format!("{}.{} = {}", v, p, format_expression(e))).collect();
+        sets.extend(self.entity_items.iter().map(|(v, merge, e)| {
+            format!("{} {} {}", v, if *merge { "+=" } else { "=" }, format_expression(e))
+        }));
         OperatorDescription {
             name: "SetProperty".to_string(),
             details: sets.join(", "),

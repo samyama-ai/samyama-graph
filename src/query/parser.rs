@@ -963,10 +963,32 @@ fn parse_set_label_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetLab
 fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause> {
     let mut items = Vec::new();
     let mut label_items: Vec<SetLabelItem> = Vec::new();
+    let mut entity_items: Vec<crate::query::ast::SetEntityItem> = Vec::new();
 
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::set_label_item {
             label_items.push(parse_set_label_item(inner)?);
+            continue;
+        }
+        if inner.as_rule() == Rule::set_entity_item {
+            let mut variable = String::new();
+            let mut merge = false;
+            let mut value = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
+                    Rule::set_entity_op => merge = part.as_str().trim() == "+=",
+                    Rule::expression => value = Some(parse_expression(part)?),
+                    _ => {}
+                }
+            }
+            entity_items.push(crate::query::ast::SetEntityItem {
+                variable,
+                merge,
+                value: value.ok_or_else(|| {
+                    ParseError::SemanticError("SET <entity> = missing a value".to_string())
+                })?,
+            });
             continue;
         }
         if inner.as_rule() == Rule::set_item {
@@ -1000,7 +1022,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
         }
     }
 
-    Ok(SetClause { items, label_items })
+    Ok(SetClause { items, label_items, entity_items })
 }
 
 fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveClause> {

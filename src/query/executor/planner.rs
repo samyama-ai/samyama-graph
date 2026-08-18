@@ -1814,6 +1814,7 @@ impl QueryPlanner {
         let is_write = if !query.set_clauses.is_empty() {
             let mut items = Vec::new();
             let mut label_adds = Vec::new();
+            let mut entity_items = Vec::new();
             for set_clause in &query.set_clauses {
                 for item in &set_clause.items {
                     items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
@@ -1823,9 +1824,14 @@ impl QueryPlanner {
                         label_adds.push((item.variable.clone(), label.clone()));
                     }
                 }
+                for item in &set_clause.entity_items {
+                    entity_items.push((item.variable.clone(), item.merge, item.value.clone()));
+                }
             }
-            if !items.is_empty() {
-                operator = Box::new(SetPropertyOperator::new(operator, items));
+            if !items.is_empty() || !entity_items.is_empty() {
+                operator = Box::new(SetPropertyOperator::with_entity_items(
+                    operator, items, entity_items,
+                ));
             }
             if !label_adds.is_empty() {
                 operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
