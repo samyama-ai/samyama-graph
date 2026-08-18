@@ -25,3 +25,11 @@ social_network.svg
 # Python bytecode, swept in by an over-broad `git add -A` (#551 was the same mistake)
 __pycache__/
 *.pyc
+
+# Scratch probes. These carry a "TEMPORARY / not for commit" header and live
+# beside real benches and tests, so `git add -A` sweeps them in -- which is how
+# an orphan module reached #551 and a .pyc reached #561. Name one `tmp_*` and
+# it cannot happen.
+benches/tmp_*.rs
+tests/tmp_*.rs
+examples/tmp_*.rs
