@@ -5825,20 +5825,32 @@ mod tests {
 
     #[test]
     fn test_cov_tointeger_bad() {
+        // Null, not an error: Cypher's `toInteger` yields null for a string it
+        // cannot parse, and erroring made the function unusable for checking
+        // whether input is a number at all (#606).
         let mut store = GraphStore::new();
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "bad").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toInteger(n.v) AS i").unwrap();
-        assert!(QueryExecutor::new(&store).execute(&q).is_err());
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
+        assert_eq!(
+            batch.records[0].get("i"),
+            Some(&Value::Property(PropertyValue::Null))
+        );
     }
 
     #[test]
     fn test_cov_tofloat_bad() {
+        // See `test_cov_tointeger_bad` (#606).
         let mut store = GraphStore::new();
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "xyz").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toFloat(n.v) AS f").unwrap();
-        assert!(QueryExecutor::new(&store).execute(&q).is_err());
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
+        assert_eq!(
+            batch.records[0].get("f"),
+            Some(&Value::Property(PropertyValue::Null))
+        );
     }
 
     // --- 10. Math: log, exp, rand ---

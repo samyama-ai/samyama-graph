@@ -302,9 +302,9 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
         },
-        BinaryOp::In => match &right_prop {
-            PropertyValue::Array(arr) => PropertyValue::Boolean(arr.contains(&left_prop)),
-            _ => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
+        BinaryOp::In => match eval_in_list(&left_prop, &right_prop) {
+            Some(v) => v,
+            None => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
         },
         BinaryOp::RegexMatch => match (&left_prop, &right_prop) {
             (PropertyValue::String(text), PropertyValue::String(pattern)) => {
@@ -347,7 +347,12 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
 /// Shared list/map indexing evaluation
 fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
     match (&collection, &index) {
-        (Value::Property(PropertyValue::Array(arr)), Value::Property(PropertyValue::Integer(i))) => {
+        // Any value that reads as a list, so an all-float literal -- which
+        // parses as a `Vector` -- indexes rather than returning null (#605).
+        (Value::Property(p), Value::Property(PropertyValue::Integer(i)))
+            if p.as_list_items().is_some() =>
+        {
+            let arr = p.as_list_items().unwrap();
             let idx = if *i < 0 { (arr.len() as i64 + *i) as usize } else { *i as usize };
             Ok(arr.get(idx).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
         }
@@ -708,8 +713,11 @@ fn eval_list_comprehension(
 ) -> ExecutionResult<Value> {
     let list_val = eval_expression(list_expr, record, store)?;
 
+    // `as_list_items` rather than an `Array` match: an all-float list literal
+    // parses as a `Vector`, and returning the empty list for it made a
+    // comprehension over one silently produce nothing (#605).
     let items = match list_val {
-        Value::Property(PropertyValue::Array(arr)) => arr,
+        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
         _ => return Ok(Value::Property(PropertyValue::Array(vec![]))),
     };
 
@@ -748,7 +756,7 @@ fn eval_predicate_function(
 ) -> ExecutionResult<Value> {
     let list_val = eval_expression(list_expr, record, store)?;
     let items = match list_val {
-        Value::Property(PropertyValue::Array(arr)) => arr,
+        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
         _ => return Ok(Value::Property(PropertyValue::Boolean(false))),
     };
 
@@ -784,8 +792,10 @@ fn eval_reduce(
 ) -> ExecutionResult<Value> {
     let init_val = eval_expression(init, record, store)?;
     let list_val = eval_expression(list_expr, record, store)?;
+    // See the note in `eval_list_comprehension`: an all-float list literal is a
+    // `Vector`, and giving up here returned the seed unchanged (#605).
     let items = match list_val {
-        Value::Property(PropertyValue::Array(arr)) => arr,
+        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
         _ => return Ok(init_val),
     };
 
@@ -926,6 +936,34 @@ fn value_node_id(v: &Value) -> Option<NodeId> {
         Value::NodeRef(id) => Some(*id),
         _ => None,
     }
+}
+
+/// `left IN right`, where `right` is any value that reads as a list.
+///
+/// Two things the previous `arr.contains(&left)` got wrong. It rejected a
+/// `Vector`, which is what an all-float list literal parses as (#605). And it
+/// compared with `PartialEq`, so `7.0 IN [7, 99]` was false even though
+/// `p.score = 7` matches a float 7.0 -- `IN` disagreed with `=` about whether
+/// an integer and a float can be equal.
+fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyValue> {
+    let items = right.as_list_items()?;
+    let numeric = |p: &PropertyValue| -> Option<f64> {
+        match p {
+            PropertyValue::Integer(i) => Some(*i as f64),
+            PropertyValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    };
+    let found = items.iter().any(|item| {
+        if item == left {
+            return true;
+        }
+        match (numeric(left), numeric(item)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    });
+    Some(PropertyValue::Boolean(found))
 }
 
 /// Property names in a stable order.
@@ -1139,8 +1177,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // only a string -- `reverse([1,2,3])` answered
         // `TypeError("Expected string argument")` (#578).
         "reverse" => match &args[0] {
-            Value::Property(PropertyValue::Array(items)) => {
-                let mut reversed = items.clone();
+            Value::Property(p) if p.as_list_items().is_some() => {
+                let mut reversed = p.as_list_items().unwrap();
                 reversed.reverse();
                 Ok(Value::Property(PropertyValue::Array(reversed)))
             }
@@ -1177,9 +1215,17 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             match &args[0] {
                 Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
                 Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
-                Value::Property(PropertyValue::String(s)) => {
-                    let i = s.parse::<i64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to integer", s)))?;
-                    Ok(Value::Property(PropertyValue::Integer(i)))
+                // Cypher yields null for a string it cannot parse, rather than
+                // failing the query. Erroring made `toInteger` unusable for the
+                // thing it is mostly used for -- checking whether input is a
+                // number at all (#606).
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(
+                    s.parse::<i64>()
+                        .map(PropertyValue::Integer)
+                        .unwrap_or(PropertyValue::Null),
+                )),
+                Value::Null | Value::Property(PropertyValue::Null) => {
+                    Ok(Value::Property(PropertyValue::Null))
                 }
                 _ => Err(ExecutionError::TypeError("Cannot convert to integer".to_string())),
             }
@@ -1188,9 +1234,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             match &args[0] {
                 Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
                 Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
-                Value::Property(PropertyValue::String(s)) => {
-                    let f = s.parse::<f64>().map_err(|_| ExecutionError::TypeError(format!("Cannot convert '{}' to float", s)))?;
-                    Ok(Value::Property(PropertyValue::Float(f)))
+                // Null rather than an error, as with `toInteger` (#606).
+                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(
+                    s.parse::<f64>().map(PropertyValue::Float).unwrap_or(PropertyValue::Null),
+                )),
+                Value::Null | Value::Property(PropertyValue::Null) => {
+                    Ok(Value::Property(PropertyValue::Null))
                 }
                 _ => Err(ExecutionError::TypeError("Cannot convert to float".to_string())),
             }
@@ -1199,8 +1248,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "size" | "length" => {
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
-                Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Integer(a.len() as i64))),
                 Value::Path { edges, .. } => Ok(Value::Property(PropertyValue::Integer(edges.len() as i64))),
+                Value::Property(p) if p.as_list_items().is_some() => Ok(Value::Property(
+                    PropertyValue::Integer(p.as_list_items().unwrap().len() as i64),
+                )),
                 _ => Err(ExecutionError::TypeError("size() requires string, list, or path".to_string())),
             }
         }
@@ -1312,17 +1363,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "head" => {
             match &args[0] {
-                Value::Property(PropertyValue::Array(arr)) => {
-                    Ok(arr.first().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
-                }
+                Value::Property(p) if p.as_list_items().is_some() => Ok(p
+                    .as_list_items()
+                    .unwrap()
+                    .first()
+                    .map(|v| Value::Property(v.clone()))
+                    .unwrap_or(Value::Null)),
                 _ => Err(ExecutionError::TypeError("head() requires list".to_string())),
             }
         }
         "last" => {
             match &args[0] {
-                Value::Property(PropertyValue::Array(arr)) => {
-                    Ok(arr.last().map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
-                }
+                Value::Property(p) if p.as_list_items().is_some() => Ok(p
+                    .as_list_items()
+                    .unwrap()
+                    .last()
+                    .map(|v| Value::Property(v.clone()))
+                    .unwrap_or(Value::Null)),
                 _ => Err(ExecutionError::TypeError("last() requires list".to_string())),
             }
         }
@@ -3283,10 +3340,8 @@ impl FilterOperator {
     }
 
     fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match right {
-            PropertyValue::Array(arr) => Ok(PropertyValue::Boolean(arr.contains(left))),
-            _ => Err(ExecutionError::TypeError("IN requires a list on the right side".to_string())),
-        }
+        eval_in_list(left, right)
+            .ok_or_else(|| ExecutionError::TypeError("IN requires a list on the right side".to_string()))
     }
 
     fn regex_match(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
@@ -11206,8 +11261,9 @@ mod tests {
 
     #[test]
     fn test_eval_function_tointeger_bad_string() {
+        // Null rather than an error, matching Cypher (#606).
         let result = eval_function("tointeger", &[Value::Property(PropertyValue::String("bad".to_string()))], None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
@@ -11239,8 +11295,9 @@ mod tests {
 
     #[test]
     fn test_eval_function_tofloat_bad_string() {
+        // Null rather than an error, matching Cypher (#606).
         let result = eval_function("tofloat", &[Value::Property(PropertyValue::String("bad".to_string()))], None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
