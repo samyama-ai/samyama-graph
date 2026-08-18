@@ -2252,6 +2252,50 @@ impl OperatorDescription {
     }
 }
 
+/// Binding power, matching the parser's precedence ladder.
+///
+/// Kept in step with `PRATT_PARSER` in `query::parser`: OR < XOR < AND < NOT <
+/// comparison < +- < */% < ^. If the two ever disagree, EXPLAIN prints a
+/// predicate that means something the engine did not run, which is the exact
+/// failure #541 describes.
+fn binary_precedence(op: &BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Or => 1,
+        BinaryOp::Xor => 2,
+        BinaryOp::And => 3,
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::In
+        | BinaryOp::StartsWith
+        | BinaryOp::EndsWith
+        | BinaryOp::Contains
+        | BinaryOp::RegexMatch => 4,
+        BinaryOp::Add | BinaryOp::Sub => 5,
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 6,
+        BinaryOp::Pow => 7,
+    }
+}
+
+/// `expr` rendered, bracketed only where dropping the brackets would reparse
+/// differently.
+///
+/// `bias` is 1 for the side that must not re-associate -- the right operand of
+/// a left-associative operator, the left operand of a right-associative one --
+/// so `a - (b - c)` keeps its brackets while `(a - b) - c` does not need them.
+fn parenthesised(expr: &Expression, parent: u8, bias: u8) -> String {
+    let text = format_expression(expr);
+    match expr {
+        Expression::Binary { op, .. } if binary_precedence(op) + bias <= parent => {
+            format!("({text})")
+        }
+        _ => text,
+    }
+}
+
 /// Format an Expression for EXPLAIN output
 fn format_expression(expr: &Expression) -> String {
     match expr {
@@ -2270,16 +2314,38 @@ fn format_expression(expr: &Expression) -> String {
                 BinaryOp::Contains => "CONTAINS", BinaryOp::In => "IN",
                 BinaryOp::RegexMatch => "=~",
             };
-            format!("{} {} {}", format_expression(left), op_str, format_expression(right))
+            // Parenthesised where precedence would otherwise change the
+            // meaning. `A AND B AND (C OR D)` printed as `A AND B AND C OR D`,
+            // which reads as `(A AND B AND C) OR D` -- a different predicate,
+            // and one that looks like a P0 wrong answer in a plan that is
+            // actually correct (#541).
+            let parent = binary_precedence(op);
+            let right_assoc = matches!(op, BinaryOp::Pow);
+            // The side that must not re-associate takes the bias: for a
+            // left-associative operator that is the *right* operand, since
+            // `a - (b - c)` differs from `a - b - c` while `(a - b) - c` does
+            // not. Reversed, this brackets every left operand of an AND chain
+            // and leaves `a - (b - c)` unbracketed -- both of which the tests
+            // below caught.
+            let left_str = parenthesised(left, parent, if right_assoc { 0 } else { 1 });
+            let right_str = parenthesised(right, parent, if right_assoc { 1 } else { 0 });
+            format!("{} {} {}", left_str, op_str, right_str)
         }
         Expression::Unary { op, expr } => {
             let op_str = match op {
                 UnaryOp::Not => "NOT", UnaryOp::Minus => "-",
                 UnaryOp::IsNull => "IS NULL", UnaryOp::IsNotNull => "IS NOT NULL",
             };
+            // A unary operator binds tighter than every binary one, so a binary
+            // operand always needs bracketing: `NOT (a AND b)` is not
+            // `NOT a AND b`.
+            let operand = match expr.as_ref() {
+                Expression::Binary { .. } => format!("({})", format_expression(expr)),
+                _ => format_expression(expr),
+            };
             match op {
-                UnaryOp::IsNull | UnaryOp::IsNotNull => format!("{} {}", format_expression(expr), op_str),
-                _ => format!("{} {}", op_str, format_expression(expr)),
+                UnaryOp::IsNull | UnaryOp::IsNotNull => format!("{} {}", operand, op_str),
+                _ => format!("{} {}", op_str, operand),
             }
         }
         Expression::Function { name, args, distinct } => {
