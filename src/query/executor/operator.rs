@@ -970,6 +970,26 @@ fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyV
 ///
 /// Lexicographic: stable, what a reader expects, and cheap over the handful of
 /// keys a node or map has (#577).
+/// Labels, sorted, as a list of strings.
+///
+/// `Node::labels` is a `HashSet`, whose iteration order varies per process
+/// because `RandomState` seeds each one differently. Returning it raw made
+/// `labels(n)` answer `['L','B']` on one run and `['B','L']` on the next for
+/// the same node — two identical queries over identical data producing
+/// different rows, which is the determinism requirement (LANG-14) failing in
+/// the smallest possible way. It surfaced as a TCK scenario that passed or
+/// failed depending on the run.
+///
+/// Sorted rather than insertion-ordered because insertion order is not
+/// recorded anywhere: a set has no order to preserve, and inventing one that
+/// survives a snapshot round trip would be a storage change. Sorted is
+/// deterministic, and it is the same contract `keys()` already offers.
+fn sorted_labels(node: &crate::graph::Node) -> Vec<PropertyValue> {
+    let mut labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+    labels.sort_unstable();
+    labels.into_iter().map(|l| PropertyValue::String(l.to_string())).collect()
+}
+
 fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
     keys.sort_by(|a, b| match (a, b) {
         (PropertyValue::String(x), PropertyValue::String(y)) => x.cmp(y),
@@ -1403,18 +1423,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "labels" => {
             match &args[0] {
                 Value::Node(_, node) => {
-                    let labels: Vec<PropertyValue> = node.labels.iter()
-                        .map(|l| PropertyValue::String(l.as_str().to_string()))
-                        .collect();
-                    Ok(Value::Property(PropertyValue::Array(labels)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_labels(node))))
                 }
                 Value::NodeRef(id) => {
                     let s = store.ok_or_else(|| ExecutionError::RuntimeError("labels() on NodeRef requires store".to_string()))?;
                     let node = s.get_node(*id).ok_or_else(|| ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())))?;
-                    let labels: Vec<PropertyValue> = node.labels.iter()
-                        .map(|l| PropertyValue::String(l.as_str().to_string()))
-                        .collect();
-                    Ok(Value::Property(PropertyValue::Array(labels)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_labels(node))))
                 }
                 _ => Err(ExecutionError::TypeError("labels() requires a node".to_string())),
             }

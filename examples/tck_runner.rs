@@ -34,6 +34,7 @@
 //!
 //!   cargo run --release --example tck_runner -- --features /path/to/tck/features
 //!   cargo run --release --example tck_runner -- --features PATH --json /tmp/tck.json
+//!   cargo run --release --example tck_runner -- --features PATH --failures-manifest /tmp/f.tsv
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -98,6 +99,30 @@ impl Tck {
                 s
             }
             Tck::Opaque(raw) => raw.clone(),
+        }
+    }
+
+    /// `render`, with the elements of every list sorted.
+    ///
+    /// Used only for scenarios that say `(ignoring element order for lists)`.
+    /// Sorting the *rendered* elements rather than the values is deliberate:
+    /// it needs a total order over mixed-type lists, and the rendering
+    /// already has one.
+    fn render_sorted_lists(&self) -> String {
+        match self {
+            Tck::List(items) => {
+                let mut inner: Vec<String> = items.iter().map(|i| i.render_sorted_lists()).collect();
+                inner.sort();
+                format!("[{}]", inner.join(", "))
+            }
+            Tck::Map(m) => {
+                let inner: Vec<String> = m
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", v.render_sorted_lists()))
+                    .collect();
+                format!("{{{}}}", inner.join(", "))
+            }
+            other => other.render(),
         }
     }
 }
@@ -405,7 +430,19 @@ fn value_to_tck(v: &Value, store: &GraphStore) -> Tck {
 
 #[derive(Debug, Clone)]
 enum Expect {
-    Rows { header: Vec<String>, rows: Vec<Vec<String>>, ordered: bool },
+    Rows {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+        ordered: bool,
+        /// Set by `the result should be (ignoring element order for lists)`.
+        ///
+        /// That phrase relaxes the order of elements *inside a list value*,
+        /// not the order of rows — `labels(n)` may answer `['L','B']` or
+        /// `['B','L']` and both satisfy the scenario. Treating it as a
+        /// row-order relaxation only, which is what this runner did, reports
+        /// a correct engine as wrong.
+        list_order_insensitive: bool,
+    },
     Empty,
     Error(String),
 }
@@ -492,10 +529,22 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             } else if body.starts_with("the result should be, in any order")
                 || body.starts_with("the result should be (ignoring element order for lists)")
             {
-                s.expect = Some(Expect::Rows { header: vec![], rows: vec![], ordered: false });
+                let list_order_insensitive =
+                    body.starts_with("the result should be (ignoring element order for lists)");
+                s.expect = Some(Expect::Rows {
+                    header: vec![],
+                    rows: vec![],
+                    ordered: false,
+                    list_order_insensitive,
+                });
                 pending = Pending::Result(false);
             } else if body.starts_with("the result should be, in order") {
-                s.expect = Some(Expect::Rows { header: vec![], rows: vec![], ordered: true });
+                s.expect = Some(Expect::Rows {
+                    header: vec![],
+                    rows: vec![],
+                    ordered: true,
+                    list_order_insensitive: false,
+                });
                 pending = Pending::Result(true);
             } else if body.starts_with("the result should be empty") {
                 s.expect = Some(Expect::Empty);
@@ -638,7 +687,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                 (Outcome::WrongResult, format!("expected empty, got {} rows", batch.records.len()))
             }
         }
-        Expect::Rows { header, rows, ordered } => {
+        Expect::Rows { header, rows, ordered, list_order_insensitive } => {
             if header.is_empty() {
                 return (Outcome::Skipped, "no header".into());
             }
@@ -647,13 +696,28 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                 let mut row = Vec::new();
                 for col in header {
                     let v = rec.get(col).map(|v| value_to_tck(v, &store)).unwrap_or(Tck::Null);
-                    row.push(v.render());
+                    row.push(if *list_order_insensitive {
+                        v.render_sorted_lists()
+                    } else {
+                        v.render()
+                    });
                 }
                 actual.push(row);
             }
             let mut expected: Vec<Vec<String>> = rows
                 .iter()
-                .map(|r| r.iter().map(|c| parse_expected(c).render()).collect())
+                .map(|r| {
+                    r.iter()
+                        .map(|c| {
+                            let v = parse_expected(c);
+                            if *list_order_insensitive {
+                                v.render_sorted_lists()
+                            } else {
+                                v.render()
+                            }
+                        })
+                        .collect()
+                })
                 .collect();
 
             if !*ordered {
@@ -721,7 +785,10 @@ fn main() {
 
     let (mut pass, mut wrong, mut err, mut skip) = (0usize, 0usize, 0usize, 0usize);
     let mut skip_reasons: BTreeMap<String, usize> = BTreeMap::new();
-    let mut failures: Vec<(String, String, String)> = Vec::new();
+    // (feature, scenario, outcome, detail). The outcome is carried so a
+    // manifest can distinguish a wrong answer from an error — they are
+    // different bugs and only one of them is dangerous.
+    let mut failures: Vec<(String, String, &'static str, String)> = Vec::new();
     let mut per_feature: BTreeMap<String, (usize, usize)> = BTreeMap::new();
 
     for s in &scenarios {
@@ -731,9 +798,9 @@ fn main() {
         match outcome {
             Outcome::Pass => { pass += 1; entry.0 += 1; entry.1 += 1; }
             Outcome::WrongResult => { wrong += 1; entry.1 += 1;
-                failures.push((s.feature.clone(), s.name.clone(), detail)); }
+                failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail)); }
             Outcome::Errored => { err += 1; entry.1 += 1;
-                failures.push((s.feature.clone(), s.name.clone(), detail)); }
+                failures.push((s.feature.clone(), s.name.clone(), "errored", detail)); }
             Outcome::Skipped => { skip += 1; *skip_reasons.entry(detail).or_insert(0) += 1; }
         }
     }
@@ -793,10 +860,29 @@ fn main() {
         println!("\nwrote {path}");
     }
 
+    // A sorted, one-line-per-scenario manifest of everything that did not
+    // pass. Two of these can be diffed, which is how the pass count was shown
+    // to vary by up to 3 scenarios between processes at a fixed commit: the
+    // totals moved while `errored` did not, so the drift was between pass and
+    // wrong-answer and no summary number could localise it.
+    if let Some(path) = arg("--failures-manifest") {
+        let mut lines: Vec<String> = failures
+            .iter()
+            .map(|(f, n, o, _)| format!("{o}\t{f}\t{n}"))
+            .collect();
+        lines.sort();
+        let _ = std::fs::write(&path, lines.join("\n") + "\n");
+        println!("wrote failure manifest ({} scenarios): {path}", lines.len());
+    }
+
     if arg("--show-failures").is_some() {
         println!("\nFailures:");
-        for (f, n, d) in failures.iter().take(60) {
-            println!("  [{f}] {n}\n      {d}");
+        for (f, n, o, d) in failures.iter().take(60) {
+            println!("  [{f}] {n} ({o})\n      {d}");
+        }
+        if failures.len() > 60 {
+            println!("  ... and {} more; use --failures-manifest for the full list",
+                     failures.len() - 60);
         }
     }
 }
