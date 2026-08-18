@@ -564,6 +564,24 @@ impl QueryPlanner {
     /// in. Assigning it to a MATCH instead puts the filter underneath the operator that
     /// binds the variable, and the query dies with "Variable not found" even though the
     /// same variable projects fine in RETURN (#429).
+    /// Whether the query has an `UNWIND` anywhere, in either slot the parser
+    /// uses for one.
+    ///
+    /// A leading `UNWIND` is `query.unwind_clause` when a single `WITH`
+    /// follows, and the *first extra stage's* unwind when two or more do. Four
+    /// early branches -- the CREATE-only path, the standalone-RETURN path, the
+    /// leading-FOREACH path and the "no clauses at all" error -- tested only
+    /// the first slot, so `UNWIND [1,2] AS x WITH x WHERE x > 1 WITH ... RETURN`
+    /// was planned as a standalone RETURN and the `UNWIND` vanished from the
+    /// plan entirely (#572).
+    fn has_any_unwind(query: &Query) -> bool {
+        query.unwind_clause.is_some()
+            || query
+                .extra_with_stages
+                .iter()
+                .any(|(_, unwind, _, _)| unwind.is_some())
+    }
+
     fn late_bound_variables(query: &Query) -> HashSet<String> {
         let mut vars = HashSet::new();
         if query.unwind_leading {
@@ -836,7 +854,7 @@ impl QueryPlanner {
         // Unwind feeds the create.
         if query.match_clauses.is_empty()
             && query.call_clause.is_none()
-            && query.unwind_clause.is_none()
+            && !Self::has_any_unwind(query)
         {
             if let Some(create_clause) = &query.create_clause {
                 let mut plan = self.plan_create_only(create_clause)?;
@@ -897,7 +915,7 @@ impl QueryPlanner {
             // A leading UNWIND also has no MATCH, but it is *not* a single-row projection --
             // it must fall through to the general pipeline so the Unwind, and any
             // aggregation over it, get planned.
-            if query.unwind_clause.is_none() {
+            if !Self::has_any_unwind(query) {
             if let Some(return_clause) = &query.return_clause {
                 // Single-row operator that emits one empty record for projection
                 use crate::query::executor::operator::SingleRowOperator;
@@ -929,7 +947,7 @@ impl QueryPlanner {
             // single empty row -- the same way a bare RETURN does. The loop
             // variable is bound per element inside ForeachOperator, so nothing
             // upstream needs to supply bindings.
-            if query.foreach_clause.is_some() && query.unwind_clause.is_none() {
+            if query.foreach_clause.is_some() && !Self::has_any_unwind(query) {
                 let foreach_clause = query.foreach_clause.as_ref().expect("checked above");
                 let mut set_items = Vec::new();
                 for set_clause in &foreach_clause.set_clauses {
@@ -959,7 +977,7 @@ impl QueryPlanner {
                 });
             }
 
-            if query.unwind_clause.is_none() {
+            if !Self::has_any_unwind(query) {
                 return Err(ExecutionError::PlanningError(
                     "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()
                 ));
@@ -1011,10 +1029,20 @@ impl QueryPlanner {
         // nothing.
         let late_bound_pre = Self::late_bound_variables(query);
 
+        // Predicates deferred past match planning because they name a leading
+        // UNWIND's variable. Kept rather than dropped: the claim above -- that
+        // the top-level WHERE re-applies them -- holds only when there is no
+        // WITH, because that filter is skipped once a barrier exists. With a
+        // WITH they were being discarded, so
+        // `UNWIND [1,2,3] AS x MATCH (p) WHERE p.n = x WITH ... RETURN ...`
+        // returned a cross product instead of the join (#572).
+        let mut late_bound_predicates: Vec<Expression> = Vec::new();
+
         for pred in pre_where_preds {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
             if pred_vars.iter().any(|v| late_bound_pre.contains(v)) {
+                late_bound_predicates.push(pred);
                 continue;
             }
 
@@ -1069,6 +1097,76 @@ impl QueryPlanner {
             known_vars.extend(clause_vars);
         }
 
+        // A leading UNWIND binds its variable before anything downstream reads it,
+        // and that has to happen *before* the first WITH barrier.
+        //
+        // A barrier projects the variables the WITH names, so with the UNWIND
+        // applied after it there is nothing bound for it to project, and
+        // `UNWIND [1,2,3] AS x WITH x WHERE x > 1 RETURN x` failed with
+        // `VariableNotFound("x")` -- as did every other shape, whatever the
+        // value type. Since `WHERE` cannot follow `UNWIND` directly, that left
+        // no way to filter an unwound list at all (#572).
+        //
+        // It also has to happen before the cross-MATCH predicates below, which
+        // may reference it: `UNWIND [1,2] AS x MATCH (p) WHERE p.n = x` puts
+        // `x` in a predicate spanning the unwound variable and a match
+        // variable. Applied after that filter, the predicate was silently
+        // dropped rather than failing, and the query returned a cross product.
+        //
+        // A statement that begins with UNWIND has no MATCH to build a pipeline
+        // on, so it is seeded with a single empty row here for the same reason
+        // it was seeded further down: the rest of the planner -- filters,
+        // aggregation, ORDER BY, SKIP/LIMIT -- then applies unchanged.
+        //
+        // Which slot holds it depends on how many WITH stages follow, which is
+        // a parser detail rather than a semantic one: with a single WITH the
+        // leading UNWIND is `query.unwind_clause`, and with two or more it is
+        // the *first* extra stage's unwind. Both mean the same query.
+        let leading_unwind: Option<&UnwindClause> = if query.unwind_leading {
+            if query.extra_with_stages.is_empty() {
+                query.unwind_clause.as_ref()
+            } else {
+                query.extra_with_stages[0].1.as_ref()
+            }
+        } else {
+            None
+        };
+
+        if query.unwind_leading {
+            if let Some(unwind) = leading_unwind {
+                use crate::query::executor::operator::SingleRowOperator;
+                let base: OperatorBox = match operator.take() {
+                    Some(op) => op,
+                    None => Box::new(SingleRowOperator::new()),
+                };
+                operator = Some(Box::new(UnwindOperator::new(
+                    base,
+                    unwind.expression.clone(),
+                    unwind.variable.clone(),
+                )));
+                known_vars.insert(unwind.variable.clone());
+            }
+        }
+
+        // The predicates held back above, now that the UNWIND has bound its
+        // variable. Only when a WITH follows: without one, the top-level WHERE
+        // applies the full predicate and doing it here as well would just cost
+        // a second evaluation per row.
+        if query.with_clause.is_some() && !late_bound_predicates.is_empty() {
+            if let Some(op) = operator.take() {
+                let filter_expr = late_bound_predicates
+                    .clone()
+                    .into_iter()
+                    .reduce(|acc, pred| Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    })
+                    .unwrap();
+                operator = Some(Box::new(FilterOperator::new(op, filter_expr)));
+            }
+        }
+
         // Apply cross-MATCH predicates after all pre-WITH MATCH clauses are joined
         if !cross_match_predicates.is_empty() {
             if let Some(op) = operator {
@@ -1088,11 +1186,21 @@ impl QueryPlanner {
         // Each stage: (with_clause, unwind, post_match_clauses, post_where_clause)
         let mut all_with_stages: Vec<(&WithClause, Option<&UnwindClause>, Vec<&MatchClause>, Option<&WhereClause>)> = Vec::new();
 
-        for (wc, uw, mcs, wh) in &query.extra_with_stages {
-            all_with_stages.push((wc, uw.as_ref(), mcs.iter().collect(), wh.as_ref()));
+        for (idx, (wc, uw, mcs, wh)) in query.extra_with_stages.iter().enumerate() {
+            // Stage 0 holds the leading UNWIND when there is more than one WITH;
+            // it was applied before the barriers, above.
+            let stage_unwind = if idx == 0 && leading_unwind.is_some() { None } else { uw.as_ref() };
+            all_with_stages.push((wc, stage_unwind, mcs.iter().collect(), wh.as_ref()));
         }
         if let Some(wc) = &query.with_clause {
-            all_with_stages.push((wc, query.unwind_clause.as_ref(), post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
+            // A *leading* UNWIND was applied before the barriers, above. Only a
+            // trailing one belongs to this stage.
+            let stage_unwind = if query.unwind_leading && query.extra_with_stages.is_empty() {
+                None
+            } else {
+                query.unwind_clause.as_ref()
+            };
+            all_with_stages.push((wc, stage_unwind, post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
         let mut anon_counter: usize = 0;
@@ -1338,26 +1446,18 @@ impl QueryPlanner {
         // aggregation, ORDER BY, SKIP/LIMIT -- apply unchanged. Hand-building a plan here
         // instead would have to re-implement all of that; the first attempt did, and
         // promptly failed on `UNWIND [...] AS x RETURN count(x)`.
-        if operator.is_none() && query.unwind_clause.is_some() {
+        if operator.is_none() && Self::has_any_unwind(query) {
             use crate::query::executor::operator::SingleRowOperator;
             operator = Some(Box::new(SingleRowOperator::new()));
         }
 
         let mut operator = operator.unwrap();
 
-        // A *leading* UNWIND binds its variable before the WHERE, because the predicate may
-        // reference it (`UNWIND [1,2] AS x MATCH (p) WHERE p.n = x`). Applied after the
-        // filter, as a trailing UNWIND is, that query fails with "Variable not found".
-        let leading_unwind = query.unwind_leading && query.with_clause.is_none();
-        if leading_unwind {
-            if let Some(unwind_clause) = &query.unwind_clause {
-                operator = Box::new(UnwindOperator::new(
-                    operator,
-                    unwind_clause.expression.clone(),
-                    unwind_clause.variable.clone(),
-                ));
-            }
-        }
+        // A *leading* UNWIND is planned before the WITH barriers, above, so that
+        // a following WITH has its variable bound. It still lands below the
+        // WHERE, which is what `UNWIND [1,2] AS x MATCH (p) WHERE p.n = x`
+        // needs -- the predicate references the unwound variable.
+        let leading_unwind = query.unwind_leading;
 
         // Add WHERE clause if present.
         // When a WITH clause exists, WHERE predicates were already decomposed and
