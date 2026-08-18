@@ -2,7 +2,7 @@
 //!
 //! A high-performance graph database written in Rust with ~90% OpenCypher query support,
 //! RESP (Redis protocol) compatibility, multi-tenancy, HNSW vector search, natural language
-//! queries, and graph algorithms. Currently at v0.7.0.
+//! queries, and graph algorithms. Currently at v1.7.0.
 //!
 //! ## How a Graph Database Works
 //!
