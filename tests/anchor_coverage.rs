@@ -27,10 +27,19 @@
 //! `MATCH (a)-[:KNOWS*1..3]->(b) WHERE id(a) = … AND id(b) = …` expands to
 //! depth 3 and filters the target afterwards, so the constraint does no work.
 //! Measured on a 20,000-node graph of degree 20: **2.4 ms with the target
-//! pinned against 2.3 ms with it free** — the constraint is indeed ignored, and
-//! exploiting it would save nothing worth the change. (`shortestPath` answers
-//! the same question in 9.6 ms, so this is already the fast path.) Recorded
-//! here so the next reader does not re-derive it.
+//! pinned against 2.3 ms with it free** — the constraint is indeed ignored.
+//!
+//! **That measurement does not generalise, and an earlier version of this note
+//! wrongly concluded from it that the shape was not worth acting on.** It has
+//! *one* input row, so there is nothing to amortise. LDBC IC6 has the same
+//! shape with **18** input rows sharing one pinned target, and there the
+//! var-length expansion produces 87,834 rows to keep 7 — **96% of the query**.
+//! The win scales with the input-row count, which the synthetic case set to
+//! one. Filed as #590.
+//!
+//! Still not asserted here, because it is a cost question rather than a
+//! plan-shape one: the plan is not *wrong*, it repeats work. This file is about
+//! scans that a predicate could have replaced.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
