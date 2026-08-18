@@ -132,6 +132,10 @@ name = "memory_footprint"
 harness = false
 
 [[bench]]
+name = "prop_scaling"
+harness = false
+
+[[bench]]
 name = "hierarchy_benchmark"
 harness = false
 
