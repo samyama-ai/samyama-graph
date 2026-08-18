@@ -484,6 +484,10 @@ pub enum BinaryOp {
     Mul,
     /// Division (/)
     Div,
+    /// Exponentiation (^). Right-associative and binds tighter than `*`.
+    Pow,
+    /// Exclusive or (XOR). Sits between OR and AND, as Cypher specifies.
+    Xor,
     /// Modulo (%)
     Mod,
     /// String starts with

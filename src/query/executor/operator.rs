@@ -145,6 +145,29 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
     let result = match op {
         BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
         BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+        BinaryOp::Pow => match (&left_prop, &right_prop) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
+            _ => {
+                // Cypher's `^` is float exponentiation even over integers:
+                // `2 ^ 3` is 8.0, and `2 ^ -1` has to be 0.5 rather than 0.
+                //
+                // `as_float` returns `None` for an `Integer`, so it cannot be
+                // used alone here -- doing that made `2 ^ 3` answer
+                // "^ requires numeric operands".
+                let numeric = |p: &PropertyValue| -> Option<f64> {
+                    p.as_float().or_else(|| p.as_integer().map(|i| i as f64))
+                };
+                match (numeric(&left_prop), numeric(&right_prop)) {
+                    (Some(base), Some(exp)) => PropertyValue::Float(base.powf(exp)),
+                    _ => return Err(ExecutionError::TypeError("^ requires numeric operands".to_string())),
+                }
+            }
+        },
+        BinaryOp::Xor => match (&left_prop, &right_prop) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(l != r),
+            _ => return Err(ExecutionError::TypeError("XOR requires boolean operands".to_string())),
+        },
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             let cmp = left_prop.partial_cmp(&right_prop);
             match (op, cmp) {
@@ -175,6 +198,28 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            // List concatenation, and appending or prepending a scalar. Cypher
+            // defines all three for `+`; none of them worked (#578).
+            (PropertyValue::Array(l), PropertyValue::Array(r)) => {
+                let mut out = l.clone();
+                out.extend(r.iter().cloned());
+                PropertyValue::Array(out)
+            }
+            // Null is excluded here so the propagation arm below still governs
+            // it. `[1,2] + null` appending a null element is arguably Cypher's
+            // answer, but it is a judgement call and this is not the change to
+            // make it in -- the existing rule is that any null operand makes the
+            // result null (#457), and it stays.
+            (PropertyValue::Array(l), scalar) if !matches!(scalar, PropertyValue::Null) => {
+                let mut out = l.clone();
+                out.push(scalar.clone());
+                PropertyValue::Array(out)
+            }
+            (scalar, PropertyValue::Array(r)) if !matches!(scalar, PropertyValue::Null) => {
+                let mut out = vec![scalar.clone()];
+                out.extend(r.iter().cloned());
+                PropertyValue::Array(out)
+            }
             // DateTime + Duration
             (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) |
             (PropertyValue::Duration { months, days, seconds, .. }, PropertyValue::DateTime(dt)) => {
@@ -883,6 +928,18 @@ fn value_node_id(v: &Value) -> Option<NodeId> {
     }
 }
 
+/// Property names in a stable order.
+///
+/// Lexicographic: stable, what a reader expects, and cheap over the handful of
+/// keys a node or map has (#577).
+fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
+    keys.sort_by(|a, b| match (a, b) {
+        (PropertyValue::String(x), PropertyValue::String(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
+    });
+    keys
+}
+
 /// Shared function evaluation for scalar functions (not aggregates)
 pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
     match name.to_lowercase().as_str() {
@@ -1078,10 +1135,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let start = chars.len().saturating_sub(n);
             Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
         }
-        "reverse" => {
-            let s = extract_string(&args[0])?;
-            Ok(Value::Property(PropertyValue::String(s.chars().rev().collect())))
-        }
+        // Cypher's reverse() takes a list as well as a string, and this took
+        // only a string -- `reverse([1,2,3])` answered
+        // `TypeError("Expected string argument")` (#578).
+        "reverse" => match &args[0] {
+            Value::Property(PropertyValue::Array(items)) => {
+                let mut reversed = items.clone();
+                reversed.reverse();
+                Ok(Value::Property(PropertyValue::Array(reversed)))
+            }
+            Value::Property(PropertyValue::Null) | Value::Null => {
+                Ok(Value::Property(PropertyValue::Null))
+            }
+            other => {
+                let text = extract_string(other)?;
+                Ok(Value::Property(PropertyValue::String(text.chars().rev().collect())))
+            }
+        },
         "tostring" => {
             let val = &args[0];
             let s = match val {
@@ -1303,6 +1373,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 _ => Err(ExecutionError::TypeError("type() requires an edge".to_string())),
             }
         }
+        // Sorted, because the underlying maps are `HashMap`s and Rust seeds
+        // their hasher randomly *per process* -- so this returned a different
+        // order on every run of the same query over the same data. Cypher does
+        // not specify an order, which makes any particular one conformant; it
+        // does not make a *different one each time* acceptable. A result that
+        // cannot be diffed, cached or compared across versions undermines
+        // Axiom 3 at the level of the answer rather than the timing (#577).
         "keys" => {
             match &args[0] {
                 Value::Node(id, node) => {
@@ -1322,7 +1399,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             .map(|k| PropertyValue::String(k.clone()))
                             .collect(),
                     };
-                    Ok(Value::Property(PropertyValue::Array(keys)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::NodeRef(id) => {
                     let s = store.ok_or_else(|| ExecutionError::RuntimeError("keys() on NodeRef requires store".to_string()))?;
@@ -1334,13 +1411,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
-                    Ok(Value::Property(PropertyValue::Array(keys)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::Edge(_, edge) => {
                     let keys: Vec<PropertyValue> = edge.properties.keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
-                    Ok(Value::Property(PropertyValue::Array(keys)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::EdgeRef(eid, _, _, _) => {
                     let s = store.ok_or_else(|| ExecutionError::RuntimeError("keys() on EdgeRef requires store".to_string()))?;
@@ -1348,7 +1425,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let keys: Vec<PropertyValue> = edge.properties.keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
-                    Ok(Value::Property(PropertyValue::Array(keys)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 // keys() over a map property. Cypher defines keys() on maps as
                 // well as nodes and edges, and without this a map property can
@@ -1358,7 +1435,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
-                    Ok(Value::Property(PropertyValue::Array(keys)))
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 _ => Err(ExecutionError::TypeError("keys() requires a node, edge, or map".to_string())),
             }
@@ -2188,6 +2265,7 @@ fn format_expression(expr: &Expression) -> String {
                 BinaryOp::And => "AND", BinaryOp::Or => "OR",
                 BinaryOp::Add => "+", BinaryOp::Sub => "-",
                 BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Mod => "%",
+                BinaryOp::Pow => "^", BinaryOp::Xor => "XOR",
                 BinaryOp::StartsWith => "STARTS WITH", BinaryOp::EndsWith => "ENDS WITH",
                 BinaryOp::Contains => "CONTAINS", BinaryOp::In => "IN",
                 BinaryOp::RegexMatch => "=~",
@@ -2894,6 +2972,15 @@ impl FilterOperator {
             BinaryOp::Ge => self.compare_ge(&left_prop, &right_prop)?,
             BinaryOp::And => self.logical_and(&left_prop, &right_prop)?,
             BinaryOp::Or => self.logical_or(&left_prop, &right_prop)?,
+            // Delegated so `^` and XOR have one definition rather than two that
+            // can drift; this evaluator differs from `eval_binary_op` only in
+            // its comparison coercions, which neither operator uses.
+            BinaryOp::Pow | BinaryOp::Xor => {
+                match eval_binary_op(op, Value::Property(left_prop.clone()), Value::Property(right_prop.clone()))? {
+                    Value::Property(p) => p,
+                    other => return Err(ExecutionError::TypeError(format!("unexpected {other:?}"))),
+                }
+            }
             BinaryOp::Add => self.arithmetic_add(&left_prop, &right_prop)?,
             BinaryOp::Sub => self.arithmetic_sub(&left_prop, &right_prop)?,
             BinaryOp::Mul => self.arithmetic_mul(&left_prop, &right_prop)?,

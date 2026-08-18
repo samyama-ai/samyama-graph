@@ -73,6 +73,9 @@ struct CypherParser;
 static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
         .op(Op::infix(Rule::or_op, Assoc::Left))
+        // XOR binds tighter than OR and looser than AND, which is where Cypher
+        // puts it (#578).
+        .op(Op::infix(Rule::xor_op, Assoc::Left))
         .op(Op::infix(Rule::and_op, Assoc::Left))
         // NOT sits between AND and the comparisons: `NOT a STARTS WITH b` negates the
         // comparison, while `NOT a AND b` still groups as `(NOT a) AND b`.
@@ -80,6 +83,9 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::in_op, Assoc::Left) | Op::infix(Rule::comparison_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
+        // Exponentiation binds tightest and associates to the *right*:
+        // `2 ^ 3 ^ 2` is 2^(3^2), not (2^3)^2.
+        .op(Op::infix(Rule::pow_op, Assoc::Right))
 });
 
 /// Parser errors
@@ -1572,7 +1578,9 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
             
             let op = match op.as_rule() {
                 Rule::or_op => BinaryOp::Or,
+                Rule::xor_op => BinaryOp::Xor,
                 Rule::and_op => BinaryOp::And,
+                Rule::pow_op => BinaryOp::Pow,
                 Rule::comparison_op => parse_op_str(op.as_str())?,
                 Rule::in_op => BinaryOp::In,
                 Rule::add_sub_op => parse_op_str(op.as_str())?,
@@ -1879,25 +1887,39 @@ fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
     let mut list_expr = None;
     let mut filter = None;
     let mut map_expr = None;
-    let mut expressions = Vec::new();
 
+    // Which optional expression is which is decided by the marker that preceded
+    // it, not by how many there are: `[x IN xs WHERE p]` and `[x IN xs | e]`
+    // both have two expressions and mean different things (#578).
+    let mut seen_where = false;
+    let mut seen_pipe = false;
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
             Rule::in_op => {} // skip the IN keyword
-            Rule::expression => expressions.push(parse_expression(inner)?),
+            Rule::where_kw => seen_where = true,
+            Rule::pipe_op => seen_pipe = true,
+            Rule::expression => {
+                let expr = parse_expression(inner)?;
+                if list_expr.is_none() {
+                    list_expr = Some(expr);
+                } else if seen_pipe {
+                    map_expr = Some(expr);
+                } else if seen_where {
+                    filter = Some(expr);
+                } else {
+                    map_expr = Some(expr);
+                }
+            }
             _ => {}
         }
     }
 
-    // Order: list_expr, [filter], map_expr
-    // Grammar: variable IN expression (WHERE expression)? | expression
-    // So expressions are: [list_expr, optional_filter, map_expr]
-    if expressions.len() >= 2 {
-        list_expr = Some(expressions.remove(0));
-        map_expr = Some(expressions.pop().unwrap());
-        if !expressions.is_empty() {
-            filter = Some(expressions.remove(0));
+    // Cypher defaults the projection to the iteration variable, so
+    // `[x IN xs WHERE p]` means `[x IN xs WHERE p | x]`.
+    if map_expr.is_none() {
+        if let Some(var) = &variable {
+            map_expr = Some(Expression::Variable(var.clone()));
         }
     }
 
