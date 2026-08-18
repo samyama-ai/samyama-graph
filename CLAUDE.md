@@ -168,6 +168,24 @@ graph.create_edge(source_id, target_id, "KNOWS")?;
 
 ## Testing
 
+**CI runs `cargo test --workspace --no-fail-fast` — a debug build, not `--release`.**
+A suite that passes in release can still fail the gate: the engine is more than
+an order of magnitude slower in debug. Run the profile CI runs before claiming a
+suite is green, and say which profile a claim was measured in.
+
+**Do not assert wall-clock times in tests.** An absolute bound encodes the speed
+of the machine and the build profile that wrote it. Assert a **ratio** against a
+baseline measured in the same process instead — a scan against an anchored
+lookup, a small graph against a large one, a query against a single hop. See
+`tests/id_anchor.rs`, `tests/aggregate_identity_grouping.rs`,
+`tests/bounded_sort_semantics.rs` and `tests/shortest_path_semantics.rs` for the
+pattern, and #587 for what it cost to learn. A weak timing assertion is worse
+than none: the one in `id_anchor` passed for a whole PR over a plan that was
+running 329x too slow (#584).
+
+Benchmarks are the opposite — always `--release`, on a quiet host, with the
+calibration line compared before the timings (#529).
+
 - **1814 unit tests** across all modules (87.8% coverage)
 - **10 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Python scripts in `tests/integration/`
