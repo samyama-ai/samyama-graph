@@ -16,6 +16,7 @@ run yourself:
 | Memory footprint | `cargo bench --bench memory_footprint` |
 | Cardinality accuracy | `cargo bench --bench cardinality_accuracy` |
 | Ingestion profile | `cargo bench --bench ingest_profile` |
+| openCypher TCK | `cargo run --release --example tck_runner -- --features <openCypher>/tck/features` |
 | Operator micro-benchmarks | `cargo bench --bench aggregate_grouping`, `--bench varlength_expand`, `--bench property_access`, `--bench aggregate_throughput` |
 
 **Reading the operator micro-benchmarks.** These report ns per row for a single
@@ -108,6 +109,61 @@ what makes H2 and H10 win by orders of magnitude. See
 [`benchmarks/hier/README.md`](../benchmarks/hier/README.md) for the full accounting,
 including the engine gaps the corpus surfaced.
 
+## openCypher TCK — Cypher conformance
+
+The first measured figure for `LANG-01`. A `~90% OpenCypher coverage` claim was
+withdrawn in #437 as unmeasured; this replaces it with a number that has a
+reproducer.
+
+```
+cargo run --release --example tck_runner -- --features <openCypher>/tck/features
+```
+
+| | |
+|---|---:|
+| scenarios in the TCK | 1,615 |
+| **evaluated** by the harness | **1,049** (65.0%) |
+| pass | 486 |
+| wrong result | 285 |
+| errored | 278 |
+| skipped | 566 |
+| **pass rate, of evaluated** | **46.3%** |
+| pass rate, of all 1,615 | 30.1% |
+| gate `CH-TCK ≥ 85%` | **not met** |
+
+**Both numbers have to be quoted together.** The pass rate says what the engine
+gets right among the scenarios this harness can judge; the coverage says how
+many it can judge at all. A harness that counted its own unimplemented steps as
+passes would report a flattering number, and one that counted them as failures
+would mislead the other way — so they are separated, and the skip reasons are
+published:
+
+| skipped | reason |
+|---:|---|
+| 274 | `Scenario Outline` — the harness does not expand `Examples` tables |
+| 197 | the scenario's setup Cypher did not parse |
+| 39 | user-defined procedures |
+| 34 | query parameters |
+| 19 | named fixture graphs (`binary-tree-N`) |
+
+The 197 setup failures are a **result, not only a harness gap**: those are
+ordinary `CREATE` statements the parser rejects, so they measure the same thing
+the TCK is measuring.
+
+Weakest areas, among features with at least 5 evaluated scenarios — all at 0%:
+`Boolean5`, `Comparison3`, `Create3`, `Create6`, `Match6`, `Merge6`, `Set4`,
+`Set5`, `Temporal5`, `Temporal6`, `Union1`, `Union2`; then `Pattern1` at 4% and
+`Match5` at 12%.
+
+### How this relates to the hand-written sweeps
+
+Four hand-written sweeps in `examples/cypher_probe*.rs` (168 cases) pass
+100%, 100%, 100% and 29/30. That is not in tension with 46.3% — those sweeps
+were written to probe areas suspected of being wrong, and every case in them was
+either already correct or has since been fixed. They found seven silent
+wrong answers; they were never a coverage measurement. **The TCK is the coverage
+measurement**, and it says there is a great deal left.
+
 ## LDBC SNB Interactive
 
 Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/benchmarks/snb/) read workload (IS1–IS7 short reads, IC1–IC14 complex reads), at two scale factors. In-process (embedded) timing, 1 warm-up + 3 timed runs, median latency. Provenance: commit `31a7e77`, id-indexes built on all anchor labels.
@@ -162,33 +218,38 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 | Query | Name | SF1 | SF10 |
 |---|---|---|---|
 | IS1 | Person Profile | 0.03 ms | 0.02 ms |
-| IS2 | Recent Posts by Person | 0.08 ms | 1.10 ms |
-| IS3 | Friends of Person | 0.08 ms | 1.80 ms |
+| IS2 | Recent Posts by Person | 0.04 ms | 1.10 ms |
+| IS3 | Friends of Person | 0.06 ms | 1.80 ms |
 | IS4 | Post Content | 0.01 ms | 0.01 ms |
 | IS5 | Post Creator | 0.02 ms | 0.02 ms |
 | IS6 | Forum of Post | 0.03 ms | 0.06 ms |
-| IS7 | Replies to Post | 1.2 ms | 11.50 ms |
+| IS7 | Replies to Post | 1.1 ms | 11.50 ms |
 
 ## Complex reads (IC1–IC14)
 
 | Query | Name | SF1 | previous SF1 | SF10 |
 |---|---|---|---|---|
-| IC1 | Transitive Friends by Name | **56.0 ms** | 58.9 ms | 14.0 s |
-| IC2 | Recent Friend Posts | **5.6 ms** | 8.1 ms | 306 ms |
-| IC3 | Friends in Countries | **443 ms** | 862 ms | 15.7 s |
-| IC4 | Popular Tags in Period | **8.8 ms** | 13.9 ms | 527 ms |
-| IC5 | New Forum Members | **713 ms** | 1203 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | **161 ms** | 185 ms | 31.5 s |
-| IC7 | Recent Likers | **0.04 ms** | 0.09 ms | 1.70 ms |
-| IC8 | Recent Replies | **0.12 ms** | 0.16 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | **673 ms** | 1131 ms | 26.3 s |
-| IC10 | Friend Recommendation | **85.9 ms** | 104 ms | 2.3 s |
-| IC11 | Job Referral | **30.9 ms** | 32.2 ms | 4.5 s |
-| IC12 | Expert Reply | **56.0 ms** | 84.7 ms | 3.2 s |
-| IC13 | Single Shortest Path | **42.6 ms** | 43.4 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | **49.4 ms** | 49.8 ms | 696 ms |
+| IC1 | Transitive Friends by Name | **55.3 ms** | 59.5 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **4.3 ms** | 9.7 ms | 306 ms |
+| IC3 | Friends in Countries | **464 ms** | 862 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **7.8 ms** | 13.9 ms | 527 ms |
+| IC5 | New Forum Members | **765 ms** | 1203 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **157 ms** | 185 ms | 31.5 s |
+| IC7 | Recent Likers | **0.05 ms** | 0.09 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.13 ms** | 0.16 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **713 ms** | 1131 ms | 26.3 s |
+| IC10 | Friend Recommendation | **90.2 ms** | 104 ms | 2.3 s |
+| IC11 | Job Referral | **30.0 ms** | 32.2 ms | 4.5 s |
+| IC12 | Expert Reply | **56.9 ms** | 84.7 ms | 3.2 s |
+| IC13 | Single Shortest Path | **40.2 ms** | 43.4 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **46.2 ms** | 49.8 ms | 696 ms |
 
-**Whole suite: 9.7 s, 21/21 passed, 0 empty, 0 errors.**
+**Whole suite: 10.1 s, 21/21 passed, 0 empty, 0 errors.**
+
+Run-to-run variance on this host is about ±5% (9.6–10.1 s across the runs
+taken this round, all at the same 43 ms calibration). The figure above is the
+most recent, taken at load 0.63 — the quietest of them. A difference smaller
+than that is not a result.
 
 ### What the "previous SF1" column is
 
