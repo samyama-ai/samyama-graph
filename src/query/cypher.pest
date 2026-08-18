@@ -88,8 +88,13 @@ where_clause = { ^"WHERE" ~ expression }
 with_clause = { ^"WITH" ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
 create_clause = { ^"CREATE" ~ pattern }
 delete_clause = { ^"DETACH"? ~ ^"DELETE" ~ expression ~ ("," ~ expression)* }
-set_clause = { ^"SET" ~ set_item ~ ("," ~ set_item)* }
+set_clause = { ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
+// `set_item` is tried first and needs a `.`, so `p:Admin` falls through to the
+// label form rather than being mistaken for a property assignment.
+set_entry = _{ set_item | set_label_item }
 set_item = { property_access ~ "=" ~ expression }
+// `SET n:A` and `SET n:A:B`, mirroring `remove_item`'s label form (#596).
+set_label_item = { variable ~ (":" ~ label)+ }
 remove_clause = { ^"REMOVE" ~ remove_item ~ ("," ~ remove_item)* }
 remove_item = { property_access | variable ~ ":" ~ label }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }

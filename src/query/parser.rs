@@ -871,8 +871,24 @@ fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteC
 
 fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause> {
     let mut items = Vec::new();
+    let mut label_items: Vec<SetLabelItem> = Vec::new();
 
     for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::set_label_item {
+            let mut variable = String::new();
+            let mut labels = Vec::new();
+            for sl in inner.into_inner() {
+                match sl.as_rule() {
+                    Rule::variable => variable = sl.as_str().to_string(),
+                    Rule::label => labels.push(Label::new(sl.as_str())),
+                    _ => {}
+                }
+            }
+            if !labels.is_empty() {
+                label_items.push(SetLabelItem { variable, labels });
+            }
+            continue;
+        }
         if inner.as_rule() == Rule::set_item {
             let mut variable = String::new();
             let mut property = String::new();
@@ -904,7 +920,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
         }
     }
 
-    Ok(SetClause { items })
+    Ok(SetClause { items, label_items })
 }
 
 fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveClause> {

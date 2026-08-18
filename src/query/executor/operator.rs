@@ -8832,6 +8832,89 @@ impl PhysicalOperator for SetPropertyOperator {
 }
 
 /// Remove property operator: REMOVE n.name
+/// Adds and removes labels on the nodes flowing through it.
+///
+/// One operator for both directions because they share everything but the
+/// call: each must go through `GraphStore`, which maintains `label_index`.
+/// A label added to the node but not to the index is invisible to
+/// `MATCH (n:Label)` and to expansion filtering (#592) -- that is, invisible
+/// to exactly the queries that look for it.
+///
+/// Before this existed the planner matched only `RemoveItem::Property` and
+/// **dropped** `RemoveItem::Label` while still reporting the statement as a
+/// successful write, so `REMOVE n:Label` was a silent no-op (#596).
+pub struct LabelMutationOperator {
+    input: OperatorBox,
+    /// `(variable, label)` pairs to add.
+    add: Vec<(String, Label)>,
+    /// `(variable, label)` pairs to remove.
+    remove: Vec<(String, Label)>,
+}
+
+impl LabelMutationOperator {
+    pub fn new(input: OperatorBox, add: Vec<(String, Label)>, remove: Vec<(String, Label)>) -> Self {
+        Self { input, add, remove }
+    }
+}
+
+impl PhysicalOperator for LabelMutationOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        self.input.next(store)
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            for (var, label) in &self.add {
+                if let Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) = record.get(var) {
+                    let id = *id;
+                    store
+                        .add_label_to_node(tenant_id, id, label.clone())
+                        .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+                }
+            }
+            for (var, label) in &self.remove {
+                if let Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) = record.get(var) {
+                    let id = *id;
+                    // A label the node does not carry is a no-op, which is
+                    // Cypher's answer and not an error.
+                    store
+                        .remove_label_from_node(id, label)
+                        .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        self.input.next_batch(store, batch_size)
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let mut parts: Vec<String> = self
+            .add
+            .iter()
+            .map(|(v, l)| format!("+{}:{}", v, l.as_str()))
+            .collect();
+        parts.extend(self.remove.iter().map(|(v, l)| format!("-{}:{}", v, l.as_str())));
+        OperatorDescription {
+            name: "LabelMutation".to_string(),
+            details: parts.join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct RemovePropertyOperator {
     input: OperatorBox,
     items: Vec<(String, String)>, // (variable, property)

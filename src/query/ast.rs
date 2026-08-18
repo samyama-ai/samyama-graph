@@ -554,6 +554,21 @@ pub struct DeleteClause {
 pub struct SetClause {
     /// Items to set
     pub items: Vec<SetItem>,
+    /// Labels to add: `SET n:Admin`, `SET n:A:B`.
+    ///
+    /// Kept beside `items` rather than folded into it because `SetItem` is a
+    /// struct read by field in several places, and an enum would touch all of
+    /// them for no gain. `RemoveItem` is an enum because it always was.
+    pub label_items: Vec<SetLabelItem>,
+}
+
+/// SET item adding labels: `n:Admin`, `n:A:B`
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetLabelItem {
+    /// Variable name
+    pub variable: String,
+    /// Labels to add
+    pub labels: Vec<Label>,
 }
 
 /// SET item: n.name = "Alice"

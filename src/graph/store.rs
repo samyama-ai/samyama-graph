@@ -1489,6 +1489,46 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// This is the correct way to add labels to nodes after creation.
     /// Using `node.add_label()` directly will NOT update the label_index,
     /// making the node invisible to `get_nodes_by_label()` queries.
+    /// Remove a label from a node, from the node and from `label_index`.
+    ///
+    /// The counterpart of `add_label_to_node`, and it has to update the index
+    /// for the same reason: `MATCH (n:Label)` reads it, and so does expansion
+    /// filtering since #592. A label removed from the node but left in the
+    /// index makes the node findable by a label it no longer carries.
+    ///
+    /// Removing a label the node does not have is a no-op returning `false`,
+    /// which is Cypher's behaviour and not an error.
+    pub fn remove_label_from_node(
+        &mut self,
+        node_id: NodeId,
+        label: &Label,
+    ) -> GraphResult<bool> {
+        self.invalidate_statistics_cache();
+        let idx = node_id.as_u64() as usize;
+
+        let node = self
+            .nodes
+            .get_mut(idx)
+            .and_then(|v| v.last_mut())
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let removed = node.remove_label(label);
+        if !removed {
+            return Ok(false);
+        }
+
+        if let Some(members) = self.label_index.get_mut(label) {
+            members.remove(&node_id);
+            // An empty set is not the same as an absent one to the expansion
+            // filter -- absent means "no node carries this", which is the
+            // answer once the last member goes (#592).
+            if members.is_empty() {
+                self.label_index.remove(label);
+            }
+        }
+
+        Ok(true)
+    }
+
     pub fn add_label_to_node(
         &mut self,
         tenant_id: &str,

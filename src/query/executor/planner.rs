@@ -62,7 +62,7 @@ use std::sync::Mutex;
 use crate::query::executor::{
     ExecutionError, ExecutionResult, OperatorBox,
     // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{NodeScanOperator, NodeByIdOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
+    operator::{NodeScanOperator, NodeByIdOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, LabelMutationOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
 };
 use crate::graph::EdgeType;  // Added for CREATE edge support
 use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
@@ -1688,12 +1688,23 @@ impl QueryPlanner {
         // Handle SET clauses
         let is_write = if !query.set_clauses.is_empty() {
             let mut items = Vec::new();
+            let mut label_adds = Vec::new();
             for set_clause in &query.set_clauses {
                 for item in &set_clause.items {
                     items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
                 }
+                for item in &set_clause.label_items {
+                    for label in &item.labels {
+                        label_adds.push((item.variable.clone(), label.clone()));
+                    }
+                }
             }
-            operator = Box::new(SetPropertyOperator::new(operator, items));
+            if !items.is_empty() {
+                operator = Box::new(SetPropertyOperator::new(operator, items));
+            }
+            if !label_adds.is_empty() {
+                operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
+            }
             true
         } else {
             is_write
@@ -1702,15 +1713,27 @@ impl QueryPlanner {
         // Handle REMOVE clauses
         let is_write = if !query.remove_clauses.is_empty() {
             let mut items = Vec::new();
+            let mut label_removes = Vec::new();
             for remove_clause in &query.remove_clauses {
                 for item in &remove_clause.items {
-                    if let RemoveItem::Property { variable, property } = item {
-                        items.push((variable.clone(), property.clone()));
+                    match item {
+                        RemoveItem::Property { variable, property } => {
+                            items.push((variable.clone(), property.clone()));
+                        }
+                        // Previously dropped here while the statement still
+                        // reported a successful write, so `REMOVE n:Label` was
+                        // a silent no-op (#596).
+                        RemoveItem::Label { variable, label } => {
+                            label_removes.push((variable.clone(), label.clone()));
+                        }
                     }
                 }
             }
             if !items.is_empty() {
                 operator = Box::new(RemovePropertyOperator::new(operator, items));
+            }
+            if !label_removes.is_empty() {
+                operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
             }
             true
         } else {
