@@ -118,44 +118,141 @@ fn an_id_list_anchors_on_every_element() {
     assert_eq!(got, vec![2, 4, 6]);
 }
 
+/// Total time to run `cypher` against `store` `reps` times.
+///
+/// Repeated because a single anchored lookup is microseconds, and a ratio
+/// between two microsecond measurements is mostly timer noise.
+fn repeat(store: &GraphStore, cypher: &str, reps: u32) -> std::time::Duration {
+    let query = parse_query(cypher).expect("parse");
+    // Warm, so the first call does not pay for statistics the rest skip.
+    let _ = QueryExecutor::new(store).execute(&query).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..reps {
+        let batch = QueryExecutor::new(store).execute(&query).unwrap();
+        std::hint::black_box(batch.records.len());
+    }
+    started.elapsed()
+}
+
 #[test]
 fn a_point_lookup_does_not_scale_with_the_graph() {
     // The property this is really about: the cost should not depend on how
     // many nodes exist.
-    let store = graph(200_000);
-    let started = std::time::Instant::now();
-    let rows = values(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v");
-    let elapsed = started.elapsed();
+    //
+    // Asserted as a *ratio* between two graph sizes rather than against a wall
+    // clock. An absolute bound encodes the speed of the machine and the build
+    // profile that wrote it: the first version of this test asserted 5 ms,
+    // passed everywhere in `--release`, and failed in CI, which builds in debug
+    // (#549 is the same mistake, made by someone else, in the other direction).
+    //
+    // A ratio has neither problem. A scan grows with the graph; an anchored
+    // lookup does not, and 20x the nodes is the difference between the two.
+    const SMALL: i64 = 2_500;
+    const LARGE: i64 = 50_000;
+    const REPS: u32 = 300;
 
-    assert_eq!(rows, vec![4]);
+    let small = graph(SMALL);
+    let large = graph(LARGE);
+
+    let cypher = "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v";
+    assert_eq!(values(&large, cypher), vec![4], "the answer first");
+
+    let t_small = repeat(&small, cypher, REPS);
+    let t_large = repeat(&large, cypher, REPS);
+    let ratio = t_large.as_secs_f64() / t_small.as_secs_f64().max(1e-9);
+
+    // A scan would be ~20x. Anything under 4x is flat within measurement noise
+    // and cannot be a scan.
     assert!(
-        elapsed < std::time::Duration::from_millis(5),
-        "a point lookup on 200,000 nodes took {elapsed:?} — it is still scanning"
+        ratio < 4.0,
+        "20x the nodes cost {ratio:.1}x the time ({t_small:?} -> {t_large:?}) — it is still scanning"
     );
 }
 
 #[test]
-fn both_endpoints_of_a_path_can_be_pinned_by_id() {
-    // #538's original shape.
+fn both_shortest_path_endpoints_reach_a_node_by_id() {
+    // The plan-shape form of the test below, and the one that would have caught
+    // #584 immediately. A timing assertion can be satisfied by a plan that is
+    // merely fast enough on the machine that wrote it; this cannot.
     let mut store = GraphStore::new();
-    let ids: Vec<NodeId> = (0..2000).map(|_| store.create_node("N")).collect();
+    let ids: Vec<NodeId> = (0..50).map(|_| store.create_node("N")).collect();
     for w in ids.windows(2) {
         store.create_edge(w[0], w[1], "KNOWS").unwrap();
     }
     let (a, b) = (ids[0].as_u64(), ids[5].as_u64());
 
-    let cypher = format!(
+    let text = plan(
+        &store,
+        &format!(
+            "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = {a} AND id(b) = {b} \
+             RETURN length(p) AS v"
+        ),
+    );
+    assert_eq!(
+        text.matches("NodeById").count(),
+        2,
+        "both endpoints must be pinned, not just the start:\n{text}"
+    );
+    assert!(
+        !text.contains("NodeScan"),
+        "neither endpoint should be scanning the label:\n{text}"
+    );
+}
+
+#[test]
+fn both_endpoints_of_a_path_can_be_pinned_by_id() {
+    // #538's original shape, and what motivated the issue: written with
+    // `WHERE id(a) = ... AND id(b) = ...` it ran ~1000x slower than the same
+    // query written with inline properties, because only the inline form
+    // anchored.
+    //
+    // So the assertion is against the inline form on the same graph, not
+    // against a wall clock. That is the comparison the issue is actually about,
+    // and it does not encode the speed of the machine or the build profile.
+    let mut store = GraphStore::new();
+    let ids: Vec<NodeId> = (0..1200)
+        .map(|i| {
+            let id = store.create_node("N");
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "seq".to_string(),
+                PropertyValue::Integer(i),
+            );
+            id
+        })
+        .collect();
+    for w in ids.windows(2) {
+        store.create_edge(w[0], w[1], "KNOWS").unwrap();
+    }
+    let (a, b) = (ids[0].as_u64(), ids[5].as_u64());
+
+    let by_id = format!(
         "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = {a} AND id(b) = {b} \
          RETURN length(p) AS v"
     );
-    let started = std::time::Instant::now();
-    let query = parse_query(&cypher).unwrap();
-    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
-    let elapsed = started.elapsed();
+    let by_property =
+        "MATCH p = shortestPath((a:N {seq: 0})-[:KNOWS*]-(b:N {seq: 5})) RETURN length(p) AS v";
 
+    let query = parse_query(&by_id).unwrap();
+    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     assert_eq!(batch.records.len(), 1, "the chain connects them");
+    assert_eq!(
+        QueryExecutor::new(&store).execute(&parse_query(by_property).unwrap()).unwrap().records.len(),
+        1,
+        "and the inline form finds the same path"
+    );
+
+    let t_id = repeat(&store, &by_id, 20);
+    let t_prop = repeat(&store, by_property, 20);
+    let ratio = t_id.as_secs_f64() / t_prop.as_secs_f64().max(1e-9);
+
+    // It was ~1000x. Anything within an order of magnitude means both ends are
+    // anchored; the two forms are not required to be identical, since they
+    // reach the same plan by different routes.
     assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "took {elapsed:?} — the endpoints are not being pinned"
+        ratio < 10.0,
+        "the id() form cost {ratio:.1}x the inline form ({t_prop:?} -> {t_id:?}) \
+         — the endpoints are not being pinned"
     );
 }

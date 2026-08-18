@@ -2428,11 +2428,31 @@ impl QueryPlanner {
                     .collect();
                 let all_paths = matches!(path.path_type, PathType::AllShortest);
 
-                // We need the target node to be scanned too — create a CartesianProduct with target scan
-                let target_scan: OperatorBox = Box::new(NodeScanOperator::new(
-                    target_var.clone(),
-                    last_segment.node.labels.clone(),
-                ));
+                // We need the target node to be scanned too — create a CartesianProduct with target scan.
+                //
+                // The target gets the same `id()` anchoring the start already
+                // got (#538), because without it only *one* endpoint was
+                // pinned: `WHERE id(a) = 1 AND id(b) = 6` planned as
+                // `NodeById(a) x NodeScan(b)`, so the BFS ran once per node in
+                // the label and a filter above discarded all but one result.
+                // Measured against the same query written with inline
+                // properties, that cost 329x (#584).
+                let target_id_pred = find_id_predicate(&target_var, &deferred_predicates);
+                let target_scan: OperatorBox = match &target_id_pred {
+                    Some((_, ids)) => {
+                        let mut op = NodeByIdOperator::new(ids.clone(), target_var.clone());
+                        if !last_segment.node.labels.is_empty() {
+                            // A scan by id bypasses the label index, so the
+                            // pattern's labels still have to be checked.
+                            op = op.with_labels(last_segment.node.labels.clone());
+                        }
+                        Box::new(op) as OperatorBox
+                    }
+                    None => Box::new(NodeScanOperator::new(
+                        target_var.clone(),
+                        last_segment.node.labels.clone(),
+                    )),
+                };
                 // Add property filter for target node
                 let target_op = if let Some(ref props) = last_segment.node.properties {
                     if !props.is_empty() {
