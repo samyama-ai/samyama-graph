@@ -245,20 +245,71 @@ enum SortPosition {
 ///
 /// A key that matches nothing is returned unchanged: it may legitimately reference a
 /// variable that is still in scope, and rewriting it would be worse than leaving it.
+/// Replace RETURN aliases in a sort key with the expressions they name.
+///
+/// A sort placed *below* the projection sees the pre-projection record, where
+/// the alias does not exist yet — only the expression behind it does. Handling
+/// the bare `ORDER BY alias` case but not `ORDER BY alias.property` made this
+/// silently wrong:
+///
+/// ```cypher
+/// MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id DESC
+/// ```
+///
+/// `rel` was unbound at sort time, so the key was null on every row, the sort
+/// was a no-op, and the rows came back in scan order — which for a small
+/// fixture is often *already* the ascending order, so the bug reads as a
+/// correct answer until you ask for `DESC` and get the same rows back.
+///
+/// It surfaced through the TCK as a scenario that passed or failed depending
+/// on the process, because after a `WITH` that aggregates, "scan order"
+/// becomes hash order.
+///
+/// Only aliases naming a variable can be substituted into a property access:
+/// if `rel` aliases `count(*)` then `rel.id` means nothing and is left alone
+/// for the executor to reject rather than silently rewritten into something
+/// else.
+fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -> Expression {
+    let aliased = |name: &str| -> Option<&Expression> {
+        return_items.iter().find(|(_, alias)| alias == name).map(|(expr, _)| expr)
+    };
+    match key {
+        Expression::Variable(name) => match aliased(name) {
+            Some(expr) => expr.clone(),
+            None => key.clone(),
+        },
+        Expression::Property { variable, property } => match aliased(variable) {
+            Some(Expression::Variable(underlying)) => Expression::Property {
+                variable: underlying.clone(),
+                property: property.clone(),
+            },
+            _ => key.clone(),
+        },
+        Expression::Binary { left, op, right } => Expression::Binary {
+            left: Box::new(substitute_aliases(left, return_items)),
+            op: op.clone(),
+            right: Box::new(substitute_aliases(right, return_items)),
+        },
+        Expression::Unary { op, expr } => Expression::Unary {
+            op: op.clone(),
+            expr: Box::new(substitute_aliases(expr, return_items)),
+        },
+        Expression::Function { name, args, distinct } => Expression::Function {
+            name: name.clone(),
+            args: args.iter().map(|a| substitute_aliases(a, return_items)).collect(),
+            distinct: *distinct,
+        },
+        other => other.clone(),
+    }
+}
+
 fn resolve_sort_key(
     key: &Expression,
     return_items: &[(Expression, String)],
     position: SortPosition,
 ) -> Expression {
     match position {
-        SortPosition::BeforeProjection => {
-            if let Expression::Variable(name) = key {
-                if let Some((expr, _)) = return_items.iter().find(|(_, alias)| alias == name) {
-                    return expr.clone();
-                }
-            }
-            key.clone()
-        }
+        SortPosition::BeforeProjection => substitute_aliases(key, return_items),
         SortPosition::AfterProjection => {
             if let Some((_, alias)) = return_items.iter().find(|(expr, _)| expr == key) {
                 return Expression::Variable(alias.clone());

@@ -203,3 +203,108 @@ fn repeated_execution_in_one_process_is_stable() {
         assert_eq!(rows(&store, cypher), first, "run {i} disagreed with run 0");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ORDER BY over a RETURN alias.
+//
+// Found while chasing the third flaky TCK scenario. It turned out not to be a
+// determinism bug at all but a plain wrong answer that *looked* deterministic:
+// with the sort dropped, rows came back in scan order, and on a small fixture
+// scan order is often already the ascending order. `ASC` looked right, and
+// only asking for `DESC` and getting the same rows back gave it away.
+//
+// Every test here therefore asserts a *reversal*, not just an order.
+
+fn edges_fixture() -> GraphStore {
+    let mut store = GraphStore::new();
+    write(
+        &mut store,
+        "CREATE ()-[:T1 {id: 0}]->(:X), ()-[:T2 {id: 1}]->(:X), ()-[:T2 {id: 2}]->()",
+    );
+    store
+}
+
+/// The `id` property of each returned edge, in result order.
+fn edge_ids(store: &GraphStore, cypher: &str, column: &str) -> Vec<i64> {
+    let q = parse_query(cypher).expect("query should parse");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    batch
+        .records
+        .iter()
+        .map(|r| match r.get(column) {
+            Some(Value::Edge(_, e)) => match e.properties.get("id") {
+                Some(PropertyValue::Integer(i)) => *i,
+                other => panic!("expected an integer id, got {other:?}"),
+            },
+            Some(Value::Property(PropertyValue::Integer(i))) => *i,
+            other => panic!("expected an edge or an integer, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn ordering_by_a_property_of_a_return_alias_actually_sorts() {
+    let store = edges_fixture();
+    assert_eq!(
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id ASC", "rel"),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id DESC", "rel"),
+        vec![2, 1, 0],
+        "DESC must reverse the order — matching ASC means the sort was dropped"
+    );
+}
+
+#[test]
+fn the_alias_and_the_underlying_variable_sort_identically() {
+    // `ORDER BY r.id` always worked; `ORDER BY rel.id` did not. They are the
+    // same query.
+    let store = edges_fixture();
+    for direction in ["ASC", "DESC"] {
+        assert_eq!(
+            edge_ids(&store, &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id {direction}"), "rel"),
+            edge_ids(&store, &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY r.id {direction}"), "rel"),
+            "{direction}"
+        );
+    }
+}
+
+#[test]
+fn a_sort_after_an_aggregating_with_and_a_second_match_is_applied() {
+    // The TCK scenario (WithOrderBy4 [15]). After a `WITH` that aggregates,
+    // the pre-sort row order is the group hash map's order, so the dropped
+    // sort stopped being merely wrong and became wrong differently on each
+    // process: 61/39 across 100 runs.
+    let store = edges_fixture();
+    let cypher = "MATCH (a)-[r]->(b:X) WITH a, r, b, count(*) AS c ORDER BY c                   MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id";
+    assert_eq!(edge_ids(&store, cypher, "rel"), vec![0, 1]);
+    assert_eq!(
+        edge_ids(&store, &cypher.replace("ORDER BY rel.id", "ORDER BY rel.id DESC"), "rel"),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn an_alias_over_a_non_variable_expression_is_left_alone() {
+    // The guard on the substitution. `total` names an aggregate, so
+    // `total.anything` is meaningless and must not be rewritten into some
+    // other node's property. Whatever the executor does with it, the query
+    // must not silently sort by something else.
+    let store = edges_fixture();
+    let q = parse_query("MATCH (a)-[r]->(b) RETURN count(*) AS total ORDER BY total").unwrap();
+    let batch = QueryExecutor::new(&store).execute(&q).expect("counting still works");
+    assert_eq!(batch.records.len(), 1);
+}
+
+#[test]
+fn ordering_by_an_expression_over_an_alias_property_is_resolved() {
+    // The substitution recurses, so a key that merely contains `rel.id`
+    // resolves as well.
+    let store = edges_fixture();
+    assert_eq!(
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id * -1", "rel"),
+        vec![2, 1, 0],
+        "negating the key reverses the order"
+    );
+}
