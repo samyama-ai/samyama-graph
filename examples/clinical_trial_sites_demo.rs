@@ -34,6 +34,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[path = "common/missing_data.rs"]
+mod missing_data;
+
 #[derive(Debug)]
 struct Args {
     snapshot: PathBuf,
@@ -72,6 +75,9 @@ fn parse_args() -> Args {
             "--diversity-weight" => { a.diversity_weight = argv[i + 1].parse().unwrap(); i += 2; }
             "--out" => { a.out = PathBuf::from(&argv[i + 1]); i += 2; }
             "--export-spec" => { a.export_spec = Some(PathBuf::from(&argv[i + 1])); i += 2; }
+            // Consumed by `missing_data::skip`, which reads it straight from
+            // `env::args`. Accepted here so the parser does not reject it (#566).
+            "--require-data" => { i += 1; }
             other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
         }
     }
@@ -118,11 +124,7 @@ fn main() {
     let mut store = GraphStore::new();
     let t0 = Instant::now();
     let f = File::open(&a.snapshot).unwrap_or_else(|e| {
-        eprintln!("Error: cannot read the clinical-trials snapshot: {}", &a.snapshot.display());
-        eprintln!("       {e}");
-        eprintln!("       this example needs data that is not part of this repository;");
-        eprintln!("       pass --snapshot PATH to point at your own copy.");
-        std::process::exit(1);
+        missing_data::skip("clinical-trials snapshot", &a.snapshot, &e, "--snapshot")
     });
     let stats = samyama::snapshot::import_tenant(&mut store, f).expect("import");
     let load_ms = t0.elapsed().as_millis();
