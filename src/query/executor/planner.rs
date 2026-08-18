@@ -2448,10 +2448,29 @@ impl QueryPlanner {
                         }
                         Box::new(op) as OperatorBox
                     }
-                    None => Box::new(NodeScanOperator::new(
-                        target_var.clone(),
-                        last_segment.node.labels.clone(),
-                    )),
+                    // Then an indexed property, for the same reason and by the
+                    // same argument. `WHERE a.seq = 0 AND b.seq = 5` planned as
+                    // `IndexScan(a) x NodeScan(b)` -- the WHERE form of what the
+                    // inline form `(b:N {seq: 5})` already got right, which is
+                    // why this went unnoticed (#584).
+                    None => match find_index_predicate(
+                        &target_var,
+                        &last_segment.node.labels,
+                        &deferred_predicates,
+                        store,
+                    ) {
+                        Some((_, label, property, op, val)) => Box::new(IndexScanOperator::new(
+                            target_var.clone(),
+                            label,
+                            property,
+                            op,
+                            val,
+                        )),
+                        None => Box::new(NodeScanOperator::new(
+                            target_var.clone(),
+                            last_segment.node.labels.clone(),
+                        )),
+                    },
                 };
                 // Add property filter for target node
                 let target_op = if let Some(ref props) = last_segment.node.properties {

@@ -199,6 +199,96 @@ fn both_shortest_path_endpoints_reach_a_node_by_id() {
     );
 }
 
+/// A chain of `N` nodes with a `seq` property and an index on it.
+fn indexed_chain(n: i64) -> (GraphStore, Vec<NodeId>) {
+    let mut store = GraphStore::new();
+    let ids: Vec<NodeId> = (0..n)
+        .map(|i| {
+            let id = store.create_node("N");
+            let _ = store.set_node_property("default", id, "seq".to_string(), PropertyValue::Integer(i));
+            id
+        })
+        .collect();
+    for w in ids.windows(2) {
+        store.create_edge(w[0], w[1], "KNOWS").unwrap();
+    }
+    let create = parse_query("CREATE INDEX ON :N(seq)").unwrap();
+    let mut mutating =
+        samyama::query::executor::MutQueryExecutor::new(&mut store, "default".to_string());
+    let _ = mutating.execute(&create);
+    (store, ids)
+}
+
+#[test]
+fn all_shortest_paths_pins_both_endpoints_too() {
+    // It shares the branch, so it should — asserted rather than assumed.
+    let (mut store, _) = (GraphStore::new(), ());
+    let ids: Vec<NodeId> = (0..50).map(|_| store.create_node("N")).collect();
+    for w in ids.windows(2) {
+        store.create_edge(w[0], w[1], "KNOWS").unwrap();
+    }
+    let (a, b) = (ids[0].as_u64(), ids[5].as_u64());
+    let text = plan(
+        &store,
+        &format!(
+            "MATCH p = allShortestPaths((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = {a} AND id(b) = {b} \
+             RETURN length(p) AS v"
+        ),
+    );
+    assert_eq!(text.matches("NodeById").count(), 2, "{text}");
+    assert!(!text.contains("NodeScan"), "{text}");
+}
+
+#[test]
+fn an_indexed_property_pins_both_endpoints_too() {
+    // The same defect for `find_index_predicate`, and the more common form:
+    // `WHERE a.seq = 0 AND b.seq = 5` planned as `IndexScan(a) x NodeScan(b)`.
+    let (store, _) = indexed_chain(50);
+    let text = plan(
+        &store,
+        "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE a.seq = 0 AND b.seq = 5 \
+         RETURN length(p) AS v",
+    );
+    assert_eq!(
+        text.matches("IndexScan").count(),
+        2,
+        "both endpoints should reach the index:\n{text}"
+    );
+    assert!(!text.contains("NodeScan"), "{text}");
+}
+
+#[test]
+fn the_indexed_form_still_answers() {
+    // A plan-shape change on a path operator is exactly where an answer can go
+    // missing quietly, so the rows are checked as well as the plan.
+    let (store, _) = indexed_chain(50);
+    let query = parse_query(
+        "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE a.seq = 0 AND b.seq = 5 \
+         RETURN length(p) AS v",
+    )
+    .unwrap();
+    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
+    assert_eq!(batch.records.len(), 1);
+    assert_eq!(
+        batch.records[0].get("v"),
+        Some(&Value::Property(PropertyValue::Integer(5))),
+        "five hops from seq 0 to seq 5"
+    );
+}
+
+#[test]
+fn an_unanchored_endpoint_still_works() {
+    // Only one endpoint constrained: the other genuinely has to scan, and the
+    // query must still answer rather than returning nothing.
+    let (store, _) = indexed_chain(20);
+    let query = parse_query(
+        "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE a.seq = 0 RETURN length(p) AS v",
+    )
+    .unwrap();
+    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
+    assert!(!batch.records.is_empty(), "an unpinned target must still be searched");
+}
+
 #[test]
 fn both_endpoints_of_a_path_can_be_pinned_by_id() {
     // #538's original shape, and what motivated the issue: written with
