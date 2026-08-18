@@ -3464,47 +3464,79 @@ impl ExpandOperator {
         let mut collected = std::mem::take(&mut self.current_edges);
         collected.clear();
         let type_filter = self.type_ids.as_deref();
+
+        // Target-label sets, resolved once per source record rather than per
+        // edge, and applied *during* the walk rather than by a `retain`
+        // afterwards.
+        //
+        // The old code collected every incident edge and then retained the ones
+        // whose target carried the labels, testing each with
+        // `get_node(id).has_label(label)` -- a `Vec` index, a version-chain
+        // walk, a 128-byte `Node`, and a `HashSet<Label>` probe hashing a
+        // *string*. At 2.22M edges visited per LDBC IC9 run that was **26.7% of
+        // the profile**, the single largest symbol, ahead of every property
+        // read. Probing `label_index` by `NodeId` instead is one hash of a u64
+        // (#592).
+        //
+        // A label no node carries yields `None`, which matches nothing -- so
+        // the whole expansion is empty, which is correct and is why the empty
+        // case is distinguished from "no labels required".
+        let label_sets: Option<Vec<&std::collections::HashSet<NodeId>>> =
+            if self.target_labels.is_empty() {
+                None
+            } else {
+                Some(
+                    self.target_labels
+                        .iter()
+                        .map(|l| store.nodes_with_label(l))
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default(),
+                )
+            };
+        let keeps = |target: NodeId| -> bool {
+            match &label_sets {
+                None => true,
+                // `Some(empty)` means a required label exists on no node.
+                Some(sets) if sets.len() < self.target_labels.len() => false,
+                Some(sets) => sets.iter().all(|s| s.contains(&target)),
+            }
+        };
+
         match self.direction {
             Direction::Outgoing => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
-                    collected.push((eid, node_id, target));
+                    if keeps(target) {
+                        collected.push((eid, node_id, target));
+                    }
                 });
             }
             Direction::Incoming => {
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
-                    collected.push((eid, source, node_id));
+                    if keeps(source) {
+                        collected.push((eid, source, node_id));
+                    }
                 });
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
-                    collected.push((eid, node_id, target));
+                    if keeps(target) {
+                        collected.push((eid, node_id, target));
+                    }
                 });
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
-                    collected.push((eid, source, node_id));
+                    if keeps(source) {
+                        collected.push((eid, source, node_id));
+                    }
                 });
             }
         }
 
+        // No `retain` here any more: the labels were applied during the walk
+        // above, so a non-matching edge was never pushed. The retain also
+        // compacted the vector, and its `Direction::Both` arm ran
+        // `store.get_node(node_id)` per edge purely to recover a value it
+        // already had (#592).
         self.current_edges = collected;
-
-        // Filter by target node labels if specified
-        if !self.target_labels.is_empty() {
-            self.current_edges.retain(|(_, src, tgt)| {
-                let target_id = match self.direction {
-                    Direction::Outgoing => *tgt,
-                    Direction::Incoming => *src,
-                    Direction::Both => {
-                        let source_id = store.get_node(node_id).map(|_| node_id);
-                        if source_id == Some(*src) { *tgt } else { *src }
-                    }
-                };
-                if let Some(node) = store.get_node(target_id) {
-                    self.target_labels.iter().all(|l| node.has_label(l))
-                } else {
-                    false
-                }
-            });
-        }
 
         self.edge_index = 0;
         Ok(())

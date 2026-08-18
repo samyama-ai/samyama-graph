@@ -2322,6 +2322,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get all nodes with a specific label
+    /// The set of nodes carrying a label, for membership tests.
+    ///
+    /// Exists so a caller testing many nodes against the same label resolves
+    /// the set once and then probes by `NodeId`. The alternative --
+    /// `get_node(id).has_label(label)` -- costs a `Vec` index, a version-chain
+    /// walk, a 128-byte `Node`, and a `HashSet<Label>` probe that hashes a
+    /// *string*, all per node tested. `ExpandOperator` was doing that once per
+    /// edge visited, and it was 26.7% of a profiled LDBC IC9 run (#592).
+    ///
+    /// `None` means no node carries the label, which matches nothing.
+    pub fn nodes_with_label(&self, label: &Label) -> Option<&HashSet<NodeId>> {
+        self.label_index.get(label)
+    }
+
     pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
         self.label_index
             .get(label)
