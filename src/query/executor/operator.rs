@@ -4810,15 +4810,22 @@ impl AggregateOperator {
     /// True when every aggregate can be satisfied by counting rows, so the
     /// argument expressions never have to be evaluated.
     ///
-    /// Valid only when the argument cannot be null per row — `count(*)` (a
-    /// literal) or `count(var)` for a bound node or edge. `count(x.prop)`
-    /// counts *non-null values*, so skipping the evaluation there counts rows
-    /// instead and reports every row as a value (#358).
+    /// Only `count(*)` qualifies — a literal, which is never null.
+    ///
+    /// `count(var)` used to qualify too, on the reasoning that a bound node or
+    /// edge cannot be null per row. `OPTIONAL MATCH` breaks exactly that: it
+    /// binds the variable to `Null` on a row that did not match, so
+    /// `MATCH (p) OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN count(f)` counted the
+    /// unmatched rows and reported 1 friend for a person with none (#600).
+    ///
+    /// Giving up the variable case costs little: evaluating one is
+    /// `record.get(var)` at ~4 ns, against a property read at ~17 ns. The fast
+    /// path exists to avoid *property* evaluation (#358), and it still does.
     fn all_simple_count(aggregates: &[AggregateFunction]) -> bool {
         aggregates.iter().all(|a| {
             matches!(a.func, AggregateType::Count)
                 && !a.distinct
-                && matches!(a.expr, Expression::Literal(_) | Expression::Variable(_))
+                && matches!(a.expr, Expression::Literal(_))
         })
     }
 
@@ -5146,6 +5153,13 @@ pub struct AdjacencyCountAggregateOperator {
     /// and emit one record per distinct property-value combination —
     /// avoids the planner-side post-aggregate hash-group entirely.
     group_by_props: Vec<String>,
+    /// The label the pattern requires of the *neighbour*, if any.
+    ///
+    /// A degree is not the number of pattern matches: it counts every edge of
+    /// the type whatever sits at the far end. Without this the operator
+    /// answered `MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name, count(f)` by
+    /// counting Ada's edge to an `:Animal` as well (#601).
+    neighbor_label: Option<Label>,
     /// `count(DISTINCT neighbor)` semantics. When true, build_grouped_iter
     /// accumulates a HashSet of neighbor NodeIds per group instead of
     /// summing degrees — required when the same neighbor may appear under
@@ -5186,8 +5200,15 @@ impl AdjacencyCountAggregateOperator {
             direction,
             group_by_props: Vec::new(),
             count_distinct: false,
+            neighbor_label: None,
             grouped_iter: None,
         }
+    }
+
+    /// Require the counted neighbour to carry this label.
+    pub fn with_neighbor_label(mut self, label: Option<Label>) -> Self {
+        self.neighbor_label = label;
+        self
     }
 
     /// Enable the in-operator group-by path. When non-empty, the operator
@@ -5245,6 +5266,11 @@ impl AdjacencyCountAggregateOperator {
 
         let rows: Vec<GroupedRow> = groups
             .into_iter()
+            // A required MATCH yields no row for a node the pattern does not
+            // match, so a group whose count is zero must not be emitted. The
+            // detector rejects OPTIONAL MATCH, where the zeros would be
+            // wanted, so this is unconditional (#601).
+            .filter(|(_, (_, count))| *count > 0)
             .map(|(prop_values, (sample_node, count))| GroupedRow {
                 prop_values,
                 count,
@@ -5333,14 +5359,63 @@ impl AdjacencyCountAggregateOperator {
     /// helpers (`incoming_degree_for_type` / `outgoing_degree_for_type`)
     /// which avoid Vec alloc + per-edge EdgeType clone.
     fn degree_filtered(&self, store: &GraphStore, node_id: NodeId) -> usize {
+        let Some(label) = &self.neighbor_label else {
+            // No constraint on the far end, so the degree *is* the match count
+            // and the adjacency index answers in O(1). This is the shape the
+            // operator exists for.
+            return match self.direction {
+                Direction::Outgoing => store.outgoing_degree_for_type(node_id, &self.edge_type),
+                Direction::Incoming => store.incoming_degree_for_type(node_id, &self.edge_type),
+                Direction::Both => {
+                    store.outgoing_degree_for_type(node_id, &self.edge_type)
+                        + store.incoming_degree_for_type(node_id, &self.edge_type)
+                }
+            };
+        };
+
+        // Constrained: walk and count the neighbours that carry the label.
+        // O(degree) rather than O(1), which is what a correct answer costs --
+        // and still cheaper than materialising a row per edge. The membership
+        // probe is one hash of a `NodeId` (#592).
+        let Some(members) = store.nodes_with_label(label) else {
+            // No node carries the label, so nothing matches.
+            return 0;
+        };
+        // `Some(&[])` matches no edge; a wildcard would be `None`, which is not
+        // what an unknown edge type means (#520).
+        let type_ids: Vec<u16> = store.edge_type_id(&self.edge_type).into_iter().collect();
+        let filter = Some(type_ids.as_slice());
+
+        let mut count = 0usize;
         match self.direction {
-            Direction::Outgoing => store.outgoing_degree_for_type(node_id, &self.edge_type),
-            Direction::Incoming => store.incoming_degree_for_type(node_id, &self.edge_type),
+            Direction::Outgoing => {
+                store.for_each_outgoing_neighbor(node_id, filter, |target, _| {
+                    if members.contains(&target) {
+                        count += 1;
+                    }
+                });
+            }
+            Direction::Incoming => {
+                store.for_each_incoming_neighbor(node_id, filter, |source, _| {
+                    if members.contains(&source) {
+                        count += 1;
+                    }
+                });
+            }
             Direction::Both => {
-                store.outgoing_degree_for_type(node_id, &self.edge_type)
-                    + store.incoming_degree_for_type(node_id, &self.edge_type)
+                store.for_each_outgoing_neighbor(node_id, filter, |target, _| {
+                    if members.contains(&target) {
+                        count += 1;
+                    }
+                });
+                store.for_each_incoming_neighbor(node_id, filter, |source, _| {
+                    if members.contains(&source) {
+                        count += 1;
+                    }
+                });
             }
         }
+        count
     }
 }
 
@@ -5393,6 +5468,12 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
             };
 
             let count = self.degree_filtered(store, node_id);
+            if count == 0 {
+                // A required MATCH yields no row for a node the pattern does
+                // not match. The detector rejects OPTIONAL MATCH, where the
+                // zero would be wanted (#601).
+                continue;
+            }
 
             let mut out = input_record;
             out.bind(

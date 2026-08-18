@@ -3037,7 +3037,11 @@ impl QueryPlanner {
             pat.count_alias.clone(),
             pat.edge_type.clone(),
             physical_direction,
-        );
+        )
+        // A degree counts every edge of the type whatever sits at the far end,
+        // so a pattern that labels the neighbour needs the label applied while
+        // counting (#601).
+        .with_neighbor_label(pat.neighbor_label.clone());
         if !group_by_props.is_empty() {
             adj_op = adj_op.with_group_by_props(group_by_props);
         }
@@ -3216,7 +3220,8 @@ impl QueryPlanner {
             pat.core.count_alias.clone(),
             pat.core.edge_type.clone(),
             physical_direction,
-        );
+        )
+        .with_neighbor_label(pat.core.neighbor_label.clone());
         if !group_by_props.is_empty() {
             adj_op = adj_op.with_group_by_props(group_by_props);
         }
@@ -3346,7 +3351,8 @@ impl QueryPlanner {
             pat.core.count_alias.clone(),
             pat.core.edge_type.clone(),
             physical_direction,
-        );
+        )
+        .with_neighbor_label(pat.core.neighbor_label.clone());
         if !group_by_props.is_empty() {
             adj_op = adj_op.with_group_by_props(group_by_props);
         }
