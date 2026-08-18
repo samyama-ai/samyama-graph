@@ -2322,6 +2322,30 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get all nodes with a specific label
+    /// Remove one property of a node from **both** stores.
+    ///
+    /// A node's properties live in the columnar store and in the per-node row
+    /// map, and reads consult the column first. So removing from one alone
+    /// leaves the value readable, which is what `REMOVE n.prop` was doing
+    /// (#594). Anything that removes a property has to go through here.
+    pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) {
+        self.node_columns.remove_property(node_id.as_u64() as usize, key);
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.remove_property(key);
+        }
+        self.invalidate_statistics_cache();
+    }
+
+    /// Remove one property of an edge from both stores. See
+    /// `remove_node_property`.
+    pub fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) {
+        self.edge_columns.remove_property(edge_id.as_u64() as usize, key);
+        if let Some(props) = self.get_edge_properties_mut(edge_id) {
+            props.remove(key);
+        }
+        self.invalidate_statistics_cache();
+    }
+
     /// The set of nodes carrying a label, for membership tests.
     ///
     /// Exists so a caller testing many nodes against the same label resolves

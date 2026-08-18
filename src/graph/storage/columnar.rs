@@ -553,6 +553,18 @@ impl ColumnStore {
         }
     }
 
+    /// Drop one property of one row.
+    ///
+    /// The single-property counterpart of `clear_row`. Its absence is why
+    /// `REMOVE n.prop` reported success and left the value readable: the
+    /// operator cleared the per-node row map, the column kept its copy, and
+    /// `resolve_property` reads the column first (#594).
+    pub fn remove_property(&mut self, idx: usize, key: &str) {
+        if let Some(&ColumnId(slot)) = self.index.get(key) {
+            self.columns[slot as usize].remove(idx);
+        }
+    }
+
     /// Drop every property stored for one row.
     ///
     /// Node ids are recycled through a free list, so a deleted node's slot is handed to the

@@ -1530,6 +1530,38 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     }
                     Value::Property(PropertyValue::Map(map)) => {
                         use chrono::TimeZone;
+
+                        // An epoch, which is what a machine caller has (Axiom 4).
+                        // Handled before the calendar components because it is a
+                        // complete specification on its own -- and because
+                        // without it the map fell through to the defaults below
+                        // and returned 1970-01-01 *silently*, which reads as a
+                        // plausible date rather than a failure (#595).
+                        if let Some(millis) = map.get("epochMillis").and_then(|v| v.as_integer()) {
+                            return Ok(Value::Property(PropertyValue::DateTime(millis)));
+                        }
+                        if let Some(seconds) = map.get("epochSeconds").and_then(|v| v.as_integer()) {
+                            return Ok(Value::Property(PropertyValue::DateTime(seconds * 1000)));
+                        }
+
+                        // A map naming none of the understood keys is a mistake,
+                        // not a request for the epoch. Answering 1970-01-01 for
+                        // it is how the missing `epochMillis` arm stayed
+                        // invisible.
+                        const KNOWN: [&str; 8] = [
+                            "year", "month", "day", "hour", "minute", "second",
+                            "epochMillis", "epochSeconds",
+                        ];
+                        if !map.keys().any(|k| KNOWN.contains(&k.as_str())) {
+                            let mut given: Vec<String> = map.keys().cloned().collect();
+                            given.sort();
+                            return Err(ExecutionError::RuntimeError(format!(
+                                "datetime() understands none of the keys given ({}); expected one of {}",
+                                given.join(", "),
+                                KNOWN.join(", ")
+                            )));
+                        }
+
                         let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
                         let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
                         let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
@@ -8824,16 +8856,19 @@ impl PhysicalOperator for RemovePropertyOperator {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             for (var, prop) in &self.items {
                 if let Some(node_val) = record.get(var) {
+                    // Through the store, so *both* the column and the row are
+                    // cleared. Removing from the row alone left the value
+                    // readable, because `resolve_property` reads the column
+                    // first -- so REMOVE reported success and did nothing
+                    // (#594).
                     match node_val {
                         Value::NodeRef(id) | Value::Node(id, _) => {
-                            if let Some(node) = store.get_node_mut(*id) {
-                                node.remove_property(prop);
-                            }
+                            let id = *id;
+                            store.remove_node_property(id, prop);
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            if let Some(props) = store.get_edge_properties_mut(*id) {
-                                props.remove(prop);
-                            }
+                            let id = *id;
+                            store.remove_edge_property(id, prop);
                         }
                         _ => {}
                     }
