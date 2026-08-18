@@ -191,14 +191,26 @@ async fn uc4_optimizer_beats_uniform_baseline() {
 
     let baseline_fit = -problem.objective(&Array1::from(vec![0.5, 0.5, 0.5, 2.0]));
 
-    // Run three independent seeds and take the best — QO-Jaya is stochastic
-    // and a single run on this small problem can fail to beat baseline.
+    // Fixed seeds, so this test is reproducible rather than probable.
+    //
+    // It ran three *unseeded* solvers and required the best to clear an
+    // absolute 0.3. QO-Jaya is a stochastic metaheuristic, so that assertion's
+    // truth depended on entropy, and it failed about one full-suite run in
+    // twenty -- more often under a full run than alone, because the solver was
+    // competing for CPU with every other test binary. A test that fails
+    // occasionally teaches people to re-run CI rather than read it, and once
+    // that habit exists a real regression gets the same treatment (#549).
+    //
+    // `with_seed` exists for exactly this (#455). With it, the thresholds below
+    // are facts about these three runs rather than hopes about a distribution.
+    const SEEDS: [u64; 3] = [20_240_115, 20_240_116, 20_240_117];
     let mut best_fit = f64::NEG_INFINITY;
-    for _ in 0..3 {
+    for seed in SEEDS {
         let solver = QOJayaSolver::new(SolverConfig {
             population_size: 20,
             max_iterations: 40,
-        });
+        })
+        .with_seed(seed);
         let p = problem.clone();
         let res = tokio::task::spawn_blocking(move || solver.solve(&*p))
             .await.unwrap();
@@ -206,14 +218,21 @@ async fn uc4_optimizer_beats_uniform_baseline() {
     }
 
     assert!(best_fit.is_finite(), "non-finite fitness: {best_fit}");
+
+    // The claim worth making: the optimizer finds something better than a
+    // uniform guess. This holds for any seed and is what would break if the
+    // solver regressed.
     assert!(
         best_fit >= baseline_fit,
-        "optimizer underperforms uniform baseline over 3 seeds: baseline={baseline_fit} best={best_fit}"
+        "optimizer underperforms uniform baseline: baseline={baseline_fit} best={best_fit} seeds={SEEDS:?}"
     );
-    // The cluster-structure fixture admits combos that clear 0.3 Hits@5; with
-    // three QO-Jaya seeds the optimizer should find one.
+
+    // And the absolute one, now that the seeds are fixed. If this fails after a
+    // solver change, the change moved the search -- re-derive the figure from
+    // these seeds rather than loosening the bound, which is what made it flaky
+    // the first time.
     assert!(
         best_fit >= 0.3,
-        "expected Hits@5 ≥ 0.3 over 3 seeds; got {best_fit}"
+        "expected Hits@5 >= 0.3 from seeds {SEEDS:?}; got {best_fit}"
     );
 }
