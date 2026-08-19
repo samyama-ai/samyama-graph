@@ -954,16 +954,97 @@ fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyV
             _ => None,
         }
     };
-    let found = items.iter().any(|item| {
-        if item == left {
-            return true;
+    // Cypher's IN is three-valued, and the answers that are neither true nor
+    // false are where it gets interesting:
+    //
+    //   null IN [null]            null   -- nothing can be known about it
+    //   4 IN [1, null, 3]         null   -- the null might have been the 4
+    //   1 IN [1, null]            true   -- a definite match wins regardless
+    //   null IN []                false  -- nothing to compare with at all
+    //   [1] IN [[1, null]]        false  -- different lengths cannot be equal
+    //   [1, 2] IN [[null, 'foo']] false  -- position 1 settles it
+    //
+    // `PartialEq` on `PropertyValue` is derived, so `Null == Null` is `true`
+    // and the first of these answered `true` while the second answered
+    // `false`. Both are values a caller will branch on, which makes this worse
+    // than an error (#647).
+    //
+    // The last two are why "does either side contain a null" is not the rule:
+    // a null makes a comparison unknown only when the comparison would
+    // otherwise have to look at it. A length mismatch, or a definite
+    // difference at any other position, settles the answer without ever
+    // reaching the null.
+
+    /// Cypher equality, three-valued: `None` means unknown.
+    fn eq3(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
+        match (a, b) {
+            (PropertyValue::Null, _) | (_, PropertyValue::Null) => None,
+            (PropertyValue::Array(x), PropertyValue::Array(y)) => {
+                if x.len() != y.len() {
+                    return Some(false);
+                }
+                let mut unknown = false;
+                for (i, j) in x.iter().zip(y.iter()) {
+                    match eq3(i, j) {
+                        // One definite difference is enough, whatever else the
+                        // lists contain.
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            (PropertyValue::Map(x), PropertyValue::Map(y)) => {
+                if x.len() != y.len() || !x.keys().all(|k| y.contains_key(k)) {
+                    return Some(false);
+                }
+                let mut unknown = false;
+                for (key, xv) in x.iter() {
+                    match y.get(key).map(|yv| eq3(xv, yv)) {
+                        Some(Some(false)) | None => return Some(false),
+                        Some(None) => unknown = true,
+                        Some(Some(true)) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            _ => {
+                if a == b {
+                    return Some(true);
+                }
+                // 1 and 1.0 are the same number.
+                let as_f64 = |p: &PropertyValue| -> Option<f64> {
+                    match p {
+                        PropertyValue::Integer(i) => Some(*i as f64),
+                        PropertyValue::Float(f) => Some(*f),
+                        _ => None,
+                    }
+                };
+                Some(match (as_f64(a), as_f64(b)) {
+                    (Some(x), Some(y)) => x == y,
+                    _ => false,
+                })
+            }
         }
-        match (numeric(left), numeric(item)) {
-            (Some(a), Some(b)) => a == b,
-            _ => false,
+    }
+
+    let mut unknown = false;
+    for item in items.iter() {
+        match eq3(left, item) {
+            Some(true) => return Some(PropertyValue::Boolean(true)),
+            Some(false) => {}
+            None => unknown = true,
         }
-    });
-    Some(PropertyValue::Boolean(found))
+    }
+
+    // An empty list falls out of this as `false`, which is what Cypher says:
+    // with nothing to compare against there is nothing undecidable.
+    Some(if unknown {
+        PropertyValue::Null
+    } else {
+        PropertyValue::Boolean(false)
+    })
 }
 
 /// Property names in a stable order.
