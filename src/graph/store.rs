@@ -720,9 +720,15 @@ impl GraphStore {
             match event {
                 NodeCreated { tenant_id, id, labels, properties } => {
                     for (key, value) in &properties {
-                        if let PropertyValue::Vector(vec) = value {
+                        // A numeric array counts, not only the `Vector`
+                        // variant: a list literal stays a list now (#628), so
+                        // `{embedding: [0.1, 0.2, 0.3]}` arrives as an `Array`
+                        // and matching on `Vector` alone silently indexed
+                        // nothing. The rebuild path already used `to_vector`,
+                        // which is why this only showed up on write.
+                        if let Some(vec) = value.to_vector() {
                             for label in &labels {
-                                let _ = vector_index.add_vector(label.as_str(), key, id, vec);
+                                let _ = vector_index.add_vector(label.as_str(), key, id, &vec);
                             }
                         }
                         for label in &labels {
@@ -835,9 +841,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                     for label in &labels {
                         property_index.index_insert(label, &key, new_value.clone(), id);
                     }
-                    if let PropertyValue::Vector(vec) = &new_value {
+                    if let Some(vec) = new_value.to_vector() {
                         for label in &labels {
-                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                     }
                     
@@ -919,8 +925,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 }
                 LabelAdded { tenant_id, id, label, properties } => {
                     for (key, value) in properties {
-                        if let PropertyValue::Vector(vec) = &value {
-                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                        if let Some(vec) = value.to_vector() {
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                         property_index.index_insert(&label, &key, value.clone(), id);
                         
@@ -2706,6 +2712,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// A property that should be treated as an embedding when *registering* a
+    /// vector index: all-numeric, non-empty, and carrying at least one float.
+    ///
+    /// Deliberately narrower than `PropertyValue::to_vector`, which any write
+    /// path may use because it can only fill an index someone already asked
+    /// for. See the call site for why the two differ.
+    fn embedding_candidate(v: &PropertyValue) -> Option<Vec<f32>> {
+        match v {
+            PropertyValue::Vector(vec) if !vec.is_empty() => Some(vec.clone()),
+            PropertyValue::Array(items)
+                if !items.is_empty()
+                    && items.iter().any(|i| matches!(i, PropertyValue::Float(_))) =>
+            {
+                v.to_vector()
+            }
+            _ => None,
+        }
+    }
+
     /// Discover all (label, property_key, dims) tuples from node Vector properties,
     /// register any missing HNSW indices, then populate them.
     /// This is the correct post-import call when no indices were pre-registered.
@@ -2720,7 +2745,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 continue;
             }
             for (k, v) in node.properties.iter() {
-                if let PropertyValue::Vector(vec) = v {
+                // Discovery *registers* indices, so it must not treat every
+                // numeric list as an embedding -- `{scores: [1, 2, 3]}` would
+                // get an HNSW index built over it. The rule is the one that was
+                // in force before list literals stopped being coerced to
+                // vectors (#628): all-numeric, non-empty, and containing at
+                // least one float. That keeps exactly the set of properties
+                // that used to arrive here as `Vector`, while an embedding
+                // written as a list literal -- now an `Array` -- is still
+                // found. The *write* paths are deliberately more permissive:
+                // they only fill an index that already exists.
+                if let Some(vec) = Self::embedding_candidate(v) {
+                    let vec = &vec;
                     // Use the MAX length seen for this (label, property): a stray
                     // empty/short embedding must not set the index dimension and
                     // cause every real vector to be skipped on rebuild.
@@ -3244,9 +3280,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in labels {
             self.property_index.index_insert(label, key, new_value.clone(), id);
         }
-        if let PropertyValue::Vector(vec) = new_value {
+        if let Some(vec) = new_value.to_vector() {
             for label in labels {
-                let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
             }
         }
     }
@@ -3256,9 +3292,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         match event {
             NodeCreated { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
-                    if let PropertyValue::Vector(vec) = &value {
+                    if let Some(vec) = value.to_vector() {
                         for label in &labels {
-                            let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                            let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                     }
                     for label in &labels {
@@ -3282,16 +3318,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for label in &labels {
                     self.property_index.index_insert(label, &key, new_value.clone(), id);
                 }
-                if let PropertyValue::Vector(vec) = &new_value {
+                if let Some(vec) = new_value.to_vector() {
                     for label in &labels {
-                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                     }
                 }
             }
             LabelAdded { tenant_id: _, id, label, properties } => {
                 for (key, value) in properties {
-                    if let PropertyValue::Vector(vec) = &value {
-                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                    if let Some(vec) = value.to_vector() {
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                     }
                     self.property_index.index_insert(&label, &key, value.clone(), id);
                 }

@@ -1699,32 +1699,25 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 // `Float(1.0), Float(2.0), Float(3.0)`: `UNWIND [1,2,3] AS x RETURN x`
                 // returned decimals for data that had none (#409).
                 //
-                // A list is only taken to be a vector when it actually contains a float.
-                // An all-integer list stays a list of integers, and the vector paths
-                // accept a numeric array (see `PropertyValue::to_vector`) so an embedding
-                // written as `[1, 0, 0]` still indexes.
+                // A list literal is a list. It used to become a
+                // `Vector(Vec<f32>)` as soon as one element was a float, on the
+                // theory that a float list is an embedding -- and every element
+                // was narrowed to 32 bits on the way in. Cypher floats are
+                // 64-bit, so `UNWIND [1.3, 1.5] AS v RETURN v` returned
+                // 1.2999999523162842, and `ORDER BY` on those values sorted
+                // numbers that were no longer the ones written (#628).
+                //
+                // Nothing needs the coercion: `PropertyValue::to_vector`
+                // already accepts a numeric array, which is how an embedding
+                // written as `[1, 0, 0]` has indexed since #409 -- an
+                // all-integer list was never turned into a vector either.
+                // Deciding vector-ness belongs to the consumer, not to whether
+                // the literal happened to contain a decimal point.
                 let mut items = Vec::new();
-                let mut numeric_vals = Vec::new();
-                let mut all_numeric = true;
-                let mut saw_float = false;
-
                 for item in inner.into_inner() {
                     if item.as_rule() == Rule::value {
-                        let val = parse_value(item)?;
-                        match val {
-                            PropertyValue::Float(f) => {
-                                saw_float = true;
-                                numeric_vals.push(f as f32);
-                            }
-                            PropertyValue::Integer(i) => numeric_vals.push(i as f32),
-                            _ => all_numeric = false,
-                        }
-                        items.push(val);
+                        items.push(parse_value(item)?);
                     }
-                }
-
-                if all_numeric && saw_float && !numeric_vals.is_empty() {
-                    return Ok(PropertyValue::Vector(numeric_vals));
                 }
                 return Ok(PropertyValue::Array(items));
             }
@@ -4013,12 +4006,20 @@ mod tests {
         let ast = result.unwrap();
         let create = ast.create_clause.unwrap();
         let props = create.pattern.paths[0].start.properties.as_ref().unwrap();
-        // Float list should be parsed as Vector
-        if let Some(PropertyValue::Vector(v)) = props.get("embedding") {
-            assert_eq!(v.len(), 4);
-        } else {
-            panic!("Expected Vector property, got {:?}", props.get("embedding"));
-        }
+        // A float list stays a list, at full precision. It is still indexable
+        // as an embedding -- `to_vector` accepts a numeric array -- but the
+        // literal keeps the 64-bit values that were written (#628).
+        let embedding = props.get("embedding").expect("embedding property");
+        assert_eq!(
+            embedding,
+            &PropertyValue::Array(vec![
+                PropertyValue::Float(0.1),
+                PropertyValue::Float(0.2),
+                PropertyValue::Float(0.3),
+                PropertyValue::Float(0.4),
+            ])
+        );
+        assert_eq!(embedding.to_vector().map(|v| v.len()), Some(4), "still indexable");
     }
 
     #[test]

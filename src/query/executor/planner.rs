@@ -2322,8 +2322,16 @@ impl QueryPlanner {
                 _ => return Err(ExecutionError::PlanningError("Second argument (property) must be a string literal".to_string())),
             };
 
+            // Any numeric list literal, not only one that parsed as a
+            // `Vector`. List literals stay lists now (#628), so requiring the
+            // `Vector` variant here would reject every query vector written
+            // with a decimal point -- which is all of them.
             let query_vector = match &call_clause.arguments[2] {
-                Expression::Literal(PropertyValue::Vector(v)) => v.clone(),
+                Expression::Literal(pv) => pv.to_vector().ok_or_else(|| {
+                    ExecutionError::PlanningError(
+                        "Third argument (vector) must be a list of numbers".to_string(),
+                    )
+                })?,
                 _ => return Err(ExecutionError::PlanningError("Third argument (vector) must be a vector literal".to_string())),
             };
 
