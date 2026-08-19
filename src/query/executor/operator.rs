@@ -3482,6 +3482,40 @@ impl PhysicalOperator for FilterOperator {
 }
 
 /// Expand operator: `-[:KNOWS]->`
+/// The path the walk has built so far, with this hop added.
+///
+/// Every expand in a chain binds the *same* path variable, and each one used
+/// to bind a fresh two-node path for its own hop — so the last hop won and
+/// `MATCH p = (a)-[:R]->(b)-[:R]->(c)` produced a path of two nodes with
+/// `length(p) = 1` (#631). The variable-length expand assembles its whole path
+/// in one place and never had the defect; the fixed multi-hop spelling is
+/// built hop by hop, so each hop has to add to what came before.
+///
+/// A path is only continued when it actually ends where this hop starts.
+/// Anything else — a comma-separated pattern, a path variable rebound across
+/// disconnected parts — starts afresh rather than inventing an edge between
+/// two unrelated nodes.
+fn extend_path(
+    base: Option<&Value>,
+    source_id: NodeId,
+    target_id: NodeId,
+    edge_id: crate::graph::EdgeId,
+) -> Value {
+    if let Some(Value::Path { nodes, edges }) = base {
+        if nodes.last() == Some(&source_id) {
+            let mut nodes = nodes.clone();
+            let mut edges = edges.clone();
+            nodes.push(target_id);
+            edges.push(edge_id);
+            return Value::Path { nodes, edges };
+        }
+    }
+    Value::Path {
+        nodes: vec![source_id, target_id],
+        edges: vec![edge_id],
+    }
+}
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -3731,10 +3765,9 @@ impl PhysicalOperator for ExpandOperator {
                     let source_id = new_record.get(&self.source_var)
                         .and_then(|v| v.node_id())
                         .unwrap_or(src);
-                    new_record.bind(path_var.clone(), Value::Path {
-                        nodes: vec![source_id, target_id],
-                        edges: vec![edge_id],
-                    });
+                    let extended =
+                        extend_path(new_record.get(path_var), source_id, target_id, edge_id);
+                    new_record.bind(path_var.clone(), extended);
                 }
 
                 return Ok(Some(new_record));
@@ -3793,10 +3826,9 @@ impl PhysicalOperator for ExpandOperator {
                         let source_id = new_record.get(&self.source_var)
                             .and_then(|v| v.node_id())
                             .unwrap_or(src);
-                        new_record.bind(path_var.clone(), Value::Path {
-                            nodes: vec![source_id, target_id],
-                            edges: vec![edge_id],
-                        });
+                        let extended =
+                            extend_path(new_record.get(path_var), source_id, target_id, edge_id);
+                        new_record.bind(path_var.clone(), extended);
                     }
                     expanded_records.push(new_record);
                 }
