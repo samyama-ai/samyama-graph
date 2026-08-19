@@ -121,6 +121,23 @@ pub struct Query {
     pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
     pub unwind_clause: Option<UnwindClause>,
+    /// Every clause of the query, in the order it was written.
+    ///
+    /// The fields above describe a query by *kind* — all the MATCHes here, the
+    /// CREATE there — which is enough only while the grammar fixes one legal
+    /// order. Cypher does not: a write may sit before a `WITH`, and two writes
+    /// may be separated by a projection, and neither has anywhere to live in a
+    /// shape-based representation. `CREATE (a) WITH a CREATE (b)` has two
+    /// creates on opposite sides of a barrier and one `Option<CreateClause>`.
+    ///
+    /// Populated for every query. The planner uses it only when the legacy
+    /// fields cannot express the query (`needs_clause_pipeline`), so the
+    /// established paths are untouched and this grows into them rather than
+    /// replacing them in one step.
+    pub clauses: Vec<Clause>,
+    /// The clause order is not expressible in the fields above, so the planner
+    /// must walk `clauses` instead.
+    pub needs_clause_pipeline: bool,
     /// Further `UNWIND`s written directly after the first, in order.
     ///
     /// Each is a cross product with everything before it. Kept beside
@@ -235,6 +252,66 @@ pub struct MatchClause {
     pub pattern: Pattern,
     /// Whether this is an optional match
     pub optional: bool,
+}
+
+/// One clause of a query, as written.
+///
+/// A flat, ordered alternative to the by-kind fields on [`Query`]. Cypher is a
+/// sequence of reading, writing and projecting clauses with few ordering
+/// constraints; this is that sequence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clause {
+    /// `MATCH` / `OPTIONAL MATCH` — the clause carries its own `optional` flag.
+    Match(MatchClause),
+    /// A `WHERE` attached to the reading clause before it.
+    Where(WhereClause),
+    Unwind(UnwindClause),
+    With(WithClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Set(SetClause),
+    Remove(RemoveClause),
+    Delete(DeleteClause),
+    Foreach(ForeachClause),
+    Call(CallClause),
+    Return(ReturnClause),
+}
+
+impl Clause {
+    /// Whether this clause writes to the graph.
+    ///
+    /// The distinction the grammar used to encode positionally: writes were
+    /// only allowed after the last projection.
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            Clause::Create(_)
+                | Clause::Merge(_)
+                | Clause::Set(_)
+                | Clause::Remove(_)
+                | Clause::Delete(_)
+                | Clause::Foreach(_)
+        )
+    }
+
+    /// A short name, for plan descriptions and error messages.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Clause::Match(m) if m.optional => "OPTIONAL MATCH",
+            Clause::Match(_) => "MATCH",
+            Clause::Where(_) => "WHERE",
+            Clause::Unwind(_) => "UNWIND",
+            Clause::With(_) => "WITH",
+            Clause::Create(_) => "CREATE",
+            Clause::Merge(_) => "MERGE",
+            Clause::Set(_) => "SET",
+            Clause::Remove(_) => "REMOVE",
+            Clause::Delete(_) => "DELETE",
+            Clause::Foreach(_) => "FOREACH",
+            Clause::Call(_) => "CALL",
+            Clause::Return(_) => "RETURN",
+        }
+    }
 }
 
 /// Graph pattern
@@ -734,6 +811,8 @@ impl Query {
             params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
+            clauses: Vec::new(),
+            needs_clause_pipeline: false,
             extra_unwind_clauses: Vec::new(),
             unwind_leading: false,
             merge_clause: None,

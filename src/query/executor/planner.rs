@@ -689,6 +689,15 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        // A query parsed as a clause sequence has empty by-kind fields — it is
+        // there precisely because they cannot represent it. Planning it through
+        // the established path would read those empty fields as "no MATCH, no
+        // CREATE" and answer a different query, which is worse than the parse
+        // error it replaced. Until `plan_clause_pipeline` covers a shape, the
+        // engine says so.
+        if query.needs_clause_pipeline {
+            return self.plan_clause_pipeline(query, store);
+        }
         Self::reject_unevaluated_property_exprs(query)?;
         // `DISTINCT` is inserted inside `plan_inner`, below SKIP and LIMIT.
         // Wrapping the finished plan here put it *above* them, so `LIMIT n`
@@ -4431,6 +4440,204 @@ fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
 }
 
 impl QueryPlanner {
+    /// Plan a query held as an ordered clause sequence.
+    ///
+    /// Walks the clauses in written order, threading one operator through
+    /// them, which is what the by-kind representation cannot do: it has one
+    /// `Option<CreateClause>` and no way to say "this create happens after
+    /// that projection".
+    fn plan_clause_pipeline(
+        &self,
+        query: &Query,
+        store: &GraphStore,
+    ) -> ExecutionResult<ExecutionPlan> {
+        use crate::query::ast::Clause;
+        use crate::query::executor::operator::SingleRowOperator;
+
+        let clauses = &query.clauses;
+
+        // The leading run of *reading* clauses is planned by the established
+        // path: it is legacy-representable by construction, and rebuilding
+        // pattern planning here would be a second implementation of the
+        // hardest part of the planner.
+        let split = clauses
+            .iter()
+            .position(|c| !matches!(c, Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_)))
+            .unwrap_or(clauses.len());
+
+        let mut operator: OperatorBox = if split == 0 {
+            // No reading prefix — a query that opens with `WITH` projects from
+            // a single empty row.
+            Box::new(SingleRowOperator::new())
+        } else {
+            let mut prefix = Query::new();
+            for clause in &clauses[..split] {
+                match clause {
+                    Clause::Match(m) => prefix.match_clauses.push(m.clone()),
+                    Clause::Where(w) => prefix.where_clause = Some(w.clone()),
+                    Clause::Unwind(u) => {
+                        if prefix.unwind_clause.is_none() {
+                            prefix.unwind_clause = Some(u.clone());
+                            prefix.unwind_leading = prefix.match_clauses.is_empty();
+                        } else {
+                            prefix.extra_unwind_clauses.push(u.clone());
+                        }
+                    }
+                    _ => unreachable!("split stops at the first non-reading clause"),
+                }
+            }
+            self.plan_inner(&prefix, store)?.root
+        };
+
+        let mut output_columns: Vec<String> = Vec::new();
+
+        for clause in &clauses[split..] {
+            match clause {
+                Clause::With(wc) => {
+                    operator = self.build_with_barrier(operator, wc, store)?;
+                    output_columns = wc
+                        .items
+                        .iter()
+                        .map(|i| i.alias.clone().unwrap_or_else(|| match &i.expression {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => {
+                                format!("{variable}.{property}")
+                            }
+                            _ => String::new(),
+                        }))
+                        .collect();
+                }
+                Clause::Unwind(u) => {
+                    operator = Box::new(UnwindOperator::new(
+                        operator,
+                        u.expression.clone(),
+                        u.variable.clone(),
+                    ));
+                }
+                Clause::Set(sc) => {
+                    let items: Vec<(String, String, Expression)> = sc
+                        .items
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.property.clone(), i.value.clone()))
+                        .collect();
+                    let entity_items: Vec<(String, bool, Expression)> = sc
+                        .entity_items
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                        .collect();
+                    if !items.is_empty() || !entity_items.is_empty() {
+                        operator = Box::new(SetPropertyOperator::with_entity_items(
+                            operator, items, entity_items,
+                        ));
+                    }
+                    let adds: Vec<(String, Label)> = sc
+                        .label_items
+                        .iter()
+                        .flat_map(|i| i.labels.iter().map(|l| (i.variable.clone(), l.clone())))
+                        .collect();
+                    if !adds.is_empty() {
+                        operator = Box::new(LabelMutationOperator::new(operator, adds, Vec::new()));
+                    }
+                }
+                Clause::Remove(rc) => {
+                    let mut props = Vec::new();
+                    let mut labels = Vec::new();
+                    for item in &rc.items {
+                        match item {
+                            crate::query::ast::RemoveItem::Property { variable, property } => {
+                                props.push((variable.clone(), property.clone()));
+                            }
+                            crate::query::ast::RemoveItem::Label { variable, label } => {
+                                labels.push((variable.clone(), label.clone()));
+                            }
+                        }
+                    }
+                    if !props.is_empty() {
+                        operator = Box::new(RemovePropertyOperator::new(operator, props));
+                    }
+                    if !labels.is_empty() {
+                        operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), labels));
+                    }
+                }
+                Clause::Delete(dc) => {
+                    let vars: Vec<String> = dc
+                        .expressions
+                        .iter()
+                        .filter_map(|e| match e {
+                            Expression::Variable(v) => Some(v.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    operator = Box::new(DeleteOperator::new(operator, vars, dc.detach));
+                }
+                Clause::Where(w) => {
+                    operator = Box::new(FilterOperator::new(operator, w.predicate.clone()));
+                }
+                Clause::Return(rc) => {
+                    let projections: Vec<(Expression, String)> = rc
+                        .items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, i)| {
+                            let alias = i.alias.clone().unwrap_or_else(|| match &i.expression {
+                                Expression::Variable(v) => v.clone(),
+                                Expression::Property { variable, property } => {
+                                    format!("{variable}.{property}")
+                                }
+                                _ => format!("col_{idx}"),
+                            });
+                            (i.expression.clone(), alias)
+                        })
+                        .collect();
+                    output_columns = projections.iter().map(|(_, a)| a.clone()).collect();
+                    operator = Box::new(ProjectOperator::new(operator, projections));
+                    if rc.distinct {
+                        operator = Box::new(DistinctOperator::new(operator));
+                    }
+                }
+                // Not yet threaded through the pipeline. Refusing is the point:
+                // planning these as though the clause order were different is
+                // how a parse error becomes a wrong answer.
+                unsupported => {
+                    let shape: Vec<&str> = clauses.iter().map(|c| c.kind()).collect();
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "`{}` is not yet supported in this clause position (query shape: {}). \
+                         The parser accepts this order; the planner threads WITH, UNWIND, SET, \
+                         REMOVE, DELETE, WHERE and RETURN through it so far, and CREATE, MERGE \
+                         and a MATCH after a WITH are still to come (samyama-graph#617).",
+                        unsupported.kind(),
+                        shape.join(" ")
+                    )));
+                }
+            }
+        }
+
+        if let Some(order_by) = &query.order_by {
+            let sort_items: Vec<(Expression, bool)> = order_by
+                .items
+                .iter()
+                .map(|i| (i.expression.clone(), i.ascending))
+                .collect();
+            operator = Box::new(SortOperator::new(operator, sort_items));
+        }
+        if let Some(skip) = query.skip {
+            operator = Box::new(SkipOperator::new(operator, skip));
+        }
+        if let Some(limit) = query.limit {
+            operator = Box::new(LimitOperator::new(operator, limit));
+        }
+
+        let is_write = clauses.iter().any(|c| c.is_write());
+        Ok(ExecutionPlan {
+            root: operator,
+            output_columns,
+            is_write,
+            candidates_evaluated: 1,
+            chosen_plan_cost: 0.0,
+            candidate_costs: Vec::new(),
+        })
+    }
+
     /// Build a WithBarrier operator from a WithClause (extracted for multi-WITH reuse)
     fn build_with_barrier(&self, input: OperatorBox, with_clause: &WithClause, _store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let mut items = Vec::new();
@@ -5306,6 +5513,8 @@ mod tests {
             order_by: None,
             limit: None,
             extra_unwind_clauses: Vec::new(),
+            clauses: Vec::new(),
+            needs_clause_pipeline: false,
             skip: None,
             call_clause: None,
             call_subquery: None,

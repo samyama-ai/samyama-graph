@@ -4915,6 +4915,54 @@ impl PhysicalOperator for AggregateOperator {
         Ok(self.results.next())
     }
 
+    /// Pull the input **mutably** before aggregating.
+    ///
+    /// Both this and `WithBarrierOperator` need it, for the same reason: the
+    /// default `next_mut` delegates to `next`, which reads its input
+    /// read-only — so any write operator below a materialising operator never
+    /// ran its mutating path. `MATCH (n) SET n.x = 1 WITH n RETURN n.x` returned the
+    /// *old* value: the query succeeded, the barrier produced rows, and the
+    /// write silently did not happen. That is the real reason the grammar only
+    /// ever allowed writes after the last projection, and it had to be fixed
+    /// before a write before a `WITH` could be planned at all.
+    ///
+    /// The input is drained into a `MaterializedOperator` rather than
+    /// threading `&mut GraphStore` through `execute_all` and its grouping
+    /// helpers: the barrier is the most intricate operator here, and this
+    /// leaves its aggregation untouched. A barrier already materialises its
+    /// whole input, so nothing is buffered that would not have been.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            let mut rows = Vec::new();
+            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
+                rows.extend(batch.records);
+            }
+            self.input = Box::new(MaterializedOperator::new(rows));
+            self.execute_all(store)?;
+        }
+        Ok(self.results.next())
+    }
+
+    fn next_batch_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
+        let mut records = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            match self.next_mut(store, tenant_id)? {
+                Some(r) => records.push(r),
+                None => break,
+            }
+        }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch { records, columns: vec![] }))
+        }
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
@@ -10551,6 +10599,31 @@ impl PhysicalOperator for WithBarrierOperator {
         vec![&mut self.input]
     }
 
+    /// Pull the input **mutably** before materialising.
+    ///
+    /// A barrier reads its whole input before emitting anything. Doing that
+    /// read-only meant a write below a `WITH` silently did not happen:
+    /// `MATCH (n) SET n.x = 1 WITH n RETURN n.x` returned the *old* value, the
+    /// query succeeded, and the store was unchanged. That is the real reason
+    /// the grammar only ever allowed writes after the last projection — not
+    /// syntax, but that mutability never reached below a barrier.
+    ///
+    /// The input is drained into a `MaterializedOperator` rather than
+    /// threading `&mut GraphStore` through `execute_all` and its grouping
+    /// helpers, which are the most intricate code in this file. A barrier
+    /// materialises its whole input anyway, so nothing is buffered that would
+    /// not have been.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            let mut rows = Vec::new();
+            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
+                rows.extend(batch.records);
+            }
+            self.input = Box::new(MaterializedOperator::new(rows));
+            self.execute_all(store)?;
+        }
+        Ok(self.results.next())
+    }
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;

@@ -107,8 +107,133 @@ pub enum ParseError {
 pub type ParseResult<T> = Result<T, ParseError>;
 
 /// Parse a Cypher query string into an AST
+/// Parse a query as a flat, ordered clause sequence.
+///
+/// Reached only when every shape-specific rule has rejected the input. The
+/// result carries `clauses` in written order and `needs_clause_pipeline`, and
+/// the legacy by-kind fields are left empty — a query here is by definition one
+/// they cannot represent, and half-filling them would give the planner two
+/// disagreeing accounts of the same query.
+fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
+    use crate::query::ast::Clause;
+
+    let pairs = CypherParser::parse(Rule::pipeline_query, input)?;
+    let mut query = Query::new();
+    query.needs_clause_pipeline = true;
+
+    for pair in pairs {
+        if pair.as_rule() != Rule::pipeline_query {
+            continue;
+        }
+        for inner in pair.into_inner() {
+            match inner.as_rule() {
+                Rule::explain_clause => {
+                    query.explain = true;
+                    query.profile = inner.as_str().eq_ignore_ascii_case("PROFILE");
+                }
+                Rule::pipeline_stmt => {
+                    for c in inner.into_inner() {
+                        match c.as_rule() {
+                            Rule::match_clause | Rule::optional_match_clause => {
+                                let optional = c.as_rule() == Rule::optional_match_clause;
+                                for p in c.into_inner() {
+                                    if p.as_rule() == Rule::pattern {
+                                        query.clauses.push(Clause::Match(MatchClause {
+                                            pattern: parse_pattern(p)?,
+                                            optional,
+                                        }));
+                                    }
+                                }
+                            }
+                            Rule::where_clause => {
+                                query.clauses.push(Clause::Where(parse_where_clause(c)?));
+                            }
+                            Rule::unwind_clause => {
+                                query.clauses.push(Clause::Unwind(parse_unwind_clause(c)?));
+                            }
+                            Rule::with_clause => {
+                                query.clauses.push(Clause::With(parse_with_clause(c)?));
+                            }
+                            Rule::create_clause => {
+                                for p in c.into_inner() {
+                                    if p.as_rule() == Rule::pattern {
+                                        query.clauses.push(Clause::Create(CreateClause {
+                                            pattern: parse_pattern(p)?,
+                                        }));
+                                    }
+                                }
+                            }
+                            Rule::merge_inline => {
+                                query.clauses.push(Clause::Merge(parse_merge_clause(c)?));
+                            }
+                            Rule::delete_clause => {
+                                query.clauses.push(Clause::Delete(parse_delete_clause(c)?));
+                            }
+                            Rule::set_clause => {
+                                query.clauses.push(Clause::Set(parse_set_clause(c)?));
+                            }
+                            Rule::remove_clause => {
+                                query.clauses.push(Clause::Remove(parse_remove_clause(c)?));
+                            }
+                            Rule::return_clause => {
+                                query.clauses.push(Clause::Return(parse_return_clause(c)?));
+                            }
+                            Rule::order_by_clause => {
+                                query.order_by = Some(parse_order_by_clause(c)?);
+                            }
+                            Rule::skip_clause => {
+                                for i in c.into_inner() {
+                                    if i.as_rule() == Rule::integer {
+                                        query.skip = i.as_str().parse().ok();
+                                    }
+                                }
+                            }
+                            Rule::limit_clause => {
+                                for i in c.into_inner() {
+                                    if i.as_rule() == Rule::integer {
+                                        query.limit = i.as_str().parse().ok();
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if query.clauses.is_empty() {
+        return Err(ParseError::SemanticError("empty clause sequence".to_string()));
+    }
+    // The RETURN is mirrored into the legacy field so `validate` and the
+    // star expansion, which both read it, keep working unchanged.
+    if let Some(Clause::Return(rc)) = query.clauses.iter().rev().find(|c| matches!(c, Clause::Return(_))) {
+        query.return_clause = Some(rc.clone());
+    }
+    crate::query::star::expand_stars(&mut query);
+    crate::query::validate::validate(&query)
+        .map_err(|e| ParseError::SemanticError(e.to_string()))?;
+    Ok(query)
+}
+
 pub fn parse_query(input: &str) -> ParseResult<Query> {
-    let pairs = CypherParser::parse(Rule::query, input)?;
+    let pairs = match CypherParser::parse(Rule::query, input) {
+        Ok(pairs) => pairs,
+        // The established rules each encode one permitted clause order. A
+        // query they all reject may still be valid Cypher — a write before a
+        // `WITH`, two writes either side of a projection — so it gets one more
+        // attempt against the general clause sequence.
+        //
+        // The original error is kept if that fails too: it points at the
+        // construct, whereas the general rule fails at the first clause it
+        // cannot start.
+        Err(original) => match parse_clause_pipeline(input) {
+            Ok(query) => return Ok(query),
+            Err(_) => return Err(original.into()),
+        },
+    };
 
     let mut query = Query::new();
 
