@@ -625,6 +625,35 @@ pub struct ReturnItem {
     pub expression: Expression,
     /// Alias (optional)
     pub alias: Option<String>,
+    /// The expression exactly as it was written, when it came from source.
+    ///
+    /// Cypher names an unaliased result column after its own text, so
+    /// `RETURN count(*)` produces a column called `count(*)`. The planner used
+    /// to reconstruct a name from the AST and fall back to `col_0`, which is
+    /// not a name any client can ask for -- and it dropped the `*`, naming the
+    /// column `count()` (#635).
+    pub source_text: Option<String>,
+}
+
+impl ReturnItem {
+    /// The result column this item produces.
+    ///
+    /// One place, because the planner had this decision written out in ten
+    /// and they did not agree. `index` only matters for an expression with no
+    /// recorded text, which now means one the engine built itself.
+    pub fn column_name(&self, index: usize) -> String {
+        if let Some(alias) = &self.alias {
+            return alias.clone();
+        }
+        if let Some(text) = &self.source_text {
+            return text.clone();
+        }
+        match &self.expression {
+            Expression::Variable(v) => v.clone(),
+            Expression::Property { variable, property } => format!("{variable}.{property}"),
+            _ => format!("col_{index}"),
+        }
+    }
 }
 
 /// CREATE clause

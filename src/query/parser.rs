@@ -1832,6 +1832,10 @@ fn parse_return_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnC
 fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnItem> {
     let mut expression = None;
     let mut alias = None;
+    // Captured before the pair is consumed. This is the column's name when no
+    // alias is given, so it has to be the text the user wrote rather than
+    // anything reconstructed from the AST.
+    let mut source_text = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1839,6 +1843,7 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
                 expression = Some(Expression::Variable(crate::query::ast::STAR_ITEM.to_string()));
             }
             Rule::expression => {
+                source_text = Some(inner.as_str().trim().to_string());
                 expression = Some(parse_expression(inner)?);
             }
             Rule::variable => {
@@ -1851,6 +1856,7 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
     Ok(ReturnItem {
         expression: expression.ok_or_else(|| ParseError::SemanticError("Missing expression in RETURN".to_string()))?,
         alias,
+        source_text,
     })
 }
 

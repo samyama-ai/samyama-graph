@@ -966,11 +966,7 @@ impl QueryPlanner {
                 let mut output_columns = Vec::new();
                 if let Some(return_clause) = &query.return_clause {
                     let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                        let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
-                            Expression::Variable(v) => v.clone(),
-                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                            _ => format!("col_{}", i),
-                        });
+                        let alias = item.column_name(i);
                         output_columns.push(alias.clone());
                         (item.expression.clone(), alias)
                     }).collect();
@@ -1001,11 +997,7 @@ impl QueryPlanner {
                 if let Some(return_clause) = &query.return_clause {
                     let mut output_columns = Vec::new();
                     let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                        let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
-                            Expression::Variable(v) => v.clone(),
-                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                            _ => format!("col_{}", i),
-                        });
+                        let alias = item.column_name(i);
                         output_columns.push(alias.clone());
                         (item.expression.clone(), alias)
                     }).collect();
@@ -1020,7 +1012,7 @@ impl QueryPlanner {
 
                 // WITH projection: bind expressions to aliases
                 let with_projections: Vec<(Expression, String)> = with_clause.items.iter().enumerate().map(|(i, item)| {
-                    let alias = item.alias.clone().unwrap_or_else(|| format!("col_{}", i));
+                    let alias = item.column_name(i);
                     (item.expression.clone(), alias)
                 }).collect();
 
@@ -1032,11 +1024,7 @@ impl QueryPlanner {
                 // RETURN projection: project from WITH-bound variables
                 let mut output_columns = Vec::new();
                 let return_projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                        _ => format!("col_{}", i),
-                    });
+                    let alias = item.column_name(i);
                     output_columns.push(alias.clone());
                     (item.expression.clone(), alias)
                 }).collect();
@@ -1060,11 +1048,7 @@ impl QueryPlanner {
                 use crate::query::executor::operator::SingleRowOperator;
                 let mut output_columns = Vec::new();
                 let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                    let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                        _ => format!("col_{}", i),
-                    });
+                    let alias = item.column_name(i);
                     output_columns.push(alias.clone());
                     (item.expression.clone(), alias)
                 }).collect();
@@ -2006,25 +1990,12 @@ impl QueryPlanner {
             let mut post_projections: Vec<(Expression, String)> = Vec::new();
 
             for (idx, item) in return_clause.items.iter().enumerate() {
-                let alias = item.alias.clone().unwrap_or_else(|| {
-                    match &item.expression {
-                        Expression::Variable(var) => var.clone(),
-                        Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                        Expression::Function { name, args, distinct } => {
-                            let arg_strs: Vec<String> = args.iter().map(|a| match a {
-                                Expression::Variable(v) => v.clone(),
-                                Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                                _ => "?".to_string(),
-                            }).collect();
-                            if *distinct {
-                                format!("{}(DISTINCT {})", name, arg_strs.join(", "))
-                            } else {
-                                format!("{}({})", name, arg_strs.join(", "))
-                            }
-                        },
-                        _ => format!("col_{}", idx),
-                    }
-                });
+                // `column_name` first: it uses the text the user wrote, which
+                // the reconstruction below cannot recover. `count(*)` came out
+                // as `count()` here because `*` is not an argument expression,
+                // and a column nobody can name by writing the query again is
+                // not a usable result (#635).
+                let alias = item.column_name(idx);
 
                 output_columns.push(alias.clone());
                 // Kept so ORDER BY can be translated between alias and expression form,
@@ -3320,13 +3291,7 @@ impl QueryPlanner {
                 let alias = item
                     .alias
                     .clone()
-                    .unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => {
-                            format!("{}.{}", variable, property)
-                        }
-                        _ => format!("col_{}", i),
-                    });
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 // For the count() item, project the already-bound alias
                 // rather than re-evaluating the aggregate function.
@@ -3498,13 +3463,7 @@ impl QueryPlanner {
                 let alias = item
                     .alias
                     .clone()
-                    .unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => {
-                            format!("{}.{}", variable, property)
-                        }
-                        _ => format!("col_{}", i),
-                    });
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 let expr = match &item.expression {
                     Expression::Function { name, .. }
@@ -3654,13 +3613,7 @@ impl QueryPlanner {
                 let alias = item
                     .alias
                     .clone()
-                    .unwrap_or_else(|| match &item.expression {
-                        Expression::Variable(v) => v.clone(),
-                        Expression::Property { variable, property } => {
-                            format!("{}.{}", variable, property)
-                        }
-                        _ => format!("col_{}", i),
-                    });
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 (item.expression.clone(), alias)
             })
@@ -4895,13 +4848,7 @@ impl QueryPlanner {
                         .iter()
                         .enumerate()
                         .map(|(idx, i)| {
-                            let alias = i.alias.clone().unwrap_or_else(|| match &i.expression {
-                                Expression::Variable(v) => v.clone(),
-                                Expression::Property { variable, property } => {
-                                    format!("{variable}.{property}")
-                                }
-                                _ => format!("col_{idx}"),
-                            });
+                            let alias = i.column_name(idx);
                             (i.expression.clone(), alias)
                         })
                         .collect();
@@ -4973,25 +4920,7 @@ impl QueryPlanner {
         let mut item_infos = Vec::new();
 
         for (idx, item) in with_clause.items.iter().enumerate() {
-            let alias = item.alias.clone().unwrap_or_else(|| {
-                match &item.expression {
-                    Expression::Variable(var) => var.clone(),
-                    Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                    Expression::Function { name, args, distinct } => {
-                        let arg_strs: Vec<String> = args.iter().map(|a| match a {
-                            Expression::Variable(v) => v.clone(),
-                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
-                            _ => "?".to_string(),
-                        }).collect();
-                        if *distinct {
-                            format!("{}(DISTINCT {})", name, arg_strs.join(", "))
-                        } else {
-                            format!("{}({})", name, arg_strs.join(", "))
-                        }
-                    },
-                    _ => format!("col_{}", idx),
-                }
-            });
+            let alias = item.column_name(idx);
 
             let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
             if !extracted.is_empty() {

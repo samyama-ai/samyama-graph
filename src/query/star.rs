@@ -117,6 +117,10 @@ fn expand_into(items: &mut Vec<ReturnItem>, scope: &[String]) {
                 out.push(ReturnItem {
                     expression: Expression::Variable(name.clone()),
                     alias: None,
+                    // `RETURN *` names each column after the variable it
+                    // expands to, which `column_name` derives from the
+                    // expression.
+                    source_text: None,
                 });
             }
         } else {
