@@ -2822,6 +2822,13 @@ impl QueryPlanner {
                         edge_types,
                         segment.edge.direction.clone(),
                     );
+                    // A selective equality on the far side of the expansion —
+                    // LDBC IC11's `org.name = "..."` — applied during the walk
+                    // rather than to the rows it produces (#656).
+                    let pushed = Self::target_equality_props(&deferred_predicates, &target_var);
+                    if !pushed.is_empty() {
+                        expand = expand.with_target_props(pushed);
+                    }
 
                     // CY-04: Set path variable for named path materialization
                     if let Some(ref pv) = path.path_variable {
@@ -2940,6 +2947,37 @@ impl QueryPlanner {
     /// later filter would have removed. `OPTIONAL MATCH` is not affected --
     /// this runs inside a single path of a single MATCH, and the outer join is
     /// built above it.
+    /// Equality predicates of the form `<var>.<prop> = <literal>` for one
+    /// variable, read out of the deferred set **without removing them**.
+    ///
+    /// Additive on purpose. The filter the planner would have built stays
+    /// where it is, so pushing these into an expand cannot change what the
+    /// query returns — only how much is materialised on the way. Getting a
+    /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
+    /// slow query.
+    fn target_equality_props(
+        deferred: &[Expression],
+        var: &str,
+    ) -> Vec<(String, PropertyValue)> {
+        let mut out = Vec::new();
+        for pred in deferred {
+            for part in flatten_and_predicates(pred) {
+                if let Expression::Binary { left, op: BinaryOp::Eq, right } = &part {
+                    if let (
+                        Expression::Property { variable, property },
+                        Expression::Literal(value),
+                    ) = (left.as_ref(), right.as_ref())
+                    {
+                        if variable == var {
+                            out.push((property.clone(), value.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn apply_ready_predicates(
         operator: OperatorBox,
         deferred: &mut Vec<Expression>,

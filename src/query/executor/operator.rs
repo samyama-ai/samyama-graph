@@ -3649,6 +3649,16 @@ pub struct ExpandOperator {
     edge_types: Vec<String>,
     /// Target node labels to filter (empty = any label)
     target_labels: Vec<Label>,
+    /// Equality predicates on the *target* node, checked during the adjacency
+    /// walk rather than after it.
+    ///
+    /// LDBC IC11 is the case this exists for. Its plan is
+    /// `Filter(org.name = ...) <- Expand((friend)-[:WORK_AT]->(org))`, so
+    /// every friend-of-friend's employer was materialised into a record and
+    /// then discarded — 11.5x Neo4j, and the only complex read still outside
+    /// the PERF-01 target. Applied here, a non-matching employer never
+    /// becomes a row (#656).
+    target_props: Vec<(String, PropertyValue)>,
     /// Direction
     direction: Direction,
     /// Current input record
@@ -3687,6 +3697,7 @@ impl ExpandOperator {
             edge_var: edge_var.map(Into::into),
             edge_types,
             target_labels: Vec::new(),
+            target_props: Vec::new(),
             direction,
             current_record: None,
             current_edges: Vec::new(),
@@ -3705,6 +3716,14 @@ impl ExpandOperator {
     /// Set target node labels to filter during expansion
     pub fn with_target_labels(mut self, labels: Vec<Label>) -> Self {
         self.target_labels = labels;
+        self
+    }
+
+    /// Equality predicates the target node must satisfy, applied during the
+    /// walk. Additive: the planner leaves its own filter in place, so this can
+    /// only reduce what is materialised, never change what is returned.
+    pub fn with_target_props(mut self, props: Vec<(String, PropertyValue)>) -> Self {
+        self.target_props = props;
         self
     }
 
@@ -3781,12 +3800,25 @@ impl ExpandOperator {
                         .unwrap_or_default(),
                 )
             };
+        let target_props = &self.target_props;
         let keeps = |target: NodeId| -> bool {
-            match &label_sets {
+            let label_ok = match &label_sets {
                 None => true,
                 // `Some(empty)` means a required label exists on no node.
                 Some(sets) if sets.len() < self.target_labels.len() => false,
                 Some(sets) => sets.iter().all(|s| s.contains(&target)),
+            };
+            if !label_ok {
+                return false;
+            }
+            if target_props.is_empty() {
+                return true;
+            }
+            match store.get_node(target) {
+                Some(node) => target_props
+                    .iter()
+                    .all(|(k, v)| node.get_property(k).map_or(false, |p| p == v)),
+                None => false,
             }
         };
 
