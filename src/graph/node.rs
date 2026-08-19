@@ -72,6 +72,24 @@ pub struct Node {
 
 impl Node {
     /// Create a new node with a single label
+    /// A node carrying exactly the labels given -- including none at all.
+    ///
+    /// `new` takes one label and always inserts it, so the only way to write
+    /// an unlabelled node through it was to pass `""`. That is what
+    /// `CREATE ({id: 0})` did, and the node came back with a one-element
+    /// label set containing the empty string (#625).
+    pub fn with_labels(id: NodeId, labels: impl IntoIterator<Item = Label>) -> Self {
+        let now = chrono::Utc::now().timestamp_millis();
+        Node {
+            id,
+            version: 1,
+            labels: labels.into_iter().collect(),
+            properties: PropertyMap::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     pub fn new(id: NodeId, label: impl Into<Label>) -> Self {
         let now = chrono::Utc::now().timestamp_millis();
         let mut labels = HashSet::new();

@@ -977,6 +977,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Create a node with auto-generated ID and single label
     pub fn create_node(&mut self, label: impl Into<Label>) -> NodeId {
+        self.create_node_with_labels(std::iter::once(label.into()))
+    }
+
+    /// Create a node with exactly the labels given, which may be none.
+    ///
+    /// Every caller building a node from a Cypher pattern went through
+    /// `create_node`, which takes a single label -- so a pattern with no label
+    /// passed `""` and a MERGE pattern with no label passed the invented
+    /// string `"Node"`. Both ended up in the label index and the catalog, so
+    /// an unlabelled node reported a label it did not have and `MATCH
+    /// (n:Node)` matched nodes nobody labelled (#625). Callers that know the
+    /// whole label set should use this.
+    pub fn create_node_with_labels(&mut self, labels: impl IntoIterator<Item = Label>) -> NodeId {
+        let labels: Vec<Label> = labels.into_iter().collect();
         self.invalidate_statistics_cache();
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
@@ -988,18 +1002,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let node_id = NodeId::new(node_id_u64);
         let idx = node_id_u64 as usize;
 
-        let label = label.into();
-        let mut node = Node::new(node_id, label.clone());
+        let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
 
-        // Add to label index
-        self.label_index
-            .entry(label.clone())
-            .or_insert_with(HashSet::new)
-            .insert(node_id);
-
-        // Update catalog label count
-        self.catalog.on_label_added(&label);
+        for label in &labels {
+            self.label_index
+                .entry(label.clone())
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+            self.catalog.on_label_added(label);
+        }
 
         // Ensure storage capacity
         if idx >= self.nodes.len() {

@@ -126,3 +126,65 @@ fn properties_on_the_first_mention_survive() {
     assert_eq!(nodes(&store), 2);
     assert_eq!(scalar(&store, "MATCH (n) WHERE n.v = 7 RETURN count(*) AS c"), 1);
 }
+
+/// Every label on every node in the store, sorted, one entry per node.
+fn label_sets(store: &GraphStore) -> Vec<Vec<String>> {
+    (0..16u64)
+        .map(samyama::graph::types::NodeId::from)
+        .filter_map(|id| store.get_node(id))
+        .map(|n| {
+            let mut labels: Vec<String> = n.labels.iter().map(|l| l.as_str().to_string()).collect();
+            labels.sort();
+            labels
+        })
+        .collect()
+}
+
+#[test]
+fn a_node_carries_exactly_the_labels_that_were_written() {
+    // `create_node` takes one label and always inserts it, so every caller
+    // building a node from a pattern had to invent one when the pattern had
+    // none: CREATE passed `""` and MERGE passed the string `"Node"`. Both went
+    // into the label index and the catalog, so an unlabelled node reported a
+    // label, and `MATCH (n:Node)` matched nodes nobody had labelled (#625).
+    for (cypher, expected) in [
+        ("CREATE ({id: 0})", vec![Vec::<String>::new()]),
+        ("MERGE ({id: 2})", vec![Vec::new()]),
+        ("CREATE ()-[:R]->()", vec![Vec::new(), Vec::new()]),
+        ("UNWIND [1, 2] AS x CREATE ({v: x})", vec![Vec::new(), Vec::new()]),
+        ("CREATE (:A {id: 1})", vec![vec!["A".to_string()]]),
+        ("CREATE (:A:B)", vec![vec!["A".to_string(), "B".to_string()]]),
+        ("MERGE (:A:B)", vec![vec!["A".to_string(), "B".to_string()]]),
+    ] {
+        let mut store = GraphStore::new();
+        write(&mut store, cypher);
+        assert_eq!(label_sets(&store), expected, "labels after `{cypher}`");
+    }
+}
+
+#[test]
+fn an_unlabelled_node_is_not_findable_by_an_invented_label() {
+    // The label index and the catalog are the reason this matters beyond
+    // rendering: a phantom label is a phantom class with a real count, and the
+    // anchor-choice cost model reads those counts.
+    let mut store = GraphStore::new();
+    write(&mut store, "CREATE ({id: 0})");
+    write(&mut store, "MERGE ({id: 2})");
+
+    let found = |cypher: &str| -> usize {
+        let q = parse_query(cypher).expect("query should parse");
+        QueryExecutor::new(&store).execute(&q).unwrap().records.len()
+    };
+    assert_eq!(found("MATCH (n) RETURN n"), 2, "both nodes exist");
+    assert_eq!(found("MATCH (n:Node) RETURN n"), 0, "`Node` was never written");
+
+    // The catalog is where a phantom label does real damage: it becomes a
+    // class with a count, and the anchor-choice cost model reads those counts.
+    for phantom in ["Node", ""] {
+        assert_eq!(
+            store.catalog().estimate_label_scan(&samyama::graph::types::Label::new(phantom)),
+            0.0,
+            "the catalog should not carry a `{phantom}` class"
+        );
+    }
+}

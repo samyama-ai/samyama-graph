@@ -6980,17 +6980,10 @@ impl PhysicalOperator for CreateNodeOperator {
         // First call: create all nodes
         if !self.executed {
             for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
-                // Use first label as primary, or empty string if none
-                let primary_label = labels.first()
-                    .map(|l| l.clone())
-                    .unwrap_or_else(|| Label::new(""));
-
-                let node_id = store.create_node(primary_label);
-
-                // Add additional labels
-                for label in labels.iter().skip(1) {
-                    let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
-                }
+                // The whole label set at once, which for `CREATE ({...})` is
+                // empty. Passing a "primary" label meant an unlabelled node was
+                // created with `Label("")` (#625).
+                let node_id = store.create_node_with_labels(labels.iter().cloned());
 
                 // A CREATE with no input row has nothing bound, so a non-literal value can
                 // only be a constant (`{n: 1 + 2}`). Anything referring to a variable is an
@@ -8040,14 +8033,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 // edge wiring below then treats it exactly like a matched variable.
                 let mut record = record;
                 for (handle, labels, properties, property_exprs) in &self.nodes_to_create {
-                    let primary_label = labels
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| Label::new(""));
-                    let node_id = store.create_node(primary_label);
-                    for label in labels.iter().skip(1) {
-                        let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
-                    }
+                    let node_id = store.create_node_with_labels(labels.iter().cloned());
                     // Non-literal property values (`{id: row.id}`) are evaluated against
                     // this row, so each created node gets the value belonging to its own
                     // match rather than a constant.
@@ -9765,13 +9751,9 @@ impl MergeOperator {
         // Create the entire pattern.
         let mut created: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
         for np in &pattern_nodes {
-            let label_str = np.labels.first().map(|l| l.as_str()).unwrap_or("Node");
-            let node_id = store.create_node(label_str);
-            for label in np.labels.iter().skip(1) {
-                if let Some(node) = store.get_node_mut(node_id) {
-                    node.labels.insert(label.clone());
-                }
-            }
+            // `MERGE ({...})` has no labels, and defaulting to "Node" gave the
+            // node a label the query never wrote (#625).
+            let node_id = store.create_node_with_labels(np.labels.iter().cloned());
             if let Some(required) = np.properties.as_ref() {
                 for (k, v) in required {
                     if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
@@ -9946,14 +9928,7 @@ impl PhysicalOperator for MergeOperator {
             }
             Self::apply_labels(&self.on_match_labels, &record, store, tenant_id);
         } else {
-            let label_str = labels.first().map(|l| l.as_str()).unwrap_or("Node");
-            node_id = store.create_node(label_str);
-
-            for label in labels.iter().skip(1) {
-                if let Some(node) = store.get_node_mut(node_id) {
-                    node.labels.insert(label.clone());
-                }
-            }
+            node_id = store.create_node_with_labels(labels.iter().cloned());
 
             if let Some(required_props) = props {
                 for (k, v) in required_props {
@@ -10079,10 +10054,8 @@ impl PhysicalOperator for ForeachOperator {
                             ));
                         }
 
-                        let label_str = path.start.labels.first()
-                            .map(|l| l.as_str())
-                            .unwrap_or("Node");
-                        let node_id = store.create_node(label_str);
+                        let node_id =
+                            store.create_node_with_labels(path.start.labels.iter().cloned());
                         if let Some(props) = &path.start.properties {
                             for (k, v) in props {
                                 let _ = store.set_node_property(tenant_id, node_id, k.to_string(), v.clone());
