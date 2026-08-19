@@ -3875,6 +3875,24 @@ pub struct VarLengthExpandOperator {
     /// filter"; a requested type the graph has never seen simply contributes
     /// no id, so it matches nothing -- which is correct.
     type_ids: Option<Vec<u16>>,
+    /// The target is pinned to exactly this node.
+    ///
+    /// Set when the planner can resolve the far endpoint to a single node at
+    /// plan time — `MATCH (p:Person {id: 42})-[:KNOWS*1..2]-(friend)` read from
+    /// the `friend` side. The question is then not "what is reachable from each
+    /// friend" but "is *this one node* reachable from each friend", and those
+    /// have very different costs.
+    pinned_target: Option<NodeId>,
+    /// Nodes from which `pinned_target` is reachable within the hop bounds,
+    /// computed once on first use.
+    ///
+    /// One BFS outward from the pinned node, reversed, answers the question for
+    /// every input row. Without it each row runs its own BFS: LDBC IC6 feeds
+    /// thousands of candidate friends into this operator and each one expanded
+    /// its own two-hop neighbourhood to discover whether one specific person
+    /// was in it. At SF10 that is the difference between finishing and hitting
+    /// the query timeout.
+    target_reach: Option<std::collections::HashSet<NodeId>>,
 }
 
 impl VarLengthExpandOperator {
@@ -3902,6 +3920,8 @@ impl VarLengthExpandOperator {
             path_variable: None,
             pending: std::collections::VecDeque::new(),
             type_ids: None,
+            pinned_target: None,
+            target_reach: None,
         }
     }
 
@@ -3950,6 +3970,29 @@ impl VarLengthExpandOperator {
     ///
     /// Filtering on the interned type id inside the walk skips a non-matching
     /// edge in a compare rather than a string clone.
+    /// Neighbours in an explicitly given direction.
+    ///
+    /// `for_each_neighbor` uses `self.direction`; the reversed BFS needs the
+    /// opposite one, and taking the direction as an argument keeps a second
+    /// near-copy of the match out of the file.
+    fn neighbors_in(
+        node: NodeId,
+        type_ids: Option<&[u16]>,
+        direction: &Direction,
+        store: &GraphStore,
+        visit: &mut impl FnMut(NodeId),
+    ) {
+        let mut with_edge = |nb: NodeId, _e: crate::graph::EdgeId| visit(nb);
+        match direction {
+            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
+            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
+            Direction::Both => {
+                store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge);
+                store.for_each_incoming_neighbor(node, type_ids, &mut with_edge);
+            }
+        }
+    }
+
     fn for_each_neighbor(
         &self,
         node: NodeId,
@@ -3969,6 +4012,75 @@ impl VarLengthExpandOperator {
 
     /// BFS from the source bound in `record`, buffering one output record per
     /// distinct reachable target in `[min_hops, max_hops]`.
+    /// Pin the target to a single node the planner resolved at plan time.
+    ///
+    /// Only valid when the destination really is that one node; the operator
+    /// then answers "can this source reach it" rather than enumerating.
+    pub fn with_pinned_target(mut self, target: NodeId) -> Self {
+        self.pinned_target = Some(target);
+        self
+    }
+
+    /// Can the pinned target be reached from `source` within the hop bounds?
+    ///
+    /// Answered from a set built by one BFS *outward from the target*, walking
+    /// edges in the opposite direction, which is the same relation read the
+    /// other way round. Built once and reused for every input row.
+    ///
+    /// Restricted by the caller to `min_hops <= 1` and no path variable, and
+    /// both restrictions are load-bearing:
+    ///
+    /// * with `min_hops >= 2` a node whose *shortest* distance is 1 may still
+    ///   have a conforming longer walk, and a set keyed on shortest distance
+    ///   would wrongly exclude it;
+    /// * a path variable needs the actual path, which a membership test does
+    ///   not produce.
+    fn target_reaches(&mut self, source: NodeId, store: &GraphStore) -> bool {
+        let target = match self.pinned_target {
+            Some(t) => t,
+            None => return false,
+        };
+        if self.target_reach.is_none() {
+            self.ensure_type_ids(store);
+            let type_ids = self.type_ids.clone();
+            let type_filter = type_ids.as_deref();
+
+            // Reversed: the operator walks source -> target, so reaching the
+            // target from a source means walking target -> source backwards.
+            let reversed = match self.direction {
+                Direction::Outgoing => Direction::Incoming,
+                Direction::Incoming => Direction::Outgoing,
+                Direction::Both => Direction::Both,
+            };
+
+            let mut reach: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+            let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+            visited.insert(target);
+            if self.min_hops == 0 {
+                reach.insert(target);
+            }
+            let mut frontier = vec![target];
+            let mut depth = 0usize;
+            while !frontier.is_empty() && depth < self.max_hops {
+                depth += 1;
+                let mut next = Vec::new();
+                for &cur in &frontier {
+                    Self::neighbors_in(cur, type_filter, &reversed, store, &mut |nb| {
+                        if visited.insert(nb) {
+                            next.push(nb);
+                            if depth >= self.min_hops {
+                                reach.insert(nb);
+                            }
+                        }
+                    });
+                }
+                frontier = next;
+            }
+            self.target_reach = Some(reach);
+        }
+        self.target_reach.as_ref().is_some_and(|r| r.contains(&source))
+    }
+
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_id = record
             .get(&self.source_var)
@@ -3977,6 +4089,18 @@ impl VarLengthExpandOperator {
             .ok_or_else(|| {
                 ExecutionError::TypeError(format!("{} is not a node", self.source_var))
             })?;
+
+        // Pinned target: one membership test instead of a BFS per row. The
+        // planner only sets this when the destination resolves to a single
+        // node, there is no path variable, and `min_hops <= 1`.
+        if let Some(target) = self.pinned_target {
+            if self.target_reaches(source_id, store) && self.emit_ok(target, store) {
+                let empty: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
+                    std::collections::HashMap::new();
+                self.buffer(record, target, &empty, source_id);
+            }
+            return Ok(());
+        }
 
         // parent[node] = (predecessor, edge used) for path reconstruction.
         let mut parent: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
@@ -4113,8 +4237,20 @@ impl PhysicalOperator for VarLengthExpandOperator {
         OperatorDescription {
             name: "VarLengthExpand".to_string(),
             details: format!(
-                "({})-[:{}*{}..{}]-({})",
-                self.source_var, types, self.min_hops, max, self.target_var
+                "({})-[:{}*{}..{}]-({}){}",
+                self.source_var,
+                types,
+                self.min_hops,
+                max,
+                self.target_var,
+                // Whether the pinned-target path is in use changes the cost of
+                // this operator by orders of magnitude, so it belongs in the
+                // plan. An optimisation you cannot see in EXPLAIN is one nobody
+                // can tell has stopped firing.
+                match self.pinned_target {
+                    Some(t) => format!(" [target pinned to node {}]", t.as_u64()),
+                    None => String::new(),
+                }
             ),
             children: vec![self.input.describe()],
         }

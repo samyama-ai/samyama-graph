@@ -2715,6 +2715,23 @@ impl QueryPlanner {
                         if let Some(ref pv) = path.path_variable {
                             expand = expand.with_path_variable(pv.clone());
                         }
+                        // If the destination resolves to exactly one node, the
+                        // question is "can each source reach *this* node",
+                        // which one reversed BFS answers for every row. LDBC
+                        // IC6 reaches this operator with thousands of candidate
+                        // friends and one pinned person; without the pin each
+                        // candidate expands its own two-hop neighbourhood.
+                        //
+                        // `min_hops <= 1` because a set keyed on shortest
+                        // distance cannot answer `*2..n` correctly, and no path
+                        // variable because a membership test yields no path.
+                        if path.path_variable.is_none() && min_hops <= 1 {
+                            if let Some(pinned) =
+                                pinned_node_for(&target_var, &deferred_predicates, store)
+                            {
+                                expand = expand.with_pinned_target(pinned);
+                            }
+                        }
                         path_operator = if !segment.node.labels.is_empty() {
                             Box::new(expand.with_target_labels(segment.node.labels.clone()))
                         } else {
@@ -2986,7 +3003,7 @@ impl QueryPlanner {
                 // anchor selection outright, which is why LDBC IC6 always
                 // started at the person and expanded to 400,257 rows rather
                 // than starting at the tag that selects seven.
-                let expand = VarLengthExpandOperator::new(
+                let mut expand = VarLengthExpandOperator::new(
                     path_operator,
                     current_var.clone(),
                     target.var.clone(),
@@ -2995,6 +3012,29 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // When the far end resolves to a single node, one reversed BFS
+                // from it answers every input row — see `with_pinned_target`.
+                // This is the shape anchoring produces on LDBC IC6: the walk
+                // ends at the pinned person, and without the pin each of
+                // thousands of candidates expands its own neighbourhood to
+                // discover whether that one person is in it.
+                if path.path_variable.is_none() && length.min.unwrap_or(1) <= 1 {
+                    if let Some(pinned) = pinned_node_for(&target.var, path_preds, store)
+                        .or_else(|| target.properties.as_ref().and_then(|props| {
+                            let inline: Vec<Expression> = props.iter().map(|(k, v)| Expression::Binary {
+                                left: Box::new(Expression::Property {
+                                    variable: target.var.clone(),
+                                    property: k.clone(),
+                                }),
+                                op: BinaryOp::Eq,
+                                right: Box::new(Expression::Literal(v.clone())),
+                            }).collect();
+                            pinned_node_for(&target.var, &inline, store)
+                        }))
+                    {
+                        expand = expand.with_pinned_target(pinned);
+                    }
+                }
                 if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
                 } else {
@@ -4175,6 +4215,49 @@ fn segment_fanout(
 /// is the whole point: anchoring LDBC IC6 on the person costs 1 row to start
 /// and then 3,272 -> 409,960 -> 400,257, while anchoring on the tag costs
 /// 16,080 rows to scan and almost nothing after it.
+/// The single node a variable is pinned to, if the predicates pin it to one.
+///
+/// Resolved at plan time by asking the property index, so this only fires when
+/// the pin is exact — an indexed equality matching exactly one node, or an
+/// `id()` literal. A predicate that merely narrows the variable is not a pin,
+/// and treating it as one would silently drop rows.
+fn pinned_node_for(
+    var: &str,
+    preds: &[Expression],
+    store: &GraphStore,
+) -> Option<crate::graph::NodeId> {
+    if let Some((_, ids)) = find_id_predicate(var, preds) {
+        if ids.len() == 1 {
+            return Some(ids[0]);
+        }
+        return None;
+    }
+    for pred in preds {
+        let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { continue };
+        let (prop_var, prop_name, value) = match (left.as_ref(), right.as_ref()) {
+            (Expression::Property { variable, property }, Expression::Literal(v)) => (variable, property, v),
+            (Expression::Literal(v), Expression::Property { variable, property }) => (variable, property, v),
+            _ => continue,
+        };
+        if prop_var != var {
+            continue;
+        }
+        // Ask the index for the actual matches rather than estimating: a pin
+        // has to be exactly one node, and an estimate cannot establish that.
+        for label in store.catalog().label_counts.keys() {
+            let Some(index) = store.property_index.get_index(label, prop_name) else { continue };
+            let nodes = index.read().unwrap().get(value);
+            if nodes.len() == 1 {
+                return nodes.first().copied();
+            }
+            if !nodes.is_empty() {
+                return None;
+            }
+        }
+    }
+    None
+}
+
 fn estimate_path_cost(
     path: &PathPattern,
     nodes: &[PathNodeRef],
@@ -4283,8 +4366,22 @@ fn choose_anchor_index(
     let mut best_idx = 0usize;
     let mut best_cost = f64::MAX;
 
+    // `SAMYAMA_EXPLAIN_ANCHORS=1` prints the cost of every candidate anchor.
+    // Anchor choice is the difference between a plan that finishes and one
+    // that times out, and `EXPLAIN` shows only the winner — so when the winner
+    // looks wrong there is otherwise nothing to inspect but the source.
+    let trace = std::env::var("SAMYAMA_EXPLAIN_ANCHORS").is_ok_and(|v| v == "1");
+
     for i in 0..nodes.len() {
         let cost = estimate_path_cost(path, nodes, i, path_preds, store);
+        if trace {
+            let (scan, emitted) = anchor_cardinality(&nodes[i], path_preds, store);
+            eprintln!(
+                "[anchor] {:<12} labels={:?} scan={:.0} emitted={:.0} path_cost={:.0}",
+                nodes[i].var, nodes[i].labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                scan, emitted, cost
+            );
+        }
         // Strict, so node 0 wins ties: re-anchoring has a real cost the model
         // does not capture (a reversed traversal reads the other adjacency,
         // which may be colder), and the written order is the better default
