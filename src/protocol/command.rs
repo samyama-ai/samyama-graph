@@ -340,6 +340,17 @@ impl CommandHandler {
             Value::List(items) => {
                 RespValue::Array(items.iter().map(|i| self.format_value(i)).collect())
             }
+            Value::Map(entries) => RespValue::Array(
+                entries
+                    .iter()
+                    .flat_map(|(k, v)| {
+                        [
+                            RespValue::BulkString(Some(k.clone().into_bytes())),
+                            self.format_value(v),
+                        ]
+                    })
+                    .collect(),
+            ),
             Value::Node(id, _node) => {
                 // Format node as JSON-like string
                 let node_str = format!("Node({:?})", id);

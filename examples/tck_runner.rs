@@ -542,6 +542,9 @@ fn value_to_tck(v: &Value, store: &GraphStore) -> Tck {
             Tck::Rel(e.edge_type.as_str().to_string(), props)
         }
         Value::List(items) => Tck::List(items.iter().map(|i| value_to_tck(i, store)).collect()),
+        Value::Map(entries) => Tck::Map(
+            entries.iter().map(|(k, v)| (k.clone(), value_to_tck(v, store))).collect(),
+        ),
         Value::Path { nodes, edges } => {
             // An edge is stored with its own source and target, which need not
             // run the same way as the walk: `MATCH (b)<-[r]-(a)` traverses `r`

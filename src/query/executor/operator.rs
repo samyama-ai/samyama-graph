@@ -402,6 +402,20 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
                 .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
             Ok(Value::Property(val.resolve_property(property, store)))
         }
+        // A collection literal whose elements are expressions. The
+        // all-literal form never reaches here -- the grammar matches it as a
+        // `PropertyValue` first -- so this is only the case that could not be
+        // expressed before (#654).
+        Expression::ListExpr(items) => Ok(Value::List(
+            items.iter().map(|e| eval_expression(e, record, store)).collect::<ExecutionResult<Vec<_>>>()?,
+        )),
+        Expression::MapExpr(entries) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (k, e) in entries {
+                out.insert(k.clone(), eval_expression(e, record, store)?);
+            }
+            Ok(Value::Map(out))
+        }
         Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
         Expression::Binary { left, op, right } => {
             let l = eval_expression(left, record, store)?;
@@ -3031,6 +3045,11 @@ const PARALLEL_PREDICATE_COST: u32 = 20;
 /// the answer lands on does, so the weights are deliberately coarse.
 fn predicate_cost(expr: &Expression) -> u32 {
     match expr {
+        // Cost of the elements, plus a little for building the collection.
+        Expression::ListExpr(items) => 1 + items.iter().map(predicate_cost).sum::<u32>(),
+        Expression::MapExpr(entries) => {
+            1 + entries.iter().map(|(_, e)| predicate_cost(e)).sum::<u32>()
+        }
         // The unit. A scattered column read plus the match to unwrap it.
         Expression::Property { .. } => 1,
         // Free: already in the record, or in the expression.
@@ -3132,6 +3151,11 @@ impl FilterOperator {
 
     fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
+            // Delegates rather than adding a sixth copy of this logic; the
+            // standalone evaluator is the one implementation (#654).
+            Expression::ListExpr(_) | Expression::MapExpr(_) => {
+                eval_expression(expr, record, store)
+            }
             Expression::Variable(var) => {
                 record.get(var)
                     .cloned()
@@ -4445,6 +4469,11 @@ impl ProjectOperator {
 
     fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
+            // Delegates rather than adding a sixth copy of this logic; the
+            // standalone evaluator is the one implementation (#654).
+            Expression::ListExpr(_) | Expression::MapExpr(_) => {
+                eval_expression(expr, record, store)
+            }
             Expression::Variable(var) => {
                 let val = record.get(var)
                     .cloned()
@@ -4775,6 +4804,9 @@ impl AggregatorState {
                     // A list is distinguished by its rendering, which is the
                     // cheapest total order available over mixed element types.
                     Value::List(items) => set.insert_prop(PropertyValue::String(format!("{items:?}"))),
+                    Value::Map(entries) => {
+                        set.insert_prop(PropertyValue::String(format!("{entries:?}")))
+                    }
                     Value::Property(prop) => {
                         if !prop.is_null() {
                             set.insert_prop(prop.clone());
@@ -5013,6 +5045,11 @@ impl AggregateOperator {
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
+            // Delegates rather than adding a sixth copy of this logic; the
+            // standalone evaluator is the one implementation (#654).
+            Expression::ListExpr(_) | Expression::MapExpr(_) => {
+                eval_expression(expr, record, store)
+            }
             Expression::Variable(var) => {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
             }
@@ -6193,6 +6230,11 @@ impl SortOperator {
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
+            // Delegates rather than adding a sixth copy of this logic; the
+            // standalone evaluator is the one implementation (#654).
+            Expression::ListExpr(_) | Expression::MapExpr(_) => {
+                eval_expression(expr, record, store)
+            }
             Expression::Variable(var) => {
                 record.get(var)
                     .cloned()
@@ -9528,6 +9570,26 @@ impl PhysicalOperator for SetPropertyOperator {
                         Value::Null => PropertyValue::Null,
                         // Degrades to ids, as the node and edge arms below do:
                         // a `PropertyValue` cannot hold an entity.
+                        Value::Map(entries) => PropertyValue::Map(
+                            entries
+                                .iter()
+                                .map(|(k, v)| {
+                                    (
+                                        k.clone(),
+                                        match v {
+                                            Value::Property(p) => p.clone(),
+                                            Value::NodeRef(id) | Value::Node(id, _) => {
+                                                PropertyValue::Integer(id.as_u64() as i64)
+                                            }
+                                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                                PropertyValue::Integer(id.as_u64() as i64)
+                                            }
+                                            _ => PropertyValue::Null,
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        ),
                         Value::List(items) => PropertyValue::Array(
                             items
                                 .iter()
@@ -9834,6 +9896,20 @@ impl PhysicalOperator for UnwindOperator {
 
             let list_val = eval_expression(&self.expression, &record, store)?;
 
+            // A `Value::List` is what a collection literal containing
+            // expressions evaluates to (#654). Without this arm `UNWIND
+            // [date({...})] AS d` iterated nothing and returned no rows --
+            // success, with the loop body never running.
+            if let Value::List(values) = list_val {
+                self.buffer.clear();
+                self.buffer_idx = 0;
+                for value in values {
+                    let mut new_record = record.clone();
+                    new_record.bind(self.variable.clone(), value);
+                    self.buffer.push(new_record);
+                }
+                continue;
+            }
             let items = match list_val {
                 Value::Property(PropertyValue::Array(arr)) => arr,
                 Value::Property(PropertyValue::Vector(vec)) => {
@@ -10838,6 +10914,11 @@ impl WithBarrierOperator {
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
+            // Delegates rather than adding a sixth copy of this logic; the
+            // standalone evaluator is the one implementation (#654).
+            Expression::ListExpr(_) | Expression::MapExpr(_) => {
+                eval_expression(expr, record, store)
+            }
             Expression::Variable(var) => {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
             }

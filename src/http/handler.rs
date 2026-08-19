@@ -139,6 +139,12 @@ pub async fn query_handler(
                     
                     // Extract graph elements for visualization
                     match val {
+                        Value::Map(entries) => {
+                            row.push(json!(entries
+                                .iter()
+                                .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                                .collect::<std::collections::BTreeMap<_, _>>()));
+                        }
                         Value::List(items) => {
                             row.push(serde_json::Value::Array(
                                 items.iter().map(|i| json!(format!("{i:?}"))).collect(),

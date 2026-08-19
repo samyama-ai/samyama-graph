@@ -2255,6 +2255,42 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 let val = parse_value(inner)?;
                 return Ok(Expression::Literal(val));
             }
+            // Reached only when the literal forms above could not match, so an
+            // all-literal collection still becomes a `PropertyValue` and every
+            // consumer of that shape is untouched (#654).
+            Rule::list_expr => {
+                let mut items = Vec::new();
+                for item in inner.into_inner() {
+                    if item.as_rule() == Rule::expression {
+                        items.push(parse_expression(item)?);
+                    }
+                }
+                return Ok(Expression::ListExpr(items));
+            }
+            Rule::map_expr => {
+                let mut entries = Vec::new();
+                for entry in inner.into_inner() {
+                    if entry.as_rule() != Rule::map_expr_entry {
+                        continue;
+                    }
+                    let mut key = String::new();
+                    let mut value = None;
+                    for part in entry.into_inner() {
+                        match part.as_rule() {
+                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::string => {
+                                key = unescape_string_literal(part.as_str());
+                            }
+                            Rule::expression => value = Some(parse_expression(part)?),
+                            _ => {}
+                        }
+                    }
+                    if let Some(v) = value {
+                        entries.push((key, v));
+                    }
+                }
+                return Ok(Expression::MapExpr(entries));
+            }
             Rule::expression => {
                 return parse_expression(inner);
             }

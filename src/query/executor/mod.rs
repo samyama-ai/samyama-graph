@@ -570,6 +570,19 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
 fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
     use crate::query::ast::Expression;
     match expr {
+        // Recursed into, not skipped: a parameter inside a collection literal
+        // is still a parameter, and leaving it unsubstituted makes `$x` a
+        // missing variable at evaluation time (#654).
+        Expression::ListExpr(items) => {
+            for e in items.iter_mut() {
+                substitute_expr(e, params);
+            }
+        }
+        Expression::MapExpr(entries) => {
+            for (_, e) in entries.iter_mut() {
+                substitute_expr(e, params);
+            }
+        }
         Expression::Parameter(name) => {
             if let Some(val) = params.get(name.as_str()) {
                 *expr = Expression::Literal(val.clone());

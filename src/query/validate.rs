@@ -34,11 +34,17 @@ pub enum ValidationError {
     MergeVariableLengthRelationship,
     MergeOnBoundVariable(String),
     MergeRelationshipWithNullProperty(String),
+    VariableTypeConflict(String),
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::VariableTypeConflict(name) => write!(
+                f,
+                "`{name}` is bound to a collection and cannot be used as a node or \
+                 relationship in a pattern"
+            ),
             Self::MergeRelationshipWithoutType => write!(
                 f,
                 "MERGE requires exactly one relationship type: `MERGE (a)-->(b)` does not say \
@@ -334,6 +340,117 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
             for seg in &path.segments {
                 check(&seg.node)?;
             }
+        }
+    }
+
+    // ---- A pattern variable that is already bound to a collection.
+    //
+    // `WITH [n] AS users MATCH (users)-->(m)` is a compile-time error in
+    // Cypher: `users` is a list, and a list is not a node. Until collection
+    // literals could hold expressions this was unreachable — `[n]` did not
+    // parse, so the query failed for an unrelated reason and the TCK scenario
+    // asserting the error passed by accident. Making the literal work removed
+    // the accident, which is the honest moment to implement the rule (#654).
+    {
+        use crate::query::ast::Clause;
+        let mut collections: HashSet<String> = HashSet::new();
+        for clause in &query.clauses {
+            match clause {
+                Clause::With(wc) => {
+                    for item in &wc.items {
+                        let Some(alias) = item.alias.as_ref() else { continue };
+                        let is_collection = matches!(
+                            &item.expression,
+                            Expression::ListExpr(_)
+                                | Expression::MapExpr(_)
+                                | Expression::Literal(crate::graph::PropertyValue::Array(_))
+                                | Expression::Literal(crate::graph::PropertyValue::Map(_))
+                        );
+                        // Re-aliasing something else to the same name clears it.
+                        if is_collection {
+                            collections.insert(alias.clone());
+                        } else {
+                            collections.remove(alias);
+                        }
+                    }
+                }
+                Clause::Match(mc) => {
+                    for path in &mc.pattern.paths {
+                        let mut check = |v: &Option<String>| -> Result<(), ValidationError> {
+                            if let Some(name) = v {
+                                if collections.contains(name) {
+                                    return Err(ValidationError::VariableTypeConflict(name.clone()));
+                                }
+                            }
+                            Ok(())
+                        };
+                        check(&path.start.variable)?;
+                        for seg in &path.segments {
+                            check(&seg.node.variable)?;
+                            check(&seg.edge.variable)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // The by-kind shape says the same thing differently: `with_clause`
+        // plus the matches after `with_split_index`, then each extra WITH
+        // stage with the matches that follow it. Checking only the pipeline
+        // shape missed this query entirely, because `MATCH … WITH … MATCH …
+        // RETURN` is a shape the established rules already accept.
+        let mut collections: HashSet<String> = HashSet::new();
+        let mut note = |wc: &crate::query::ast::WithClause,
+                        collections: &mut HashSet<String>| {
+            for item in &wc.items {
+                let Some(alias) = item.alias.as_ref() else { continue };
+                let is_collection = matches!(
+                    &item.expression,
+                    Expression::ListExpr(_)
+                        | Expression::MapExpr(_)
+                        | Expression::Literal(crate::graph::PropertyValue::Array(_))
+                        | Expression::Literal(crate::graph::PropertyValue::Map(_))
+                );
+                if is_collection {
+                    collections.insert(alias.clone());
+                } else {
+                    collections.remove(alias);
+                }
+            }
+        };
+        let check_patterns = |mcs: &[crate::query::ast::MatchClause],
+                              collections: &HashSet<String>|
+         -> Result<(), ValidationError> {
+            for mc in mcs {
+                for path in &mc.pattern.paths {
+                    let mut check = |v: &Option<String>| -> Result<(), ValidationError> {
+                        if let Some(name) = v {
+                            if collections.contains(name) {
+                                return Err(ValidationError::VariableTypeConflict(name.clone()));
+                            }
+                        }
+                        Ok(())
+                    };
+                    check(&path.start.variable)?;
+                    for seg in &path.segments {
+                        check(&seg.node.variable)?;
+                        check(&seg.edge.variable)?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Some(wc) = &query.with_clause {
+            note(wc, &mut collections);
+            let from = query.with_split_index.unwrap_or(query.match_clauses.len());
+            if from <= query.match_clauses.len() {
+                check_patterns(&query.match_clauses[from..], &collections)?;
+            }
+        }
+        for (wc, _, matches, _) in &query.extra_with_stages {
+            note(wc, &mut collections);
+            check_patterns(matches, &collections)?;
         }
     }
 

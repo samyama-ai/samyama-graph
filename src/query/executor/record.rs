@@ -127,6 +127,11 @@ pub enum Value {
     /// integer ids and a variable-length relationship variable was not bound
     /// at all.
     List(Vec<Value>),
+    /// A map whose values are themselves `Value`s.
+    ///
+    /// `PropertyValue::Map` cannot hold an entity, and `{key: u}` over a node
+    /// is how the TCK's Delete5 scenarios reach what they delete (#654).
+    Map(std::collections::BTreeMap<String, Value>),
     /// Null
     Null,
 }
@@ -164,6 +169,10 @@ impl Hash for Value {
             Value::Property(p) => { 2u8.hash(state); p.hash(state); }
             Value::Path { nodes, edges } => { 3u8.hash(state); nodes.hash(state); edges.hash(state); }
             Value::List(items) => { 5u8.hash(state); items.hash(state); }
+            Value::Map(entries) => {
+                6u8.hash(state);
+                for (k, v) in entries { k.hash(state); v.hash(state); }
+            }
             Value::Null => { 4u8.hash(state); }
         }
     }

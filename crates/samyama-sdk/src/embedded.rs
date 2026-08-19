@@ -162,6 +162,11 @@ fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> Quer
             };
 
             match val {
+                Value::Map(entries) => {
+                    row.push(serde_json::Value::Object(
+                        entries.iter().map(|(k, v)| (k.clone(), serde_json::json!(format!("{v:?}")))).collect(),
+                    ));
+                }
                 Value::List(items) => {
                     row.push(serde_json::Value::Array(
                         items.iter().map(|i| serde_json::json!(format!("{i:?}"))).collect(),

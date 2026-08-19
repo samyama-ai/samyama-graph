@@ -539,6 +539,14 @@ pub enum Expression {
     PathVariable(String),
     /// Query parameter reference ($name)
     Parameter(String),
+    /// `[a, f(b), 1]` — a list literal whose elements are expressions.
+    ///
+    /// Distinct from `Literal(PropertyValue::Array(..))`, which can only hold
+    /// literals. The grammar tries the literal form first, so this variant
+    /// appears only for collections the literal form cannot express (#654).
+    ListExpr(Vec<Expression>),
+    /// `{k: a, j: f(b)}` — a map literal whose values are expressions.
+    MapExpr(Vec<(String, Expression)>),
 }
 
 /// Binary operators

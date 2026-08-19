@@ -15,6 +15,10 @@ use samyama::query::parser::parse_query;
 
 fn render(v: Option<&Value>) -> String {
     match v {
+        Some(Value::Map(entries)) => format!(
+            "{{{}}}",
+            entries.iter().map(|(k, v)| format!("{k}: {}", render(Some(v)))).collect::<Vec<_>>().join(", ")
+        ),
         Some(Value::List(items)) => format!(
             "[{}]",
             items.iter().map(|i| render(Some(i))).collect::<Vec<_>>().join(", ")

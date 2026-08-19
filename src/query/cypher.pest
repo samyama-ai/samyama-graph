@@ -250,6 +250,8 @@ primary = {
     property_access |
     parameter |
     value |
+    list_expr |
+    map_expr |
     variable |
     pattern_predicate |
     "(" ~ expression ~ ")"
@@ -345,6 +347,19 @@ string = @{ "\"" ~ (escape_seq | !("\"" | "\\") ~ ANY)* ~ "\"" | "'" ~ (escape_s
 list = { "[" ~ (value ~ ("," ~ value)*)? ~ "]" }
 map = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
 map_entry = { (string | property_key) ~ ":" ~ value }
+
+// Collection literals whose elements are arbitrary expressions.
+//
+// `list` and `map` above are built from `value`, which is literals only, so
+// `[abs(1)]`, `[date({year: 1910})]` and `{key: u}` were all parse errors —
+// the last one blocking every Delete5 scenario, which reaches its nodes
+// through a map. These are tried *after* `value` in `primary`, so an
+// all-literal collection keeps producing a `PropertyValue` and every existing
+// consumer of that shape is untouched; only collections that `value` cannot
+// match reach here.
+list_expr = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
+map_expr = { "{" ~ (map_expr_entry ~ ("," ~ map_expr_entry)*)? ~ "}" }
+map_expr_entry = { (string | property_key) ~ ":" ~ expression }
 
 // Variable names
 variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
