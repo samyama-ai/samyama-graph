@@ -1695,7 +1695,7 @@ impl QueryPlanner {
             let create_pattern = &create_clause.pattern;
 
             // Collect edges to create from the CREATE pattern
-            let mut edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+            let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
 
             // Variables the MATCH already bound. Anything else in the CREATE pattern is a
             // *new* node: previously such nodes were dropped on the floor, so
@@ -1792,6 +1792,7 @@ impl QueryPlanner {
                         edge_type,
                         edge_properties,
                         edge_variable,
+                        edge.property_exprs.clone(),
                     ));
 
                     current_var = target_var;
@@ -2721,7 +2722,15 @@ impl QueryPlanner {
                 for (seg_idx, segment) in path.segments.iter().enumerate() {
                     let target_var = path_nodes[seg_idx + 1].var.clone();
 
-                    let edge_var = segment.edge.variable.clone();
+                    // An inline relationship property constraint has to be
+                    // applied; it used to be dropped, so
+                    // `MATCH ()-[r:R {num: 2}]->()` returned every `:R` (#649).
+                    // An anonymous relationship gets a name to filter on.
+                    let edge_filter = self.edge_property_filter(&segment.edge, seg_idx);
+                    let edge_var = match &edge_filter {
+                        Some((var, _)) => Some(var.clone()),
+                        None => segment.edge.variable.clone(),
+                    };
                     let edge_types: Vec<String> = segment.edge.types.iter()
                         .map(|t| t.as_str().to_string())
                         .collect();
@@ -2836,6 +2845,10 @@ impl QueryPlanner {
                             let filter_expr = self.build_property_filter(&target_var, props);
                             path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                         }
+                    }
+
+                    if let Some((_, predicate)) = edge_filter {
+                        path_operator = Box::new(FilterOperator::new(path_operator, predicate));
                     }
 
                     bound.insert(target_var.clone());
@@ -3038,7 +3051,16 @@ impl QueryPlanner {
         for seg_idx in (0..anchor_idx).rev() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx];
-            let edge_var = segment.edge.variable.clone();
+            // Same rule as the main path builder: an inline relationship
+            // property constraint is applied rather than dropped (#649). Which
+            // of these builders runs depends on where the cheapest anchor is,
+            // so a fix in only one of them is a fix that depends on the
+            // optimiser's mood.
+            let edge_filter = self.edge_property_filter(&segment.edge, seg_idx);
+            let edge_var = match &edge_filter {
+                Some((var, _)) => Some(var.clone()),
+                None => segment.edge.variable.clone(),
+            };
             let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
             let reversed_dir = match segment.edge.direction {
                 Direction::Outgoing => Direction::Incoming,
@@ -3134,6 +3156,9 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
+            if let Some((_, predicate)) = edge_filter {
+                path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+            }
             bound.insert(target.var.clone());
             if let Some(ev) = &segment.edge.variable {
                 bound.insert(ev.clone());
@@ -3148,7 +3173,16 @@ impl QueryPlanner {
         for seg_idx in anchor_idx..path.segments.len() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx + 1];
-            let edge_var = segment.edge.variable.clone();
+            // Same rule as the main path builder: an inline relationship
+            // property constraint is applied rather than dropped (#649). Which
+            // of these builders runs depends on where the cheapest anchor is,
+            // so a fix in only one of them is a fix that depends on the
+            // optimiser's mood.
+            let edge_filter = self.edge_property_filter(&segment.edge, seg_idx);
+            let edge_var = match &edge_filter {
+                Some((var, _)) => Some(var.clone()),
+                None => segment.edge.variable.clone(),
+            };
             let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
             path_operator = if let Some(length) = &segment.edge.length {
                 let expand = VarLengthExpandOperator::new(
@@ -3206,6 +3240,9 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
+            if let Some((_, predicate)) = edge_filter {
+                path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+            }
             bound.insert(target.var.clone());
             if let Some(ev) = &segment.edge.variable {
                 bound.insert(ev.clone());
@@ -3220,6 +3257,30 @@ impl QueryPlanner {
 
     /// Build a filter expression from node properties.
     /// Converts {name: "Alice", age: 30} into (n.name = "Alice" AND n.age = 30)
+    /// A filter for an inline relationship property constraint, if it has one.
+    ///
+    /// `MATCH ()-[r:R {num: 2}]->()` was planned with the type filter only and
+    /// the properties dropped, so it returned **every** `:R` -- a silent
+    /// over-match, and the same query written `WHERE r.num = 2` answered
+    /// correctly. The node side of the pattern has always been filtered; this
+    /// is the relationship side of the same rule (#649).
+    ///
+    /// An anonymous relationship needs a name to filter on, so one is invented
+    /// when the pattern did not give it one. Nothing reads it: `RETURN *`
+    /// expands from the query's own variables, not from the record's keys.
+    fn edge_property_filter(
+        &self,
+        edge: &crate::query::ast::EdgePattern,
+        seg_idx: usize,
+    ) -> Option<(String, Expression)> {
+        let props = edge.properties.as_ref().filter(|p| !p.is_empty())?;
+        let var = edge
+            .variable
+            .clone()
+            .unwrap_or_else(|| format!("__edge_props_{seg_idx}"));
+        Some((var.clone(), self.build_property_filter(&var, props)))
+    }
+
     fn build_property_filter(&self, var: &str, props: &HashMap<String, PropertyValue>) -> Expression {
         let mut conditions: Vec<Expression> = Vec::new();
 
@@ -3769,7 +3830,7 @@ impl QueryPlanner {
         let mut output_columns: Vec<String> = Vec::new();
 
         // Collect edges to create: (source_var, target_var, edge_type, properties, edge_var)
-        let mut edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
 
         // Anonymous nodes still need a handle for edge wiring. Edges are wired by variable
         // name, so an endpoint written as `(:Label)` used to have nothing to wire to and
@@ -3913,6 +3974,7 @@ impl QueryPlanner {
                         edge_type,
                         edge_properties,
                         edge_variable,
+                        edge.property_exprs.clone(),
                     ));
                 }
 
@@ -4548,13 +4610,8 @@ impl QueryPlanner {
             HashMap<String, PropertyValue>,
             Option<HashMap<String, Expression>>,
         )> = Vec::new();
-        let mut edges_to_create: Vec<(
-            String,
-            String,
-            EdgeType,
-            HashMap<String, PropertyValue>,
-            Option<String>,
-        )> = Vec::new();
+        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> =
+            Vec::new();
 
         let mut handle_for = |node: &crate::query::ast::NodePattern,
                               nodes: &mut Vec<(
@@ -4612,6 +4669,7 @@ impl QueryPlanner {
                     edge_type,
                     segment.edge.properties.clone().unwrap_or_default(),
                     segment.edge.variable.clone(),
+                    segment.edge.property_exprs.clone(),
                 ));
                 current = target;
             }

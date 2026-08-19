@@ -5958,6 +5958,25 @@ impl PhysicalOperator for LimitOperator {
         }
     }
 
+    // A pass-through operator's default `next_mut` delegates to `next`, which
+    // reads its input read-only -- so a LIMIT above a write made the write
+    // operators refuse outright: `UNWIND [...] AS x CREATE (n) RETURN n.num
+    // LIMIT 2` failed with "requires mutable store access". Same defect class
+    // as the barriers in #622 and the joins in #624, in the last two
+    // pass-through operators that still had it (#649).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.count >= self.limit {
+            return Ok(None);
+        }
+
+        if let Some(record) = self.input.next_mut(store, tenant_id)? {
+            self.count += 1;
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn try_push_limit(&mut self, n: usize) -> bool {
         // Forward the more restrictive of (incoming hint, our own limit).
         // This handles `RETURN ... LIMIT 5 LIMIT 3` and similar nested-limit
@@ -7967,8 +7986,14 @@ impl PhysicalOperator for CreateEdgeOperator {
 pub struct CreateNodesAndEdgesOperator {
     /// Node creation operator
     node_operator: OperatorBox,
-    /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
-    edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    /// Edges to create: (source_var, target_var, edge_type, literal properties,
+    /// edge_var, property expressions).
+    ///
+    /// The expressions are the row-dependent half -- `{num: x}` from an UNWIND.
+    /// Without them `CREATE ()-[r:R {num: x}]->()` made the relationship and
+    /// left `r.num` null, which is a wrong answer rather than a missing one
+    /// (#649). The node side of this operator has carried them since #467.
+    edges_to_create: Vec<EdgeToCreate>,
     /// Variable to NodeId mapping (built during node creation)
     var_to_node_id: HashMap<String, NodeId>,
     /// Created edges
@@ -7985,7 +8010,7 @@ impl CreateNodesAndEdgesOperator {
     /// Create a new CreateNodesAndEdgesOperator
     pub fn new(
         node_operator: OperatorBox,
-        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+        edges_to_create: Vec<EdgeToCreate>,
     ) -> Self {
         Self {
             node_operator,
@@ -8027,7 +8052,9 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
         // Phase 1: Create all edges
         if self.phase == 1 {
-            for (source_var, target_var, edge_type, properties, edge_var) in &self.edges_to_create {
+            for (source_var, target_var, edge_type, properties, edge_var, _exprs) in
+                &self.edges_to_create
+            {
                 let source_id = self.var_to_node_id.get(source_var)
                     .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
                 let target_id = self.var_to_node_id.get(target_var)
@@ -8088,6 +8115,17 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 /// Operator for MATCH...CREATE queries
 /// Example: `MATCH (a:Trial {id: 'NCT001'}), (b:Condition {mesh_id: 'D001'}) CREATE (a)-[:STUDIES]->(b)`
 /// This operator takes matched nodes and creates edges between them
+/// `(source_var, target_var, edge_type, literal properties, edge_var,
+/// property expressions)` for one relationship a CREATE has to build.
+pub type EdgeToCreate = (
+    String,
+    String,
+    EdgeType,
+    HashMap<String, PropertyValue>,
+    Option<String>,
+    Option<HashMap<String, Expression>>,
+);
+
 pub struct MatchCreateEdgeOperator {
     /// Input operator (MATCH results)
     input: OperatorBox,
@@ -8096,8 +8134,14 @@ pub struct MatchCreateEdgeOperator {
     /// were ignored entirely, so `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither
     /// the node nor the edge and reported success.
     nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
-    /// Edges to create: (source_var, target_var, edge_type, properties, edge_var)
-    edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    /// Edges to create: (source_var, target_var, edge_type, literal properties,
+    /// edge_var, property expressions).
+    ///
+    /// The expressions are the row-dependent half -- `{num: x}` from an UNWIND.
+    /// Without them `CREATE ()-[r:R {num: x}]->()` made the relationship and
+    /// left `r.num` null, which is a wrong answer rather than a missing one
+    /// (#649). The node side of this operator has carried them since #467.
+    edges_to_create: Vec<EdgeToCreate>,
     /// Whether edges have been created for current batch
     done: bool,
     /// Results to return
@@ -8110,7 +8154,7 @@ impl MatchCreateEdgeOperator {
     /// Create a new MatchCreateEdgeOperator
     pub fn new(
         input: OperatorBox,
-        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+        edges_to_create: Vec<EdgeToCreate>,
     ) -> Self {
         Self::with_nodes(input, Vec::new(), edges_to_create)
     }
@@ -8121,7 +8165,7 @@ impl MatchCreateEdgeOperator {
     pub fn with_nodes(
         input: OperatorBox,
         nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
-        edges_to_create: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+        edges_to_create: Vec<EdgeToCreate>,
     ) -> Self {
         Self {
             input,
@@ -8188,7 +8232,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 }
 
                 // For each matched record, create the specified edges
-                for (source_var, target_var, edge_type, properties, _edge_var) in &self.edges_to_create {
+                for (source_var, target_var, edge_type, properties, edge_var, property_exprs) in
+                    &self.edges_to_create
+                {
                     // Get source node ID from record bindings
                     let source_id = match record.get(source_var).and_then(|v| v.node_id()) {
                         Some(id) => id,
@@ -8209,11 +8255,48 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     for (key, value) in properties {
                         store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
                     }
+                    // Property values that are expressions rather than
+                    // literals -- crucially including the loop variable. These
+                    // live in `property_exprs`, and not evaluating them made
+                    // `CREATE ()-[r:R {num: x}]->()` build the right number of
+                    // relationships with none of the data (#649), the same
+                    // defect the node side had in #467.
+                    if let Some(exprs) = property_exprs {
+                        for (key, expr) in exprs {
+                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                                store.set_edge_property_sparse(edge_id, key.clone(), pv);
+                            }
+                        }
+                    }
+
+                    // Property values that are expressions rather than
+                    // literals -- crucially including the loop variable. These
+                    // live in `property_exprs`, and not evaluating them made
+                    // `CREATE ()-[r:R {num: x}]->()` build the right number of
+                    // relationships with none of the data (#649), the same
+                    // defect the node side had in #467.
+                    if let Some(exprs) = property_exprs {
+                        for (key, expr) in exprs {
+                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                                store.set_edge_property_sparse(edge_id, key.clone(), pv);
+                            }
+                        }
+                    }
 
                     // Build result record with the created edge
                     let mut result_record = record.clone();
                     if let Some(edge) = store.get_edge(edge_id) {
-                        result_record.bind("_edge".to_string(), Value::Edge(edge_id, Box::new(edge)));
+                        let value = Value::Edge(edge_id, Box::new(edge));
+                        // Under the pattern's own name as well as the internal
+                        // one. Binding only `_edge` meant
+                        // `CREATE ()-[r:R {num: x}]->() RETURN r.num` could not
+                        // find `r`: the edge existed, with the right
+                        // properties, under a name the query never wrote
+                        // (#649).
+                        if let Some(var) = edge_var {
+                            result_record.bind(var.clone(), value.clone());
+                        }
+                        result_record.bind("_edge".to_string(), value);
                     }
                     self.results.push(result_record);
                 }
@@ -9190,6 +9273,19 @@ impl PhysicalOperator for SkipOperator {
             }
         }
         self.input.next(store)
+    }
+
+    // See `LimitOperator::next_mut`: skipping a row still has to *produce* it,
+    // and producing it may be a write (#649).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        while self.skipped < self.skip {
+            if self.input.next_mut(store, tenant_id)?.is_some() {
+                self.skipped += 1;
+            } else {
+                return Ok(None);
+            }
+        }
+        self.input.next_mut(store, tenant_id)
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
