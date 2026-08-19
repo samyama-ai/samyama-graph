@@ -3698,6 +3698,14 @@ impl ExpandOperator {
                     }
                 });
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                    // A self-relationship is incident to its node twice -- once
+                    // outgoing, once incoming -- and the walk above has already
+                    // taken it. Undirected matching traverses each
+                    // relationship once, so `MATCH ()--()` over a single
+                    // `(a)-[:LOOP]->(a)` is one match and not two (#640).
+                    if source == node_id {
+                        return;
+                    }
                     if keeps(source) {
                         collected.push((eid, source, node_id));
                     }

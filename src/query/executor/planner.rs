@@ -2768,10 +2768,26 @@ impl QueryPlanner {
                         continue;
                     }
 
+                    // A variable already bound has to be *matched*, not
+                    // rebound. `ExpandOperator` binds its target
+                    // unconditionally, so `MATCH (b)-->(b)` bound the far end
+                    // of each edge over the near one and every edge matched --
+                    // a graph containing no self-relationships at all returned
+                    // one row per edge (#639). Expanding into a synthetic name
+                    // and requiring the two to be equal is what a repeated
+                    // variable means; the walk then continues from the
+                    // original, which the filter has just proved is the same
+                    // node.
+                    let self_ref = bound.contains(&target_var);
+                    let expand_var = if self_ref {
+                        format!("__self_{target_var}_{seg_idx}")
+                    } else {
+                        target_var.clone()
+                    };
                     let mut expand = ExpandOperator::new(
                         path_operator,
                         current_var.clone(),
-                        target_var.clone(),
+                        expand_var.clone(),
                         edge_var,
                         edge_types,
                         segment.edge.direction.clone(),
@@ -2788,6 +2804,16 @@ impl QueryPlanner {
                     } else {
                         Box::new(expand)
                     };
+                    if self_ref {
+                        path_operator = Box::new(FilterOperator::new(
+                            path_operator,
+                            Expression::Binary {
+                                left: Box::new(Expression::Variable(expand_var)),
+                                op: BinaryOp::Eq,
+                                right: Box::new(Expression::Variable(target_var.clone())),
+                            },
+                        ));
+                    }
 
                     // Add property filter for target node if properties specified
                     if let Some(ref props) = segment.node.properties {
@@ -3053,11 +3079,38 @@ impl QueryPlanner {
                     Box::new(expand) as OperatorBox
                 }
             } else {
-                let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, reversed_dir);
-                if !target.labels.is_empty() {
-                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                // A variable already bound has to be *matched*, not rebound.
+                // `ExpandOperator` binds its target unconditionally, so
+                // `MATCH (b)-->(b)` bound the far end of each edge over the
+                // near one and every edge matched -- a graph containing no
+                // self-relationships at all returned one row per edge (#639).
+                // Expanding into a synthetic name and requiring the two to be
+                // equal is what a repeated variable means; the walk continues
+                // from the original, which the filter has just proved is the
+                // same node.
+                let self_ref = bound.contains(&target.var);
+                let expand_var = if self_ref {
+                    format!("__self_{}_{}", target.var, seg_idx)
                 } else {
-                    Box::new(expand) as OperatorBox
+                    target.var.clone()
+                };
+                let expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, reversed_dir);
+                let expanded: OperatorBox = if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone()))
+                } else {
+                    Box::new(expand)
+                };
+                if self_ref {
+                    Box::new(FilterOperator::new(
+                        expanded,
+                        Expression::Binary {
+                            left: Box::new(Expression::Variable(expand_var)),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expression::Variable(target.var.clone())),
+                        },
+                    )) as OperatorBox
+                } else {
+                    expanded
                 }
             };
             if let Some(ref props) = target.properties {
@@ -3098,11 +3151,38 @@ impl QueryPlanner {
                     Box::new(expand) as OperatorBox
                 }
             } else {
-                let expand = ExpandOperator::new(path_operator, current_var.clone(), target.var.clone(), edge_var, edge_types, segment.edge.direction.clone());
-                if !target.labels.is_empty() {
-                    Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
+                // A variable already bound has to be *matched*, not rebound.
+                // `ExpandOperator` binds its target unconditionally, so
+                // `MATCH (b)-->(b)` bound the far end of each edge over the
+                // near one and every edge matched -- a graph containing no
+                // self-relationships at all returned one row per edge (#639).
+                // Expanding into a synthetic name and requiring the two to be
+                // equal is what a repeated variable means; the walk continues
+                // from the original, which the filter has just proved is the
+                // same node.
+                let self_ref = bound.contains(&target.var);
+                let expand_var = if self_ref {
+                    format!("__self_{}_{}", target.var, seg_idx)
                 } else {
-                    Box::new(expand) as OperatorBox
+                    target.var.clone()
+                };
+                let expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, segment.edge.direction.clone());
+                let expanded: OperatorBox = if !target.labels.is_empty() {
+                    Box::new(expand.with_target_labels(target.labels.clone()))
+                } else {
+                    Box::new(expand)
+                };
+                if self_ref {
+                    Box::new(FilterOperator::new(
+                        expanded,
+                        Expression::Binary {
+                            left: Box::new(Expression::Variable(expand_var)),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expression::Variable(target.var.clone())),
+                        },
+                    )) as OperatorBox
+                } else {
+                    expanded
                 }
             };
             if let Some(ref props) = target.properties {
