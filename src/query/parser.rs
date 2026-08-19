@@ -195,7 +195,32 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                     }
                                 }
                             }
-                            _ => {}
+                            // Anything this builder cannot lower has to be an
+                            // error. Falling through silently was the worse
+                            // failure: FOREACH and CALL parsed cleanly, were
+                            // dropped on the floor, and the query then ran as
+                            // though the clause had never been written —
+                            // `CREATE (a:A) WITH a FOREACH (i IN [1,2] | SET
+                            // a.n = i)` reported success having set nothing. A
+                            // clause the engine cannot run must never be
+                            // mistaken for one it ran.
+                            other => {
+                                let keyword = c
+                                    .as_str()
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_uppercase();
+                                let name = if keyword.is_empty() {
+                                    format!("{other:?}")
+                                } else {
+                                    keyword
+                                };
+                                return Err(ParseError::SemanticError(format!(
+                                    "`{name}` is not yet supported in this clause position \
+                                     (samyama-graph#617)"
+                                )));
+                            }
                         }
                     }
                 }
@@ -231,6 +256,11 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
         // cannot start.
         Err(original) => match parse_clause_pipeline(input) {
             Ok(query) => return Ok(query),
+            // A semantic error means the general rule *did* recognise the
+            // clause order and then refused to lower one of the clauses. That
+            // names the actual obstacle, so it wins; a plain parse failure
+            // does not, and the original error is kept instead.
+            Err(e @ ParseError::SemanticError(_)) => return Err(e),
             Err(_) => return Err(original.into()),
         },
     };

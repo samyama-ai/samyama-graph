@@ -147,17 +147,18 @@ fn a_create_references_variables_already_in_scope() {
 
 #[test]
 fn an_unsupported_clause_position_is_refused_not_mis_planned() {
-    // MERGE is not threaded through the pipeline yet. The parser accepts the
+    // FOREACH is not threaded through the pipeline yet. The parser accepts the
     // order, so the planner must say no rather than fall back to the by-kind
     // fields — which are empty for these queries, and would be read as "no
-    // MERGE at all".
-    let mut store = GraphStore::new();
-    let q = parse_query("CREATE (a) WITH a MERGE (b:L)").expect("this order parses");
-    let err = MutQueryExecutor::new(&mut store, "default".to_string())
-        .execute(&q)
-        .expect_err("must refuse rather than silently do nothing");
+    // FOREACH at all", i.e. as a query that simply does less than it says.
+    //
+    // Keep this test pointed at whatever is still unsupported. It started on
+    // MERGE and moved here when MERGE landed; the assertion is about the
+    // refusal existing at the boundary, not about which clause is outside it.
+    let err = parse_query("CREATE (a:A) WITH a FOREACH (i IN [1, 2] | SET a.n = i)")
+        .expect_err("must refuse rather than silently drop the clause");
     let msg = err.to_string();
-    assert!(msg.contains("MERGE"), "the message should name the clause: {msg}");
+    assert!(msg.contains("FOREACH"), "the message should name the clause: {msg}");
 }
 
 #[test]
@@ -245,4 +246,144 @@ fn repeated_runs_of_a_pipeline_query_agree() {
         assert_eq!(again, first);
     }
     assert_eq!(first.len(), 3);
+}
+
+#[test]
+fn both_planning_paths_refuse_an_expression_valued_merge_property() {
+    // The two queries below express the same thing: MERGE a node whose property
+    // comes from a bound variable rather than a literal. The left one goes
+    // through the established planner, the right one through the clause
+    // pipeline. Neither supports it yet, and the risk is that only *one* of
+    // them says so: the pipeline read none of the by-kind clause fields the
+    // guard inspected, so it planned a MERGE on the label alone and
+    // `UNWIND ['a','b','a'] AS x MERGE (n:N {v: x})` created a single node and
+    // reported success. A silent wrong answer is worse than the refusal.
+    //
+    // Assert the agreement, not the message: whatever the two paths do here,
+    // they must do the same thing.
+    let legacy = "MATCH (a:Src) MERGE (n:N {v: a.k}) RETURN n";
+    let pipeline = "UNWIND ['a', 'b', 'a'] AS x MERGE (n:N {v: x}) WITH n RETURN n.v AS v";
+
+    for cypher in [legacy, pipeline] {
+        let mut store = GraphStore::new();
+        let q = parse_query(cypher).expect("query should parse");
+        let err = MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .expect_err(&format!("`{cypher}` must be refused, not silently mis-planned"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MERGE") && msg.contains("non-literal property value"),
+            "`{cypher}` was refused for the wrong reason: {msg}"
+        );
+        assert_eq!(
+            count(&store, "MATCH (n:N) RETURN n"),
+            0,
+            "`{cypher}` was refused but still wrote to the store"
+        );
+    }
+}
+
+#[test]
+fn merge_below_a_barrier_runs_once_per_input_row() {
+    // MERGE in the pipeline takes an input operator, so it runs per row rather
+    // than once. Two rows, distinct literals, must leave two nodes; a third row
+    // repeating the first must not add a third.
+    let mut store = GraphStore::new();
+    let q = parse_query("UNWIND [1, 2, 1] AS x MERGE (n:N) WITH n RETURN 1 AS r")
+        .expect("query should parse");
+    let out = MutQueryExecutor::new(&mut store, "default".to_string())
+        .execute(&q)
+        .expect("merge below a barrier should execute");
+    assert_eq!(out.records.len(), 3, "one row in, one row out");
+    assert_eq!(
+        count(&store, "MATCH (n:N) RETURN n"),
+        1,
+        "MERGE is match-or-create: the second and third rows find the first node"
+    );
+}
+
+/// Rows of `(x, y)` from a two-column query, sorted so the assertion does not
+/// depend on scan order.
+fn pairs(store: &mut GraphStore, cypher: &str) -> Vec<(String, String)> {
+    let q = parse_query(cypher).expect("query should parse");
+    let out = MutQueryExecutor::new(store, "default".to_string())
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("`{cypher}` should execute: {e}"));
+    let mut rows: Vec<(String, String)> = out
+        .records
+        .iter()
+        .map(|r| (format!("{:?}", r.get("x")), format!("{:?}", r.get("y"))))
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn two_a_two_b() -> GraphStore {
+    let mut store = GraphStore::new();
+    run(&mut store, "CREATE (:A {k: 1}), (:A {k: 2}), (:B {k: 1}), (:B {k: 9})");
+    run(&mut store, "MATCH (a:A {k: 1}), (b:B {k: 1}) CREATE (a)-[:R]->(b)");
+    store
+}
+
+#[test]
+fn a_match_after_a_with_sharing_no_variable_is_a_cartesian_product() {
+    let mut store = two_a_two_b();
+    let rows = pairs(&mut store, "MATCH (a:A) WITH a MATCH (b:B) RETURN a.k AS x, b.k AS y");
+    assert_eq!(rows.len(), 4, "two As against two Bs, uncorrelated: {rows:?}");
+}
+
+#[test]
+fn a_match_after_a_with_sharing_a_variable_stays_correlated() {
+    // The failure this guards against is the previous test's answer showing up
+    // here: joining on nothing turns a correlated MATCH into a cross product,
+    // which is a wrong answer rather than an error. Only one A has an :R edge.
+    let mut store = two_a_two_b();
+    let rows = pairs(
+        &mut store,
+        "MATCH (a:A) WITH a MATCH (a)-[:R]->(b:B) RETURN a.k AS x, b.k AS y",
+    );
+    assert_eq!(rows.len(), 1, "only a.k = 1 has an outgoing :R: {rows:?}");
+    assert!(rows[0].0.contains('1') && rows[0].1.contains('1'));
+}
+
+#[test]
+fn an_optional_match_after_a_with_keeps_the_unmatched_row() {
+    let mut store = two_a_two_b();
+    let rows = pairs(
+        &mut store,
+        "MATCH (a:A) WITH a OPTIONAL MATCH (a)-[:R]->(b:B) RETURN a.k AS x, b.k AS y",
+    );
+    assert_eq!(rows.len(), 2, "both As survive: {rows:?}");
+    assert_eq!(
+        rows.iter().filter(|(_, y)| y.contains("Null")).count(),
+        1,
+        "the A with no edge keeps a null b: {rows:?}"
+    );
+}
+
+#[test]
+fn a_match_can_read_what_an_earlier_clause_created() {
+    // The join operators materialise both sides, and materialising the left one
+    // read-only makes any write below it refuse outright — this query returned
+    // "requires mutable store access" rather than rows. The write has to run
+    // before the join reads.
+    let mut store = two_a_two_b();
+    let rows = pairs(
+        &mut store,
+        "CREATE (n:C {k: 7}) WITH n MATCH (a:A) RETURN a.k AS x, n.k AS y",
+    );
+    assert_eq!(rows.len(), 2, "one row per A: {rows:?}");
+    assert!(rows.iter().all(|(_, y)| y.contains('7')), "{rows:?}");
+    assert_eq!(count(&store, "MATCH (n:C) RETURN n"), 1, "exactly one C, created once");
+}
+
+#[test]
+fn a_match_after_an_unwind_filters_per_row() {
+    let mut store = two_a_two_b();
+    let rows = pairs(
+        &mut store,
+        "UNWIND [1, 2] AS k MATCH (a:A) WHERE a.k = k RETURN k AS x, a.k AS y",
+    );
+    assert_eq!(rows.len(), 2, "each k finds its own A, not both: {rows:?}");
+    assert!(rows.iter().all(|(x, y)| x == y), "{rows:?}");
 }

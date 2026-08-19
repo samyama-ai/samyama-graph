@@ -6415,6 +6415,9 @@ pub struct CartesianProductOperator {
     left_index: usize,
     current_right: Option<Record>,
     left_materialized: bool,
+    /// Set once the left input has been drained through `next_mut`.
+    /// Without it a second call would re-drain an already-consumed side.
+    left_drained_mut: bool,
 }
 
 impl CartesianProductOperator {
@@ -6426,6 +6429,7 @@ impl CartesianProductOperator {
             left_index: 0,
             current_right: None,
             left_materialized: false,
+            left_drained_mut: false,
         }
     }
 
@@ -6518,6 +6522,30 @@ impl PhysicalOperator for CartesianProductOperator {
         }
     }
 
+
+    // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
+    // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
+    // Draining that side with the read-only `next` makes the write operators
+    // refuse — they cannot reach a mutable store — so the left input is drained
+    // once with `next_mut` and replaced by its own rows. Everything below has
+    // then already run, and the read-only path is correct for the rest.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.left_drained_mut {
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.left.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.left = Box::new(MaterializedOperator::new(rows));
+            self.left_drained_mut = true;
+        }
+        self.next(store)
+    }
+
     fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
@@ -6553,6 +6581,9 @@ pub struct JoinOperator {
     current_right_index: usize,
     current_left_list_index: usize,
     materialized: bool,
+    /// Set once the left input has been drained through `next_mut`.
+    /// Without it a second call would re-drain an already-consumed side.
+    left_drained_mut: bool,
 }
 
 impl JoinOperator {
@@ -6572,6 +6603,7 @@ impl JoinOperator {
             current_right_index: 0,
             current_left_list_index: 0,
             materialized: false,
+            left_drained_mut: false,
         }
     }
 
@@ -6678,6 +6710,30 @@ impl PhysicalOperator for JoinOperator {
         }
     }
 
+
+    // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
+    // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
+    // Draining that side with the read-only `next` makes the write operators
+    // refuse — they cannot reach a mutable store — so the left input is drained
+    // once with `next_mut` and replaced by its own rows. Everything below has
+    // then already run, and the read-only path is correct for the rest.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.left_drained_mut {
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.left.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.left = Box::new(MaterializedOperator::new(rows));
+            self.left_drained_mut = true;
+        }
+        self.next(store)
+    }
+
     fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
@@ -6714,6 +6770,9 @@ pub struct LeftOuterJoinOperator {
     current_right_match_idx: usize,
     null_emitted: bool,
     materialized: bool,
+    /// Set once the left input has been drained through `next_mut`.
+    /// Without it a second call would re-drain an already-consumed side.
+    left_drained_mut: bool,
 }
 
 impl LeftOuterJoinOperator {
@@ -6734,6 +6793,7 @@ impl LeftOuterJoinOperator {
             current_right_match_idx: 0,
             null_emitted: false,
             materialized: false,
+            left_drained_mut: false,
         }
     }
 
@@ -6831,6 +6891,30 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         } else {
             Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
         }
+    }
+
+
+    // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
+    // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
+    // Draining that side with the read-only `next` makes the write operators
+    // refuse — they cannot reach a mutable store — so the left input is drained
+    // once with `next_mut` and replaced by its own rows. Everything below has
+    // then already run, and the read-only path is correct for the rest.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.left_drained_mut {
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.left.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.left = Box::new(MaterializedOperator::new(rows));
+            self.left_drained_mut = true;
+        }
+        self.next(store)
     }
 
     fn reset(&mut self) {
@@ -9522,6 +9606,13 @@ impl PhysicalOperator for UnwindOperator {
 
 /// MERGE operator - upsert: match or create pattern
 pub struct MergeOperator {
+    /// Upstream rows, when this MERGE runs inside a clause pipeline.
+    ///
+    /// `None` is the established shape — a leaf that runs once. With an input
+    /// the clause runs **per incoming row**, which is what
+    /// `UNWIND [...] AS x MERGE (:N {v: x})` means, and it must keep the row's
+    /// existing bindings so `... WITH a MERGE (a)-[:R]->(b)` can see `a`.
+    input: Option<OperatorBox>,
     pattern: Pattern,
     on_create_set: Vec<(String, String, Expression)>,
     on_match_set: Vec<(String, String, Expression)>,
@@ -9541,6 +9632,7 @@ impl MergeOperator {
         on_match_labels: Vec<(String, Vec<Label>)>,
     ) -> Self {
         Self {
+            input: None,
             pattern,
             on_create_set,
             on_match_set,
@@ -9548,6 +9640,12 @@ impl MergeOperator {
             on_match_labels,
             executed: false,
         }
+    }
+
+    /// Run this MERGE once per row of `input`, extending each row.
+    pub fn with_input(mut self, input: OperatorBox) -> Self {
+        self.input = Some(input);
+        self
     }
 
     /// Add the labels an `ON CREATE` / `ON MATCH` branch asks for.
@@ -9596,6 +9694,7 @@ impl MergeOperator {
     fn merge_path(
         &self,
         path: &crate::query::ast::PathPattern,
+        base: Record,
         store: &mut GraphStore,
         tenant_id: &str,
     ) -> ExecutionResult<Option<Record>> {
@@ -9646,7 +9745,9 @@ impl MergeOperator {
             Self::search(&candidates, &pattern_rels, store, &mut assignment)
         };
 
-        let mut record = Record::new();
+        // Seeded from the incoming row so a MERGE inside a clause
+        // pipeline keeps the bindings its predecessors produced.
+        let mut record = base;
 
         if let Some(assignment) = found {
             for (i, np) in pattern_nodes.iter().enumerate() {
@@ -9769,10 +9870,27 @@ impl PhysicalOperator for MergeOperator {
     }
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
-        if self.executed {
-            return Ok(None);
-        }
-        self.executed = true;
+        // With an upstream, the clause runs once per incoming row and each row
+        // seeds the merge; without one it is a leaf that runs exactly once.
+        // Taking the input out first keeps the borrow checker happy while the
+        // merge body holds `&mut store`.
+        let base = match self.input.take() {
+            Some(mut input) => {
+                let row = input.next_mut(store, tenant_id)?;
+                self.input = Some(input);
+                match row {
+                    Some(r) => r,
+                    None => return Ok(None),
+                }
+            }
+            None => {
+                if self.executed {
+                    return Ok(None);
+                }
+                self.executed = true;
+                Record::new()
+            }
+        };
 
         let path = self.pattern.paths.first()
             .ok_or_else(|| ExecutionError::PlanningError("MERGE pattern has no paths".to_string()))?;
@@ -9783,7 +9901,7 @@ impl PhysicalOperator for MergeOperator {
         // segments were ignored outright, so `MERGE (a:X {..})-[:R]->(b:X {..})` matched
         // the first node, created no relationship, and reported success.
         if !path.segments.is_empty() {
-            return self.merge_path(path, store, tenant_id);
+            return self.merge_path(path, base, store, tenant_id);
         }
 
         let start = &path.start;
@@ -9812,7 +9930,7 @@ impl PhysicalOperator for MergeOperator {
         }
 
         let node_id;
-        let mut record = Record::new();
+        let mut record = base;
 
         if let Some(existing_id) = matched_node_id {
             node_id = existing_id;

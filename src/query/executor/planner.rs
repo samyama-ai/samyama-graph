@@ -643,6 +643,34 @@ impl QueryPlanner {
             }
         }
 
+        // A clause-pipeline query keeps its clauses here and leaves the fields
+        // above empty, so the checks above see nothing. Missing this let
+        // `UNWIND ['a','b','a'] AS x MERGE (n:N {v: x})` create **one** node
+        // instead of two: the property is an expression, MERGE matched on the
+        // label alone, and every row found the first `:N`. The established
+        // path had refused that query for exactly this reason since #311's
+        // lesson — a new path does not inherit an old guard.
+        for clause in &query.clauses {
+            let (label, pattern) = match clause {
+                crate::query::ast::Clause::Match(m) => ("MATCH", &m.pattern),
+                crate::query::ast::Clause::Merge(m) => ("MERGE", &m.pattern),
+                _ => continue,
+            };
+            for path in &pattern.paths {
+                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                    return Err(complain(label, key));
+                }
+                for seg in &path.segments {
+                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                        return Err(complain(label, key));
+                    }
+                    if let Some(key) = seg.edge.property_exprs.as_ref().and_then(|e| e.keys().next()) {
+                        return Err(complain(label, key));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -695,10 +723,13 @@ impl QueryPlanner {
         // CREATE" and answer a different query, which is worse than the parse
         // error it replaced. Until `plan_clause_pipeline` covers a shape, the
         // engine says so.
+        // Checked for *both* paths. It reads `query.clauses` as well as the
+        // by-kind fields, so a pipeline query cannot slip a pattern carrying an
+        // unevaluated property expression past it.
+        Self::reject_unevaluated_property_exprs(query)?;
         if query.needs_clause_pipeline {
             return self.plan_clause_pipeline(query, store);
         }
-        Self::reject_unevaluated_property_exprs(query)?;
         // `DISTINCT` is inserted inside `plan_inner`, below SKIP and LIMIT.
         // Wrapping the finished plan here put it *above* them, so `LIMIT n`
         // took n duplicate-bearing rows and DISTINCT then collapsed them --
@@ -4637,6 +4668,88 @@ impl QueryPlanner {
                         }
                     }
                 }
+                Clause::Match(mc) => {
+                    // Same join rule as the established multi-MATCH path: every
+                    // shared variable is a join key, and only a pattern sharing
+                    // nothing with what is already bound becomes a cartesian
+                    // product. Taking a subset of the keys would silently widen
+                    // the result instead of failing (#360), so the intersection
+                    // is taken whole and sorted — it comes from a HashSet, and
+                    // an unsorted key order varies between runs.
+                    let mut clause_vars: HashSet<String> = HashSet::new();
+                    for path in &mc.pattern.paths {
+                        if let Some(v) = &path.start.variable {
+                            clause_vars.insert(v.clone());
+                        }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.node.variable {
+                                clause_vars.insert(v.clone());
+                            }
+                            if let Some(v) = &seg.edge.variable {
+                                clause_vars.insert(v.clone());
+                            }
+                        }
+                    }
+                    let match_op = self.dispatch_plan_match(mc, None, store)?;
+                    let mut shared: Vec<String> = bound.intersection(&clause_vars).cloned().collect();
+                    shared.sort();
+                    operator = if shared.is_empty() {
+                        Box::new(CartesianProductOperator::new(operator, match_op)) as OperatorBox
+                    } else if mc.optional {
+                        let right_only: Vec<String> =
+                            clause_vars.difference(&bound).cloned().collect();
+                        Box::new(LeftOuterJoinOperator::new(operator, match_op, shared, right_only))
+                            as OperatorBox
+                    } else {
+                        Box::new(JoinOperator::new(operator, match_op, shared)) as OperatorBox
+                    };
+                    bound.extend(clause_vars);
+                }
+                Clause::Merge(mc) => {
+                    let on_create: Vec<(String, String, Expression)> = mc
+                        .on_create_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.property.clone(), i.value.clone()))
+                        .collect();
+                    let on_match: Vec<(String, String, Expression)> = mc
+                        .on_match_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.property.clone(), i.value.clone()))
+                        .collect();
+                    let on_create_labels: Vec<(String, Vec<Label>)> = mc
+                        .on_create_labels
+                        .iter()
+                        .map(|l| (l.variable.clone(), l.labels.clone()))
+                        .collect();
+                    let on_match_labels: Vec<(String, Vec<Label>)> = mc
+                        .on_match_labels
+                        .iter()
+                        .map(|l| (l.variable.clone(), l.labels.clone()))
+                        .collect();
+                    operator = Box::new(
+                        MergeOperator::new(
+                            mc.pattern.clone(),
+                            on_create,
+                            on_match,
+                            on_create_labels,
+                            on_match_labels,
+                        )
+                        .with_input(operator),
+                    );
+                    for path in &mc.pattern.paths {
+                        if let Some(v) = &path.start.variable {
+                            bound.insert(v.clone());
+                        }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.edge.variable {
+                                bound.insert(v.clone());
+                            }
+                            if let Some(v) = &seg.node.variable {
+                                bound.insert(v.clone());
+                            }
+                        }
+                    }
+                }
                 Clause::With(wc) => {
                     operator = self.build_with_barrier(operator, wc, store)?;
                     bound = wc
@@ -4797,9 +4910,9 @@ impl QueryPlanner {
                     let shape: Vec<&str> = clauses.iter().map(|c| c.kind()).collect();
                     return Err(ExecutionError::RuntimeError(format!(
                         "`{}` is not yet supported in this clause position (query shape: {}). \
-                         The parser accepts this order; the planner threads WITH, UNWIND, SET, \
-                         REMOVE, DELETE, WHERE and RETURN through it so far, and CREATE, MERGE \
-                         and a MATCH after a WITH are still to come (samyama-graph#617).",
+                         The parser accepts this order; the planner threads MATCH, WHERE, \
+                         UNWIND, WITH, CREATE, MERGE, SET, REMOVE, DELETE and RETURN through it \
+                         so far, and FOREACH and CALL are still to come (samyama-graph#617).",
                         unsupported.kind(),
                         shape.join(" ")
                     )));
