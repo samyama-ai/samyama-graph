@@ -188,3 +188,61 @@ fn the_clause_list_records_written_order() {
     let kinds: Vec<&str> = q.clauses.iter().map(|c| c.kind()).collect();
     assert_eq!(kinds, vec!["MATCH", "SET", "WITH", "RETURN"]);
 }
+
+#[test]
+fn order_by_a_column_the_return_does_not_carry_still_sorts() {
+    // `WITH p, count(q) AS rng RETURN p ORDER BY rng` sorts on a column the
+    // projection drops. Placing the sort *above* the projection leaves the key
+    // unbound, the sort silently becomes a no-op, and the rows come back in
+    // whatever order the barrier produced — which is hash order, so the answer
+    // differs between processes.
+    //
+    // `CH-DETERM` caught exactly this after the pipeline first landed: one
+    // scenario flipping across five runs. The assertion is on the order, and
+    // the fixture is built so the sorted order differs from the natural one.
+    let store = GraphStore::new();
+    let cypher = "WITH [0, 1] AS prows, [[2], [3, 4]] AS qrows \
+                  UNWIND prows AS p UNWIND qrows[p] AS q \
+                  WITH p, count(q) AS rng RETURN p AS v ORDER BY rng DESC";
+    let q = parse_query(cypher).expect("query should parse");
+    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let got: Vec<i64> = batch
+        .records
+        .iter()
+        .map(|r| match r.get("v") {
+            Some(Value::Property(PropertyValue::Integer(n))) => *n,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // rng is 1 for p=0 and 2 for p=1, so DESC puts p=1 first — the reverse of
+    // the order the rows are produced in. Ascending would pass by accident.
+    assert_eq!(got, vec![1, 0]);
+}
+
+#[test]
+fn repeated_runs_of_a_pipeline_query_agree() {
+    // A cheap guard on the class CH-DETERM found. It cannot vary the hash seed
+    // within one process, so it would not have caught the original defect —
+    // but it costs nothing and catches a per-call variation.
+    let store = GraphStore::new();
+    let cypher = "WITH [3, 1, 2] AS xs UNWIND xs AS x WITH x RETURN x AS v ORDER BY x";
+    let q = parse_query(cypher).expect("query should parse");
+    let first: Vec<String> = QueryExecutor::new(&store)
+        .execute(&q)
+        .unwrap()
+        .records
+        .iter()
+        .map(|r| format!("{:?}", r.get("v")))
+        .collect();
+    for _ in 0..20 {
+        let again: Vec<String> = QueryExecutor::new(&store)
+            .execute(&q)
+            .unwrap()
+            .records
+            .iter()
+            .map(|r| format!("{:?}", r.get("v")))
+            .collect();
+        assert_eq!(again, first);
+    }
+    assert_eq!(first.len(), 3);
+}

@@ -4611,6 +4611,8 @@ impl QueryPlanner {
             }
         }
         let mut anon_seq = 0usize;
+        // Set when a RETURN has already placed the sort below its projection.
+        let mut order_by_applied = false;
 
         for clause in &clauses[split..] {
             match clause {
@@ -4725,6 +4727,48 @@ impl QueryPlanner {
                     operator = Box::new(FilterOperator::new(operator, w.predicate.clone()));
                 }
                 Clause::Return(rc) => {
+                    // ORDER BY goes **below** the projection, not after it.
+                    //
+                    // `WITH p, count(q) AS rng RETURN p ORDER BY rng` sorts on
+                    // a column the RETURN does not carry. Sorting above the
+                    // projection leaves the key unbound, the sort silently
+                    // becomes a no-op, and the rows come back in whatever
+                    // order the barrier produced — which is hash order, so the
+                    // answer differs between processes. CH-DETERM caught
+                    // exactly this scenario after the pipeline landed.
+                    if let Some(order_by) = &query.order_by {
+                        let order_keys: Vec<(Expression, String)> = rc
+                            .items
+                            .iter()
+                            .map(|i| {
+                                let alias = i.alias.clone().unwrap_or_else(|| match &i.expression {
+                                    Expression::Variable(v) => v.clone(),
+                                    Expression::Property { variable, property } => {
+                                        format!("{variable}.{property}")
+                                    }
+                                    _ => String::new(),
+                                });
+                                (i.expression.clone(), alias)
+                            })
+                            .collect();
+                        let sort_items: Vec<(Expression, bool)> = order_by
+                            .items
+                            .iter()
+                            .map(|i| {
+                                (
+                                    resolve_sort_key(
+                                        &i.expression,
+                                        &order_keys,
+                                        SortPosition::BeforeProjection,
+                                    ),
+                                    i.ascending,
+                                )
+                            })
+                            .collect();
+                        operator = Box::new(SortOperator::new(operator, sort_items));
+                        order_by_applied = true;
+                    }
+
                     let projections: Vec<(Expression, String)> = rc
                         .items
                         .iter()
@@ -4764,12 +4808,14 @@ impl QueryPlanner {
         }
 
         if let Some(order_by) = &query.order_by {
-            let sort_items: Vec<(Expression, bool)> = order_by
-                .items
-                .iter()
-                .map(|i| (i.expression.clone(), i.ascending))
-                .collect();
-            operator = Box::new(SortOperator::new(operator, sort_items));
+            if !order_by_applied {
+                let sort_items: Vec<(Expression, bool)> = order_by
+                    .items
+                    .iter()
+                    .map(|i| (i.expression.clone(), i.ascending))
+                    .collect();
+                operator = Box::new(SortOperator::new(operator, sort_items));
+            }
         }
         if let Some(skip) = query.skip {
             operator = Box::new(SkipOperator::new(operator, skip));
