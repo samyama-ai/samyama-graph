@@ -1900,6 +1900,54 @@ fn parse_order_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<OrderByIte
 }
 
 fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    let inner: Vec<_> = pair.into_inner().collect();
+
+    // `1 < n.num < 3` means `1 < n.num AND n.num < 3`. Left-associative
+    // parsing makes it `(1 < n.num) < 3` instead, which compares a boolean to
+    // 3 -- "Cannot compare these types" on a query that is ordinary Cypher.
+    //
+    // The rewrite keys on the **token sequence**, not the parsed tree, and
+    // that distinction is the whole safety argument. Parentheses are inline in
+    // `primary`, so `(a < b) = true` and `a < b < c` are indistinguishable
+    // once parsed -- but at this level the first is one top-level comparison
+    // operator and the second is two. Applying the expansion only when *every*
+    // top-level operator is a comparison therefore cannot touch a
+    // parenthesised comparison being compared to something, and cannot touch
+    // anything joined by AND/OR/arithmetic, which the Pratt parser goes on
+    // handling exactly as before.
+    //
+    // The middle operand appears in both conjuncts. Cypher evaluates it once,
+    // and duplicating it is observationally the same here because expressions
+    // in this position are pure.
+    let ops: Vec<&pest::iterators::Pair<Rule>> = inner.iter().skip(1).step_by(2).collect();
+    if ops.len() >= 2 && ops.iter().all(|p| p.as_rule() == Rule::comparison_op) {
+        let mut terms = Vec::with_capacity(ops.len() + 1);
+        for term in inner.iter().step_by(2) {
+            terms.push(parse_term(term.clone())?);
+        }
+        if terms.len() == ops.len() + 1 {
+            let mut conjunction: Option<Expression> = None;
+            for (i, op) in ops.iter().enumerate() {
+                let comparison = Expression::Binary {
+                    left: Box::new(terms[i].clone()),
+                    op: parse_op_str(op.as_str())?,
+                    right: Box::new(terms[i + 1].clone()),
+                };
+                conjunction = Some(match conjunction {
+                    None => comparison,
+                    Some(previous) => Expression::Binary {
+                        left: Box::new(previous),
+                        op: BinaryOp::And,
+                        right: Box::new(comparison),
+                    },
+                });
+            }
+            if let Some(expr) = conjunction {
+                return Ok(expr);
+            }
+        }
+    }
+
     PRATT_PARSER
         .map_primary(|primary| parse_term(primary))
         .map_prefix(|op, rhs| match op.as_rule() {
@@ -1933,7 +1981,7 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
                 right: Box::new(right),
             })
         })
-        .parse(pair.into_inner())
+        .parse(inner.into_iter())
 }
 
 fn parse_op_str(op_str: &str) -> ParseResult<BinaryOp> {
