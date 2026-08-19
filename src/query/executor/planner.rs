@@ -1126,17 +1126,10 @@ impl QueryPlanner {
         let post_with_clauses = &query.match_clauses[split..];
 
         // Pre-compute variable sets for each pre-WITH MATCH clause
-        let pre_match_var_sets: Vec<HashSet<String>> = pre_with_clauses.iter().map(|mc| {
-            let mut vars = HashSet::new();
-            for path in &mc.pattern.paths {
-                if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
-                for seg in &path.segments {
-                    if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
-                    if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
-                }
-            }
-            vars
-        }).collect();
+        let pre_match_var_sets: Vec<HashSet<String>> = pre_with_clauses
+            .iter()
+            .map(|mc| Self::clause_variables(&mc.pattern))
+            .collect();
 
         // Decompose WHERE clause: assign predicates to MATCH clauses or cross-MATCH
         let pre_where_preds = query.where_clause.as_ref()
@@ -4637,20 +4630,7 @@ impl QueryPlanner {
                     // the result instead of failing (#360), so the intersection
                     // is taken whole and sorted — it comes from a HashSet, and
                     // an unsorted key order varies between runs.
-                    let mut clause_vars: HashSet<String> = HashSet::new();
-                    for path in &mc.pattern.paths {
-                        if let Some(v) = &path.start.variable {
-                            clause_vars.insert(v.clone());
-                        }
-                        for seg in &path.segments {
-                            if let Some(v) = &seg.node.variable {
-                                clause_vars.insert(v.clone());
-                            }
-                            if let Some(v) = &seg.edge.variable {
-                                clause_vars.insert(v.clone());
-                            }
-                        }
-                    }
+                    let clause_vars = Self::clause_variables(&mc.pattern);
                     let match_op = self.dispatch_plan_match(mc, None, store)?;
                     let mut shared: Vec<String> = bound.intersection(&clause_vars).cloned().collect();
                     shared.sort();
@@ -4985,8 +4965,23 @@ impl QueryPlanner {
 
     /// Extract variable names from a MATCH clause
     fn extract_match_vars(&self, mc: &MatchClause) -> HashSet<String> {
+        Self::clause_variables(&mc.pattern)
+    }
+
+    /// Every variable a MATCH clause binds, **including the named path**.
+    ///
+    /// Leaving the path variable out is what made
+    /// `OPTIONAL MATCH p = (a)-[:X]->(b) RETURN p` fail with "Variable not
+    /// found: p" when nothing matched. The left outer join fills its
+    /// right-hand-only variables with null, and that list is this set minus
+    /// what was already bound -- so a variable missing here is a variable the
+    /// join never nulls, and an unmatched OPTIONAL MATCH then looks like a
+    /// query referring to something that does not exist. `b` was nulled
+    /// correctly the whole time; only `p` was invisible.
+    fn clause_variables(pattern: &crate::query::ast::Pattern) -> HashSet<String> {
         let mut vars = HashSet::new();
-        for path in &mc.pattern.paths {
+        for path in &pattern.paths {
+            if let Some(v) = &path.path_variable { vars.insert(v.clone()); }
             if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
             for seg in &path.segments {
                 if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
