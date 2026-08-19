@@ -62,6 +62,12 @@ enum Tck {
     Node(Vec<String>, BTreeMap<String, Tck>),
     /// `[:TYPE {k: v}]`
     Rel(String, BTreeMap<String, Tck>),
+    /// `<(:A)-[:T]->(:B)<-[:T]-(:C)>` — the nodes of a path and, between each
+    /// adjacent pair, the relationship and whether it points forwards along
+    /// the walk. Direction is the whole point: three Match6 scenarios assert
+    /// that a path which exists in one direction does not match in the other,
+    /// and a renderer that dropped it would pass them for the wrong reason.
+    Path { nodes: Vec<Tck>, rels: Vec<(Tck, bool)> },
     /// Anything this harness does not model; carries the raw text so a
     /// mismatch report is still readable.
     Opaque(String),
@@ -98,6 +104,23 @@ impl Tck {
                 }
                 s.push(']');
                 s
+            }
+            Tck::Path { nodes, rels } => {
+                let mut out = String::from("<");
+                for (i, node) in nodes.iter().enumerate() {
+                    if i > 0 {
+                        let (rel, forward) = &rels[i - 1];
+                        let rel = rel.render();
+                        if *forward {
+                            let _ = write!(out, "-{rel}->");
+                        } else {
+                            let _ = write!(out, "<-{rel}-");
+                        }
+                    }
+                    out.push_str(&node.render());
+                }
+                out.push('>');
+                out
             }
             Tck::Opaque(raw) => raw.clone(),
         }
@@ -202,27 +225,7 @@ impl<'a> Cursor<'a> {
             }
             Some('(') => self.parse_node(),
             Some('{') => Tck::Map(self.parse_props()),
-            Some('<') => {
-                // A path. Consumed whole and left opaque; comparing paths needs
-                // more of the TCK model than this harness has.
-                let start = self.i;
-                let mut depth = 0usize;
-                while self.i < self.s.len() {
-                    match self.s[self.i] as char {
-                        '<' => depth += 1,
-                        '>' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                self.i += 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    self.i += 1;
-                }
-                Tck::Opaque(String::from_utf8_lossy(&self.s[start..self.i]).to_string())
-            }
+            Some('<') => self.parse_path(),
             _ => {
                 let word = self.take_while(|c| !matches!(c, ',' | ']' | '}' | ')' | ' '));
                 match word.as_str() {
@@ -275,6 +278,89 @@ impl<'a> Cursor<'a> {
             let _ = self.eat(',');
         }
         Tck::List(items)
+    }
+
+    /// `<(:A {k: 1})-[:T]->(:B)<-[:T]-(:C)>`, or `<()>` for a zero-length path.
+    ///
+    /// Parsed into the same shape the engine's paths are converted into, so
+    /// the two are compared through one renderer rather than by matching the
+    /// feature file's exact spacing.
+    fn parse_path(&mut self) -> Tck {
+        let start = self.i;
+        self.eat('<');
+        let mut nodes = Vec::new();
+        let mut rels = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek() != Some('(') {
+                // Not a shape this harness models. Rewind and keep the raw text
+                // so the mismatch report still shows what was expected.
+                self.i = start;
+                return self.consume_opaque_path();
+            }
+            nodes.push(self.parse_node());
+            self.skip_ws();
+            match self.peek() {
+                Some('>') => {
+                    self.i += 1;
+                    break;
+                }
+                Some('<') => {
+                    // `<-[:T]-`
+                    self.i += 1;
+                    self.eat('-');
+                    let rel = self.parse_rel();
+                    self.eat('-');
+                    rels.push((rel, false));
+                }
+                Some('-') => {
+                    // `-[:T]->`
+                    self.i += 1;
+                    let rel = self.parse_rel();
+                    self.eat('-');
+                    self.eat('>');
+                    rels.push((rel, true));
+                }
+                _ => {
+                    self.i = start;
+                    return self.consume_opaque_path();
+                }
+            }
+        }
+        Tck::Path { nodes, rels }
+    }
+
+    /// The old behaviour: swallow a `<...>` whole and keep it as raw text.
+    fn consume_opaque_path(&mut self) -> Tck {
+        let start = self.i;
+        let mut depth = 0usize;
+        while self.i < self.s.len() {
+            match self.s[self.i] as char {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.i += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            self.i += 1;
+        }
+        Tck::Opaque(String::from_utf8_lossy(&self.s[start..self.i]).to_string())
+    }
+
+    fn parse_rel(&mut self) -> Tck {
+        self.eat('[');
+        self.skip_ws();
+        if self.peek() == Some(':') {
+            self.i += 1;
+        }
+        let t = self.take_ident();
+        let props = self.parse_optional_props();
+        self.eat(']');
+        Tck::Rel(t, props)
     }
 
     fn parse_node(&mut self) -> Tck {
@@ -423,7 +509,43 @@ fn value_to_tck(v: &Value, store: &GraphStore) -> Tck {
             let _ = id;
             Tck::Rel(e.edge_type.as_str().to_string(), props)
         }
-        Value::Path { nodes, edges } => Tck::Opaque(format!("<path {} {}>", nodes.len(), edges.len())),
+        Value::Path { nodes, edges } => {
+            // An edge is stored with its own source and target, which need not
+            // run the same way as the walk: `MATCH (b)<-[r]-(a)` traverses `r`
+            // backwards. Comparing the stored endpoints against the node the
+            // walk arrived from is what recovers the arrow the TCK prints.
+            let rels: Vec<(Tck, bool)> = edges
+                .iter()
+                .enumerate()
+                .map(|(i, eid)| {
+                    let edge = store.get_edge(*eid);
+                    let props: BTreeMap<String, Tck> = edge
+                        .as_ref()
+                        .map(|e| {
+                            e.properties
+                                .iter()
+                                .filter(|(_, v)| !v.is_null())
+                                .map(|(k, v)| (k.clone(), prop_to_tck(v)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let ty = edge
+                        .as_ref()
+                        .map(|e| e.edge_type.as_str().to_string())
+                        .unwrap_or_default();
+                    let forward = match (edge.as_ref(), nodes.get(i)) {
+                        (Some(e), Some(from)) => e.source == *from,
+                        _ => true,
+                    };
+                    (Tck::Rel(ty, props), forward)
+                })
+                .collect();
+            let nodes: Vec<Tck> = nodes
+                .iter()
+                .map(|id| value_to_tck(&Value::NodeRef(*id), store))
+                .collect();
+            Tck::Path { nodes, rels }
+        }
     }
 }
 
@@ -1017,6 +1139,41 @@ Feature: Demo
             vec!["CREATE (:A {name: 'a'})".to_string(), "CREATE (:B)".to_string()],
             "a scenario's own setup runs after the Background's, not instead of it"
         );
+    }
+
+    /// The expected side and the engine side must meet in one renderer.
+    ///
+    /// Paths used to be compared as raw text on the expected side and rendered
+    /// as `<path 2 1>` on the engine side, so **every** path scenario was a
+    /// mismatch — 14 of Match6's 19 failures were the harness declining to look
+    /// at the value it had been given.
+    #[test]
+    fn a_path_round_trips_through_the_renderer() {
+        for text in [
+            "<(:A {name: 'A'})-[:KNOWS]->(:B {name: 'B'})>",
+            "<(:B)<-[:T]-(:A)>",
+            "<(:C)-[:T]->(:B)-[:T]->(:A)>",
+            "<(:Label1)<-[:T1]-(:Label2)-[:T2]->(:Label3)>",
+            "<()>",
+            "<( {id: 0})-[:R {num: 1}]->( {id: 1})>",
+        ] {
+            let parsed = parse_expected(text);
+            assert!(
+                matches!(parsed, Tck::Path { .. }),
+                "`{text}` should parse as a path, got {parsed:?}"
+            );
+            assert_eq!(parsed.render(), text, "rendering must reproduce the input");
+        }
+    }
+
+    /// Direction is not decoration. Three Match6 scenarios assert that a path
+    /// existing one way does not match the other, and they would pass for the
+    /// wrong reason against a renderer that printed every arrow forwards.
+    #[test]
+    fn a_reversed_path_does_not_render_the_same_as_a_forward_one() {
+        let forward = parse_expected("<(:A)-[:T]->(:B)>");
+        let backward = parse_expected("<(:A)<-[:T]-(:B)>");
+        assert_ne!(forward.render(), backward.render());
     }
 
     /// The ordinary case: no `Background:`, no setup invented for anyone.
