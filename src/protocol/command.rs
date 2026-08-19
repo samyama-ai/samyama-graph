@@ -337,6 +337,9 @@ impl CommandHandler {
         match value {
             // _node prefixed with underscore - node data available but not used in
             // simple string formatting (only showing id for RESP compatibility)
+            Value::List(items) => {
+                RespValue::Array(items.iter().map(|i| self.format_value(i)).collect())
+            }
             Value::Node(id, _node) => {
                 // Format node as JSON-like string
                 let node_str = format!("Node({:?})", id);

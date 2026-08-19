@@ -72,6 +72,7 @@ fn value_to_json(v: &crate::query::executor::record::Value) -> Value {
     match v {
         V::Null => Value::Null,
         V::Property(p) => prop_to_json(p),
+        V::List(items) => Value::Array(items.iter().map(value_to_json).collect()),
         V::Node(id, _) | V::NodeRef(id) => json!({ "node_id": id.as_u64() }),
         V::Edge(id, _) | V::EdgeRef(id, _, _, _) => json!({ "edge_id": id.as_u64() }),
         V::Path { nodes, edges } => json!({

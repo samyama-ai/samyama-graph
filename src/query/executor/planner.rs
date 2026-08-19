@@ -2751,6 +2751,12 @@ impl QueryPlanner {
                         if let Some(ref pv) = path.path_variable {
                             expand = expand.with_path_variable(pv.clone());
                         }
+                        // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
+                        // relationships traversed. Dropping it made the query
+                        // fail with "Variable not found: r" (#652).
+                        if let Some(ref rv) = segment.edge.variable {
+                            expand = expand.with_rel_variable(rv.clone());
+                        }
                         // If the destination resolves to exactly one node, the
                         // question is "can each source reach *this* node",
                         // which one reversed BFS answers for every row. LDBC
@@ -3087,6 +3093,12 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
+                // relationships traversed. Dropping it made the query fail
+                // with "Variable not found: r" (#652).
+                if let Some(ref rv) = segment.edge.variable {
+                    expand = expand.with_rel_variable(rv.clone());
+                }
                 // When the far end resolves to a single node, one reversed BFS
                 // from it answers every input row — see `with_pinned_target`.
                 // This is the shape anchoring produces on LDBC IC6: the walk
@@ -3185,7 +3197,7 @@ impl QueryPlanner {
             };
             let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
             path_operator = if let Some(length) = &segment.edge.length {
-                let expand = VarLengthExpandOperator::new(
+                let mut expand = VarLengthExpandOperator::new(
                     path_operator,
                     current_var.clone(),
                     target.var.clone(),
@@ -3194,6 +3206,12 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
+                // relationships traversed. Dropping it made the query fail
+                // with "Variable not found: r" (#652).
+                if let Some(ref rv) = segment.edge.variable {
+                    expand = expand.with_rel_variable(rv.clone());
+                }
                 if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
                 } else {

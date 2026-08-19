@@ -1350,32 +1350,41 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
                 Value::Path { edges, .. } => Ok(Value::Property(PropertyValue::Integer(edges.len() as i64))),
+                // A list of entities -- what a variable-length relationship
+                // variable binds -- is a list, and `size()` counts it (#652).
+                Value::List(items) => Ok(Value::Property(PropertyValue::Integer(items.len() as i64))),
                 Value::Property(p) if p.as_list_items().is_some() => Ok(Value::Property(
                     PropertyValue::Integer(p.as_list_items().unwrap().len() as i64),
                 )),
                 _ => Err(ExecutionError::TypeError("size() requires string, list, or path".to_string())),
             }
         }
-        // Path functions
+        // Path functions.
+        //
+        // These return the nodes and relationships themselves. They used to
+        // return their **integer ids**, because a `PropertyValue::Array`
+        // cannot hold an entity -- so `nodes(p)` answered `[1, 2]` where
+        // Cypher answers `[(:A), (:B)]`, and anything reading a property off
+        // an element got nothing (#652).
         "nodes" => {
             match &args[0] {
-                Value::Path { nodes, .. } => {
-                    let arr: Vec<PropertyValue> = nodes.iter()
-                        .map(|id| PropertyValue::Integer(id.as_u64() as i64))
-                        .collect();
-                    Ok(Value::Property(PropertyValue::Array(arr)))
-                }
+                Value::Path { nodes, .. } => Ok(Value::List(
+                    nodes.iter().map(|id| Value::NodeRef(*id)).collect(),
+                )),
                 _ => Err(ExecutionError::TypeError("nodes() requires a path".to_string())),
             }
         }
         "relationships" | "rels" => {
             match &args[0] {
-                Value::Path { edges, .. } => {
-                    let arr: Vec<PropertyValue> = edges.iter()
-                        .map(|id| PropertyValue::Integer(id.as_u64() as i64))
-                        .collect();
-                    Ok(Value::Property(PropertyValue::Array(arr)))
-                }
+                Value::Path { edges, .. } => Ok(Value::List(
+                    edges
+                        .iter()
+                        .map(|id| match store.and_then(|s| s.get_edge(*id)) {
+                            Some(e) => Value::EdgeRef(*id, e.source, e.target, e.edge_type.clone()),
+                            None => Value::Null,
+                        })
+                        .collect(),
+                )),
                 _ => Err(ExecutionError::TypeError("relationships() requires a path".to_string())),
             }
         }
@@ -3987,6 +3996,9 @@ pub struct VarLengthExpandOperator {
     min_hops: usize,
     max_hops: usize,
     path_variable: Option<String>,
+    /// The pattern's own name for the relationships traversed, bound to a
+    /// list of them (#652).
+    rel_variable: Option<String>,
     /// Output records buffered for the current input record.
     pending: std::collections::VecDeque<Record>,
     /// `edge_types` resolved to interned ids, cached after the first use.
@@ -4039,6 +4051,7 @@ impl VarLengthExpandOperator {
             min_hops,
             max_hops,
             path_variable: None,
+            rel_variable: None,
             pending: std::collections::VecDeque::new(),
             type_ids: None,
             pinned_target: None,
@@ -4055,6 +4068,17 @@ impl VarLengthExpandOperator {
     /// Set path variable for named-path materialization.
     pub fn with_path_variable(mut self, var: String) -> Self {
         self.path_variable = Some(var);
+        self
+    }
+
+    /// Bind the pattern's relationship variable to the relationships traversed.
+    ///
+    /// `MATCH (a)-[r:T*]->(b)` makes `r` a **list of relationships**, one per
+    /// hop. The variable was simply dropped, so the query failed with
+    /// "Variable not found: r" -- the traversal was right and its own name for
+    /// what it traversed did not exist (#652).
+    pub fn with_rel_variable(mut self, var: String) -> Self {
+        self.rel_variable = Some(var);
         self
     }
 
@@ -4218,7 +4242,7 @@ impl VarLengthExpandOperator {
             if self.target_reaches(source_id, store) && self.emit_ok(target, store) {
                 let empty: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
                     std::collections::HashMap::new();
-                self.buffer(record, target, &empty, source_id);
+                self.buffer(record, target, &empty, source_id, store);
             }
             return Ok(());
         }
@@ -4231,7 +4255,7 @@ impl VarLengthExpandOperator {
 
         // Depth 0 endpoint (only relevant when min_hops == 0).
         if self.min_hops == 0 && self.emit_ok(source_id, store) {
-            self.buffer(record, source_id, &parent, source_id);
+            self.buffer(record, source_id, &parent, source_id, store);
         }
 
         // Cloned rather than borrowed: the BFS below calls `&mut self` methods
@@ -4261,7 +4285,7 @@ impl VarLengthExpandOperator {
             if depth >= self.min_hops {
                 for &nb in &next {
                     if self.emit_ok(nb, store) {
-                        self.buffer(record, nb, &parent, source_id);
+                        self.buffer(record, nb, &parent, source_id, store);
                     }
                 }
             }
@@ -4288,12 +4312,39 @@ impl VarLengthExpandOperator {
         target: NodeId,
         parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
         source: NodeId,
+        store: &GraphStore,
     ) {
         let mut rec = base.clone();
         rec.bind(self.target_var.clone(), Value::NodeRef(target));
-        if let Some(ref pv) = self.path_variable {
+        if self.path_variable.is_some() || self.rel_variable.is_some() {
             let (nodes, edges) = reconstruct_path(parent, source, target);
-            rec.bind(pv.clone(), Value::Path { nodes, edges });
+            if let Some(ref rv) = self.rel_variable {
+                // A list of relationships, not of ids: `r` is the same kind of
+                // thing a single-hop `[r]` binds, one per hop.
+                // Resolved from the store rather than left as placeholders:
+                // an `EdgeRef` carrying a blank type renders as `[:]`, which
+                // is not what any caller means by a relationship.
+                rec.bind(
+                    rv.clone(),
+                    Value::List(
+                        edges
+                            .iter()
+                            .map(|e| match store.get_edge(*e) {
+                                Some(edge) => Value::EdgeRef(
+                                    *e,
+                                    edge.source,
+                                    edge.target,
+                                    edge.edge_type.clone(),
+                                ),
+                                None => Value::Null,
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(ref pv) = self.path_variable {
+                rec.bind(pv.clone(), Value::Path { nodes, edges });
+            }
         }
         self.pending.push_back(rec);
     }
@@ -4721,6 +4772,9 @@ impl AggregatorState {
             }
             AggregatorState::CountDistinct(set) => {
                 match value {
+                    // A list is distinguished by its rendering, which is the
+                    // cheapest total order available over mixed element types.
+                    Value::List(items) => set.insert_prop(PropertyValue::String(format!("{items:?}"))),
                     Value::Property(prop) => {
                         if !prop.is_null() {
                             set.insert_prop(prop.clone());
@@ -9472,6 +9526,23 @@ impl PhysicalOperator for SetPropertyOperator {
                     Ok(v) => match v {
                         Value::Property(pv) => pv,
                         Value::Null => PropertyValue::Null,
+                        // Degrades to ids, as the node and edge arms below do:
+                        // a `PropertyValue` cannot hold an entity.
+                        Value::List(items) => PropertyValue::Array(
+                            items
+                                .iter()
+                                .map(|i| match i {
+                                    Value::Property(p) => p.clone(),
+                                    Value::NodeRef(id) | Value::Node(id, _) => {
+                                        PropertyValue::Integer(id.as_u64() as i64)
+                                    }
+                                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                        PropertyValue::Integer(id.as_u64() as i64)
+                                    }
+                                    _ => PropertyValue::Null,
+                                })
+                                .collect(),
+                        ),
                         Value::NodeRef(id) => PropertyValue::Integer(id.as_u64() as i64),
                         Value::Node(id, _) => PropertyValue::Integer(id.as_u64() as i64),
                         Value::EdgeRef(id, ..) => PropertyValue::Integer(id.as_u64() as i64),
@@ -12225,14 +12296,19 @@ mod tests {
             nodes: vec![NodeId::new(1), NodeId::new(2)],
             edges: vec![EdgeId::new(10)],
         };
+        // The nodes themselves, not their ids. This asserted an
+        // `Array([1, 2])` -- which is what the function used to return,
+        // because a `PropertyValue` cannot hold a node. An id is a
+        // plausible-looking answer that no property access can be read from
+        // (#652).
         let result = eval_function("nodes", &[path], None).unwrap();
         match result {
-            Value::Property(PropertyValue::Array(arr)) => {
-                assert_eq!(arr.len(), 2);
-                assert_eq!(arr[0].as_integer(), Some(1));
-                assert_eq!(arr[1].as_integer(), Some(2));
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0], Value::NodeRef(id) if id.as_u64() == 1));
+                assert!(matches!(items[1], Value::NodeRef(id) if id.as_u64() == 2));
             }
-            _ => panic!("Expected Array"),
+            other => panic!("expected a list of nodes, got {other:?}"),
         }
     }
 
@@ -12249,13 +12325,13 @@ mod tests {
             nodes: vec![NodeId::new(1), NodeId::new(2)],
             edges: vec![EdgeId::new(10)],
         };
+        // With no store to resolve against, the element is `Null` rather
+        // than an invented edge -- the shape is a list either way, which is
+        // what changed (#652).
         let result = eval_function("relationships", &[path], None).unwrap();
         match result {
-            Value::Property(PropertyValue::Array(arr)) => {
-                assert_eq!(arr.len(), 1);
-                assert_eq!(arr[0].as_integer(), Some(10));
-            }
-            _ => panic!("Expected Array"),
+            Value::List(items) => assert_eq!(items.len(), 1),
+            other => panic!("expected a list of relationships, got {other:?}"),
         }
     }
 

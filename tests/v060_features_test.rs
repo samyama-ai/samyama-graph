@@ -6,6 +6,7 @@
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::QueryEngine;
+use samyama::query::executor::Value;
 
 // ---------------------------------------------------------------------------
 // Helper: build a small social graph for reuse across tests
@@ -193,12 +194,19 @@ fn test_nodes_function() {
         &store,
     ).unwrap();
     assert_eq!(result.len(), 1);
-    // nodes(p) should return a list with 2 nodes (Alice, Bob)
-    let ns = result.records[0].get("ns").unwrap().as_property().unwrap();
-    if let PropertyValue::Array(items) = ns {
-        assert_eq!(items.len(), 2, "Path Alice->Bob has 2 nodes");
-    } else {
-        panic!("Expected array from nodes(), got {:?}", ns);
+    // A list of *nodes*. This asserted a `PropertyValue::Array`, which cannot
+    // hold a node — so what it was really asserting was that `nodes()`
+    // returned the node **ids** (#652).
+    let ns = result.records[0].get("ns").unwrap();
+    match ns {
+        Value::List(items) => {
+            assert_eq!(items.len(), 2, "Path Alice->Bob has 2 nodes");
+            assert!(
+                items.iter().all(|i| matches!(i, Value::NodeRef(_) | Value::Node(..))),
+                "elements are nodes, not ids: {items:?}"
+            );
+        }
+        other => panic!("Expected a list of nodes from nodes(), got {other:?}"),
     }
 }
 
@@ -211,11 +219,16 @@ fn test_relationships_function() {
         &store,
     ).unwrap();
     assert_eq!(result.len(), 1);
-    let rels = result.records[0].get("rels").unwrap().as_property().unwrap();
-    if let PropertyValue::Array(items) = rels {
-        assert_eq!(items.len(), 1, "Path Alice->Bob has 1 relationship");
-    } else {
-        panic!("Expected array from relationships(), got {:?}", rels);
+    let rels = result.records[0].get("rels").unwrap();
+    match rels {
+        Value::List(items) => {
+            assert_eq!(items.len(), 1, "Path Alice->Bob has 1 relationship");
+            assert!(
+                items.iter().all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))),
+                "elements are relationships, not ids: {items:?}"
+            );
+        }
+        other => panic!("Expected a list of relationships, got {other:?}"),
     }
 }
 

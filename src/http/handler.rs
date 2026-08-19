@@ -139,6 +139,11 @@ pub async fn query_handler(
                     
                     // Extract graph elements for visualization
                     match val {
+                        Value::List(items) => {
+                            row.push(serde_json::Value::Array(
+                                items.iter().map(|i| json!(format!("{i:?}"))).collect(),
+                            ));
+                        }
                         Value::Node(id, node) => {
                             let mut properties = serde_json::Map::new();
                             if let Some(merged) = full_props.get(&id.as_u64()) {

@@ -120,6 +120,13 @@ pub enum Value {
         nodes: Vec<NodeId>,
         edges: Vec<EdgeId>,
     },
+    /// A list whose elements are themselves `Value`s.
+    ///
+    /// `PropertyValue::Array` cannot hold a node or a relationship, so a list
+    /// of them had nowhere to live: `relationships(p)` degraded its edges to
+    /// integer ids and a variable-length relationship variable was not bound
+    /// at all.
+    List(Vec<Value>),
     /// Null
     Null,
 }
@@ -156,6 +163,7 @@ impl Hash for Value {
             Value::Edge(id, _) | Value::EdgeRef(id, ..) => { 1u8.hash(state); id.hash(state); }
             Value::Property(p) => { 2u8.hash(state); p.hash(state); }
             Value::Path { nodes, edges } => { 3u8.hash(state); nodes.hash(state); edges.hash(state); }
+            Value::List(items) => { 5u8.hash(state); items.hash(state); }
             Value::Null => { 4u8.hash(state); }
         }
     }
