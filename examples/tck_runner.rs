@@ -172,17 +172,22 @@ fn float_repr(f: f64) -> String {
 
 // ------------------------------------------------- parsing a TCK literal
 
-struct Cursor<'a> {
-    s: &'a [u8],
+/// Characters, not bytes.
+///
+/// This indexed `&[u8]` and cast each byte to `char`, which splits every
+/// multi-byte character into mojibake -- the reason the TCK's UTF-8 literal
+/// scenarios could not be scored correctly for any engine.
+struct Cursor {
+    s: Vec<char>,
     i: usize,
 }
 
-impl<'a> Cursor<'a> {
-    fn new(s: &'a str) -> Self {
-        Self { s: s.as_bytes(), i: 0 }
+impl Cursor {
+    fn new(s: &str) -> Self {
+        Self { s: s.chars().collect(), i: 0 }
     }
     fn skip_ws(&mut self) {
-        while self.i < self.s.len() && (self.s[self.i] as char).is_whitespace() {
+        while self.i < self.s.len() && self.s[self.i].is_whitespace() {
             self.i += 1;
         }
     }
@@ -199,7 +204,7 @@ impl<'a> Cursor<'a> {
         }
     }
     fn rest(&self) -> String {
-        String::from_utf8_lossy(&self.s[self.i..]).to_string()
+        self.s[self.i..].iter().collect::<String>()
     }
 
     fn parse(&mut self) -> Tck {
@@ -250,10 +255,37 @@ impl<'a> Cursor<'a> {
         self.i += 1;
         let mut out = String::new();
         while self.i < self.s.len() {
-            let c = self.s[self.i] as char;
+            let c = self.s[self.i];
             if c == '\\' && self.i + 1 < self.s.len() {
-                out.push(self.s[self.i + 1] as char);
+                // Interpreted, not merely un-backslashed. Dropping the
+                // backslash turned `'Foo\nFoo'` into `FoonFoo` on the expected
+                // side, so a correct engine returning a real newline was
+                // scored wrong -- for every engine, including Neo4j, which is
+                // how it was found.
+                let esc = self.s[self.i + 1];
                 self.i += 2;
+                match esc {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    'b' => out.push('\u{8}'),
+                    'f' => out.push('\u{c}'),
+                    '0' => out.push('\0'),
+                    'u' => {
+                        let hex: String =
+                            (0..4).filter_map(|k| self.s.get(self.i + k).copied()).collect();
+                        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            Some(ch) if hex.len() == 4 => {
+                                out.push(ch);
+                                self.i += 4;
+                            }
+                            // Not a valid escape; the TCK has scenarios that
+                            // assert exactly that, so keep it literal.
+                            _ => out.push('u'),
+                        }
+                    }
+                    other => out.push(other),
+                }
                 continue;
             }
             self.i += 1;
@@ -335,7 +367,7 @@ impl<'a> Cursor<'a> {
         let start = self.i;
         let mut depth = 0usize;
         while self.i < self.s.len() {
-            match self.s[self.i] as char {
+            match self.s[self.i] {
                 '<' => depth += 1,
                 '>' => {
                     depth -= 1;
@@ -348,7 +380,7 @@ impl<'a> Cursor<'a> {
             }
             self.i += 1;
         }
-        Tck::Opaque(String::from_utf8_lossy(&self.s[start..self.i]).to_string())
+        Tck::Opaque(self.s[start..self.i].iter().collect::<String>())
     }
 
     fn parse_rel(&mut self) -> Tck {
@@ -425,10 +457,10 @@ impl<'a> Cursor<'a> {
 
     fn take_while(&mut self, f: impl Fn(char) -> bool) -> String {
         let start = self.i;
-        while self.i < self.s.len() && f(self.s[self.i] as char) {
+        while self.i < self.s.len() && f(self.s[self.i]) {
             self.i += 1;
         }
-        String::from_utf8_lossy(&self.s[start..self.i]).to_string()
+        self.s[start..self.i].iter().collect::<String>()
     }
 }
 
@@ -576,6 +608,16 @@ struct Scenario {
     name: String,
     setup: Vec<String>,
     query: Option<String>,
+    /// `When executing control query` — a *verification* query that runs
+    /// **after** the main one, and whose result is what the scenario's final
+    /// expectation describes.
+    ///
+    /// This was being appended to `setup`, so it ran first, returned nothing,
+    /// and the main query was then scored against **its** expectation. The
+    /// main query in these scenarios is a write whose own result is empty, so
+    /// every engine failed all 27 of them — Neo4j included, which is how it
+    /// was noticed.
+    control_query: Option<String>,
     expect: Option<Expect>,
     /// A step this harness does not implement; the scenario is skipped and this
     /// says which step, so the gap is legible.
@@ -613,7 +655,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 
     // The step a docstring or table belongs to.
     #[derive(PartialEq, Clone, Copy)]
-    enum Pending { None, Setup, Query, Result(bool), Params }
+    enum Pending { None, Setup, Query, Control, Result(bool), Params }
     let mut pending = Pending::None;
 
     while i < lines.len() {
@@ -627,6 +669,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 name: "Background".to_string(),
                 setup: Vec::new(),
                 query: None,
+                control_query: None,
                 expect: None,
                 unsupported: None,
             });
@@ -649,6 +692,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 name: line.trim_start_matches("Scenario Outline:").trim_start_matches("Scenario:").trim().to_string(),
                 setup: background.clone(),
                 query: None,
+                control_query: None,
                 expect: None,
                 unsupported: None,
             };
@@ -678,7 +722,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             } else if body.starts_with("executing query") {
                 pending = Pending::Query;
             } else if body.starts_with("executing control query") {
-                pending = Pending::Setup;
+                pending = Pending::Control;
             } else if body.starts_with("the result should be, in any order")
                 || body.starts_with("the result should be (ignoring element order for lists)")
             {
@@ -732,6 +776,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             i += 1;
             match pending {
                 Pending::Setup => s.setup.push(buf.trim().to_string()),
+                Pending::Control => s.control_query = Some(buf.trim().to_string()),
                 Pending::Query => s.query = Some(buf.trim().to_string()),
                 _ => {}
             }
@@ -772,6 +817,49 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
     out
 }
 
+/// Run a scenario and render its rows the way a competitor driver would.
+///
+/// Shares `run_scenario`'s setup and control-query handling by construction --
+/// it is the same function body up to the point where the rows are produced --
+/// so the only difference between this and a competitor is the engine.
+fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>, String> {
+    let query = s.query.as_ref().ok_or("no query")?;
+    let mut store = GraphStore::new();
+    for stmt in &s.setup {
+        let q = parse_query(stmt).map_err(|_| format!("setup did not parse: {stmt}"))?;
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        m.execute(&q).map_err(|e| format!("setup did not run: {e}"))?;
+    }
+    let query: &String = if let Some(control) = &s.control_query {
+        let q = parse_query(query).map_err(|e| format!("parse: {e}"))?;
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        m.execute(&q).map_err(|e| format!("{e}"))?;
+        control
+    } else {
+        query
+    };
+    let parsed = parse_query(query).map_err(|e| format!("parse: {e}"))?;
+    let batch = {
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        match m.execute(&parsed) {
+            Ok(b) => b,
+            Err(_) => QueryExecutor::new(&store)
+                .execute(&parsed)
+                .map_err(|e| format!("exec: {e}"))?,
+        }
+    };
+    let mut rows = Vec::new();
+    for rec in &batch.records {
+        rows.push(
+            header
+                .iter()
+                .map(|c| rec.get(c).map(|v| value_to_tck(v, &store)).unwrap_or(Tck::Null).render())
+                .collect(),
+        );
+    }
+    Ok(rows)
+}
+
 fn run_scenario(s: &Scenario) -> (Outcome, String) {
     if let Some(why) = &s.unsupported {
         return (Outcome::Skipped, why.clone());
@@ -796,6 +884,25 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
             return (Outcome::Skipped, "setup did not run".into());
         }
     }
+
+    // A control query runs *after* the main one and is what the scenario's
+    // final expectation describes. The main query in these scenarios is a
+    // write whose own result is empty, so its rows are deliberately discarded
+    // here -- what is being asserted is that the write happened, which only
+    // the control query can see.
+    let query: &String = if let Some(control) = &s.control_query {
+        if let Ok(q) = parse_query(query) {
+            let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+            if m.execute(&q).is_err() {
+                return (Outcome::Errored, "the query before the control query failed".into());
+            }
+        } else {
+            return (Outcome::Errored, format!("parse: {}", query.replace('\n', " ")));
+        }
+        control
+    } else {
+        query
+    };
 
     // A write query has to go through the mutating executor; try that first and
     // fall back, since the harness does not know which it is.
@@ -851,7 +958,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                 (Outcome::WrongResult, format!("expected empty, got {} rows", batch.records.len()))
             }
         }
-        Expect::Rows { header, rows, ordered, list_order_insensitive } => {
+        Expect::Rows { header, rows: _, ordered: _, list_order_insensitive } => {
             if header.is_empty() {
                 return (Outcome::Skipped, "no header".into());
             }
@@ -868,6 +975,22 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                 }
                 actual.push(row);
             }
+            compare_rendered_rows(expect, actual)
+        }
+    }
+}
+
+/// Score already-rendered rows against a scenario's expectation.
+///
+/// Split out so that **every** engine is judged by the same code. A competitor
+/// is run by a thin driver that renders each cell in TCK literal syntax; that
+/// text is parsed and re-rendered through `Tck` here, exactly as the expected
+/// side is. If the comparison lived in the driver instead, a difference
+/// between engines could be a difference between two comparators, and the
+/// number would say nothing about either engine.
+fn compare_rendered_rows(expect: &Expect, mut actual: Vec<Vec<String>>) -> (Outcome, String) {
+    match expect {
+        Expect::Rows { rows, ordered, list_order_insensitive, .. } => {
             let mut expected: Vec<Vec<String>> = rows
                 .iter()
                 .map(|r| {
@@ -903,6 +1026,17 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                 )
             }
         }
+        Expect::Empty => {
+            if actual.is_empty() {
+                (Outcome::Pass, String::new())
+            } else {
+                (Outcome::WrongResult, format!("expected empty, got {} rows", actual.len()))
+            }
+        }
+        Expect::Error(kind) => (
+            Outcome::WrongResult,
+            format!("expected {kind}, query succeeded with {} rows", actual.len()),
+        ),
     }
 }
 
@@ -945,6 +1079,204 @@ fn main() {
         if let Ok(text) = std::fs::read_to_string(f) {
             scenarios.extend(parse_feature(f, &text));
         }
+    }
+
+    // Hand the scenario list to another engine, or score what one sent back.
+    //
+    // Both exist so a competitor is measured by *this* code: same scenario
+    // selection, same comparison. A separate harness per engine would make
+    // every difference ambiguous between the engines and the harnesses -- and
+    // the harness is the thing under most suspicion here, having been wrong
+    // about `Background:` blocks and paths already.
+    if let Some(path) = arg("--emit-scenarios") {
+        let mut out = Vec::new();
+        for s in &scenarios {
+            if s.unsupported.is_some() || s.query.is_none() || s.expect.is_none() {
+                continue;
+            }
+            let expect = s.expect.as_ref().unwrap();
+            let (kind, header, ordered, loose) = match expect {
+                Expect::Rows { header, ordered, list_order_insensitive, .. } =>
+                    ("rows", header.clone(), *ordered, *list_order_insensitive),
+                Expect::Empty => ("empty", Vec::new(), false, false),
+                Expect::Error(_) => ("error", Vec::new(), false, false),
+            };
+            out.push(serde_json::json!({
+                "feature": s.feature,
+                "name": s.name,
+                "setup": s.setup,
+                "query": s.query.as_ref().unwrap(),
+                "control_query": s.control_query,
+                "expect_kind": kind,
+                "header": header,
+                "ordered": ordered,
+                "list_order_insensitive": loose,
+            }));
+        }
+        let n = out.len();
+        std::fs::write(&path, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+        println!("wrote {n} evaluable scenarios to {path}");
+        return;
+    }
+
+    // Samyama's own results, in the shape the competitor drivers emit.
+    //
+    // Without this our number and theirs sit on slightly different
+    // denominators -- the native path skips a few scenarios at run time that
+    // the emitted list still contains -- and a comparison across two
+    // denominators is not a comparison. It doubles as a check on the judge:
+    // scoring these should reproduce the native run.
+    if let Some(path) = arg("--emit-actuals") {
+        let mut out = Vec::new();
+        for sc in &scenarios {
+            if sc.unsupported.is_some() || sc.query.is_none() || sc.expect.is_none() {
+                continue;
+            }
+            let mut rec = serde_json::json!({ "feature": sc.feature, "name": sc.name });
+            let header: Vec<String> = match sc.expect.as_ref().unwrap() {
+                Expect::Rows { header, .. } => header.clone(),
+                _ => Vec::new(),
+            };
+            let produced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_scenario_rows(sc, &header)
+            }))
+            .unwrap_or_else(|_| Err("panicked".to_string()));
+            match produced {
+                Ok(rows) => {
+                    rec["status"] = serde_json::json!("ok");
+                    rec["rows"] = serde_json::json!(rows);
+                }
+                Err(e) => {
+                    rec["status"] = serde_json::json!("error");
+                    rec["error"] = serde_json::json!(e);
+                }
+            }
+            out.push(rec);
+        }
+        let n = out.len();
+        std::fs::write(&path, serde_json::to_string(&out).unwrap()).unwrap();
+        println!("wrote {n} actuals to {path}");
+        return;
+    }
+
+    if let Some(path) = arg("--judge") {
+        let engine = arg("--engine").unwrap_or_else(|| "competitor".into());
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("cannot read {path}: {e}");
+            std::process::exit(66);
+        });
+        let actuals: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!("{path} is not the expected JSON: {e}");
+            std::process::exit(65);
+        });
+        let by_key: BTreeMap<(String, String), &serde_json::Value> = actuals
+            .iter()
+            .map(|a| {
+                (
+                    (
+                        a["feature"].as_str().unwrap_or("").to_string(),
+                        a["name"].as_str().unwrap_or("").to_string(),
+                    ),
+                    a,
+                )
+            })
+            .collect();
+
+        let (mut pass, mut wrong, mut err, mut missing) = (0usize, 0usize, 0usize, 0usize);
+        let mut failures: Vec<(String, String, &'static str, String)> = Vec::new();
+        let mut per_feature: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        let mut evaluated = 0usize;
+        for s in &scenarios {
+            if s.unsupported.is_some() || s.query.is_none() || s.expect.is_none() {
+                continue;
+            }
+            evaluated += 1;
+            let entry = per_feature.entry(s.feature.clone()).or_insert((0, 0));
+            entry.1 += 1;
+            let expect = s.expect.as_ref().unwrap();
+            let Some(actual) = by_key.get(&(s.feature.clone(), s.name.clone())) else {
+                missing += 1;
+                err += 1;
+                failures.push((s.feature.clone(), s.name.clone(), "errored", "no result reported".into()));
+                continue;
+            };
+            let status = actual["status"].as_str().unwrap_or("error");
+            if status != "ok" {
+                let detail = actual["error"].as_str().unwrap_or("error").to_string();
+                // A scenario asserting an error is *satisfied* by one.
+                if matches!(expect, Expect::Error(_)) {
+                    pass += 1;
+                    entry.0 += 1;
+                } else {
+                    err += 1;
+                    failures.push((s.feature.clone(), s.name.clone(), "errored", short(&detail)));
+                }
+                continue;
+            }
+            if matches!(expect, Expect::Error(_)) {
+                wrong += 1;
+                failures.push((
+                    s.feature.clone(),
+                    s.name.clone(),
+                    "wrong_result",
+                    "expected an error, query succeeded".into(),
+                ));
+                continue;
+            }
+            // Each cell arrives as TCK literal text and is put through the same
+            // parse-and-render as the expected side.
+            let loose = matches!(expect, Expect::Rows { list_order_insensitive: true, .. });
+            let rows: Vec<Vec<String>> = actual["rows"]
+                .as_array()
+                .map(|rs| {
+                    rs.iter()
+                        .map(|r| {
+                            r.as_array()
+                                .map(|cs| {
+                                    cs.iter()
+                                        .map(|c| {
+                                            let v = parse_expected(c.as_str().unwrap_or("null"));
+                                            if loose { v.render_sorted_lists() } else { v.render() }
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            match compare_rendered_rows(expect, rows) {
+                (Outcome::Pass, _) => { pass += 1; entry.0 += 1; }
+                (_, detail) => {
+                    wrong += 1;
+                    failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail));
+                }
+            }
+        }
+        println!("openCypher TCK — {engine}");
+        println!("  evaluated          {evaluated}");
+        println!("    pass             {pass}");
+        println!("    wrong result     {wrong}");
+        println!("    errored          {err}   (of which {missing} reported nothing)");
+        let rate = if evaluated > 0 { pass as f64 / evaluated as f64 * 100.0 } else { 0.0 };
+        println!("\n  PASS RATE          {rate:.1}%  of evaluated scenarios");
+        if let Some(m) = arg("--failures-manifest") {
+            let mut lines: Vec<String> = failures
+                .iter()
+                .map(|(f, n, o, _)| format!("{o}\t{f}\t{n}"))
+                .collect();
+            lines.sort();
+            std::fs::write(m, lines.join("\n")).ok();
+        }
+        if let Some(d) = arg("--failures-detail") {
+            let mut lines: Vec<String> = failures
+                .iter()
+                .map(|(f, n, o, det)| format!("{o}\t{f}\t{n}\t{det}"))
+                .collect();
+            lines.sort();
+            std::fs::write(d, lines.join("\n")).ok();
+        }
+        return;
     }
 
     let (mut pass, mut wrong, mut err, mut skip) = (0usize, 0usize, 0usize, 0usize);
