@@ -1647,9 +1647,17 @@ fn a_constant_expression_is_allowed_but_an_unbound_variable_is_refused() {
 }
 
 #[test]
-fn match_and_merge_refuse_non_literal_property_values_rather_than_ignoring_them() {
-    // These are not evaluated yet. Accepting and dropping the constraint would make
-    // `MATCH (p:P {n: x})` return *every* :P — a working-looking query returning too much.
+fn match_refuses_a_non_literal_property_value_and_merge_evaluates_it() {
+    // The danger both halves guard against is the same: accepting the pattern
+    // and dropping the constraint. `MATCH (p:P {n: x})` would then return
+    // *every* `:P` — a working-looking query returning too much.
+    //
+    // MATCH still refuses, because it still does not evaluate these. MERGE no
+    // longer needs to: #642 resolves the property against the row and uses the
+    // result for the match and the creation alike, which is what makes
+    // `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather than a
+    // node factory. This test used to assert both refused; it now asserts each
+    // does the right thing, which is no longer the same thing.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     engine.execute_mut("CREATE (:P {n: 1})", &mut s, "default").unwrap();
@@ -1660,15 +1668,21 @@ fn match_and_merge_refuse_non_literal_property_values_rather_than_ignoring_them(
         .expect_err("must not silently match everything");
     assert!(format!("{err}").contains("WHERE"), "should name the workaround: {err}");
 
-    let err = engine
-        .execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default")
-        .expect_err("must not silently store null");
-    assert!(format!("{err}").contains("WHERE"), "{err}");
-
     // the WHERE form it points at does work
     assert_eq!(
         bag(&s, "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.n AS v"),
         vec!["v=1"]
+    );
+
+    // MERGE keys on the row: one `:M` per distinct `p.n`, and running it again
+    // adds nothing.
+    engine.execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default").unwrap();
+    assert_eq!(scalar(&s, "MATCH (m:M) RETURN count(m) AS n"), "n=2");
+    engine.execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default").unwrap();
+    assert_eq!(
+        scalar(&s, "MATCH (m:M) RETURN count(m) AS n"),
+        "n=2",
+        "a second run must find the nodes the first one wrote"
     );
 }
 

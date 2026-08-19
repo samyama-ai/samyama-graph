@@ -249,37 +249,37 @@ fn repeated_runs_of_a_pipeline_query_agree() {
 }
 
 #[test]
-fn both_planning_paths_refuse_an_expression_valued_merge_property() {
-    // The two queries below express the same thing: MERGE a node whose property
-    // comes from a bound variable rather than a literal. The left one goes
-    // through the established planner, the right one through the clause
-    // pipeline. Neither supports it yet, and the risk is that only *one* of
-    // them says so: the pipeline read none of the by-kind clause fields the
-    // guard inspected, so it planned a MERGE on the label alone and
-    // `UNWIND ['a','b','a'] AS x MERGE (n:N {v: x})` created a single node and
-    // reported success. A silent wrong answer is worse than the refusal.
+fn both_planning_paths_agree_on_an_expression_valued_merge_property() {
+    // The two queries express the same thing: MERGE a node whose key comes
+    // from the row rather than from a literal. The first goes through the
+    // established planner, the second through the clause pipeline.
     //
-    // Assert the agreement, not the message: whatever the two paths do here,
-    // they must do the same thing.
-    let legacy = "MATCH (a:Src) MERGE (n:N {v: a.k}) RETURN n";
-    let pipeline = "UNWIND ['a', 'b', 'a'] AS x MERGE (n:N {v: x}) WITH n RETURN n.v AS v";
+    // This test began life asserting they both *refused* it. They did, and the
+    // point was that only one of them refusing would be the dangerous
+    // outcome — the pipeline read none of the by-kind clause fields the guard
+    // inspected, so it planned a MERGE on the label alone and
+    // `UNWIND ['a','b','a'] AS x MERGE (n:N {v: x})` created a single node and
+    // reported success. #642 made the query answerable, so the assertion flips
+    // to what it was always really about: the two paths must do the same
+    // thing, and that thing must now be correct.
+    let mut legacy_store = GraphStore::new();
+    run(&mut legacy_store, "CREATE (:Src {k: 'a'}), (:Src {k: 'b'}), (:Src {k: 'a'})");
+    run(&mut legacy_store, "MATCH (a:Src) MERGE (n:N {v: a.k})");
 
-    for cypher in [legacy, pipeline] {
-        let mut store = GraphStore::new();
-        let q = parse_query(cypher).expect("query should parse");
-        let err = MutQueryExecutor::new(&mut store, "default".to_string())
-            .execute(&q)
-            .expect_err(&format!("`{cypher}` must be refused, not silently mis-planned"));
-        let msg = err.to_string();
-        assert!(
-            msg.contains("MERGE") && msg.contains("non-literal property value"),
-            "`{cypher}` was refused for the wrong reason: {msg}"
-        );
+    let mut pipeline_store = GraphStore::new();
+    run(
+        &mut pipeline_store,
+        "UNWIND ['a', 'b', 'a'] AS x MERGE (n:N {v: x}) WITH n RETURN n.v AS v",
+    );
+
+    for (label, store) in [("legacy", &legacy_store), ("pipeline", &pipeline_store)] {
         assert_eq!(
-            count(&store, "MATCH (n:N) RETURN n"),
-            0,
-            "`{cypher}` was refused but still wrote to the store"
+            count(store, "MATCH (n:N) RETURN n"),
+            2,
+            "{label}: one node per distinct key, not one per row and not one overall"
         );
+        assert_eq!(count(store, "MATCH (n:N {v: 'a'}) RETURN n"), 1, "{label}");
+        assert_eq!(count(store, "MATCH (n:N {v: 'b'}) RETURN n"), 1, "{label}");
     }
 }
 
