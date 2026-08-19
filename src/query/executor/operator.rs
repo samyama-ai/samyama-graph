@@ -9698,6 +9698,50 @@ impl MergeOperator {
     }
 
     /// Does a node satisfy the pattern's labels and inline properties?
+
+    /// A pattern's properties with every expression resolved against this row.
+    ///
+    /// `property_exprs` holds the values that are not literals -- `{v: x}` from
+    /// an UNWIND, `{id: row.id}` from a batch upsert, `{name: a.name}` from a
+    /// bound node. MERGE did not evaluate them at all, so it matched on the
+    /// labels alone and `UNWIND ['a','b'] AS x MERGE (n:N {v: x})` found the
+    /// first `:N` for every row and created **one** node instead of two. The
+    /// planner refused the query outright rather than answer it wrongly; this
+    /// is what makes it answerable (#642).
+    ///
+    /// The resolved map is used for matching *and* for creation, which is the
+    /// property that matters: a MERGE that searched on one set of values and
+    /// wrote another would create a node its own pattern could not find, and
+    /// running the query twice would make two.
+    fn resolved_props(
+        literals: Option<&HashMap<String, PropertyValue>>,
+        exprs: Option<&HashMap<String, Expression>>,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Option<HashMap<String, PropertyValue>>> {
+        let has_exprs = exprs.map_or(false, |e| !e.is_empty());
+        if !has_exprs {
+            return Ok(literals.cloned());
+        }
+        let mut out = literals.cloned().unwrap_or_default();
+        for (key, expr) in exprs.into_iter().flatten() {
+            match eval_expression(expr, record, store)? {
+                Value::Property(pv) => {
+                    out.insert(key.clone(), pv);
+                }
+                Value::Null => {
+                    out.insert(key.clone(), PropertyValue::Null);
+                }
+                other => {
+                    return Err(ExecutionError::TypeError(format!(
+                        "MERGE property `{key}` must be a scalar value, got {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
     fn node_matches(node: &crate::graph::Node, labels: &[Label], props: Option<&HashMap<String, PropertyValue>>) -> bool {
         if !labels.iter().all(|l| node.labels.contains(l)) {
             return false;
@@ -9738,7 +9782,13 @@ impl MergeOperator {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-            let props = segment.edge.properties.clone().unwrap_or_default();
+            let props = Self::resolved_props(
+                segment.edge.properties.as_ref(),
+                segment.edge.property_exprs.as_ref(),
+                &base,
+                store,
+            )?
+            .unwrap_or_default();
             let (a, b) = match segment.edge.direction {
                 Direction::Incoming => (to, from),
                 Direction::Outgoing | Direction::Both => (from, to),
@@ -9749,12 +9799,26 @@ impl MergeOperator {
         // Candidate node ids per pattern position. A pattern node with no label has no
         // cheap candidate set, so it cannot participate in a match and the pattern is
         // treated as absent (i.e. created).
-        let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
+        //
+        // Resolved once per pattern node, before the search, because the same
+        // values decide both what is matched and what would be created.
+        let mut node_props: Vec<Option<HashMap<String, PropertyValue>>> =
+            Vec::with_capacity(pattern_nodes.len());
         for np in &pattern_nodes {
+            node_props.push(Self::resolved_props(
+                np.properties.as_ref(),
+                np.property_exprs.as_ref(),
+                &base,
+                store,
+            )?);
+        }
+
+        let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
+        for (i, np) in pattern_nodes.iter().enumerate() {
             let mut ids = Vec::new();
             if let Some(first_label) = np.labels.first() {
                 for node in store.get_nodes_by_label(first_label) {
-                    if Self::node_matches(node, &np.labels, np.properties.as_ref()) {
+                    if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
                         ids.push(node.id);
                     }
                 }
@@ -9790,11 +9854,11 @@ impl MergeOperator {
 
         // Create the entire pattern.
         let mut created: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
-        for np in &pattern_nodes {
+        for (i, np) in pattern_nodes.iter().enumerate() {
             // `MERGE ({...})` has no labels, and defaulting to "Node" gave the
             // node a label the query never wrote (#625).
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
-            if let Some(required) = np.properties.as_ref() {
+            if let Some(required) = node_props[i].as_ref() {
                 for (k, v) in required {
                     if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
                     {
@@ -9929,7 +9993,16 @@ impl PhysicalOperator for MergeOperator {
         let start = &path.start;
         let start_var = start.variable.clone().unwrap_or_else(|| "n".to_string());
         let labels = &start.labels;
-        let props = start.properties.as_ref();
+        // The same map decides what is matched and what is created, so a value
+        // that came from the row cannot make MERGE search for one thing and
+        // write another.
+        let resolved = Self::resolved_props(
+            start.properties.as_ref(),
+            start.property_exprs.as_ref(),
+            &base,
+            store,
+        )?;
+        let props = resolved.as_ref();
 
         // Search for existing nodes matching labels + properties
         let mut matched_node_id = None;

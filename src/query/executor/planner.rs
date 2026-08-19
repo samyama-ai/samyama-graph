@@ -630,19 +630,6 @@ impl QueryPlanner {
             }
         }
 
-        if let Some(merge) = &query.merge_clause {
-            for path in &merge.pattern.paths {
-                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
-                    return Err(complain("MERGE", key));
-                }
-                for seg in &path.segments {
-                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
-                        return Err(complain("MERGE", key));
-                    }
-                }
-            }
-        }
-
         // A clause-pipeline query keeps its clauses here and leaves the fields
         // above empty, so the checks above see nothing. Missing this let
         // `UNWIND ['a','b','a'] AS x MERGE (n:N {v: x})` create **one** node
@@ -651,9 +638,10 @@ impl QueryPlanner {
         // path had refused that query for exactly this reason since #311's
         // lesson — a new path does not inherit an old guard.
         for clause in &query.clauses {
+            // MERGE resolves its property expressions against the row now
+            // (#642), so only MATCH is still restricted here.
             let (label, pattern) = match clause {
                 crate::query::ast::Clause::Match(m) => ("MATCH", &m.pattern),
-                crate::query::ast::Clause::Merge(m) => ("MERGE", &m.pattern),
                 _ => continue,
             };
             for path in &pattern.paths {
@@ -924,8 +912,17 @@ impl QueryPlanner {
             return self.plan_aggregate_then_expand(query, pat);
         }
 
-        // Handle MERGE-only statement (no MATCH needed)
-        if query.match_clauses.is_empty() && query.call_clause.is_none() {
+        // Handle MERGE-only statement (no MATCH needed).
+        //
+        // A leading UNWIND is excluded for the same reason as the CREATE-only
+        // branch below: `UNWIND [...] AS x MERGE (n:N {v: x})` has no MATCH but
+        // is still row-driven, and planning it here runs the MERGE once with
+        // nothing bound. It falls through to the general path, where the
+        // Unwind feeds the merge.
+        if query.match_clauses.is_empty()
+            && query.call_clause.is_none()
+            && !Self::has_any_unwind(query)
+        {
             if let Some(merge_clause) = &query.merge_clause {
                 let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
                     .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
@@ -1939,14 +1936,29 @@ impl QueryPlanner {
                 }
             }
 
-            if !edges_to_merge.is_empty() {
+            // `MatchMergeEdgeOperator` wires an edge between endpoints that
+            // are **already bound**, which is what this branch is for -- the
+            // `MATCH (a), (b) MERGE (a)-[:R]->(b)` shape. Without a MATCH the
+            // endpoints are not bound by anything, so it wired nothing and
+            // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
+            // silently created no nodes and no edges. That case is a
+            // whole-pattern merge, which `MergeOperator` already does (#642).
+            if !edges_to_merge.is_empty() && !query.match_clauses.is_empty() {
                 // Edge MERGE: use MatchMergeEdgeOperator
                 use crate::query::executor::operator::MatchMergeEdgeOperator;
                 operator = Box::new(MatchMergeEdgeOperator::new(
                     operator, edges_to_merge, on_create, on_match,
                 ));
             } else {
-                // Node-only MERGE: use existing MergeOperator with input
+                // Node-only MERGE, or a whole-pattern MERGE with nothing bound
+                // to hang it off, running once per upstream row.
+                //
+                // The comment here used to say "with input" while the code
+                // assigned over `operator` and threw the input away, so the
+                // MERGE ran exactly once no matter what fed it -- and, more to
+                // the point, could not see the row. That is why
+                // `UNWIND [...] AS x MERGE (n:N {v: x})` had nowhere to read
+                // `x` from (#642).
                 let on_create_labels: Vec<(String, Vec<Label>)> = merge_clause
                     .on_create_labels
                     .iter()
@@ -1957,13 +1969,16 @@ impl QueryPlanner {
                     .iter()
                     .map(|l| (l.variable.clone(), l.labels.clone()))
                     .collect();
-                operator = Box::new(MergeOperator::new(
-                    merge_clause.pattern.clone(),
-                    on_create,
-                    on_match,
-                    on_create_labels,
-                    on_match_labels,
-                ));
+                operator = Box::new(
+                    MergeOperator::new(
+                        merge_clause.pattern.clone(),
+                        on_create,
+                        on_match,
+                        on_create_labels,
+                        on_match_labels,
+                    )
+                    .with_input(operator),
+                );
             }
             true
         } else {
