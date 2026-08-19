@@ -478,6 +478,17 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
     let mut cur: Option<Scenario> = None;
     let mut i = 0usize;
 
+    // A `Background:` block's steps belong to *every* scenario in the file.
+    // Collected by pointing `cur` at a scratch scenario and moving its setup
+    // here when the first real `Scenario:` arrives. Without this the block was
+    // dropped on the floor -- the loop below skips any line before the first
+    // scenario -- and every scenario in the file ran against an empty graph.
+    // One feature uses it (Match5), and 26 of its 29 scenarios were being
+    // scored as wrong answers for returning nothing from a graph that had
+    // never been built.
+    let mut background: Vec<String> = Vec::new();
+    let mut in_background = false;
+
     // The step a docstring or table belongs to.
     #[derive(PartialEq, Clone, Copy)]
     enum Pending { None, Setup, Query, Result(bool), Params }
@@ -488,14 +499,33 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
         let line = raw.trim();
         i += 1;
 
+        if line.starts_with("Background:") {
+            cur = Some(Scenario {
+                feature: feature.clone(),
+                name: "Background".to_string(),
+                setup: Vec::new(),
+                query: None,
+                expect: None,
+                unsupported: None,
+            });
+            in_background = true;
+            pending = Pending::None;
+            continue;
+        }
+
         if line.starts_with("Scenario:") || line.starts_with("Scenario Outline:") {
             if let Some(s) = cur.take() {
-                out.push(s);
+                if in_background {
+                    background = s.setup;
+                    in_background = false;
+                } else {
+                    out.push(s);
+                }
             }
             let mut s = Scenario {
                 feature: feature.clone(),
                 name: line.trim_start_matches("Scenario Outline:").trim_start_matches("Scenario:").trim().to_string(),
-                setup: Vec::new(),
+                setup: background.clone(),
                 query: None,
                 expect: None,
                 unsupported: None,
@@ -613,7 +643,9 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
         }
     }
     if let Some(s) = cur.take() {
-        out.push(s);
+        if !in_background {
+            out.push(s);
+        }
     }
     out
 }
@@ -920,5 +952,91 @@ fn main() {
             println!("  ... and {} more; use --failures-manifest for the full list",
                      failures.len() - 60);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Background:` block applies to every scenario in its file.
+    ///
+    /// This harness dropped it: the parse loop skips any line appearing before
+    /// the first `Scenario:`, so the block was read and discarded. One feature
+    /// in the TCK uses it — Match5, 29 scenarios — and all of them ran against
+    /// an empty graph. They did not error; they returned no rows and were
+    /// scored as **wrong answers**, so the engine was charged with 26 defects
+    /// it did not have and the published pass rate was two points low.
+    ///
+    /// A harness that silently tests nothing looks exactly like an engine that
+    /// silently answers nothing.
+    #[test]
+    fn a_background_block_reaches_every_scenario_in_the_file() {
+        let text = "\
+Feature: Demo
+
+  Background:
+    Given an empty graph
+    And having executed:
+      \"\"\"
+      CREATE (:A {name: 'a'})
+      \"\"\"
+
+  Scenario: [1] first
+    When executing query:
+      \"\"\"
+      MATCH (n:A) RETURN n.name
+      \"\"\"
+    Then the result should be, in any order:
+      | n.name |
+      | 'a'    |
+
+  Scenario: [2] second
+    And having executed:
+      \"\"\"
+      CREATE (:B)
+      \"\"\"
+    When executing query:
+      \"\"\"
+      MATCH (n) RETURN n
+      \"\"\"
+    Then the result should be, in any order:
+      | n |
+";
+        let scenarios = parse_feature(Path::new("Demo.feature"), text);
+
+        assert_eq!(scenarios.len(), 2, "the Background must not become a scenario");
+        assert_eq!(scenarios[0].name, "[1] first");
+        assert_eq!(
+            scenarios[0].setup,
+            vec!["CREATE (:A {name: 'a'})".to_string()],
+            "a scenario with no setup of its own still gets the Background's"
+        );
+        assert_eq!(
+            scenarios[1].setup,
+            vec!["CREATE (:A {name: 'a'})".to_string(), "CREATE (:B)".to_string()],
+            "a scenario's own setup runs after the Background's, not instead of it"
+        );
+    }
+
+    /// The ordinary case: no `Background:`, no setup invented for anyone.
+    #[test]
+    fn a_file_without_a_background_is_unaffected() {
+        let text = "\
+Feature: Demo
+
+  Scenario: [1] only
+    Given any graph
+    When executing query:
+      \"\"\"
+      RETURN 1 AS n
+      \"\"\"
+    Then the result should be, in any order:
+      | n |
+      | 1 |
+";
+        let scenarios = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(scenarios.len(), 1);
+        assert!(scenarios[0].setup.is_empty());
     }
 }
