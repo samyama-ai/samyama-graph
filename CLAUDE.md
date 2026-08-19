@@ -28,6 +28,8 @@ cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
 cargo bench --bench graph_optimization_benchmark # Metaheuristic optimization solvers
 cargo bench --bench ldbc_benchmark             # LDBC SNB Interactive queries (needs data)
+cargo bench --bench ldbc_benchmark -- --explain          # print plans, do NOT run the queries
+cargo bench --bench ldbc_benchmark -- --derive-params 50 # parameters valid for THIS extract
 cargo bench --bench ldbc_bi_benchmark          # LDBC SNB BI queries (needs data)
 cargo bench --bench finbench_benchmark         # LDBC FinBench queries (synthetic data)
 cargo bench --bench hierarchy_benchmark        # OEH index: build, order test, roll-up vs subtree size
@@ -172,6 +174,24 @@ graph.create_edge(source_id, target_id, "KNOWS")?;
 A suite that passes in release can still fail the gate: the engine is more than
 an order of magnitude slower in debug. Run the profile CI runs before claiming a
 suite is green, and say which profile a claim was measured in.
+
+### Diagnosing a slow query
+
+```bash
+# Plans without executing. `--profile` runs the query, which is useless for the
+# ones most worth looking at — a query that times out cannot be PROFILEd.
+cargo bench --bench ldbc_benchmark -- --data-dir <sf1> --derive-params 50 --explain --query IC6
+
+# Why the planner chose the anchor it chose. EXPLAIN shows only the winner.
+SAMYAMA_EXPLAIN_ANCHORS=1 cargo bench --bench ldbc_benchmark -- ... --explain --query IC6
+```
+
+**Use `--derive-params` before believing anything.** The built-in defaults name
+a person who exists in one particular extract and not in others. Against the
+wrong extract every query runs fast and returns nothing, the anchor for the
+pinned node costs zero rows, and the plans you are reading are plans for a
+query that matches nothing. The bench's `0 empty` line in the summary is the
+check that catches this; read it first.
 
 **Do not assert wall-clock times in tests.** An absolute bound encodes the speed
 of the machine and the build profile that wrote it. Assert a **ratio** against a
