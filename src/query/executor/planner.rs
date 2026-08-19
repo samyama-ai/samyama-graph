@@ -4137,10 +4137,32 @@ fn anchor_cardinality(
     // No index, so the scan reads the whole label -- but an equality on a
     // property still cuts what comes *out* of it, and that is what the rest of
     // the path multiplies.
+    //
+    // Both sources of equality count. Reading only the inline form made
+    // `MATCH (org:Organisation) WHERE org.name = '…'` look like all 7,955
+    // organisations while the identical `MATCH (org:Organisation {name: '…'})`
+    // looked like one — the same query costed two ways depending on where the
+    // author put the predicate. On LDBC IC11 that is the difference between
+    // anchoring on one organisation and anchoring on a person whose two-hop
+    // neighbourhood then has to be enumerated.
     let mut emitted = scan;
+    let mut apply = |prop_name: &str, prop_value: &PropertyValue| {
+        emitted *= stats.estimate_equality_selectivity_for_value(label, prop_name, prop_value);
+    };
     if let Some(props) = &node.properties {
         for (prop_name, prop_value) in props {
-            emitted *= stats.estimate_equality_selectivity_for_value(label, prop_name, prop_value);
+            apply(prop_name, prop_value);
+        }
+    }
+    for pred in path_preds {
+        let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { continue };
+        let (var, prop, value) = match (left.as_ref(), right.as_ref()) {
+            (Expression::Property { variable, property }, Expression::Literal(v)) => (variable, property, v),
+            (Expression::Literal(v), Expression::Property { variable, property }) => (variable, property, v),
+            _ => continue,
+        };
+        if var == &node.var {
+            apply(prop, value);
         }
     }
     (scan, emitted.max(1.0))
