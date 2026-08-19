@@ -243,6 +243,47 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
     Ok(query)
 }
 
+/// An integer literal, in decimal, hexadecimal (`0x1A`) or octal (`0o17`).
+///
+/// Returns an error rather than panicking when the value does not fit. The
+/// previous `.parse().unwrap()` meant `RETURN 9223372036854775808` **crashed
+/// the process**: an out-of-range literal is a syntax error in Cypher, and the
+/// TCK has two scenarios asserting exactly that, but a panic is reachable from
+/// any query string and takes the server with it (#633).
+fn parse_integer_literal(text: &str) -> ParseResult<i64> {
+    let text = text.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (radix, digits) = if let Some(rest) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = digits.strip_prefix("0o").or_else(|| digits.strip_prefix("0O")) {
+        (8, rest)
+    } else {
+        (10, digits)
+    };
+
+    // Parsed as i128 so the magnitude of i64::MIN -- which is one larger than
+    // i64::MAX -- can be represented before the sign is applied. Without this,
+    // `-9223372036854775808` has no valid intermediate form.
+    let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
+        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+    })?;
+    let value = if negative { -magnitude } else { magnitude };
+    i64::try_from(value).map_err(|_| {
+        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+    })
+}
+
+/// A `SKIP`/`LIMIT` count. Same crash as the literal parser had, same fix:
+/// `LIMIT 99999999999999999999` panicked rather than being refused.
+fn parse_count_literal(text: &str) -> ParseResult<usize> {
+    let value = parse_integer_literal(text)?;
+    usize::try_from(value)
+        .map_err(|_| ParseError::SemanticError(format!("SKIP/LIMIT must not be negative: `{text}`")))
+}
+
 pub fn parse_query(input: &str) -> ParseResult<Query> {
     let pairs = match CypherParser::parse(Rule::query, input) {
         Ok(pairs) => pairs,
@@ -970,14 +1011,14 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::skip_clause => {
                 for skip_inner in inner.into_inner() {
                     if skip_inner.as_rule() == Rule::integer {
-                        query.skip = Some(skip_inner.as_str().parse().unwrap());
+                        query.skip = Some(parse_count_literal(skip_inner.as_str())?);
                     }
                 }
             }
             Rule::limit_clause => {
                 for limit_inner in inner.into_inner() {
                     if limit_inner.as_rule() == Rule::integer {
-                        query.limit = Some(limit_inner.as_str().parse().unwrap());
+                        query.limit = Some(parse_count_literal(limit_inner.as_str())?);
                     }
                 }
             }
@@ -1062,14 +1103,14 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
             Rule::skip_clause => {
                 for skip_inner in inner.into_inner() {
                     if skip_inner.as_rule() == Rule::integer {
-                        skip = Some(skip_inner.as_str().parse().unwrap());
+                        skip = Some(parse_count_literal(skip_inner.as_str())?);
                     }
                 }
             }
             Rule::limit_clause => {
                 for limit_inner in inner.into_inner() {
                     if limit_inner.as_rule() == Rule::integer {
-                        limit = Some(limit_inner.as_str().parse().unwrap());
+                        limit = Some(parse_count_literal(limit_inner.as_str())?);
                     }
                 }
             }
@@ -1683,11 +1724,15 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Boolean(val));
             }
             Rule::integer => {
-                let val = inner.as_str().parse().unwrap();
-                return Ok(PropertyValue::Integer(val));
+                return Ok(PropertyValue::Integer(parse_integer_literal(inner.as_str())?));
             }
             Rule::float => {
-                let val = inner.as_str().parse().unwrap();
+                let val = inner.as_str().trim().parse().map_err(|_| {
+                    ParseError::SemanticError(format!(
+                        "float literal out of range: `{}`",
+                        inner.as_str()
+                    ))
+                })?;
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
@@ -1922,6 +1967,31 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     Rule::postfix_op => postfix_pair = Some(inner),
                     Rule::index_op => index_pairs.push(inner),
                     _ => {}
+                }
+            }
+
+            // `-9223372036854775808` is i64::MIN, and its magnitude is not a
+            // valid i64 on its own -- so the minus has to be folded into the
+            // literal rather than applied to it afterwards, or the only way to
+            // write the smallest integer is a parse error. Every other negated
+            // literal folds to exactly what the operator would have produced.
+            if prefix_ops.len() == 1
+                && prefix_ops[0].as_str().trim() == "-"
+                && index_pairs.is_empty()
+                && postfix_pair.is_none()
+            {
+                if let Some(primary) = primary_pair.as_ref() {
+                    let text = primary.as_str().trim();
+                    let numeric = !text.is_empty()
+                        && text.bytes().all(|b| b.is_ascii_digit())
+                        || text.len() > 2
+                            && text.starts_with('0')
+                            && matches!(text.as_bytes()[1], b'x' | b'X' | b'o' | b'O');
+                    if numeric {
+                        if let Ok(value) = parse_integer_literal(&format!("-{text}")) {
+                            return Ok(Expression::Literal(PropertyValue::Integer(value)));
+                        }
+                    }
                 }
             }
 
