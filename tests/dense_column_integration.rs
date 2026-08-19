@@ -32,7 +32,7 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<Vec<(String, String)>> {
             let mut cells: Vec<(String, String)> = r
                 .bindings()
                 .iter()
-                .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                .map(|(k, v)| (k.to_string(), format!("{v:?}")))
                 .collect();
             cells.sort();
             cells

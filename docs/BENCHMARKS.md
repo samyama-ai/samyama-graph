@@ -16,6 +16,17 @@ run yourself:
 | Memory footprint | `cargo bench --bench memory_footprint` |
 | Cardinality accuracy | `cargo bench --bench cardinality_accuracy` |
 | Ingestion profile | `cargo bench --bench ingest_profile` |
+| openCypher TCK | `cargo run --release --example tck_runner -- --features <openCypher>/tck/features` |
+| Operator micro-benchmarks | `cargo bench --bench aggregate_grouping`, `--bench varlength_expand`, `--bench property_access`, `--bench aggregate_throughput` |
+
+**Reading the operator micro-benchmarks.** These report ns per row for a single
+operator, and each prints the operator the planner actually chose. Check that
+column before drawing a conclusion: the planner rewrites several shapes, and a
+case that was rewritten measures the rewrite rather than the operator named in
+the row. `aggregate_grouping` reported 88 ns/row for LDBC IC5's shape until that
+column was added — `RETURN f.x, count(i)` over an expand becomes
+`AdjacencyCountAggregate`, which reads degrees off the adjacency index and never
+groups anything. The honest figure for that shape was 12× higher.
 
 **Not on this page: cross-engine comparisons.** Results against Neo4j,
 FalkorDB and TigerGraph are maintained internally alongside the competitor
@@ -26,6 +37,22 @@ section below come from that work.
 The split follows from where a reader can act: a number you can reproduce
 belongs next to the code that produces it; a number that required another
 vendor's licensed software to obtain does not.
+
+**LDBC SNB Interactive at SF10, against Neo4j on the same host** (2026-08-19,
+AWS r6a.8xlarge): 12 of 14 complex reads within 5× of Neo4j and **6 faster**,
+with IC6 timing out and IC11 at 11.5×. That is a cross-engine result, so it
+lives in the private repo with the competitor configs it depends on —
+`benchmarks/ldbc-snb-interactive/SF10-2026-08-19-SAME-HOST.md`. It supersedes
+the "85–170× slower on complex reads" figure, which came from a run whose
+Samyama and competitor columns were measured on *different machines*.
+
+**Not on this page either: the scorecard.** Every figure here is one suite's
+result. The single file that says where the product stands against all 254
+requirements — measured, unmeasured, or measured only by proxy — is
+`SCORECARD.json`, assembled by the conformance harness from run envelopes. It
+lives with the cross-engine results for the same reason they do. This page
+stays the reproducible own-engine record; the scorecard is what a claim gets
+checked against.
 
 ## Comparing two numbers
 
@@ -98,6 +125,137 @@ what makes H2 and H10 win by orders of magnitude. See
 [`benchmarks/hier/README.md`](../benchmarks/hier/README.md) for the full accounting,
 including the engine gaps the corpus surfaced.
 
+## openCypher TCK — Cypher conformance
+
+The first measured figure for `LANG-01`. A `~90% OpenCypher coverage` claim was
+withdrawn in #437 as unmeasured; this replaces it with a number that has a
+reproducer.
+
+```
+cargo run --release --example tck_runner -- --features <openCypher>/tck/features
+```
+
+| | |
+|---|---:|
+| scenarios in the TCK | 1,615 |
+| **evaluated** by the harness | **1,244** (77.0%) |
+| pass | 892 |
+| wrong result | 208 |
+| errored | 144 |
+| skipped | 371 |
+| **pass rate, of evaluated** | **71.7%** |
+| pass rate, of all 1,615 | 55.2% |
+| gate `CH-TCK ≥ 85%` | **not met** |
+
+Measured at `6de3f32` via the conformance harness's `CH-TCK` suite; the
+envelope is in `samyama-graph-competitor-benchmarks/harness/runs/`.
+
+**The largest single engine step was a naming rule.** Cypher names an
+unaliased result column after the expression as written; the planner
+reconstructed it from the AST in **ten separate places that did not agree**.
+`RETURN 1 + 1` produced `col_0` — a column no client can select by key — and
+`count(*)` produced `count()`, because `*` is not an argument expression and
+the text that would say so was discarded at parse time. Recording the source
+text and deriving the name once moved 43 scenarios (#635, #636). The size of
+that jump measures how ordinary the broken case was, not how clever the fix
+is.
+
+**One of these was a reachable crash.** `RETURN 9223372036854775808` did not
+return an error — it panicked, from a string any client can send, which on
+the HTTP or protocol server stops the process (#633, #634).
+
+**Three more harness points, not engine points.** The
+runner discarded every `Background:` block — its parse loop skips lines
+before the first `Scenario:` — so all 29 scenarios in Match5 ran against an
+empty graph, returned no rows, and were scored as **wrong answers**. The
+engine had been charged with 26 defects it did not have, and `wrong_result`
+— the class this page calls the most damaging — was 25 too high (#627). Run
+by hand against the fixture, those queries return exactly what the TCK
+expects. Stated plainly because the direction is flattering: 61.0% → 63.0%
+here is the measurement getting more accurate, not the engine getting
+better.
+
+**A storage defect was worth 36 scenarios.** `create_node` takes one label
+and always inserts it, so a pattern with no label had to invent one: CREATE
+passed `""` and MERGE passed the string `"Node"`. Both reached the label
+index and the catalog, so an unlabelled node reported a label it did not
+have and `MATCH (n:Node)` matched nodes nobody had labelled (#625, #626).
+Unlabelled nodes are the default shape across the TCK, which is the whole
+reason one storage bug moved the rate 58.1% → 61.0%.
+
+**Coverage moved further than the rate.** 65.0% → 76.7% of scenarios are now
+judged rather than skipped, because 197 of them were being skipped for
+"setup did not parse" — every TCK fixture is written as a run of `CREATE`
+clauses, which did not parse. Making them parse then exposed a worse bug:
+`CREATE (a), (b), (a)-[:R]->(b)` created **four** nodes instead of two. The
+rate rising from 46.6% to 57.2% *while* 195 harder scenarios joined the
+denominator is the more useful way to read this.
+
+**Every step here was checked by diffing the failure manifest, not by
+comparing the headline.** Completing the clause pipeline (#624) raised the
+rate *and* regressed four TCK negative scenarios: Merge5 [22], [23], [28]
+and [29] had been passing because the grammar rejected the clause **order**,
+so an error came out for an unrelated reason. Routing MERGE through the new
+path made them run, and the Cypher rules they assert — exactly one
+relationship type, no variable-length relationship, no new labels on a bound
+variable, no null property — turned out not to exist anywhere in the engine.
+A rising pass rate hides that; a manifest diff does not.
+
+**The largest single step was not a feature.** Every statement rule in the
+grammar encoded one permitted clause order, with writes at the end — so
+`MATCH (n) SET n.x = 1 WITH n RETURN n.x` was a syntax error. Underneath that
+was the reason: a pass-through operator's default `next_mut` delegates to
+`next`, which reads its input read-only, so a materialising operator severed
+mutability for everything below it. A write below a `WITH` silently did not
+happen. Fixing the operator tree, not the grammar, is what let clause order
+become free (#617, #622).
+
+**This number was nondeterministic until 2026-08-18.** Running the TCK five
+times at a fixed commit gave 484, 485, 486 and 487 passes while `errored`
+stayed constant — three scenarios were changing their *answer* between
+processes, because `RandomState` seeds each process's hash maps differently
+and that order was reaching results. Any single figure published before then,
+including the 486 previously on this page, was one sample of a distribution.
+The three defects behind it are fixed (#610); the count is stable now, and
+`--failures-manifest` exists so the check is one diff rather than an
+inference.
+
+**Both numbers have to be quoted together.** The pass rate says what the engine
+gets right among the scenarios this harness can judge; the coverage says how
+many it can judge at all. A harness that counted its own unimplemented steps as
+passes would report a flattering number, and one that counted them as failures
+would mislead the other way — so they are separated, and the skip reasons are
+published:
+
+| skipped | reason |
+|---:|---|
+| 274 | `Scenario Outline` — the harness does not expand `Examples` tables |
+| 39 | user-defined procedures |
+| 34 | query parameters |
+| 19 | named fixture graphs (`binary-tree-N`) |
+| 7 | the scenario's setup still does not parse |
+| 3 | the scenario's setup did not run |
+
+"setup did not parse" fell from **197 to 7**: they were ordinary `CREATE`
+statements the parser rejected, and fixing that moved them into the judged set
+— which is where most of the coverage gain came from. `Scenario Outline`
+expansion is now the single largest remaining skip category and is a harness
+gap rather than an engine one.
+
+Weakest areas, among features with at least 5 evaluated scenarios — all at 0%:
+`Boolean5`, `Comparison3`, `Create3`, `Create6`, `Match6`, `Merge6`, `Set4`,
+`Set5`, `Temporal5`, `Temporal6`, `Union1`, `Union2`; then `Pattern1` at 4% and
+`Match5` at 12%.
+
+### How this relates to the hand-written sweeps
+
+Four hand-written sweeps in `examples/cypher_probe*.rs` (168 cases) pass
+100%, 100%, 100% and 29/30. That is not in tension with 57.2% — those sweeps
+were written to probe areas suspected of being wrong, and every case in them was
+either already correct or has since been fixed. They found seven silent
+wrong answers; they were never a coverage measurement. **The TCK is the coverage
+measurement**, and it says there is a great deal left.
+
 ## LDBC SNB Interactive
 
 Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/benchmarks/snb/) read workload (IS1–IS7 short reads, IC1–IC14 complex reads), at two scale factors. In-process (embedded) timing, 1 warm-up + 3 timed runs, median latency. Provenance: commit `31a7e77`, id-indexes built on all anchor labels.
@@ -106,9 +264,19 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 >
 > The SF1 column below was re-run under the fixed harness (#450), which reports an `EMPTY` status and
 > exits non-zero if any read returns zero rows. Result: **21/21 passed, 0 empty, 0 errors** — so every
-> figure is a measurement of an actual traversal rather than of an empty result set.
-> Provenance: commit `b20ab99`, Vultr 12 vCPU / 23 GB AMD EPYC-Rome, 1 warm-up + 3 timed runs, median
-> reported, dataset from `scripts/download_ldbc_snb.sh` with the benchmark's built-in SF1 parameters.
+> figure is a measurement of an actual traversal rather than of an empty result set. This is the first
+> clean 21/21: IC14 timed out at 120 s until #539.
+>
+> Provenance: commit `4f0253e`, **Vultr voc-c-16c-32gb dedicated CPU** (16 vCPU / 31 GB, AMD EPYC-Rome,
+> fixed 1996 MHz), 1 warm-up + 3 timed runs, median reported, dataset from
+> `scripts/download_ldbc_snb.sh`. Host calibration was flat across the run — 43 ms opening and closing,
+> 1.00x (#529).
+>
+> Substitution parameters were **derived from the dataset** at the median of the KNOWS-degree
+> distribution rather than taken from the benchmark's built-in defaults (#505): anchor degree 23
+> against a median of 23 and a maximum of 977. Reproduce with
+> `cargo bench --bench ldbc_benchmark -- --runs 3 --derive-params 50`, which prints the provenance of
+> every parameter above the table.
 >
 > **The SF10 column is still unverified** and should not be quoted. It predates #450, when the harness
 > counted a zero-row read as a pass, so it cannot be told apart from an empty result. It needs the same
@@ -142,31 +310,87 @@ Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interact
 | Query | Name | SF1 | SF10 |
 |---|---|---|---|
 | IS1 | Person Profile | 0.03 ms | 0.02 ms |
-| IS2 | Recent Posts by Person | 0.85 ms | 1.10 ms |
-| IS3 | Friends of Person | 0.17 ms | 1.80 ms |
+| IS2 | Recent Posts by Person | 0.04 ms | 1.10 ms |
+| IS3 | Friends of Person | 0.06 ms | 1.80 ms |
 | IS4 | Post Content | 0.01 ms | 0.01 ms |
 | IS5 | Post Creator | 0.02 ms | 0.02 ms |
-| IS6 | Forum of Post | 0.05 ms | 0.06 ms |
-| IS7 | Replies to Post | 0.39 ms | 11.50 ms |
+| IS6 | Forum of Post | 0.03 ms | 0.06 ms |
+| IS7 | Replies to Post | 1.1 ms | 11.50 ms |
 
 ## Complex reads (IC1–IC14)
 
-| Query | Name | SF1 | SF10 |
-|---|---|---|---|
-| IC1 | Transitive Friends by Name | 533 ms | 14.0 s |
-| IC2 | Recent Friend Posts | 27.6 ms | 306 ms |
-| IC3 | Friends in Countries | 997 ms | 15.7 s |
-| IC4 | Popular Tags in Period | 44.4 ms | 527 ms |
-| IC5 | New Forum Members | 1431 ms | 31.1 s |
-| IC6 | Tag Co-occurrence | 1300 ms | 31.5 s |
-| IC7 | Recent Likers | 0.33 ms | 1.70 ms |
-| IC8 | Recent Replies | 0.49 ms | 4.00 ms |
-| IC9 | Recent FoF Posts | 2246 ms | 26.3 s |
-| IC10 | Friend Recommendation | 144 ms | 2.3 s |
-| IC11 | Job Referral | 145 ms | 4.5 s |
-| IC12 | Expert Reply | 176 ms | 3.2 s |
-| IC13 | Single Shortest Path | 2.3 ms | 37.00 ms |
-| IC14 | Trusted Connection Paths | 37.0 ms | 696 ms |
+| Query | Name | SF1 | previous SF1 | SF10 |
+|---|---|---|---|---|
+| IC1 | Transitive Friends by Name | **55.3 ms** | 59.5 ms | 14.0 s |
+| IC2 | Recent Friend Posts | **4.3 ms** | 9.7 ms | 306 ms |
+| IC3 | Friends in Countries | **464 ms** | 862 ms | 15.7 s |
+| IC4 | Popular Tags in Period | **7.8 ms** | 13.9 ms | 527 ms |
+| IC5 | New Forum Members | **765 ms** | 1203 ms | 31.1 s |
+| IC6 | Tag Co-occurrence | **157 ms** | 185 ms | 31.5 s |
+| IC7 | Recent Likers | **0.05 ms** | 0.09 ms | 1.70 ms |
+| IC8 | Recent Replies | **0.13 ms** | 0.16 ms | 4.00 ms |
+| IC9 | Recent FoF Posts | **713 ms** | 1131 ms | 26.3 s |
+| IC10 | Friend Recommendation | **90.2 ms** | 104 ms | 2.3 s |
+| IC11 | Job Referral | **30.0 ms** | 32.2 ms | 4.5 s |
+| IC12 | Expert Reply | **56.9 ms** | 84.7 ms | 3.2 s |
+| IC13 | Single Shortest Path | **40.2 ms** | 43.4 ms | 37.00 ms |
+| IC14 | Trusted Connection Paths | **46.2 ms** | 49.8 ms | 696 ms |
+
+**Whole suite: 10.1 s, 21/21 passed, 0 empty, 0 errors.**
+
+Run-to-run variance on this host is about ±5% (9.6–10.1 s across the runs
+taken this round, all at the same 43 ms calibration). The figure above is the
+most recent, taken at load 0.63 — the quietest of them. A difference smaller
+than that is not a result.
+
+### What the "previous SF1" column is
+
+The measurement immediately before this one, on the same host with the same
+derived parameters (#505), so the two columns differ only by engine changes.
+Both were taken with the host calibration reported and matching, which is what
+makes them comparable at all (#529).
+
+This round: `Expand` applies a pattern's target labels **during** the adjacency
+walk, by probing the label index with the target's id, instead of collecting
+every incident edge and then `retain`-ing the ones that match. The old test was
+`get_node(id).has_label(label)` per edge — a `Vec` index, a version-chain walk,
+a 128-byte `Node`, and a `HashSet<Label>` probe that hashes a *string* — and at
+2.22M edges visited per IC9 run it was **26.7% of a CPU profile**, the largest
+single symbol, ahead of every property read (#592). IC3, IC5 and IC9 each drop
+about 40%.
+
+Before that: `Value` became **56 bytes instead of 144** by boxing the
+`Node`/`Edge` payloads, shrinking every binding in every record (#570).
+
+Before that: the aggregate's group table stopped storing a `Value` per group,
+taking an entry from ~320 bytes to ~40 and IC5's `Aggregate` down 23%.
+
+Before that: `Sort` locates its key columns once instead of once per input row
+(#568), worth 5% on IC9, which spends a fifth of itself sorting. And before
+that: `Expand` holds its variable names as `Arc<str>`, so binding one on
+an output row is a refcount bump rather than two heap allocations, and it
+refills its edge buffer instead of allocating a new one per source record
+(#564). IC5 was a third faster on that alone.
+
+The rounds before, which is what the previous column and the ones before it
+reflect: records cloned with room for the bindings about to be added (#562);
+`id()` predicates anchoring a scan instead of filtering one (#538); aggregates
+grouping on identity and resolving their keys once per group (#521); property
+columns located once per query rather than once per row (#557); and `Filter`
+deciding whether to go parallel from the predicate's cost rather than the batch
+size (#559).
+
+Together, over this sequence, the suite went from **24.2 s to 9.7 s** on the
+same host at the same derived parameters — a **60% reduction**, almost all of it
+in per-row constants rather than in algorithms. The one exception is the last:
+moving the label test into the walk removes work rather than making it cheaper.
+
+Nothing here is a parameter change. The parameter shift that made several
+queries look slower — deriving substitution parameters from the dataset at the
+median of the KNOWS-degree distribution, rather than using the benchmark's
+built-in anchors — happened in the round before, and those harder parameters are
+still in force.
+
 
 ## Notes
 

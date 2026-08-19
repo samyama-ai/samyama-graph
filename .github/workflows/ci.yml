@@ -76,3 +76,25 @@ jobs:
         # The sweep runs these; here we only prove they still build, which is
         # what actually breaks when a signature changes.
         run: cargo check --workspace --all-targets
+
+      # ---- Conformance gates (spec 18 §5: these block commits, not releases,
+      # because they are fast and catch the most damaging classes).
+      #
+      # Each is an ordinary example that exits non-zero on failure, so it
+      # gates without any bespoke CI machinery. `--release` because both are
+      # seconds either way and the debug build of the engine is slow enough
+      # that the dev profile dominates.
+
+      - name: CH-IMPORT — the same graph by different paths is the same graph
+        # REL-06. Builds one fixture via Cypher, a snapshot round
+        # trip, and the store API, then compares 11 invariants through Cypher.
+        # Carries its own canary: a deliberately-wrong graph must be detected,
+        # so the suite cannot pass by comparing nothing.
+        run: cargo run --release --example import_invariants
+
+      - name: CH-DOC-EXEC — the Cypher in our documentation parses
+        # DX-04. Every fenced ```cypher block in every markdown file. Blocks
+        # showing clause syntax rather than whole queries opt out with
+        # ```cypher,ignore, and the opt-out count is printed so it cannot grow
+        # unnoticed.
+        run: cargo run --release --example doc_check

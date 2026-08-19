@@ -40,7 +40,7 @@ The fundamental insight: when the aggregate is `count(neighbor)` grouped by a bo
 
 The v1.0 planner has a narrow `EdgeTypeCountOperator` (planner.rs:1321-1339) that handles:
 
-```cypher
+```cypher,ignore
 MATCH ()-[r]->() RETURN type(r), count(*)
 ```
 
@@ -59,7 +59,7 @@ MB049 does not qualify because both endpoints have labels. The degree informatio
 
 The planner will detect this shape during logical-plan construction:
 
-```cypher
+```cypher,ignore
 MATCH (a[:LabelA])-[r:EdgeType]-(b:LabelB)
 RETURN b.prop [, ...], count(a) AS n  -- or count(*), count(r), count(DISTINCT a)
 [ORDER BY n DESC | ASC] [LIMIT N]

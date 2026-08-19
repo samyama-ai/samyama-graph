@@ -314,6 +314,32 @@ impl PropertyValue {
         }
     }
 
+    /// The elements of this value viewed as a list.
+    ///
+    /// `Array` is a list. So is `Vector`, in every sense a query can observe:
+    /// a list literal whose numeric elements include a float is parsed as a
+    /// `Vector` because the type is inferred from the values, and nothing in
+    /// `[1.0, 2.0]` distinguishes an embedding from a list of numbers.
+    ///
+    /// Without this, `size`, `head`, `last`, `reverse`, `IN` and `+` rejected
+    /// such a literal, and indexing, list comprehension and `reduce` returned
+    /// null, `[]` and the seed respectively — silently (#605).
+    ///
+    /// The inference itself is the deeper problem, but it cannot simply be
+    /// removed: the `Vector` type is what marks a property as an embedding for
+    /// the vector index, so making literals `Array` would stop
+    /// `{embedding: [0.1, 0.2]}` being indexed. That needs a way to declare an
+    /// embedding, and is left on #605.
+    pub fn as_list_items(&self) -> Option<Vec<PropertyValue>> {
+        match self {
+            PropertyValue::Array(items) => Some(items.clone()),
+            PropertyValue::Vector(floats) => {
+                Some(floats.iter().map(|f| PropertyValue::Float(*f as f64)).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Get boolean value if this is a boolean
     pub fn as_boolean(&self) -> Option<bool> {
         match self {

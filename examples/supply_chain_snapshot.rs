@@ -19,6 +19,9 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[path = "common/missing_data.rs"]
+mod missing_data;
+
 fn arg(argv: &[String], name: &str) -> Option<String> {
     argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1)).cloned()
 }
@@ -37,11 +40,7 @@ fn main() {
     let mut s = String::new();
     File::open(&nodes_path)
         .unwrap_or_else(|e| {
-            eprintln!("Error: cannot read the supply-chain nodes file: {}", nodes_path.display());
-            eprintln!("       {e}");
-            eprintln!("       this example needs data that is not part of this repository;");
-            eprintln!("       pass --nodes PATH to point at your own copy.");
-            std::process::exit(1);
+            missing_data::skip("supply-chain nodes file", &nodes_path, &e, "--nodes")
         })
         .read_to_string(&mut s)
         .unwrap();

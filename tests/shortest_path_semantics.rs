@@ -235,9 +235,9 @@ fn a_wide_graph_three_hops_apart_finishes_quickly() {
     }
 
     // Anchored by inline properties, which is the form LDBC IC14 uses. The
-    // `WHERE id(a) = …` form is 1000x slower because the planner does not use
-    // the predicate to anchor the source — a separate defect, filed as #538,
-    // and not what this test is about.
+    // `WHERE id(a) = …` form used to be ~1000x slower because the planner did
+    // not use the predicate to anchor either endpoint — #538 fixed the start,
+    // #584 the target. Both forms are anchored now.
     for (label, cypher) in [
         (
             "shortestPath",
@@ -254,9 +254,26 @@ fn a_wide_graph_three_hops_apart_finishes_quickly() {
         let elapsed = started.elapsed();
 
         assert!(!batch.records.is_empty(), "{label}: the graph is dense enough to be connected");
+
+        // Compared against a one-hop expansion over the same graph rather than
+        // against a clock. The old shape enumerated walks, so it was
+        // ~degree³ where this is one pass; a bound expressed as a multiple of
+        // a single hop states that, and does not encode the speed of the
+        // machine or the build profile.
+        //
+        // An absolute bound here would be the same mistake that made CI red
+        // in #584: 5 ms asserted from a `--release` run, failing in CI, which
+        // builds in debug.
+        let hop_started = std::time::Instant::now();
+        let hop = parse_query("MATCH (a:N {seq: 1})-[:KNOWS]-(b:N) RETURN count(b) AS len").unwrap();
+        let _ = QueryExecutor::new(&store).execute(&hop).unwrap();
+        let hop_elapsed = hop_started.elapsed();
+
+        let ratio = elapsed.as_secs_f64() / hop_elapsed.as_secs_f64().max(1e-9);
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "{label} took {elapsed:?} on a 4,000-node graph — this is the shape that timed out"
+            ratio < 400.0,
+            "{label} cost {ratio:.0}x a single hop ({hop_elapsed:?} -> {elapsed:?}) \
+             on a 4,000-node graph — this is the shape that timed out"
         );
     }
 }

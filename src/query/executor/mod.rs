@@ -94,7 +94,7 @@ pub mod record;
 // Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
 pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
 pub use planner::{QueryPlanner, ExecutionPlan, PlannerConfig};
-pub use record::{Record, RecordBatch, Value};
+pub use record::{PropertyCursor, Record, RecordBatch, Value};
 
 use crate::graph::GraphStore;
 use crate::query::ast::Query;
@@ -238,11 +238,13 @@ impl<'a> QueryExecutor<'a> {
         }
 
         if return_clause.distinct {
+            // `dedup_key` sorts by variable name. The previous key was
+            // `format!("{:?}", r.bindings())` over a hash map, so it depended
+            // on iteration order for its identity -- two records binding the
+            // same values could hash to different strings, and did not
+            // deduplicate. It also formatted a string per row.
             let mut seen = std::collections::HashSet::new();
-            records.retain(|r| {
-                let key = format!("{:?}", r.bindings());
-                seen.insert(key)
-            });
+            records.retain(|r| seen.insert(r.dedup_key()));
         }
 
         Ok(RecordBatch { records, columns })
@@ -479,8 +481,37 @@ impl<'a> MutQueryExecutor<'a> {
             return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref)));
         }
 
-        // Execute the plan with mutable access
-        self.execute_plan_mut(plan)
+        // Execute the plan with mutable access.
+        //
+        // A write statement with no RETURN produces **no rows**. `CREATE ()`
+        // returns an empty result and one new node; it does not return the
+        // node. We were emitting a row per created entity, so 34 TCK
+        // scenarios whose whole assertion is "the result should be empty"
+        // failed while the side effect was perfectly correct.
+        //
+        // The plan is still driven to exhaustion — the rows are what is
+        // discarded, not the work. Discarding earlier would skip the writes.
+        let batch = self.execute_plan_mut(plan)?;
+        // Scoped to **data writes**, not to "any query without a RETURN".
+        // Two neighbours produce rows with no RETURN and must keep doing so:
+        // `CALL … YIELD` yields its results, and DDL such as
+        // `CREATE HIERARCHY INDEX …` reports the encoding it chose. Widening
+        // the rule to every RETURN-less query broke both, which is why it is
+        // written as the narrow thing it actually is.
+        let is_data_write = query.create_clause.is_some()
+            || query.merge_clause.is_some()
+            || !query.set_clauses.is_empty()
+            || !query.remove_clauses.is_empty()
+            || query.delete_clause.is_some()
+            // A clause-pipeline query keeps its writes in `clauses`; the
+            // by-kind fields above are empty for it by construction, so
+            // reading only those would let `CREATE (a) WITH a CREATE (b)`
+            // return a row where `CREATE (a), (b)` correctly returns none.
+            || query.clauses.iter().any(|c| c.is_write());
+        if is_data_write && query.return_clause.is_none() && query.call_clause.is_none() {
+            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new() });
+        }
+        Ok(batch)
     }
 
     fn execute_plan_mut(&mut self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
@@ -767,7 +798,11 @@ mod tests {
         let result = executor.execute(&query);
         assert!(result.is_ok(), "MERGE create failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(batch.records.len(), 1);
+        // A data write with no RETURN yields no rows — the side effect is the
+        // point. This asserted 1 row and was pinning the older behaviour; 34
+        // TCK scenarios whose entire assertion is "the result should be empty"
+        // were failing against it while the write itself was correct.
+        assert_eq!(batch.records.len(), 0, "MERGE without RETURN returns no rows");
 
         // Verify node was created
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
@@ -5823,20 +5858,32 @@ mod tests {
 
     #[test]
     fn test_cov_tointeger_bad() {
+        // Null, not an error: Cypher's `toInteger` yields null for a string it
+        // cannot parse, and erroring made the function unusable for checking
+        // whether input is a number at all (#606).
         let mut store = GraphStore::new();
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "bad").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toInteger(n.v) AS i").unwrap();
-        assert!(QueryExecutor::new(&store).execute(&q).is_err());
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
+        assert_eq!(
+            batch.records[0].get("i"),
+            Some(&Value::Property(PropertyValue::Null))
+        );
     }
 
     #[test]
     fn test_cov_tofloat_bad() {
+        // See `test_cov_tointeger_bad` (#606).
         let mut store = GraphStore::new();
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "xyz").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toFloat(n.v) AS f").unwrap();
-        assert!(QueryExecutor::new(&store).execute(&q).is_err());
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
+        assert_eq!(
+            batch.records[0].get("f"),
+            Some(&Value::Property(PropertyValue::Null))
+        );
     }
 
     // --- 10. Math: log, exp, rand ---

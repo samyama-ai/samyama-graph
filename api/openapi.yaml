@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Samyama Graph Database API
-  version: 0.7.0
+  version: 1.7.0
   description: |
     HTTP API for the Samyama high-performance distributed graph database.
     Supports OpenCypher queries, graph status, and CRUD operations.
@@ -170,7 +170,7 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
               example:
                 status: healthy
-                version: 0.7.0
+                version: 1.7.0
                 storage:
                   nodes: 2000
                   edges: 11000
@@ -298,31 +298,151 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/tenants/{id}/usage:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Tenant ID
-    get:
-      operationId: getTenantUsage
-      summary: Get tenant resource usage
-      description: Returns current resource usage for a tenant (nodes, edges, memory, storage, connections).
+  /api/sample:
+    post:
+      operationId: sampleSubgraph
+      summary: Sample a representative subgraph
+      description: >
+        Returns a label-stratified, size-capped subgraph intended for
+        visualization. One call replaces the `1 + <edge types>` sequential
+        queries a client would otherwise issue to draw an overview, and the
+        default of 200 nodes is the point past which a node-link diagram stops
+        being legible.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_nodes:
+                  type: integer
+                  default: 200
+                  description: Upper bound on returned nodes. Capped server-side at 1000.
+                labels:
+                  type: array
+                  items:
+                    type: string
+                  description: Restrict sampling to these labels. Empty means all labels.
+                graph:
+                  type: string
+                  description: Tenant/graph name.
       responses:
         '200':
-          description: Resource usage
+          description: A sampled subgraph
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UsageResponse'
-        '404':
-          description: Tenant not found
+                type: object
+
+  /api/vector/indexes:
+    get:
+      operationId: listVectorIndexes
+      summary: List vector indexes
+      responses:
+        '200':
+          description: The configured vector indexes
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                type: object
+    post:
+      operationId: createVectorIndex
+      summary: Create a vector index
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - label
+                - property_key
+                - dimensions
+              properties:
+                label:
+                  type: string
+                property_key:
+                  type: string
+                dimensions:
+                  type: integer
+                metric:
+                  type: string
+                  description: Distance metric, e.g. cosine or euclidean.
+      responses:
+        '200':
+          description: The index was created
+
+  /api/vector-search:
+    post:
+      operationId: vectorSearch
+      summary: k-nearest-neighbour search over a vector index
+      description: >
+        Supply either `query_vector` or `query_text`; supplying text requires an
+        embedding provider to be configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query_text:
+                  type: string
+                query_vector:
+                  type: array
+                  items:
+                    type: number
+                    format: float
+                label:
+                  type: string
+                property_key:
+                  type: string
+                k:
+                  type: integer
+                  description: Number of neighbours to return.
+      responses:
+        '200':
+          description: The nearest neighbours, closest first
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/snapshot/export:
+    post:
+      operationId: exportSnapshot
+      summary: Export a tenant as a portable .sgsnap snapshot
+      responses:
+        '200':
+          description: The snapshot bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /api/snapshot/import:
+    post:
+      operationId: importSnapshot
+      summary: Import a .sgsnap snapshot into a tenant
+      description: >
+        The body is **multipart/form-data**, not a raw octet stream — posting the
+        bytes directly is the mistake this description exists to prevent. Import
+        merges into the target tenant rather than replacing it.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: The snapshot was imported
 
 components:
   schemas:
@@ -414,7 +534,7 @@ components:
           type: string
           description: Server version
           examples:
-            - 0.7.0
+            - 1.7.0
         storage:
           type: object
           properties:

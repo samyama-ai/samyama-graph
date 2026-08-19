@@ -737,7 +737,7 @@ mod tests {
 
         let handler = CommandHandler::new(None);
         let node = Node::new(NodeId::new(1), "Person");
-        let value = Value::Node(NodeId::new(1), node);
+        let value = Value::Node(NodeId::new(1), Box::new(node));
         let result = handler.format_value(&value);
         match result {
             RespValue::BulkString(Some(bytes)) => {
@@ -772,7 +772,7 @@ mod tests {
 
         let handler = CommandHandler::new(None);
         let edge = Edge::new(EdgeId::new(10), NodeId::new(1), NodeId::new(2), "KNOWS");
-        let value = Value::Edge(EdgeId::new(10), edge);
+        let value = Value::Edge(EdgeId::new(10), Box::new(edge));
         let result = handler.format_value(&value);
         match result {
             RespValue::BulkString(Some(bytes)) => {

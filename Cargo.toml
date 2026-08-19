@@ -132,6 +132,10 @@ name = "memory_footprint"
 harness = false
 
 [[bench]]
+name = "prop_scaling"
+harness = false
+
+[[bench]]
 name = "hierarchy_benchmark"
 harness = false
 
@@ -183,3 +187,23 @@ harness = false
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "aggregate_grouping"
+harness = false
+
+[[bench]]
+name = "filter_throughput"
+harness = false
+
+[[bench]]
+name = "record_ops"
+harness = false
+
+[[bench]]
+name = "adjacency_walk"
+harness = false
+
+[[bench]]
+name = "sort_topn"
+harness = false

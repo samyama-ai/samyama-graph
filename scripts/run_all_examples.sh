@@ -8,6 +8,7 @@ SERVER_PID=""
 BATCH_MODE=false
 TOTAL_TIME=0
 EXAMPLE_RESULTS=()
+EXIT_STATUS=0
 
 # Colors
 GREEN='\033[0;32m'
@@ -117,9 +118,16 @@ function run_rust_example() {
     local EXIT_CODE=$?
     local ELAPSED=$(( SECONDS - START_TIME ))
 
+    # Exit 2 means "this example needs data that is not in this repository"
+    # (#566). It is deliberately distinct from 1 so this loop can tell a skip
+    # from a break -- before that, a demo whose sibling-repo data was absent
+    # exited 1, and a demo that actually broke among them was invisible.
     if [ $EXIT_CODE -eq 0 ]; then
         echo -e "${GREEN}$DESCRIPTION completed in ${ELAPSED}s${NC}"
         EXAMPLE_RESULTS+=("PASS  ${ELAPSED}s  $DESCRIPTION")
+    elif [ $EXIT_CODE -eq 2 ]; then
+        echo -e "${YELLOW}$DESCRIPTION skipped after ${ELAPSED}s — needs data not in this repository${NC}"
+        EXAMPLE_RESULTS+=("SKIP  ${ELAPSED}s  $DESCRIPTION (needs external data)")
     else
         echo -e "${RED}$DESCRIPTION FAILED (exit code: $EXIT_CODE) after ${ELAPSED}s${NC}"
         EXAMPLE_RESULTS+=("FAIL  ${ELAPSED}s  $DESCRIPTION")
@@ -231,6 +239,14 @@ function run_all_batch() {
 function cleanup_exit() {
     stop_server
     cleanup_data
+    # A gate needs an exit code, not only a table. Skips do not fail it: that
+    # is the whole point of separating them from failures (#566).
+    local FAILURES
+    FAILURES=$(printf '%s\n' "${EXAMPLE_RESULTS[@]}" | grep -c '^FAIL' || true)
+    if [ "${FAILURES:-0}" -gt 0 ]; then
+        EXIT_STATUS=1
+    fi
+
     if [ ${#EXAMPLE_RESULTS[@]} -gt 0 ]; then
         print_summary
     fi
@@ -246,7 +262,10 @@ build_project
 if [ "$BATCH_MODE" = true ]; then
     start_server
     run_all_batch
-    cleanup_exit
+    # Batch mode is the CI entry point, so it has to carry the verdict in its
+    # exit code. Skips do not fail it (#566).
+    stop_server 2>/dev/null || true
+    exit "$EXIT_STATUS"
 fi
 
 # Interactive menu mode

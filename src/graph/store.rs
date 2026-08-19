@@ -720,9 +720,15 @@ impl GraphStore {
             match event {
                 NodeCreated { tenant_id, id, labels, properties } => {
                     for (key, value) in &properties {
-                        if let PropertyValue::Vector(vec) = value {
+                        // A numeric array counts, not only the `Vector`
+                        // variant: a list literal stays a list now (#628), so
+                        // `{embedding: [0.1, 0.2, 0.3]}` arrives as an `Array`
+                        // and matching on `Vector` alone silently indexed
+                        // nothing. The rebuild path already used `to_vector`,
+                        // which is why this only showed up on write.
+                        if let Some(vec) = value.to_vector() {
                             for label in &labels {
-                                let _ = vector_index.add_vector(label.as_str(), key, id, vec);
+                                let _ = vector_index.add_vector(label.as_str(), key, id, &vec);
                             }
                         }
                         for label in &labels {
@@ -835,9 +841,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                     for label in &labels {
                         property_index.index_insert(label, &key, new_value.clone(), id);
                     }
-                    if let PropertyValue::Vector(vec) = &new_value {
+                    if let Some(vec) = new_value.to_vector() {
                         for label in &labels {
-                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                     }
                     
@@ -919,8 +925,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 }
                 LabelAdded { tenant_id, id, label, properties } => {
                     for (key, value) in properties {
-                        if let PropertyValue::Vector(vec) = &value {
-                            let _ = vector_index.add_vector(label.as_str(), &key, id, vec);
+                        if let Some(vec) = value.to_vector() {
+                            let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                         property_index.index_insert(&label, &key, value.clone(), id);
                         
@@ -977,6 +983,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Create a node with auto-generated ID and single label
     pub fn create_node(&mut self, label: impl Into<Label>) -> NodeId {
+        self.create_node_with_labels(std::iter::once(label.into()))
+    }
+
+    /// Create a node with exactly the labels given, which may be none.
+    ///
+    /// Every caller building a node from a Cypher pattern went through
+    /// `create_node`, which takes a single label -- so a pattern with no label
+    /// passed `""` and a MERGE pattern with no label passed the invented
+    /// string `"Node"`. Both ended up in the label index and the catalog, so
+    /// an unlabelled node reported a label it did not have and `MATCH
+    /// (n:Node)` matched nodes nobody labelled (#625). Callers that know the
+    /// whole label set should use this.
+    pub fn create_node_with_labels(&mut self, labels: impl IntoIterator<Item = Label>) -> NodeId {
+        let labels: Vec<Label> = labels.into_iter().collect();
         self.invalidate_statistics_cache();
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
@@ -988,18 +1008,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let node_id = NodeId::new(node_id_u64);
         let idx = node_id_u64 as usize;
 
-        let label = label.into();
-        let mut node = Node::new(node_id, label.clone());
+        let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
 
-        // Add to label index
-        self.label_index
-            .entry(label.clone())
-            .or_insert_with(HashSet::new)
-            .insert(node_id);
-
-        // Update catalog label count
-        self.catalog.on_label_added(&label);
+        for label in &labels {
+            self.label_index
+                .entry(label.clone())
+                .or_insert_with(HashSet::new)
+                .insert(node_id);
+            self.catalog.on_label_added(label);
+        }
 
         // Ensure storage capacity
         if idx >= self.nodes.len() {
@@ -1489,6 +1507,46 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// This is the correct way to add labels to nodes after creation.
     /// Using `node.add_label()` directly will NOT update the label_index,
     /// making the node invisible to `get_nodes_by_label()` queries.
+    /// Remove a label from a node, from the node and from `label_index`.
+    ///
+    /// The counterpart of `add_label_to_node`, and it has to update the index
+    /// for the same reason: `MATCH (n:Label)` reads it, and so does expansion
+    /// filtering since #592. A label removed from the node but left in the
+    /// index makes the node findable by a label it no longer carries.
+    ///
+    /// Removing a label the node does not have is a no-op returning `false`,
+    /// which is Cypher's behaviour and not an error.
+    pub fn remove_label_from_node(
+        &mut self,
+        node_id: NodeId,
+        label: &Label,
+    ) -> GraphResult<bool> {
+        self.invalidate_statistics_cache();
+        let idx = node_id.as_u64() as usize;
+
+        let node = self
+            .nodes
+            .get_mut(idx)
+            .and_then(|v| v.last_mut())
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let removed = node.remove_label(label);
+        if !removed {
+            return Ok(false);
+        }
+
+        if let Some(members) = self.label_index.get_mut(label) {
+            members.remove(&node_id);
+            // An empty set is not the same as an absent one to the expansion
+            // filter -- absent means "no node carries this", which is the
+            // answer once the last member goes (#592).
+            if members.is_empty() {
+                self.label_index.remove(label);
+            }
+        }
+
+        Ok(true)
+    }
+
     pub fn add_label_to_node(
         &mut self,
         tenant_id: &str,
@@ -1974,6 +2032,35 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get outgoing edge targets with owned EdgeType — works for both full and stub edges.
     /// Uses compact edge_type_ids array (DS-07c) when Edge objects are not available.
+    /// Every property a node has, from wherever it is stored.
+    ///
+    /// A graph built through the API writes both the columnar store and the
+    /// row map on the `Node`; a graph restored from a `.sgsnap` writes only
+    /// the columns, so its row maps are empty. `resolve_property` handles that
+    /// by reading the column first and falling back to the row, and anything
+    /// that reads `node.properties` directly gets nothing on an imported graph
+    /// -- which is what #554 was.
+    ///
+    /// Columns win on a clash, matching `resolve_property`: the column holds
+    /// the current value, the row can hold a superseded one.
+    pub fn node_properties_merged(&self, node_id: NodeId) -> PropertyMap {
+        let idx = node_id.as_u64() as usize;
+        let mut merged: PropertyMap = PropertyMap::new();
+
+        if let Some(node) = self.get_node(node_id) {
+            for (key, value) in &node.properties {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        for key in self.node_columns.get_property_keys(idx) {
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                merged.insert(key, value);
+            }
+        }
+        merged
+    }
+
     /// The interned id of an edge type, if the graph has ever seen one.
     ///
     /// `None` means no edge in the graph has this type, so a filter on it
@@ -2293,6 +2380,44 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get all nodes with a specific label
+    /// Remove one property of a node from **both** stores.
+    ///
+    /// A node's properties live in the columnar store and in the per-node row
+    /// map, and reads consult the column first. So removing from one alone
+    /// leaves the value readable, which is what `REMOVE n.prop` was doing
+    /// (#594). Anything that removes a property has to go through here.
+    pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) {
+        self.node_columns.remove_property(node_id.as_u64() as usize, key);
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.remove_property(key);
+        }
+        self.invalidate_statistics_cache();
+    }
+
+    /// Remove one property of an edge from both stores. See
+    /// `remove_node_property`.
+    pub fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) {
+        self.edge_columns.remove_property(edge_id.as_u64() as usize, key);
+        if let Some(props) = self.get_edge_properties_mut(edge_id) {
+            props.remove(key);
+        }
+        self.invalidate_statistics_cache();
+    }
+
+    /// The set of nodes carrying a label, for membership tests.
+    ///
+    /// Exists so a caller testing many nodes against the same label resolves
+    /// the set once and then probes by `NodeId`. The alternative --
+    /// `get_node(id).has_label(label)` -- costs a `Vec` index, a version-chain
+    /// walk, a 128-byte `Node`, and a `HashSet<Label>` probe that hashes a
+    /// *string*, all per node tested. `ExpandOperator` was doing that once per
+    /// edge visited, and it was 26.7% of a profiled LDBC IC9 run (#592).
+    ///
+    /// `None` means no node carries the label, which matches nothing.
+    pub fn nodes_with_label(&self, label: &Label) -> Option<&HashSet<NodeId>> {
+        self.label_index.get(label)
+    }
+
     pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
         self.label_index
             .get(label)
@@ -2587,6 +2712,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// A property that should be treated as an embedding when *registering* a
+    /// vector index: all-numeric, non-empty, and carrying at least one float.
+    ///
+    /// Deliberately narrower than `PropertyValue::to_vector`, which any write
+    /// path may use because it can only fill an index someone already asked
+    /// for. See the call site for why the two differ.
+    fn embedding_candidate(v: &PropertyValue) -> Option<Vec<f32>> {
+        match v {
+            PropertyValue::Vector(vec) if !vec.is_empty() => Some(vec.clone()),
+            PropertyValue::Array(items)
+                if !items.is_empty()
+                    && items.iter().any(|i| matches!(i, PropertyValue::Float(_))) =>
+            {
+                v.to_vector()
+            }
+            _ => None,
+        }
+    }
+
     /// Discover all (label, property_key, dims) tuples from node Vector properties,
     /// register any missing HNSW indices, then populate them.
     /// This is the correct post-import call when no indices were pre-registered.
@@ -2601,7 +2745,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 continue;
             }
             for (k, v) in node.properties.iter() {
-                if let PropertyValue::Vector(vec) = v {
+                // Discovery *registers* indices, so it must not treat every
+                // numeric list as an embedding -- `{scores: [1, 2, 3]}` would
+                // get an HNSW index built over it. The rule is the one that was
+                // in force before list literals stopped being coerced to
+                // vectors (#628): all-numeric, non-empty, and containing at
+                // least one float. That keeps exactly the set of properties
+                // that used to arrive here as `Vector`, while an embedding
+                // written as a list literal -- now an `Array` -- is still
+                // found. The *write* paths are deliberately more permissive:
+                // they only fill an index that already exists.
+                if let Some(vec) = Self::embedding_candidate(v) {
+                    let vec = &vec;
                     // Use the MAX length seen for this (label, property): a stray
                     // empty/short embedding must not set the index dimension and
                     // cause every real vector to be skipped on rebuild.
@@ -3125,9 +3280,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in labels {
             self.property_index.index_insert(label, key, new_value.clone(), id);
         }
-        if let PropertyValue::Vector(vec) = new_value {
+        if let Some(vec) = new_value.to_vector() {
             for label in labels {
-                let _ = self.vector_index.add_vector(label.as_str(), key, id, vec);
+                let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
             }
         }
     }
@@ -3137,9 +3292,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         match event {
             NodeCreated { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
-                    if let PropertyValue::Vector(vec) = &value {
+                    if let Some(vec) = value.to_vector() {
                         for label in &labels {
-                            let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                            let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                     }
                     for label in &labels {
@@ -3163,16 +3318,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for label in &labels {
                     self.property_index.index_insert(label, &key, new_value.clone(), id);
                 }
-                if let PropertyValue::Vector(vec) = &new_value {
+                if let Some(vec) = new_value.to_vector() {
                     for label in &labels {
-                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                     }
                 }
             }
             LabelAdded { tenant_id: _, id, label, properties } => {
                 for (key, value) in properties {
-                    if let PropertyValue::Vector(vec) = &value {
-                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, vec);
+                    if let Some(vec) = value.to_vector() {
+                        let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                     }
                     self.property_index.index_insert(&label, &key, value.clone(), id);
                 }

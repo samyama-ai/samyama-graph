@@ -121,6 +121,30 @@ pub struct Query {
     pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
     pub unwind_clause: Option<UnwindClause>,
+    /// Every clause of the query, in the order it was written.
+    ///
+    /// The fields above describe a query by *kind* — all the MATCHes here, the
+    /// CREATE there — which is enough only while the grammar fixes one legal
+    /// order. Cypher does not: a write may sit before a `WITH`, and two writes
+    /// may be separated by a projection, and neither has anywhere to live in a
+    /// shape-based representation. `CREATE (a) WITH a CREATE (b)` has two
+    /// creates on opposite sides of a barrier and one `Option<CreateClause>`.
+    ///
+    /// Populated for every query. The planner uses it only when the legacy
+    /// fields cannot express the query (`needs_clause_pipeline`), so the
+    /// established paths are untouched and this grows into them rather than
+    /// replacing them in one step.
+    pub clauses: Vec<Clause>,
+    /// The clause order is not expressible in the fields above, so the planner
+    /// must walk `clauses` instead.
+    pub needs_clause_pipeline: bool,
+    /// Further `UNWIND`s written directly after the first, in order.
+    ///
+    /// Each is a cross product with everything before it. Kept beside
+    /// `unwind_clause` rather than replacing it with a `Vec` because the
+    /// single-UNWIND field is read in a dozen places that only ever care
+    /// about the first one.
+    pub extra_unwind_clauses: Vec<UnwindClause>,
     /// Whether the UNWIND *led* the statement (`UNWIND ... MATCH ...`) rather than
     /// following the match. The AST keeps a single `unwind_clause` with no position, but
     /// the two orders plan differently: a leading UNWIND must bind its variable before the
@@ -228,6 +252,66 @@ pub struct MatchClause {
     pub pattern: Pattern,
     /// Whether this is an optional match
     pub optional: bool,
+}
+
+/// One clause of a query, as written.
+///
+/// A flat, ordered alternative to the by-kind fields on [`Query`]. Cypher is a
+/// sequence of reading, writing and projecting clauses with few ordering
+/// constraints; this is that sequence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Clause {
+    /// `MATCH` / `OPTIONAL MATCH` — the clause carries its own `optional` flag.
+    Match(MatchClause),
+    /// A `WHERE` attached to the reading clause before it.
+    Where(WhereClause),
+    Unwind(UnwindClause),
+    With(WithClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Set(SetClause),
+    Remove(RemoveClause),
+    Delete(DeleteClause),
+    Foreach(ForeachClause),
+    Call(CallClause),
+    Return(ReturnClause),
+}
+
+impl Clause {
+    /// Whether this clause writes to the graph.
+    ///
+    /// The distinction the grammar used to encode positionally: writes were
+    /// only allowed after the last projection.
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            Clause::Create(_)
+                | Clause::Merge(_)
+                | Clause::Set(_)
+                | Clause::Remove(_)
+                | Clause::Delete(_)
+                | Clause::Foreach(_)
+        )
+    }
+
+    /// A short name, for plan descriptions and error messages.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Clause::Match(m) if m.optional => "OPTIONAL MATCH",
+            Clause::Match(_) => "MATCH",
+            Clause::Where(_) => "WHERE",
+            Clause::Unwind(_) => "UNWIND",
+            Clause::With(_) => "WITH",
+            Clause::Create(_) => "CREATE",
+            Clause::Merge(_) => "MERGE",
+            Clause::Set(_) => "SET",
+            Clause::Remove(_) => "REMOVE",
+            Clause::Delete(_) => "DELETE",
+            Clause::Foreach(_) => "FOREACH",
+            Clause::Call(_) => "CALL",
+            Clause::Return(_) => "RETURN",
+        }
+    }
 }
 
 /// Graph pattern
@@ -484,6 +568,10 @@ pub enum BinaryOp {
     Mul,
     /// Division (/)
     Div,
+    /// Exponentiation (^). Right-associative and binds tighter than `*`.
+    Pow,
+    /// Exclusive or (XOR). Sits between OR and AND, as Cypher specifies.
+    Xor,
     /// Modulo (%)
     Mod,
     /// String starts with
@@ -520,6 +608,16 @@ pub struct ReturnClause {
     pub distinct: bool,
 }
 
+/// The variable name standing for `RETURN *` / `WITH *` between parsing and
+/// star expansion.
+///
+/// A sentinel rather than a new `Expression` variant because `*` is not a
+/// value and never survives into a plan: `expand_stars` replaces it with the
+/// variables in scope immediately after parsing, so nothing downstream can
+/// encounter it. `*` is not a legal identifier in Cypher, so the sentinel
+/// cannot collide with a user variable.
+pub const STAR_ITEM: &str = "*";
+
 /// Return item: n, n.name AS name, count(n)
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReturnItem {
@@ -527,6 +625,35 @@ pub struct ReturnItem {
     pub expression: Expression,
     /// Alias (optional)
     pub alias: Option<String>,
+    /// The expression exactly as it was written, when it came from source.
+    ///
+    /// Cypher names an unaliased result column after its own text, so
+    /// `RETURN count(*)` produces a column called `count(*)`. The planner used
+    /// to reconstruct a name from the AST and fall back to `col_0`, which is
+    /// not a name any client can ask for -- and it dropped the `*`, naming the
+    /// column `count()` (#635).
+    pub source_text: Option<String>,
+}
+
+impl ReturnItem {
+    /// The result column this item produces.
+    ///
+    /// One place, because the planner had this decision written out in ten
+    /// and they did not agree. `index` only matters for an expression with no
+    /// recorded text, which now means one the engine built itself.
+    pub fn column_name(&self, index: usize) -> String {
+        if let Some(alias) = &self.alias {
+            return alias.clone();
+        }
+        if let Some(text) = &self.source_text {
+            return text.clone();
+        }
+        match &self.expression {
+            Expression::Variable(v) => v.clone(),
+            Expression::Property { variable, property } => format!("{variable}.{property}"),
+            _ => format!("col_{index}"),
+        }
+    }
 }
 
 /// CREATE clause
@@ -550,6 +677,37 @@ pub struct DeleteClause {
 pub struct SetClause {
     /// Items to set
     pub items: Vec<SetItem>,
+    /// Labels to add: `SET n:Admin`, `SET n:A:B`.
+    ///
+    /// Kept beside `items` rather than folded into it because `SetItem` is a
+    /// struct read by field in several places, and an enum would touch all of
+    /// them for no gain. `RemoveItem` is an enum because it always was.
+    pub label_items: Vec<SetLabelItem>,
+    /// Whole-entity assignment: `SET n = {…}` and `SET n += {…}`.
+    pub entity_items: Vec<SetEntityItem>,
+}
+
+/// `SET n = <expr>` (replace every property) or `SET n += <expr>` (merge).
+///
+/// The right-hand side evaluates to a map, or to another node or relationship
+/// whose properties are copied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetEntityItem {
+    /// Variable naming the entity being assigned to.
+    pub variable: String,
+    /// `true` for `+=` (merge), `false` for `=` (replace).
+    pub merge: bool,
+    /// The map, or entity, to take properties from.
+    pub value: Expression,
+}
+
+/// SET item adding labels: `n:Admin`, `n:A:B`
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetLabelItem {
+    /// Variable name
+    pub variable: String,
+    /// Labels to add
+    pub labels: Vec<Label>,
 }
 
 /// SET item: n.name = "Alice"
@@ -608,6 +766,14 @@ pub struct MergeClause {
     pub on_create_set: Vec<SetItem>,
     /// ON MATCH SET items
     pub on_match_set: Vec<SetItem>,
+    /// Labels added by `ON CREATE SET n:Label`.
+    ///
+    /// Separate from `on_create_set` for the same reason `SetClause` keeps
+    /// `label_items` apart from `items`: the property form is read by field in
+    /// several places and an enum would touch all of them.
+    pub on_create_labels: Vec<SetLabelItem>,
+    /// Labels added by `ON MATCH SET n:Label`.
+    pub on_match_labels: Vec<SetLabelItem>,
 }
 
 /// WITH clause
@@ -674,6 +840,9 @@ impl Query {
             params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
+            clauses: Vec::new(),
+            needs_clause_pipeline: false,
+            extra_unwind_clauses: Vec::new(),
             unwind_leading: false,
             merge_clause: None,
             union_queries: Vec::new(),

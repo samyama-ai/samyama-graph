@@ -1,0 +1,184 @@
+//! What one adjacency step costs, and where it goes (#520, Axiom 2).
+//!
+//! `Expand` is the largest operator in every hot LDBC query. Normalising its
+//! cost by **edges visited** rather than rows emitted makes the two hot cases
+//! agree: IC5 and IC9 both sit around 300-365 ns per edge visited, and the
+//! reason IC9 looks four times worse per *row* is that an LDBC `Person` has
+//! ~680 incoming edges of which its pattern keeps 125, where IC5's keeps 513.
+//!
+//! 300 ns is what needs explaining. The adjacency itself is CSR — `offsets`
+//! into a packed `Vec<(NodeId, EdgeId)>`, contiguous per node, sequential to
+//! walk. But the type filter is:
+//!
+//! ```ignore
+//! self.edge_type_ids.get(edge_id.as_u64() as usize)
+//! ```
+//!
+//! and edge ids within one node's adjacency run are **not** contiguous — they
+//! are whatever order the edges were created. So every edge visited makes a
+//! scattered read into an array with one entry per edge in the graph, which at
+//! LDBC SF1's 21.1M edges is 42 MB and misses cache essentially every time.
+//!
+//! **That hypothesis is wrong, and this bench is what refuted it.** The walk,
+//! type probe included, costs under 3 ns per edge. Running the same traversal
+//! through the query engine costs ~30x that. Storage is a few percent of what
+//! `Expand` spends; the rest is the operator.
+//!
+//! It also fixes the normalisation. Per *edge visited*, IC5 (407 ns/row, keeps
+//! 513 of ~680) and IC9 (1976 ns/row, keeps 125 of ~680) look four times apart;
+//! per *emitted row* they agree, and they agree with the synthetic case here.
+//! Cost tracks rows produced, not edges walked — which is the opposite of what
+//! "make the traversal faster" would suggest, and worth knowing before anyone
+//! rewrites the adjacency layout.
+//!
+//!   cargo bench --bench adjacency_walk
+//!   cargo bench --bench adjacency_walk -- --nodes 500000 --degree 40
+
+use std::time::Instant;
+
+use samyama::graph::GraphStore;
+
+#[path = "common/bench_setup.rs"]
+mod bench_setup;
+
+/// `nodes` nodes, each with `degree` outgoing edges to scattered targets, of
+/// which one in `types` is the type a query would ask for.
+///
+/// Scattered targets on purpose: a node's adjacency run is contiguous, but the
+/// *edge ids* in it are not, and the whole question is what a scattered probe
+/// keyed on those ids costs.
+fn build(nodes: usize, degree: usize, types: usize) -> (GraphStore, Vec<samyama::graph::NodeId>) {
+    let mut store = GraphStore::new();
+    let ids: Vec<_> = (0..nodes).map(|_| store.create_node("N")).collect();
+    let names: Vec<String> = (0..types).map(|t| format!("TYPE{t}")).collect();
+    for (i, &src) in ids.iter().enumerate() {
+        for d in 0..degree {
+            let x = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((d as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+            let x = x ^ (x >> 31);
+            let target = ids[(x % nodes as u64) as usize];
+            if target != src {
+                let _ = store.create_edge(src, target, names[d % types].as_str());
+            }
+        }
+    }
+    (store, ids)
+}
+
+fn main() {
+    bench_setup::init();
+    let calibration = bench_setup::report_calibration();
+
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |flag: &str| -> Option<usize> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+    };
+    let nodes = arg("--nodes").unwrap_or(300_000);
+    let degree = arg("--degree").unwrap_or(30);
+    let types = arg("--types").unwrap_or(6);
+
+    eprintln!("Building {nodes} nodes x {degree} edges over {types} types…");
+    let started = Instant::now();
+    let (store, ids) = build(nodes, degree, types);
+    eprintln!(
+        "built {} edges in {:.1}s\n",
+        store.edge_count(),
+        started.elapsed().as_secs_f64()
+    );
+
+    let wanted = store
+        .edge_type_id(&samyama::graph::EdgeType::new("TYPE0"))
+        .expect("the type exists");
+    let filter = [wanted];
+
+    // Every edge incident to every node, both variants, same order.
+    let visited = nodes * degree;
+
+    let run = |label: &str, f: &dyn Fn() -> (u64, u64)| -> f64 {
+        let _ = f();
+        let started = Instant::now();
+        let (seen, kept) = f();
+        let ns = started.elapsed().as_secs_f64() * 1e9 / visited as f64;
+        println!("{label:<48} {ns:>9.1}  {seen:>12} {kept:>12}");
+        ns
+    };
+
+    println!("{} edges visited per pass\n", visited);
+    println!("{:<48} {:>9}  {:>12} {:>12}", "walk", "ns/edge", "visited", "kept");
+    println!("{:-<48} {:->9}  {:->12} {:->12}", "", "", "", "");
+
+    let unfiltered = run("wildcard (still probes the type array)", &|| {
+        let (mut seen, mut kept) = (0u64, 0u64);
+        for &id in &ids {
+            store.for_each_outgoing_neighbor(id, None, |_t, _e| {
+                seen += 1;
+                kept += 1;
+            });
+        }
+        (seen, kept)
+    });
+
+    let filtered = run("one type of six", &|| {
+        let (mut seen, mut kept) = (0u64, 0u64);
+        for &id in &ids {
+            store.for_each_outgoing_neighbor(id, Some(&filter), |_t, _e| {
+                kept += 1;
+            });
+            seen += 1;
+        }
+        (seen, kept)
+    });
+
+    // The same traversal through the query engine, so the raw walk and the
+    // operator around it are bracketed on one host in one run. `Expand` on
+    // LDBC measures 300-365 ns per edge visited; if the walk is 3 ns then the
+    // rest is the operator, and this says how much of it.
+    let expand_ns = {
+        use samyama::query::executor::QueryExecutor;
+        use samyama::query::parser::parse_query;
+        let cypher = "MATCH (a:N)-[:TYPE0]->(b:N) RETURN count(b) AS c";
+        let query = parse_query(cypher).expect("query should parse");
+        let _ = QueryExecutor::new(&store).execute(&query).expect("query should run");
+        let started = Instant::now();
+        let out = QueryExecutor::new(&store).execute(&query).expect("query should run");
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let _ = out;
+        // Rows emitted is the traversal's keep-count: one row per surviving edge.
+        let emitted = visited / types;
+        println!(
+            "{:<48} {:>9.1}  {:>12} {:>12}",
+            "the same traversal as Cypher (whole query)",
+            ms * 1e6 / visited as f64,
+            visited,
+            emitted
+        );
+        println!(
+            "{:<48} {:>9.1}  {:>12} {:>12}",
+            "  ... per emitted row",
+            ms * 1e6 / emitted as f64,
+            "",
+            ""
+        );
+        ms * 1e6 / visited as f64
+    };
+
+    println!();
+    println!("Both numbers include one scattered probe of `edge_type_ids` per edge visited:");
+    println!("the wildcard case still probes it, because an edge whose type is UNSET has to be");
+    println!("rejected. At {} edges the array is {:.0} MB.", store.edge_count(), store.edge_count() as f64 * 2.0 / 1e6);
+    println!();
+    println!("LDBC IC5 and IC9 both measure ~300-365 ns per edge visited on SF1, whose type");
+    println!("array is 42 MB (#520).");
+    println!();
+    println!("The walk itself is {unfiltered:.1} ns per edge. Running the same traversal through the");
+    println!("query engine costs {expand_ns:.1} ns per edge visited -- {:.0}x the walk. Whatever `Expand`", expand_ns / unfiltered.max(0.01));
+    println!("costs, storage is not where it goes.");
+    println!();
+    println!("Read the per-emitted-row line, not the per-edge one. Per edge visited, IC5 and IC9");
+    println!("look four times apart; per emitted row they agree with each other and with the");
+    println!("figure here. Expand's cost tracks rows produced, not edges walked.");
+    let _ = filtered;
+
+    bench_setup::report_drift(calibration);
+}

@@ -73,6 +73,9 @@ struct CypherParser;
 static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
         .op(Op::infix(Rule::or_op, Assoc::Left))
+        // XOR binds tighter than OR and looser than AND, which is where Cypher
+        // puts it (#578).
+        .op(Op::infix(Rule::xor_op, Assoc::Left))
         .op(Op::infix(Rule::and_op, Assoc::Left))
         // NOT sits between AND and the comparisons: `NOT a STARTS WITH b` negates the
         // comparison, while `NOT a AND b` still groups as `(NOT a) AND b`.
@@ -80,6 +83,9 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::in_op, Assoc::Left) | Op::infix(Rule::comparison_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
+        // Exponentiation binds tightest and associates to the *right*:
+        // `2 ^ 3 ^ 2` is 2^(3^2), not (2^3)^2.
+        .op(Op::infix(Rule::pow_op, Assoc::Right))
 });
 
 /// Parser errors
@@ -101,8 +107,204 @@ pub enum ParseError {
 pub type ParseResult<T> = Result<T, ParseError>;
 
 /// Parse a Cypher query string into an AST
+/// Parse a query as a flat, ordered clause sequence.
+///
+/// Reached only when every shape-specific rule has rejected the input. The
+/// result carries `clauses` in written order and `needs_clause_pipeline`, and
+/// the legacy by-kind fields are left empty — a query here is by definition one
+/// they cannot represent, and half-filling them would give the planner two
+/// disagreeing accounts of the same query.
+fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
+    use crate::query::ast::Clause;
+
+    let pairs = CypherParser::parse(Rule::pipeline_query, input)?;
+    let mut query = Query::new();
+    query.needs_clause_pipeline = true;
+
+    for pair in pairs {
+        if pair.as_rule() != Rule::pipeline_query {
+            continue;
+        }
+        for inner in pair.into_inner() {
+            match inner.as_rule() {
+                Rule::explain_clause => {
+                    query.explain = true;
+                    query.profile = inner.as_str().eq_ignore_ascii_case("PROFILE");
+                }
+                Rule::pipeline_stmt => {
+                    for c in inner.into_inner() {
+                        match c.as_rule() {
+                            Rule::match_clause | Rule::optional_match_clause => {
+                                let optional = c.as_rule() == Rule::optional_match_clause;
+                                for p in c.into_inner() {
+                                    if p.as_rule() == Rule::pattern {
+                                        query.clauses.push(Clause::Match(MatchClause {
+                                            pattern: parse_pattern(p)?,
+                                            optional,
+                                        }));
+                                    }
+                                }
+                            }
+                            Rule::where_clause => {
+                                query.clauses.push(Clause::Where(parse_where_clause(c)?));
+                            }
+                            Rule::unwind_clause => {
+                                query.clauses.push(Clause::Unwind(parse_unwind_clause(c)?));
+                            }
+                            Rule::with_clause => {
+                                query.clauses.push(Clause::With(parse_with_clause(c)?));
+                            }
+                            Rule::create_clause => {
+                                for p in c.into_inner() {
+                                    if p.as_rule() == Rule::pattern {
+                                        query.clauses.push(Clause::Create(CreateClause {
+                                            pattern: parse_pattern(p)?,
+                                        }));
+                                    }
+                                }
+                            }
+                            Rule::merge_inline => {
+                                query.clauses.push(Clause::Merge(parse_merge_clause(c)?));
+                            }
+                            Rule::delete_clause => {
+                                query.clauses.push(Clause::Delete(parse_delete_clause(c)?));
+                            }
+                            Rule::set_clause => {
+                                query.clauses.push(Clause::Set(parse_set_clause(c)?));
+                            }
+                            Rule::remove_clause => {
+                                query.clauses.push(Clause::Remove(parse_remove_clause(c)?));
+                            }
+                            Rule::return_clause => {
+                                query.clauses.push(Clause::Return(parse_return_clause(c)?));
+                            }
+                            Rule::order_by_clause => {
+                                query.order_by = Some(parse_order_by_clause(c)?);
+                            }
+                            Rule::skip_clause => {
+                                for i in c.into_inner() {
+                                    if i.as_rule() == Rule::integer {
+                                        query.skip = i.as_str().parse().ok();
+                                    }
+                                }
+                            }
+                            Rule::limit_clause => {
+                                for i in c.into_inner() {
+                                    if i.as_rule() == Rule::integer {
+                                        query.limit = i.as_str().parse().ok();
+                                    }
+                                }
+                            }
+                            // Anything this builder cannot lower has to be an
+                            // error. Falling through silently was the worse
+                            // failure: FOREACH and CALL parsed cleanly, were
+                            // dropped on the floor, and the query then ran as
+                            // though the clause had never been written —
+                            // `CREATE (a:A) WITH a FOREACH (i IN [1,2] | SET
+                            // a.n = i)` reported success having set nothing. A
+                            // clause the engine cannot run must never be
+                            // mistaken for one it ran.
+                            other => {
+                                let keyword = c
+                                    .as_str()
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_uppercase();
+                                let name = if keyword.is_empty() {
+                                    format!("{other:?}")
+                                } else {
+                                    keyword
+                                };
+                                return Err(ParseError::SemanticError(format!(
+                                    "`{name}` is not yet supported in this clause position \
+                                     (samyama-graph#617)"
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if query.clauses.is_empty() {
+        return Err(ParseError::SemanticError("empty clause sequence".to_string()));
+    }
+    // The RETURN is mirrored into the legacy field so `validate` and the
+    // star expansion, which both read it, keep working unchanged.
+    if let Some(Clause::Return(rc)) = query.clauses.iter().rev().find(|c| matches!(c, Clause::Return(_))) {
+        query.return_clause = Some(rc.clone());
+    }
+    crate::query::star::expand_stars(&mut query);
+    crate::query::validate::validate(&query)
+        .map_err(|e| ParseError::SemanticError(e.to_string()))?;
+    Ok(query)
+}
+
+/// An integer literal, in decimal, hexadecimal (`0x1A`) or octal (`0o17`).
+///
+/// Returns an error rather than panicking when the value does not fit. The
+/// previous `.parse().unwrap()` meant `RETURN 9223372036854775808` **crashed
+/// the process**: an out-of-range literal is a syntax error in Cypher, and the
+/// TCK has two scenarios asserting exactly that, but a panic is reachable from
+/// any query string and takes the server with it (#633).
+fn parse_integer_literal(text: &str) -> ParseResult<i64> {
+    let text = text.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (radix, digits) = if let Some(rest) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = digits.strip_prefix("0o").or_else(|| digits.strip_prefix("0O")) {
+        (8, rest)
+    } else {
+        (10, digits)
+    };
+
+    // Parsed as i128 so the magnitude of i64::MIN -- which is one larger than
+    // i64::MAX -- can be represented before the sign is applied. Without this,
+    // `-9223372036854775808` has no valid intermediate form.
+    let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
+        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+    })?;
+    let value = if negative { -magnitude } else { magnitude };
+    i64::try_from(value).map_err(|_| {
+        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+    })
+}
+
+/// A `SKIP`/`LIMIT` count. Same crash as the literal parser had, same fix:
+/// `LIMIT 99999999999999999999` panicked rather than being refused.
+fn parse_count_literal(text: &str) -> ParseResult<usize> {
+    let value = parse_integer_literal(text)?;
+    usize::try_from(value)
+        .map_err(|_| ParseError::SemanticError(format!("SKIP/LIMIT must not be negative: `{text}`")))
+}
+
 pub fn parse_query(input: &str) -> ParseResult<Query> {
-    let pairs = CypherParser::parse(Rule::query, input)?;
+    let pairs = match CypherParser::parse(Rule::query, input) {
+        Ok(pairs) => pairs,
+        // The established rules each encode one permitted clause order. A
+        // query they all reject may still be valid Cypher — a write before a
+        // `WITH`, two writes either side of a projection — so it gets one more
+        // attempt against the general clause sequence.
+        //
+        // The original error is kept if that fails too: it points at the
+        // construct, whereas the general rule fails at the first clause it
+        // cannot start.
+        Err(original) => match parse_clause_pipeline(input) {
+            Ok(query) => return Ok(query),
+            // A semantic error means the general rule *did* recognise the
+            // clause order and then refused to lower one of the clauses. That
+            // names the actual obstacle, so it wins; a plain parse failure
+            // does not, and the original error is kept instead.
+            Err(e @ ParseError::SemanticError(_)) => return Err(e),
+            Err(_) => return Err(original.into()),
+        },
+    };
 
     let mut query = Query::new();
 
@@ -146,6 +348,18 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
             _ => {}
         }
     }
+
+    // `RETURN *` / `WITH *` are resolved here rather than in the planner, so
+    // that nothing downstream has to know the sentinel exists. See
+    // `crate::query::star`.
+    crate::query::star::expand_stars(&mut query);
+
+    // Checks the grammar cannot express — duplicate result columns, UNION
+    // arity, CREATE over an already-bound variable. Reported as a parse
+    // failure because that is what they are to a caller: the query was never
+    // well-formed, and running it would answer a question nobody asked.
+    crate::query::validate::validate(&query)
+        .map_err(|e| ParseError::SemanticError(e.to_string()))?;
 
     Ok(query)
 }
@@ -549,6 +763,23 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }
+            Rule::order_by_clause => {
+                query.order_by = Some(parse_order_by_clause(inner)?);
+            }
+            Rule::skip_clause => {
+                for i in inner.into_inner() {
+                    if i.as_rule() == Rule::integer {
+                        query.skip = i.as_str().parse::<usize>().ok();
+                    }
+                }
+            }
+            Rule::limit_clause => {
+                for i in inner.into_inner() {
+                    if i.as_rule() == Rule::integer {
+                        query.limit = i.as_str().parse::<usize>().ok();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -759,7 +990,14 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 query.remove_clauses.push(parse_remove_clause(inner)?);
             }
             Rule::unwind_clause => {
-                query.unwind_clause = Some(parse_unwind_clause(inner)?);
+                // The first UNWIND stays in `unwind_clause`; the rest queue up
+                // behind it, each a cross product with everything before.
+                let u = parse_unwind_clause(inner)?;
+                if query.unwind_clause.is_none() {
+                    query.unwind_clause = Some(u);
+                } else {
+                    query.extra_unwind_clauses.push(u);
+                }
             }
             Rule::merge_inline => {
                 query.merge_clause = Some(parse_merge_clause(inner)?);
@@ -773,14 +1011,14 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::skip_clause => {
                 for skip_inner in inner.into_inner() {
                     if skip_inner.as_rule() == Rule::integer {
-                        query.skip = Some(skip_inner.as_str().parse().unwrap());
+                        query.skip = Some(parse_count_literal(skip_inner.as_str())?);
                     }
                 }
             }
             Rule::limit_clause => {
                 for limit_inner in inner.into_inner() {
                     if limit_inner.as_rule() == Rule::integer {
-                        query.limit = Some(limit_inner.as_str().parse().unwrap());
+                        query.limit = Some(parse_count_literal(limit_inner.as_str())?);
                     }
                 }
             }
@@ -792,18 +1030,52 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
 }
 
 fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    // Adjacent CREATE clauses are merged into one pattern. They are equivalent
+    // by definition — `CREATE (a) CREATE (b)` and `CREATE (a), (b)` bind the
+    // same variables to the same nodes — and merging means the planner and the
+    // executor never learn that repeated clauses exist. The alternative,
+    // `Vec<CreateClause>` on the AST, would touch 36 call sites, most of them
+    // `is_some()` guards asking only "is this a write query".
+    let mut paths = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::pattern => {
-                query.create_clause = Some(CreateClause {
-                    pattern: parse_pattern(inner)?,
-                });
+            // A bare `CREATE` statement yields `pattern` directly; a repeated
+            // one yields `create_clause` wrappers.
+            Rule::pattern => paths.extend(parse_pattern(inner)?.paths),
+            Rule::create_clause => {
+                for c in inner.into_inner() {
+                    if c.as_rule() == Rule::pattern {
+                        paths.extend(parse_pattern(c)?.paths);
+                    }
+                }
             }
             Rule::return_clause => {
                 query.return_clause = Some(parse_return_clause(inner)?);
             }
+            Rule::order_by_clause => {
+                query.order_by = Some(parse_order_by_clause(inner)?);
+            }
+            Rule::skip_clause => {
+                for i in inner.into_inner() {
+                    if i.as_rule() == Rule::integer {
+                        query.skip = i.as_str().parse::<usize>().ok();
+                    }
+                }
+            }
+            Rule::limit_clause => {
+                for i in inner.into_inner() {
+                    if i.as_rule() == Rule::integer {
+                        query.limit = i.as_str().parse::<usize>().ok();
+                    }
+                }
+            }
             _ => {}
         }
+    }
+    if !paths.is_empty() {
+        query.create_clause = Some(CreateClause {
+            pattern: crate::query::ast::Pattern { paths },
+        });
     }
     Ok(())
 }
@@ -831,14 +1103,14 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
             Rule::skip_clause => {
                 for skip_inner in inner.into_inner() {
                     if skip_inner.as_rule() == Rule::integer {
-                        skip = Some(skip_inner.as_str().parse().unwrap());
+                        skip = Some(parse_count_literal(skip_inner.as_str())?);
                     }
                 }
             }
             Rule::limit_clause => {
                 for limit_inner in inner.into_inner() {
                     if limit_inner.as_rule() == Rule::integer {
-                        limit = Some(limit_inner.as_str().parse().unwrap());
+                        limit = Some(parse_count_literal(limit_inner.as_str())?);
                     }
                 }
             }
@@ -863,10 +1135,58 @@ fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteC
     Ok(DeleteClause { expressions, detach })
 }
 
+/// `variable (":" label)+` — the label form of a SET item.
+///
+/// Shared by `SET`, `ON CREATE SET` and `ON MATCH SET`. Kept as one function
+/// because the last time these were parsed in two places the copies drifted
+/// and one of them silently dropped items it did not recognise.
+fn parse_set_label_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetLabelItem> {
+    let mut variable = String::new();
+    let mut labels = Vec::new();
+    for sl in pair.into_inner() {
+        match sl.as_rule() {
+            Rule::variable => variable = sl.as_str().to_string(),
+            Rule::label => labels.push(Label::new(sl.as_str())),
+            _ => {}
+        }
+    }
+    if labels.is_empty() {
+        return Err(ParseError::SemanticError("SET label item has no label".to_string()));
+    }
+    Ok(SetLabelItem { variable, labels })
+}
+
 fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause> {
     let mut items = Vec::new();
+    let mut label_items: Vec<SetLabelItem> = Vec::new();
+    let mut entity_items: Vec<crate::query::ast::SetEntityItem> = Vec::new();
 
     for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::set_label_item {
+            label_items.push(parse_set_label_item(inner)?);
+            continue;
+        }
+        if inner.as_rule() == Rule::set_entity_item {
+            let mut variable = String::new();
+            let mut merge = false;
+            let mut value = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
+                    Rule::set_entity_op => merge = part.as_str().trim() == "+=",
+                    Rule::expression => value = Some(parse_expression(part)?),
+                    _ => {}
+                }
+            }
+            entity_items.push(crate::query::ast::SetEntityItem {
+                variable,
+                merge,
+                value: value.ok_or_else(|| {
+                    ParseError::SemanticError("SET <entity> = missing a value".to_string())
+                })?,
+            });
+            continue;
+        }
         if inner.as_rule() == Rule::set_item {
             let mut variable = String::new();
             let mut property = String::new();
@@ -898,7 +1218,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
         }
     }
 
-    Ok(SetClause { items })
+    Ok(SetClause { items, label_items, entity_items })
 }
 
 fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveClause> {
@@ -919,17 +1239,23 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 }
                 items.push(RemoveItem::Property { variable, property });
             } else {
-                // variable : label
+                // `variable (":" label)+` — one item per label, so
+                // `REMOVE n:L1:L3` removes both rather than only the first.
                 let mut variable = String::new();
-                let mut label = String::new();
+                let mut labels = Vec::new();
                 for child in children {
                     match child.as_rule() {
                         Rule::variable => variable = child.as_str().to_string(),
-                        Rule::label => label = child.as_str().to_string(),
+                        Rule::label => labels.push(child.as_str().to_string()),
                         _ => {}
                     }
                 }
-                items.push(RemoveItem::Label { variable, label: Label::new(&label) });
+                for label in labels {
+                    items.push(RemoveItem::Label {
+                        variable: variable.clone(),
+                        label: Label::new(&label),
+                    });
+                }
             }
         }
     }
@@ -960,21 +1286,27 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
     let mut pattern = None;
     let mut on_create_set = Vec::new();
     let mut on_match_set = Vec::new();
+    let mut on_create_labels = Vec::new();
+    let mut on_match_labels = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::pattern => pattern = Some(parse_pattern(inner)?),
             Rule::on_create_set => {
                 for si in inner.into_inner() {
-                    if si.as_rule() == Rule::set_item {
-                        on_create_set.push(parse_set_item(si)?);
+                    match si.as_rule() {
+                        Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
+                        _ => {}
                     }
                 }
             }
             Rule::on_match_set => {
                 for si in inner.into_inner() {
-                    if si.as_rule() == Rule::set_item {
-                        on_match_set.push(parse_set_item(si)?);
+                    match si.as_rule() {
+                        Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
+                        _ => {}
                     }
                 }
             }
@@ -999,6 +1331,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
         pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
         on_create_set,
         on_match_set,
+        on_create_labels,
+        on_match_labels,
     });
     Ok(())
 }
@@ -1007,21 +1341,27 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
     let mut pattern = None;
     let mut on_create_set = Vec::new();
     let mut on_match_set = Vec::new();
+    let mut on_create_labels = Vec::new();
+    let mut on_match_labels = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::pattern => pattern = Some(parse_pattern(inner)?),
             Rule::on_create_set => {
                 for si in inner.into_inner() {
-                    if si.as_rule() == Rule::set_item {
-                        on_create_set.push(parse_set_item(si)?);
+                    match si.as_rule() {
+                        Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
+                        _ => {}
                     }
                 }
             }
             Rule::on_match_set => {
                 for si in inner.into_inner() {
-                    if si.as_rule() == Rule::set_item {
-                        on_match_set.push(parse_set_item(si)?);
+                    match si.as_rule() {
+                        Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
+                        _ => {}
                     }
                 }
             }
@@ -1036,6 +1376,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
         pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
         on_create_set,
         on_match_set,
+        on_create_labels,
+        on_match_labels,
     })
 }
 
@@ -1067,22 +1409,19 @@ fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
     })
 }
 
+/// Parse a `RETURN` / `WITH` item list.
+///
+/// Delegates to `parse_return_item` rather than repeating its body. The two
+/// had drifted: this one matched only `expression` and `variable` and dropped
+/// anything else *silently* (`if let Some(e) = expr`), so when `star_item` was
+/// added `WITH *` parsed to an empty projection and the query failed at
+/// runtime with "Variable not found" — a grammar addition that looked like an
+/// executor bug. One implementation cannot drift from itself.
 fn parse_return_items(pair: pest::iterators::Pair<Rule>) -> ParseResult<Vec<ReturnItem>> {
     let mut items = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::return_item {
-            let mut expr = None;
-            let mut alias = None;
-            for ri in inner.into_inner() {
-                match ri.as_rule() {
-                    Rule::expression => expr = Some(parse_expression(ri)?),
-                    Rule::variable => alias = Some(ri.as_str().to_string()),
-                    _ => {}
-                }
-            }
-            if let Some(e) = expr {
-                items.push(ReturnItem { expression: e, alias });
-            }
+            items.push(parse_return_item(inner)?);
         }
     }
     Ok(items)
@@ -1385,11 +1724,15 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Boolean(val));
             }
             Rule::integer => {
-                let val = inner.as_str().parse().unwrap();
-                return Ok(PropertyValue::Integer(val));
+                return Ok(PropertyValue::Integer(parse_integer_literal(inner.as_str())?));
             }
             Rule::float => {
-                let val = inner.as_str().parse().unwrap();
+                let val = inner.as_str().trim().parse().map_err(|_| {
+                    ParseError::SemanticError(format!(
+                        "float literal out of range: `{}`",
+                        inner.as_str()
+                    ))
+                })?;
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
@@ -1401,32 +1744,25 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 // `Float(1.0), Float(2.0), Float(3.0)`: `UNWIND [1,2,3] AS x RETURN x`
                 // returned decimals for data that had none (#409).
                 //
-                // A list is only taken to be a vector when it actually contains a float.
-                // An all-integer list stays a list of integers, and the vector paths
-                // accept a numeric array (see `PropertyValue::to_vector`) so an embedding
-                // written as `[1, 0, 0]` still indexes.
+                // A list literal is a list. It used to become a
+                // `Vector(Vec<f32>)` as soon as one element was a float, on the
+                // theory that a float list is an embedding -- and every element
+                // was narrowed to 32 bits on the way in. Cypher floats are
+                // 64-bit, so `UNWIND [1.3, 1.5] AS v RETURN v` returned
+                // 1.2999999523162842, and `ORDER BY` on those values sorted
+                // numbers that were no longer the ones written (#628).
+                //
+                // Nothing needs the coercion: `PropertyValue::to_vector`
+                // already accepts a numeric array, which is how an embedding
+                // written as `[1, 0, 0]` has indexed since #409 -- an
+                // all-integer list was never turned into a vector either.
+                // Deciding vector-ness belongs to the consumer, not to whether
+                // the literal happened to contain a decimal point.
                 let mut items = Vec::new();
-                let mut numeric_vals = Vec::new();
-                let mut all_numeric = true;
-                let mut saw_float = false;
-
                 for item in inner.into_inner() {
                     if item.as_rule() == Rule::value {
-                        let val = parse_value(item)?;
-                        match val {
-                            PropertyValue::Float(f) => {
-                                saw_float = true;
-                                numeric_vals.push(f as f32);
-                            }
-                            PropertyValue::Integer(i) => numeric_vals.push(i as f32),
-                            _ => all_numeric = false,
-                        }
-                        items.push(val);
+                        items.push(parse_value(item)?);
                     }
-                }
-
-                if all_numeric && saw_float && !numeric_vals.is_empty() {
-                    return Ok(PropertyValue::Vector(numeric_vals));
                 }
                 return Ok(PropertyValue::Array(items));
             }
@@ -1496,10 +1832,18 @@ fn parse_return_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnC
 fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnItem> {
     let mut expression = None;
     let mut alias = None;
+    // Captured before the pair is consumed. This is the column's name when no
+    // alias is given, so it has to be the text the user wrote rather than
+    // anything reconstructed from the AST.
+    let mut source_text = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::star_item => {
+                expression = Some(Expression::Variable(crate::query::ast::STAR_ITEM.to_string()));
+            }
             Rule::expression => {
+                source_text = Some(inner.as_str().trim().to_string());
                 expression = Some(parse_expression(inner)?);
             }
             Rule::variable => {
@@ -1512,6 +1856,7 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
     Ok(ReturnItem {
         expression: expression.ok_or_else(|| ParseError::SemanticError("Missing expression in RETURN".to_string()))?,
         alias,
+        source_text,
     })
 }
 
@@ -1572,7 +1917,9 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
             
             let op = match op.as_rule() {
                 Rule::or_op => BinaryOp::Or,
+                Rule::xor_op => BinaryOp::Xor,
                 Rule::and_op => BinaryOp::And,
+                Rule::pow_op => BinaryOp::Pow,
                 Rule::comparison_op => parse_op_str(op.as_str())?,
                 Rule::in_op => BinaryOp::In,
                 Rule::add_sub_op => parse_op_str(op.as_str())?,
@@ -1629,6 +1976,31 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 }
             }
 
+            // `-9223372036854775808` is i64::MIN, and its magnitude is not a
+            // valid i64 on its own -- so the minus has to be folded into the
+            // literal rather than applied to it afterwards, or the only way to
+            // write the smallest integer is a parse error. Every other negated
+            // literal folds to exactly what the operator would have produced.
+            if prefix_ops.len() == 1
+                && prefix_ops[0].as_str().trim() == "-"
+                && index_pairs.is_empty()
+                && postfix_pair.is_none()
+            {
+                if let Some(primary) = primary_pair.as_ref() {
+                    let text = primary.as_str().trim();
+                    let numeric = !text.is_empty()
+                        && text.bytes().all(|b| b.is_ascii_digit())
+                        || text.len() > 2
+                            && text.starts_with('0')
+                            && matches!(text.as_bytes()[1], b'x' | b'X' | b'o' | b'O');
+                    if numeric {
+                        if let Ok(value) = parse_integer_literal(&format!("-{text}")) {
+                            return Ok(Expression::Literal(PropertyValue::Integer(value)));
+                        }
+                    }
+                }
+            }
+
             let mut expr = parse_primary(primary_pair.unwrap())?;
 
             // Apply each index/slice suffix in source order, so chained
@@ -1675,16 +2047,46 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
 
             // Apply postfix operator (IS NULL / IS NOT NULL)
             if let Some(postfix) = postfix_pair {
-                let text = postfix.as_str().to_uppercase();
-                let op = if text.contains("NOT") {
-                    UnaryOp::IsNotNull
+                // `n:A:B` — a label test used as a boolean value. Desugared to
+                // a function call rather than given its own `Expression`
+                // variant: a new variant would have to be handled by every
+                // exhaustive match over `Expression`, and this needs no
+                // information a call cannot carry.
+                // The labels sit two levels down: postfix_op → label_check →
+                // label. Reading only the first level found nothing and fell
+                // through to the `IS NULL` branch, so `n:A` silently became
+                // `n IS NULL` — a wrong answer rather than a parse error.
+                let labels: Vec<PropertyValue> = postfix
+                    .clone()
+                    .into_inner()
+                    .flat_map(|p| {
+                        if p.as_rule() == Rule::label_check {
+                            p.into_inner().collect::<Vec<_>>()
+                        } else {
+                            vec![p]
+                        }
+                    })
+                    .filter(|p| p.as_rule() == Rule::label)
+                    .map(|p| PropertyValue::String(p.as_str().to_string()))
+                    .collect();
+                if !labels.is_empty() {
+                    expr = Expression::Function {
+                        name: "hasLabels".to_string(),
+                        args: vec![expr, Expression::Literal(PropertyValue::Array(labels))],
+                        distinct: false,
+                    };
                 } else {
-                    UnaryOp::IsNull
-                };
-                expr = Expression::Unary {
-                    op,
-                    expr: Box::new(expr),
-                };
+                    let text = postfix.as_str().to_uppercase();
+                    let op = if text.contains("NOT") {
+                        UnaryOp::IsNotNull
+                    } else {
+                        UnaryOp::IsNull
+                    };
+                    expr = Expression::Unary {
+                        op,
+                        expr: Box::new(expr),
+                    };
+                }
             }
 
             // Apply prefix operators in reverse order (innermost first)
@@ -1879,25 +2281,39 @@ fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
     let mut list_expr = None;
     let mut filter = None;
     let mut map_expr = None;
-    let mut expressions = Vec::new();
 
+    // Which optional expression is which is decided by the marker that preceded
+    // it, not by how many there are: `[x IN xs WHERE p]` and `[x IN xs | e]`
+    // both have two expressions and mean different things (#578).
+    let mut seen_where = false;
+    let mut seen_pipe = false;
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
             Rule::in_op => {} // skip the IN keyword
-            Rule::expression => expressions.push(parse_expression(inner)?),
+            Rule::where_kw => seen_where = true,
+            Rule::pipe_op => seen_pipe = true,
+            Rule::expression => {
+                let expr = parse_expression(inner)?;
+                if list_expr.is_none() {
+                    list_expr = Some(expr);
+                } else if seen_pipe {
+                    map_expr = Some(expr);
+                } else if seen_where {
+                    filter = Some(expr);
+                } else {
+                    map_expr = Some(expr);
+                }
+            }
             _ => {}
         }
     }
 
-    // Order: list_expr, [filter], map_expr
-    // Grammar: variable IN expression (WHERE expression)? | expression
-    // So expressions are: [list_expr, optional_filter, map_expr]
-    if expressions.len() >= 2 {
-        list_expr = Some(expressions.remove(0));
-        map_expr = Some(expressions.pop().unwrap());
-        if !expressions.is_empty() {
-            filter = Some(expressions.remove(0));
+    // Cypher defaults the projection to the iteration variable, so
+    // `[x IN xs WHERE p]` means `[x IN xs WHERE p | x]`.
+    if map_expr.is_none() {
+        if let Some(var) = &variable {
+            map_expr = Some(Expression::Variable(var.clone()));
         }
     }
 
@@ -3666,12 +4082,20 @@ mod tests {
         let ast = result.unwrap();
         let create = ast.create_clause.unwrap();
         let props = create.pattern.paths[0].start.properties.as_ref().unwrap();
-        // Float list should be parsed as Vector
-        if let Some(PropertyValue::Vector(v)) = props.get("embedding") {
-            assert_eq!(v.len(), 4);
-        } else {
-            panic!("Expected Vector property, got {:?}", props.get("embedding"));
-        }
+        // A float list stays a list, at full precision. It is still indexable
+        // as an embedding -- `to_vector` accepts a numeric array -- but the
+        // literal keeps the 64-bit values that were written (#628).
+        let embedding = props.get("embedding").expect("embedding property");
+        assert_eq!(
+            embedding,
+            &PropertyValue::Array(vec![
+                PropertyValue::Float(0.1),
+                PropertyValue::Float(0.2),
+                PropertyValue::Float(0.3),
+                PropertyValue::Float(0.4),
+            ])
+        );
+        assert_eq!(embedding.to_vector().map(|v| v.len()), Some(4), "still indexable");
     }
 
     #[test]

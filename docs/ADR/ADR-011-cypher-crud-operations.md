@@ -32,7 +32,7 @@ This significantly limits Samyama's utility as a production graph database.
 
 ### Phase 1: DELETE Operations
 
-```cypher
+```cypher,ignore
 -- Strict delete (fails if node has edges)
 DELETE n
 
@@ -44,7 +44,7 @@ DETACH DELETE n
 
 ### Phase 2: SET Operations
 
-```cypher
+```cypher,ignore
 -- Individual property
 SET n.prop = value
 
@@ -59,7 +59,7 @@ SET n += {props}
 
 ### Phase 3: REMOVE Operations
 
-```cypher
+```cypher,ignore
 -- Remove properties
 REMOVE n.prop1, n.prop2
 ```

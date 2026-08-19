@@ -701,6 +701,11 @@ async fn main() -> Result<(), Error> {
     // `CH-PROFILE-01` deliverable: the gate is "at least 90% of wall-clock
     // attributed" for IC1/IC6/IC9, and a total by itself attributes nothing.
     let profile_mode = args.iter().any(|a| a == "--profile");
+    // `--explain` prints the plan **without running the query**. `--profile`
+    // executes, which is useless for exactly the queries most worth looking at:
+    // IC6 times out at SF10, so the one plan you most want to see is the one
+    // PROFILE cannot show you.
+    let explain_mode = args.iter().any(|a| a == "--explain");
 
     let include_updates = args.iter().any(|a| a == "--updates");
     let include_deletes = args.iter().any(|a| a == "--deletes");
@@ -895,6 +900,29 @@ async fn main() -> Result<(), Error> {
 
         let cypher = params.apply(query.cypher);
 
+
+        if explain_mode {
+            println!("\n================ {} — {} ================", query.id, query.name);
+            println!("{}", cypher);
+            println!();
+            match client.query("default", &format!("EXPLAIN {}", cypher)).await {
+                Ok(batch) => {
+                    for record in &batch.records {
+                        for cell in record {
+                            match cell.as_str() {
+                                Some(text) => println!("{}", text),
+                                None => println!("{}", cell),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("ERROR: {}", e);
+                    errors += 1;
+                }
+            }
+            continue;
+        }
 
         if profile_mode {
             match client.query("default", &format!("PROFILE {}", cypher)).await {

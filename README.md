@@ -356,8 +356,9 @@ RETURN nodeId, score ORDER BY score DESC LIMIT 10
 **Vector search** — HNSW indexing for semantic search and Graph RAG.
 
 ```cypher
-CREATE VECTOR INDEX ON :Paper(embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
-CALL vector.search('Paper', 'embedding', [0.1, 0.2, ...], 10) YIELD node, score
+CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
+
+CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
 
 **Natural language** — Ask questions in English. The LLM translates to Cypher.

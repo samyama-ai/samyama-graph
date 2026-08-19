@@ -114,6 +114,25 @@ fn main() {
     let columns = &fx.store.node_columns;
     let ids = &fx.rows;
 
+    // The same rows, visited in scattered order. A scan reads in id order, but
+    // anything downstream of an `Expand` does not: a traversal arrives at nodes
+    // in adjacency order, which is scattered with respect to the id space. Since
+    // the two orders read exactly the same values through exactly the same code,
+    // any difference between them is cache and nothing else.
+    let scattered: Vec<usize> = {
+        let mut v = ids.clone();
+        // Deterministic shuffle -- a benchmark that varies run to run cannot be
+        // compared across commits (#529).
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for i in (1..v.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            v.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+        v
+    };
+
     println!("{:<46} {:>10}", "access", "ns");
     println!("{:-<46} {:->10}", "", "");
 
@@ -173,6 +192,39 @@ fn main() {
         acc
     });
 
+    let scattered_ns = time("get_property, dense int, scattered order", rows, || {
+        let mut acc = 0u64;
+        for &idx in &scattered {
+            if let PropertyValue::Integer(v) = columns.get_property(idx, "dense_int") {
+                acc = acc.wrapping_add(v as u64);
+            }
+        }
+        acc
+    });
+
+    let scattered_hoisted = time("  ... with the column hoisted", rows, || {
+        let mut acc = 0u64;
+        if let Some(col) = columns.get_column("dense_int") {
+            for &idx in &scattered {
+                if let PropertyValue::Integer(v) = col.get(idx) {
+                    acc = acc.wrapping_add(v as u64);
+                }
+            }
+        }
+        acc
+    });
+
+    let scattered_vec = {
+        let plain: Vec<i64> = (0..rows as i64).collect();
+        time("a dense Vec<i64>, scattered order", rows, || {
+            let mut acc = 0u64;
+            for &idx in &scattered {
+                acc = acc.wrapping_add(plain[idx.min(plain.len() - 1)] as u64);
+            }
+            acc
+        })
+    };
+
     let row_nodes = &fx.row_nodes;
     time("row storage, node.properties HashMap", rows, || {
         let mut acc = 0u64;
@@ -197,11 +249,19 @@ fn main() {
 
     println!();
     println!(
-        "A dense integer read costs {:.0}x an array index ({:.1} ns vs {:.1} ns).",
-        dense_int / vec_ns.max(0.01),
-        dense_int,
-        vec_ns
+        "A dense integer read costs {:.0}x an array index ({dense_int:.1} ns vs {vec_ns:.1} ns).",
+        dense_int / vec_ns.max(0.01)
     );
+    println!();
+    println!("Order matters more than the lookup does. The same read in scattered order costs");
+    println!("{scattered_ns:.1} ns against {dense_int:.1} ns in id order, and a bare Vec<i64> read scattered costs");
+    println!("{scattered_vec:.1} ns against {vec_ns:.1} ns -- so most of the gap is a DRAM round trip that any");
+    println!("representation would pay. Hoisting the column lookup out of the loop takes the");
+    println!("scattered read to {scattered_hoisted:.1} ns, which is the part an operator can fix without");
+    println!("touching storage (#557).");
+    println!();
+    println!("This is why an operator downstream of an Expand pays more per property than a");
+    println!("scan does: it arrives at nodes in adjacency order, not id order.");
     println!("Most of that is cache, not hashing: at {rows} rows the inner table is tens of");
     println!("megabytes and the hash scatters access, so even a scan in id order misses.");
 
