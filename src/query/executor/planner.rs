@@ -4446,6 +4446,107 @@ impl QueryPlanner {
     /// them, which is what the by-kind representation cannot do: it has one
     /// `Option<CreateClause>` and no way to say "this create happens after
     /// that projection".
+    /// Wrap `input` with the node and edge creation a CREATE pattern asks for.
+    ///
+    /// Mirrors the construction the `MATCH … CREATE` path uses, so the clause
+    /// pipeline creates through the same operator rather than a second
+    /// implementation. `bound` names the variables already in scope: those are
+    /// referenced, not re-created, which is the rule that stops
+    /// `MATCH (a) CREATE (a)-[:R]->(b)` making a second `a`.
+    fn build_create_on_input(
+        &self,
+        input: OperatorBox,
+        pattern: &crate::query::ast::Pattern,
+        bound: &HashSet<String>,
+        anon_seq: &mut usize,
+    ) -> OperatorBox {
+        use crate::query::executor::operator::MatchCreateEdgeOperator;
+
+        let mut nodes_to_create: Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )> = Vec::new();
+        let mut edges_to_create: Vec<(
+            String,
+            String,
+            EdgeType,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+        )> = Vec::new();
+
+        let mut handle_for = |node: &crate::query::ast::NodePattern,
+                              nodes: &mut Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )>,
+                              seq: &mut usize|
+         -> String {
+            match &node.variable {
+                // Already in scope, or already registered by an earlier path in
+                // this same CREATE: reference it.
+                Some(v) if bound.contains(v) || nodes.iter().any(|(h, ..)| h == v) => v.clone(),
+                Some(v) => {
+                    nodes.push((
+                        v.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    v.clone()
+                }
+                None => {
+                    let h = format!("__anon_pipe_{seq}");
+                    *seq += 1;
+                    nodes.push((
+                        h.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    h
+                }
+            }
+        };
+
+        for path in &pattern.paths {
+            let mut current = handle_for(&path.start, &mut nodes_to_create, anon_seq);
+            for segment in &path.segments {
+                let target = handle_for(&segment.node, &mut nodes_to_create, anon_seq);
+                let edge_type = segment
+                    .edge
+                    .types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let (from, to) = match segment.edge.direction {
+                    Direction::Incoming => (target.clone(), current.clone()),
+                    Direction::Outgoing | Direction::Both => (current.clone(), target.clone()),
+                };
+                edges_to_create.push((
+                    from,
+                    to,
+                    edge_type,
+                    segment.edge.properties.clone().unwrap_or_default(),
+                    segment.edge.variable.clone(),
+                ));
+                current = target;
+            }
+        }
+
+        if edges_to_create.is_empty() && nodes_to_create.is_empty() {
+            return input;
+        }
+        Box::new(MatchCreateEdgeOperator::with_nodes(
+            input,
+            nodes_to_create,
+            edges_to_create,
+        ))
+    }
+
     fn plan_clause_pipeline(
         &self,
         query: &Query,
@@ -4490,11 +4591,60 @@ impl QueryPlanner {
         };
 
         let mut output_columns: Vec<String> = Vec::new();
+        // Variables in scope. A CREATE references those and creates the rest;
+        // a WITH replaces the set with what it projects.
+        let mut bound: HashSet<String> = HashSet::new();
+        for clause in &clauses[..split] {
+            match clause {
+                Clause::Match(m) => {
+                    for path in &m.pattern.paths {
+                        if let Some(v) = &path.path_variable { bound.insert(v.clone()); }
+                        if let Some(v) = &path.start.variable { bound.insert(v.clone()); }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.edge.variable { bound.insert(v.clone()); }
+                            if let Some(v) = &seg.node.variable { bound.insert(v.clone()); }
+                        }
+                    }
+                }
+                Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                _ => {}
+            }
+        }
+        let mut anon_seq = 0usize;
 
         for clause in &clauses[split..] {
             match clause {
+                Clause::Create(cc) => {
+                    // Scope as it stands *before* this CREATE decides what to
+                    // create. Adding the pattern's own variables first would
+                    // make every one of them look already-bound, and the
+                    // clause would create nothing.
+                    operator =
+                        self.build_create_on_input(operator, &cc.pattern, &bound, &mut anon_seq);
+                    for path in &cc.pattern.paths {
+                        if let Some(v) = &path.start.variable {
+                            bound.insert(v.clone());
+                        }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.edge.variable {
+                                bound.insert(v.clone());
+                            }
+                            if let Some(v) = &seg.node.variable {
+                                bound.insert(v.clone());
+                            }
+                        }
+                    }
+                }
                 Clause::With(wc) => {
                     operator = self.build_with_barrier(operator, wc, store)?;
+                    bound = wc
+                        .items
+                        .iter()
+                        .filter_map(|i| i.alias.clone().or_else(|| match &i.expression {
+                            Expression::Variable(v) => Some(v.clone()),
+                            _ => None,
+                        }))
+                        .collect();
                     output_columns = wc
                         .items
                         .iter()
@@ -4513,6 +4663,7 @@ impl QueryPlanner {
                         u.expression.clone(),
                         u.variable.clone(),
                     ));
+                    bound.insert(u.variable.clone());
                 }
                 Clause::Set(sc) => {
                     let items: Vec<(String, String, Expression)> = sc

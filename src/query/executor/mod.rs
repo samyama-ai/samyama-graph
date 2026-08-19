@@ -502,7 +502,12 @@ impl<'a> MutQueryExecutor<'a> {
             || query.merge_clause.is_some()
             || !query.set_clauses.is_empty()
             || !query.remove_clauses.is_empty()
-            || query.delete_clause.is_some();
+            || query.delete_clause.is_some()
+            // A clause-pipeline query keeps its writes in `clauses`; the
+            // by-kind fields above are empty for it by construction, so
+            // reading only those would let `CREATE (a) WITH a CREATE (b)`
+            // return a row where `CREATE (a), (b)` correctly returns none.
+            || query.clauses.iter().any(|c| c.is_write());
         if is_data_write && query.return_clause.is_none() && query.call_clause.is_none() {
             return Ok(RecordBatch { records: Vec::new(), columns: Vec::new() });
         }

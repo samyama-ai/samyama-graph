@@ -118,19 +118,46 @@ fn a_where_after_a_with_filters() {
 }
 
 #[test]
-fn an_unsupported_clause_position_is_refused_not_mis_planned() {
-    // CREATE and MERGE are not threaded through the pipeline yet. The parser
-    // accepts the order, so the planner must say no rather than fall back to
-    // the by-kind fields — which are empty for these queries, and would be
-    // read as "no CREATE at all".
+fn a_create_before_a_with_actually_creates() {
     let mut store = GraphStore::new();
-    let q = parse_query("CREATE (a) WITH a CREATE (b)").expect("this order parses");
+    let rows = run(&mut store, "CREATE (a) WITH a CREATE (b) CREATE (a)<-[:T]-(b)");
+    assert_eq!(rows, 0, "a data write with no RETURN returns no rows");
+    assert_eq!(count(&store, "MATCH (n) RETURN n"), 2);
+    assert_eq!(count(&store, "MATCH ()-[:T]->() RETURN 1 AS z"), 1);
+}
+
+#[test]
+fn a_create_after_an_unwind_runs_once_per_row() {
+    let mut store = GraphStore::new();
+    run(&mut store, "UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) WITH n RETURN n.num AS v");
+    assert_eq!(count(&store, "MATCH (n:N) RETURN n"), 3);
+    assert_eq!(scalar(&store, "MATCH (n:N) WHERE n.num = 2 RETURN n.num AS v"), Some(2));
+}
+
+#[test]
+fn a_create_references_variables_already_in_scope() {
+    // The rule that stops the second clause making a second `a`. Getting the
+    // order wrong here — adding the pattern's own variables to scope before
+    // deciding what to create — makes the clause create nothing at all.
+    let mut store = GraphStore::new();
+    run(&mut store, "CREATE (a:A) WITH a CREATE (a)-[:R]->(:B)");
+    assert_eq!(count(&store, "MATCH (n:A) RETURN n"), 1, "exactly one A");
+    assert_eq!(count(&store, "MATCH (:A)-[:R]->(:B) RETURN 1 AS z"), 1);
+}
+
+#[test]
+fn an_unsupported_clause_position_is_refused_not_mis_planned() {
+    // MERGE is not threaded through the pipeline yet. The parser accepts the
+    // order, so the planner must say no rather than fall back to the by-kind
+    // fields — which are empty for these queries, and would be read as "no
+    // MERGE at all".
+    let mut store = GraphStore::new();
+    let q = parse_query("CREATE (a) WITH a MERGE (b:L)").expect("this order parses");
     let err = MutQueryExecutor::new(&mut store, "default".to_string())
         .execute(&q)
         .expect_err("must refuse rather than silently do nothing");
     let msg = err.to_string();
-    assert!(msg.contains("CREATE"), "the message should name the clause: {msg}");
-    assert_eq!(count(&store, "MATCH (n) RETURN n"), 0, "and it must not half-run");
+    assert!(msg.contains("MERGE"), "the message should name the clause: {msg}");
 }
 
 #[test]
