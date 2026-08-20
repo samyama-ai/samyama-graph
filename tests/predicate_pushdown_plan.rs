@@ -167,10 +167,16 @@ fn a_single_hop_pattern_is_unchanged() {
 }
 
 #[test]
-fn an_optional_match_still_excludes_its_null_rows() {
-    // The shape where filtering too early would be wrong. The outer join is
-    // built above the path builder, so this must be unaffected — asserted
-    // rather than assumed.
+fn an_optional_match_keeps_its_null_rows() {
+    // This asserted that the person with no post is excluded. That is not
+    // Cypher: `WHERE` after an `OPTIONAL MATCH` scopes to the optional match,
+    // so a row with nothing to match keeps its place with `m` NULL. TCK
+    // MatchWhere6 [6] is the same shape and Neo4j 5 returns the null row —
+    // checked against its actual output, not just the scenario text (#667).
+    //
+    // The predicate is still pushed early, which is what this file is about;
+    // what changed is that it is no longer *also* applied above the join,
+    // where it deleted exactly the rows the OPTIONAL MATCH produces.
     let mut store = GraphStore::new();
     let a = store.create_node("Person");
     let _ = store.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(20));
@@ -182,7 +188,11 @@ fn an_optional_match_still_excludes_its_null_rows() {
 
     let cypher = "MATCH (p:Person) OPTIONAL MATCH (p)-[:WROTE]->(m:Post) \
                   WHERE m.created > 50 RETURN p";
-    assert_eq!(rows(&store, cypher), 1, "the person with no post must not survive");
+    assert_eq!(
+        rows(&store, cypher),
+        2,
+        "both people survive; only `m` is nulled for the one with no post"
+    );
 }
 
 #[test]

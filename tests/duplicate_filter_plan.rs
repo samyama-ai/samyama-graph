@@ -123,11 +123,20 @@ fn a_predicate_split_across_two_variables_plans_each_conjunct_once() {
 }
 
 #[test]
-fn an_optional_match_keeps_the_top_level_filter() {
-    // The case the subtraction must not touch. A left outer join leaves `f`
-    // NULL for people with no KNOWS edge; a filter pushed inside the optional
-    // side never sees those rows, and the top-level one rejects them. Dropping
-    // it would admit rows that should have been excluded.
+fn a_where_after_an_optional_match_scopes_to_the_optional_match() {
+    // This test used to assert the opposite — that the top-level filter must
+    // be kept, so the row with a NULL `f` is rejected — and it was the stated
+    // justification for re-applying the whole WHERE whenever an OPTIONAL MATCH
+    // is present.
+    //
+    // That is not what Cypher does. `WHERE` after an `OPTIONAL MATCH` scopes
+    // to the optional match: a person with no qualifying friend keeps their
+    // row with `f` NULL, rather than being deleted. TCK MatchWhere6 [6] is the
+    // same shape and Neo4j 5 returns all three rows, the null one included —
+    // measured, not assumed (#667).
+    //
+    // The old expectation is what made `MATCH (x) OPTIONAL MATCH ... WHERE
+    // y.val > 4` return one row where Cypher returns three.
     let mut store = GraphStore::new();
     let a = store.create_node("Person");
     let _ = store.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(20));
@@ -137,12 +146,13 @@ fn an_optional_match_keeps_the_top_level_filter() {
     let _ = store.set_node_property("default", b, "age".to_string(), PropertyValue::Integer(90));
     let _ = store.create_edge(a, b, "KNOWS");
 
-    // `lonely` has no friend, so `f.age` is NULL and the row must not survive.
+    // Every person survives: `a` with `f` bound to the 90-year-old, `lonely`
+    // and `b` with `f` NULL because nothing satisfied the predicate.
     let cypher = "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 50 RETURN p";
     assert_eq!(
         rows(&store, cypher),
-        1,
-        "only the person whose friend is over 50 should survive"
+        3,
+        "the WHERE scopes to the OPTIONAL MATCH; it nulls `f`, it does not drop rows"
     );
 }
 

@@ -7073,6 +7073,15 @@ pub struct LeftOuterJoinOperator {
     /// Every shared variable — see [`JoinOperator::join_vars`] (#360).
     join_vars: Vec<String>,
     right_only_vars: Vec<String>,
+    /// A predicate spanning both sides, evaluated **inside** the join.
+    ///
+    /// `OPTIONAL MATCH (x)-[:E1]->(y) WHERE x.val < y.val` scopes its WHERE to
+    /// the optional match. Applied as an ordinary filter above the join it
+    /// deletes the null-filled rows the OPTIONAL MATCH exists to produce —
+    /// `MATCH (x:X) OPTIONAL MATCH ... WHERE y.val > 4` returned one row where
+    /// Cypher returns three. A pair failing this predicate is *not a match*,
+    /// so the left row is still emitted with nulls (#667).
+    join_predicate: Option<Expression>,
     // Materialized data
     left_records: Vec<Record>,
     right_hash: HashMap<Vec<Value>, Vec<Record>>,
@@ -7080,6 +7089,10 @@ pub struct LeftOuterJoinOperator {
     current_left_idx: usize,
     current_right_match_idx: usize,
     null_emitted: bool,
+    /// Whether any right row for the current left row satisfied
+    /// `join_predicate`. A left row whose every candidate fails it has *no
+    /// match*, so it is still emitted with nulls (#667).
+    any_match_for_left: bool,
     materialized: bool,
     /// Set once the left input has been drained through `next_mut`.
     /// Without it a second call would re-drain an already-consumed side.
@@ -7098,14 +7111,26 @@ impl LeftOuterJoinOperator {
             right,
             join_vars,
             right_only_vars,
+            join_predicate: None,
             left_records: Vec::new(),
             right_hash: HashMap::new(),
             current_left_idx: 0,
             current_right_match_idx: 0,
             null_emitted: false,
+            any_match_for_left: false,
             materialized: false,
             left_drained_mut: false,
         }
+    }
+
+    /// A predicate that must hold for a left/right pair to count as a match.
+    ///
+    /// Rows failing it are not filtered out — the left row is emitted with the
+    /// right side null, which is what distinguishes a join condition from a
+    /// WHERE above the join (#667).
+    pub fn with_join_predicate(mut self, predicate: Expression) -> Self {
+        self.join_predicate = Some(predicate);
+        self
     }
 
     fn materialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
@@ -7150,13 +7175,37 @@ impl PhysicalOperator for LeftOuterJoinOperator {
             if let Some(join_val) = JoinOperator::key_of(left_record, &self.join_vars) {
                 if let Some(right_list) = self.right_hash.get(&join_val) {
                     // Has right matches — emit merged records
-                    if self.current_right_match_idx < right_list.len() {
+                    while self.current_right_match_idx < right_list.len() {
                         let right_record = &right_list[self.current_right_match_idx];
                         self.current_right_match_idx += 1;
 
                         let mut merged = left_record.clone();
                         for (key, value) in right_record.bindings() {
                             merged.bind(key.clone(), value.clone());
+                        }
+                        // A pair failing the join predicate is not a match.
+                        // Skipping it here rather than filtering above the join
+                        // is the whole point: the left row survives, with nulls,
+                        // if nothing else matches (#667).
+                        if let Some(pred) = &self.join_predicate {
+                            let holds = matches!(
+                                eval_expression(pred, &merged, store)?,
+                                Value::Property(PropertyValue::Boolean(true))
+                            );
+                            if !holds {
+                                continue;
+                            }
+                        }
+                        self.any_match_for_left = true;
+                        return Ok(Some(merged));
+                    }
+                    // Every candidate failed the predicate: this left row has no
+                    // match at all, so it gets the null treatment.
+                    if !self.any_match_for_left && !self.null_emitted {
+                        self.null_emitted = true;
+                        let mut merged = left_record.clone();
+                        for var in &self.right_only_vars {
+                            merged.bind(var.clone(), Value::Null);
                         }
                         return Ok(Some(merged));
                     }
@@ -7184,6 +7233,7 @@ impl PhysicalOperator for LeftOuterJoinOperator {
             self.current_left_idx += 1;
             self.current_right_match_idx = 0;
             self.null_emitted = false;
+            self.any_match_for_left = false;
         }
 
         Ok(None)

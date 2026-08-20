@@ -1150,12 +1150,68 @@ impl QueryPlanner {
         // `UNWIND [1,2,3] AS x MATCH (p) WHERE p.n = x WITH ... RETURN ...`
         // returned a cross product instead of the join (#572).
         let mut late_bound_predicates: Vec<Expression> = Vec::new();
+        // Predicates that become join conditions on an OPTIONAL MATCH (#667).
+        let mut optional_join_predicates: Vec<Option<Expression>> =
+            vec![None; pre_with_clauses.len()];
 
         for pred in pre_where_preds {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
             if pred_vars.iter().any(|v| late_bound_pre.contains(v)) {
                 late_bound_predicates.push(pred);
+                continue;
+            }
+
+            // A predicate mentioning an OPTIONAL MATCH's variables belongs to
+            // that clause, not above the join. Cypher scopes the WHERE after an
+            // OPTIONAL MATCH to the optional match itself, so a row failing it
+            // keeps the left side and nulls the right — filtering above the
+            // join deletes the row entirely, which is what
+            // `OPTIONAL MATCH (x)-[:E1]->(y) WHERE y.val > 4` did: one row
+            // returned where Cypher returns three (#667).
+            //
+            // Only for predicates that cannot be pushed *into* the optional
+            // clause's own plan, i.e. ones also referencing an outer variable.
+            // Any predicate naming a variable the optional clause introduces.
+            // "Introduces" is the operative word: the clause's own set includes
+            // the join variable it shares with the outer match, so testing
+            // against the whole set catches predicates that belong entirely to
+            // the outer side.
+            let optional_target = pre_with_clauses.iter().enumerate().find(|(i, mc)| {
+                if !mc.optional || pred_vars.is_empty() {
+                    return false;
+                }
+                let own = &pre_match_var_sets[*i];
+                // Must *span* the join: name something this clause introduces
+                // **and** something it does not.
+                //
+                // A predicate naming only the optional clause's own variables
+                // is pushed inside that clause instead, where it can anchor the
+                // scan — `OPTIONAL MATCH (b:N) WHERE id(b) = 6` has to stay an
+                // id lookup. Routing those here cost that anchor and
+                // `anchor_coverage` caught it. They are already handled
+                // correctly by the existing per-clause decomposition: a filter
+                // inside the optional side leaves unmatched rows null, which is
+                // what Cypher asks for.
+                let earlier: HashSet<&String> = pre_match_var_sets[..*i]
+                    .iter()
+                    .flat_map(|s| s.iter())
+                    .collect();
+                let introduced: HashSet<&String> =
+                    own.iter().filter(|v| !earlier.contains(*v)).collect();
+                let touches_optional = pred_vars.iter().any(|v| introduced.contains(v));
+                let touches_outer = pred_vars.iter().any(|v| !introduced.contains(v));
+                touches_optional && touches_outer
+            });
+            if let Some((i, _)) = optional_target {
+                optional_join_predicates[i] = Some(match optional_join_predicates[i].take() {
+                    Some(existing) => Expression::Binary {
+                        left: Box::new(existing),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    },
+                    None => pred,
+                });
                 continue;
             }
 
@@ -1197,7 +1253,12 @@ impl QueryPlanner {
                     if !shared.is_empty() {
                         if match_clause.optional {
                             let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
-                            Box::new(LeftOuterJoinOperator::new(existing, match_op, shared.clone(), right_only)) as OperatorBox
+                            let mut join =
+                                LeftOuterJoinOperator::new(existing, match_op, shared.clone(), right_only);
+                            if let Some(pred) = optional_join_predicates[match_idx].clone() {
+                                join = join.with_join_predicate(pred);
+                            }
+                            Box::new(join) as OperatorBox
                         } else {
                             Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                         }
@@ -1624,6 +1685,17 @@ impl QueryPlanner {
                 //     optional side never sees those rows; the top-level one
                 //     does, and rejects them. Dropping it would admit rows
                 //     that should have been excluded.
+                //
+                //     A predicate made a *join condition* on the outer join is
+                //     the exception, and the one this reasoning did not
+                //     anticipate. Cypher scopes the WHERE after an OPTIONAL
+                //     MATCH to the optional match, so a row failing it keeps
+                //     the left side and nulls the right. Re-applying such a
+                //     conjunct here deletes exactly the rows the OPTIONAL
+                //     MATCH exists to produce:
+                //     `MATCH (x:X) OPTIONAL MATCH (x)-[:E1]->(y) WHERE y.val > 4`
+                //     returned one row where Cypher returns three (#667).
+                //     Those conjuncts are subtracted below by name.
                 //   * a leading UNWIND -- predicates on its variable are
                 //     deliberately left out of the decomposition, because the
                 //     Unwind that binds them sits above the matches. They are
@@ -1638,8 +1710,48 @@ impl QueryPlanner {
                 let has_optional = query.match_clauses.iter().any(|mc| mc.optional);
                 let has_late_bound = !Self::late_bound_variables(query).is_empty();
 
+                // Conjuncts scoped to an OPTIONAL MATCH. Subtracted even in
+                // the OPTIONAL MATCH case, because re-applying one of these is
+                // not redundant -- it changes the answer.
+                //
+                // Two ways a conjunct gets that scope, and both must be
+                // subtracted:
+                //
+                //   * it spans the join and became a join condition;
+                //   * it names only the optional clause's own variables and was
+                //     pushed inside that clause, where it anchors the scan.
+                //
+                // The second is the common case and needs no new machinery at
+                // all -- the decomposition already puts it in the right place.
+                // The bug was purely that this filter then put it back on top,
+                // and a filter above a left outer join deletes the null-filled
+                // rows the OPTIONAL MATCH exists to produce (#667).
+                let mut optional_scoped: Vec<Expression> = optional_join_predicates
+                    .iter()
+                    .flatten()
+                    .flat_map(flatten_and_predicates)
+                    .collect();
+                for (i, mc) in pre_with_clauses.iter().enumerate() {
+                    if !mc.optional {
+                        continue;
+                    }
+                    if let Some(wc) = &per_match_where[i] {
+                        optional_scoped.extend(flatten_and_predicates(&wc.predicate));
+                    }
+                }
+                let as_join_conditions = optional_scoped;
+
                 let predicate = if has_optional || has_late_bound {
-                    Some(where_clause.predicate.clone())
+                    let remaining: Vec<Expression> =
+                        flatten_and_predicates(&where_clause.predicate)
+                            .into_iter()
+                            .filter(|c| !as_join_conditions.contains(c))
+                            .collect();
+                    remaining.into_iter().reduce(|acc, pred| Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    })
                 } else {
                     let mut applied = Vec::new();
                     Self::collect_applied_predicates(&mut operator, &mut applied);
