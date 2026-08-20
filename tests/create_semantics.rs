@@ -188,3 +188,37 @@ fn an_unlabelled_node_is_not_findable_by_an_invented_label() {
         );
     }
 }
+
+#[test]
+fn creating_a_node_that_is_already_bound_is_refused() {
+    // `MATCH (a) CREATE (a)` re-creates a node that exists and wires nothing.
+    // A *bare* re-mention is legal only where it is doing work — attaching a
+    // relationship — which is why this check is on standalone paths and the
+    // idiom below still passes (#663).
+    for cypher in [
+        "MATCH (a) CREATE (a)",
+        "MATCH (a) CREATE (a:Foo)",
+        // `n` is bound by the *first path of the same clause* and re-labelled
+        // in the second. A bound set computed before the clause cannot see it.
+        "CREATE (n:Foo)-[:T1]->(), (n:Bar)-[:T2]->()",
+    ] {
+        let err = parse_query(cypher).expect_err(&format!("`{cypher}` must be refused"));
+        assert!(
+            err.to_string().contains('a') || err.to_string().contains('n'),
+            "the message should name the variable: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_re_mention_that_attaches_a_relationship_stays_legal() {
+    // The distinction the rule above turns on. Getting this wrong breaks the
+    // idiom every TCK fixture is written in, so it is asserted separately.
+    for cypher in [
+        "MATCH (a), (b) CREATE (a)-[:R]->(b)",
+        "CREATE (a), (b), (a)-[:R]->(b)",
+        "CREATE (n:Foo)-[:T1]->(), (n)-[:T2]->()",
+    ] {
+        assert!(parse_query(cypher).is_ok(), "`{cypher}` should be accepted");
+    }
+}

@@ -2827,6 +2827,14 @@ impl QueryPlanner {
                     // rather than to the rows it produces (#656).
                     let pushed = Self::target_equality_props(&deferred_predicates, &target_var);
                     if !pushed.is_empty() {
+                        // Resolved to ids where possible: the property check
+                        // costs a node fetch per candidate edge and this costs
+                        // a hash lookup (#664).
+                        if let Some(ids) =
+                            self.resolve_target_ids(&segment.node.labels, &pushed, store)
+                        {
+                            expand = expand.with_target_ids(ids);
+                        }
                         expand = expand.with_target_props(pushed);
                     }
 
@@ -2955,6 +2963,63 @@ impl QueryPlanner {
     /// query returns — only how much is materialised on the way. Getting a
     /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
     /// slow query.
+    /// The exact node set a target's equality predicates admit, when that can
+    /// be computed without scanning the whole store.
+    ///
+    /// The profile of LDBC IC11 at SF10 is what motivates this. Pushing
+    /// `org.name = "..."` into the expand (#656) correctly cut its output to
+    /// 190 rows, and the expand still took **74% of the query** — because the
+    /// check costs a `get_node` and a property compare per candidate edge, and
+    /// there are ~29,000 of them. Moving a filter earlier made it more
+    /// expensive per candidate.
+    ///
+    /// Resolving the predicate to node ids once turns that into a hash lookup.
+    /// The property index answers it directly when one exists; otherwise a
+    /// label scan is used, which is worth it only because it happens once at
+    /// plan time against a small label — 7,955 Organisations against 29,000
+    /// edge candidates. The scan is capped for that reason: above the cap the
+    /// per-candidate check is the cheaper of the two (#664).
+    fn resolve_target_ids(
+        &self,
+        labels: &[Label],
+        props: &[(String, PropertyValue)],
+        store: &GraphStore,
+    ) -> Option<HashSet<crate::graph::NodeId>> {
+        let (key, value) = props.first()?;
+
+        // Preferred: an index answers without touching any node.
+        let candidates: Vec<Label> = labels
+            .iter()
+            .cloned()
+            .chain(store.catalog().label_counts.keys().cloned())
+            .collect();
+        for label in &candidates {
+            if let Some(index) = store.property_index.get_index(label, key) {
+                let ids = index.read().unwrap().get(value);
+                if !ids.is_empty() {
+                    return Some(ids.into_iter().collect());
+                }
+            }
+        }
+
+        // Fallback: scan one label, once. Only worth doing when the label is
+        // small — otherwise this trades a per-candidate cost for a per-query
+        // one that is larger.
+        const MAX_SCAN: usize = 50_000;
+        let label = labels.first()?;
+        let nodes = store.get_nodes_by_label(label);
+        if nodes.len() > MAX_SCAN {
+            return None;
+        }
+        Some(
+            nodes
+                .iter()
+                .filter(|n| n.get_property(key).is_some_and(|p| p == value))
+                .map(|n| n.id)
+                .collect(),
+        )
+    }
+
     fn target_equality_props(
         deferred: &[Expression],
         var: &str,

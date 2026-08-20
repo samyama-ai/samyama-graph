@@ -79,13 +79,23 @@ fn create_may_not_add_labels_to_a_variable_match_already_bound() {
 }
 
 #[test]
-fn a_bare_re_mention_of_a_matched_variable_stays_legal() {
+fn a_bare_re_mention_that_attaches_a_relationship_stays_legal() {
     // This is how you write an edge between two matched nodes, and it is the
     // single most common write query in this codebase. If the rule above ever
     // starts rejecting it, every loader breaks.
-    accepted("MATCH (a) CREATE (a)");
     accepted("MATCH (a), (b) CREATE (a)-[:R]->(b)");
     accepted("MATCH (a:Person) CREATE (a)-[:OWNS]->(:Thing)");
+}
+
+#[test]
+fn a_standalone_re_mention_of_a_matched_variable_is_refused() {
+    // `MATCH (a) CREATE (a)` used to be listed alongside the cases above as
+    // legal. It is not: Cypher raises `VariableAlreadyBound`, Neo4j rejects
+    // it, and the TCK asserts the error (Create1 [13]). The two were
+    // conflated because both are "bare", but a bare mention inside a
+    // relationship pattern is doing work — attaching an edge — and a
+    // standalone one re-creates a node that already exists (#663).
+    rejected("MATCH (a) CREATE (a)");
 }
 
 #[test]

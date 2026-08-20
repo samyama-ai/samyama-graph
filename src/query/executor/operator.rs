@@ -831,7 +831,11 @@ fn eval_pattern_comprehension(
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    let mut results = Vec::new();
+    // `Vec<Value>`, not `Vec<PropertyValue>`: `[p = (n)-->() | p]` projects
+    // *paths*, and a `PropertyValue` cannot hold one (#662). An all-scalar
+    // comprehension is still returned as a `PropertyValue::Array` at the end,
+    // so nothing that consumed the old shape changes.
+    let mut results: Vec<Value> = Vec::new();
 
     for path in &pattern.paths {
         let start_var = path.start.variable.as_deref();
@@ -872,11 +876,7 @@ fn eval_pattern_comprehension(
                     let cond = eval_expression(f, &temp_record, store)?;
                     if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
                 }
-                let val = eval_expression(projection, &temp_record, store)?;
-                match val {
-                    Value::Property(pv) => results.push(pv),
-                    _ => results.push(PropertyValue::Null),
-                }
+                results.push(eval_expression(projection, &temp_record, store)?);
             } else {
                 // One-hop traversal for pattern comprehension
                 for segment in &path.segments {
@@ -911,22 +911,39 @@ fn eval_pattern_comprehension(
                         if let Some(ref var) = segment.edge.variable {
                             temp_record.bind(var.clone(), Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()));
                         }
+                        // `[p = (a)-->(b) | p]` — the named path, bound for the
+                        // projection to read.
+                        if let Some(ref pv) = path.path_variable {
+                            temp_record.bind(
+                                pv.clone(),
+                                Value::Path { nodes: vec![*node_id, target_id], edges: vec![edge.id] },
+                            );
+                        }
                         if let Some(f) = filter {
                             let cond = eval_expression(f, &temp_record, store)?;
                             if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
                         }
-                        let val = eval_expression(projection, &temp_record, store)?;
-                        match val {
-                            Value::Property(pv) => results.push(pv),
-                            _ => results.push(PropertyValue::Null),
-                        }
+                        results.push(eval_expression(projection, &temp_record, store)?);
                     }
                 }
             }
         }
     }
 
-    Ok(Value::Property(PropertyValue::Array(results)))
+    // Kept as a `PropertyValue::Array` when every element is a scalar, which
+    // is what it always was; only a comprehension projecting entities needs
+    // the wider shape.
+    if results.iter().all(|v| matches!(v, Value::Property(_))) {
+        let scalars = results
+            .into_iter()
+            .map(|v| match v {
+                Value::Property(p) => p,
+                _ => PropertyValue::Null,
+            })
+            .collect();
+        return Ok(Value::Property(PropertyValue::Array(scalars)));
+    }
+    Ok(Value::List(results))
 }
 
 /// Evaluate a boolean predicate expression standalone (for parallel batch filtering).
@@ -3659,6 +3676,15 @@ pub struct ExpandOperator {
     /// the PERF-01 target. Applied here, a non-matching employer never
     /// becomes a row (#656).
     target_props: Vec<(String, PropertyValue)>,
+    /// The exact set of nodes the target may be, resolved once at plan time.
+    ///
+    /// `target_props` above still costs a `get_node` and a property compare per
+    /// candidate edge. On LDBC IC11 that is ~29,000 lookups at ~10us each and
+    /// the expand became 74% of the query — the filter moved earlier and got
+    /// *more* expensive per candidate. Resolving `org.name = "..."` to the one
+    /// matching Organisation once, and testing membership here, replaces that
+    /// with a hash lookup (#664).
+    target_ids: Option<std::collections::HashSet<NodeId>>,
     /// Direction
     direction: Direction,
     /// Current input record
@@ -3698,6 +3724,7 @@ impl ExpandOperator {
             edge_types,
             target_labels: Vec::new(),
             target_props: Vec::new(),
+            target_ids: None,
             direction,
             current_record: None,
             current_edges: Vec::new(),
@@ -3724,6 +3751,14 @@ impl ExpandOperator {
     /// only reduce what is materialised, never change what is returned.
     pub fn with_target_props(mut self, props: Vec<(String, PropertyValue)>) -> Self {
         self.target_props = props;
+        self
+    }
+
+    /// The resolved node set for the target, when the planner could compute it.
+    /// Preferred over `target_props`: an id membership test costs a hash
+    /// lookup where the property check costs a node fetch (#664).
+    pub fn with_target_ids(mut self, ids: std::collections::HashSet<NodeId>) -> Self {
+        self.target_ids = Some(ids);
         self
     }
 
@@ -3801,7 +3836,15 @@ impl ExpandOperator {
                 )
             };
         let target_props = &self.target_props;
+        let target_ids = self.target_ids.as_ref();
         let keeps = |target: NodeId| -> bool {
+            // Cheapest discriminator first: if the planner resolved the target
+            // to a known set, membership settles it without touching the node.
+            if let Some(ids) = target_ids {
+                if !ids.contains(&target) {
+                    return false;
+                }
+            }
             let label_ok = match &label_sets {
                 None => true,
                 // `Some(empty)` means a required label exists on no node.

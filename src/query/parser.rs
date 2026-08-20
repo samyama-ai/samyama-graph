@@ -2445,8 +2445,12 @@ fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult
     let mut projection = None;
     let mut expressions = Vec::new();
 
+    let mut path_variable = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            // The only bare `variable` in this rule is the `p =` prefix; the
+            // pattern's own variables are inside `path`.
+            Rule::variable => path_variable = Some(inner.as_str().to_string()),
             Rule::path => pattern_path = Some(parse_path(inner)?),
             Rule::where_clause => {
                 let wc = parse_where_clause(inner)?;
@@ -2460,7 +2464,10 @@ fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult
     // The last expression is the projection
     projection = expressions.pop();
 
-    let path = pattern_path.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing pattern".to_string()))?;
+    let mut path = pattern_path.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing pattern".to_string()))?;
+    if path_variable.is_some() {
+        path.path_variable = path_variable;
+    }
 
     Ok(Expression::PatternComprehension {
         pattern: Pattern { paths: vec![path] },

@@ -275,7 +275,14 @@ predicate_function_name = @{ (^"all" | ^"any" | ^"none" | ^"single") ~ !(ASCII_A
 reduce_expression = { ^"reduce" ~ "(" ~ variable ~ "=" ~ expression ~ "," ~ variable ~ in_op ~ expression ~ "|" ~ expression ~ ")" }
 
 // Pattern comprehension: [(a)-[:REL]->(b) WHERE cond | expr]
-pattern_comprehension = { "[" ~ path ~ where_clause? ~ "|" ~ expression ~ "]" }
+// The `p =` prefix names the path, and `| p` then projects it — which is what
+// every Pattern2 scenario in the TCK does. Without it the whole feature was a
+// parse error despite the comprehension itself being supported.
+//
+// The optional group cannot swallow a list comprehension: for `[x IN xs | e]`
+// it matches `x`, finds `IN` where `=` must be, and backtracks to nothing —
+// then `path` needs a `(` and fails, so `list_comprehension` is tried next.
+pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~ expression ~ "]" }
 
 // EXISTS { MATCH pattern WHERE condition }
 exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }

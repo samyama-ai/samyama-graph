@@ -320,13 +320,19 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                 }
             }
         }
+        // Tracked *within* the clause as well as before it. `CREATE (n:Foo)-[:T1]->(),
+        // (n:Bar)-[:T2]->()` binds `n` in its first path and re-labels it in its
+        // second, and a bound set computed only before the clause cannot see that.
+        let mut bound = bound;
         for path in &pattern.paths {
-            let mut check = |np: &crate::query::ast::NodePattern| -> Result<(), ValidationError> {
-                if let Some(v) = &np.variable {
-                    let adds_something = !np.labels.is_empty()
-                        || np.properties.as_ref().is_some_and(|p| !p.is_empty())
-                        || np.property_exprs.as_ref().is_some_and(|p| !p.is_empty());
-                    if bound.contains(v) && adds_something {
+            // A bare re-mention is how an edge between existing nodes is
+            // written -- `CREATE (a)-[:R]->(b)`, and the `CREATE (a), (b),
+            // (a)-[:R]->(b)` idiom every TCK fixture uses. A *standalone* one
+            // is not: `MATCH (a) CREATE (a)` re-creates a node that already
+            // exists and wires nothing, which Cypher rejects (#663).
+            if path.segments.is_empty() {
+                if let Some(v) = &path.start.variable {
+                    if bound.contains(v) {
                         return Err(if merge {
                             ValidationError::MergeOnBoundVariable(v.clone())
                         } else {
@@ -334,11 +340,41 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         });
                     }
                 }
-                Ok(())
-            };
-            check(&path.start)?;
+            }
+            {
+                let bound = &bound;
+                let mut check = |np: &crate::query::ast::NodePattern| -> Result<(), ValidationError> {
+                    if let Some(v) = &np.variable {
+                        let adds_something = !np.labels.is_empty()
+                            || np.properties.as_ref().is_some_and(|p| !p.is_empty())
+                            || np.property_exprs.as_ref().is_some_and(|p| !p.is_empty());
+                        if bound.contains(v) && adds_something {
+                            return Err(if merge {
+                                ValidationError::MergeOnBoundVariable(v.clone())
+                            } else {
+                                ValidationError::CreateOnBoundVariable(v.clone())
+                            });
+                        }
+                    }
+                    Ok(())
+                };
+                check(&path.start)?;
+                for seg in &path.segments {
+                    check(&seg.node)?;
+                }
+            }
+            // Only now do this path's own variables count as bound, so a later
+            // path in the same clause sees them.
+            if let Some(v) = &path.start.variable {
+                bound.insert(v.clone());
+            }
             for seg in &path.segments {
-                check(&seg.node)?;
+                if let Some(v) = &seg.node.variable {
+                    bound.insert(v.clone());
+                }
+                if let Some(v) = &seg.edge.variable {
+                    bound.insert(v.clone());
+                }
             }
         }
     }
