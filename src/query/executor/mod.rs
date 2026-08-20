@@ -251,6 +251,63 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Execute a read-only query and return results
+    /// One dedup key per record, built from the batch's own column order.
+    fn union_keys(batch: &RecordBatch) -> Vec<Vec<String>> {
+        batch
+            .records
+            .iter()
+            .map(|r| batch.columns.iter().map(|c| format!("{:?}", r.get(c))).collect())
+            .collect()
+    }
+
+    /// Run every branch of a UNION and concatenate the results.
+    ///
+    /// `UNION` deduplicates across the combined result; `UNION ALL` does not.
+    /// openCypher forbids mixing the two in one query and the validator
+    /// rejects that already, so the flavour is read from the first branch.
+    ///
+    /// Column names come from the leading branch: the validator has already
+    /// established that every branch agrees on them, so binding by the first
+    /// branch's names is well-defined.
+    fn execute_union(&self, query: &Query) -> ExecutionResult<RecordBatch> {
+        let mut head = query.clone();
+        let branches = std::mem::take(&mut head.union_queries);
+        let union_all = branches.first().map(|(_, all)| *all).unwrap_or(false);
+
+        // The dedup key is *positional*: each branch's row is keyed by its own
+        // columns in order, not by the leading branch's names. Keying by name
+        // silently mangles a query whose branches project different aliases —
+        // the later branch's rows all look up missing names, key identically,
+        // and collapse into one row rather than deduplicating against the
+        // first branch. Position is what "the same columns" means once the
+        // validator has established the branches line up.
+        let mut batch = self.execute(&head)?;
+        let mut keys: Vec<Vec<String>> = Vec::new();
+        if !union_all {
+            keys.extend(Self::union_keys(&batch));
+        }
+
+        for (branch, _) in &branches {
+            let mut next = self.execute(branch)?;
+            if !union_all {
+                keys.extend(Self::union_keys(&next));
+            }
+            batch.records.append(&mut next.records);
+        }
+
+        if !union_all {
+            // First-seen order, so the result does not depend on hash order.
+            let mut seen: std::collections::HashSet<&Vec<String>> = std::collections::HashSet::new();
+            let mut keep: Vec<bool> = Vec::with_capacity(keys.len());
+            for k in &keys {
+                keep.push(seen.insert(k));
+            }
+            let mut it = keep.into_iter();
+            batch.records.retain(|_| it.next().unwrap_or(true));
+        }
+        Ok(batch)
+    }
+
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
         // Substitute parameters if any
         let query = if !self.params.is_empty() || !query.params.is_empty() {
@@ -266,6 +323,17 @@ impl<'a> QueryExecutor<'a> {
 
         if let Some(inner) = &query.call_subquery {
             return self.execute_call_subquery(query, inner);
+        }
+
+        // UNION / UNION ALL.
+        //
+        // The parser fills `query.union_queries` and the validator checks the
+        // branches agree on column names, but nothing executed them: every
+        // branch after the first was discarded, so `RETURN 1 UNION RETURN 2`
+        // answered `1`. EXPLAIN is deliberately left to the first branch —
+        // describing one branch is more useful than refusing.
+        if !query.union_queries.is_empty() && !query.explain {
+            return self.execute_union(query);
         }
 
         // Plan the query
@@ -2432,7 +2500,8 @@ mod tests {
         let query = parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(result.records.len() >= 2, "Expected at least 2 records from UNION ALL, got {}", result.records.len());
+        assert_eq!(result.records.len(), 4,
+            "UNION ALL over 2 Person nodes is 4 rows; >= 2 cannot tell a working UNION from one that ran only the first branch");
     }
 
     // ========== Batch 5: OPTIONAL MATCH ==========
@@ -2976,7 +3045,8 @@ mod tests {
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         // UNION should deduplicate: Alice, Bob appear in both halves -> 2 unique results
-        assert!(result.records.len() >= 2, "UNION should return at least 2 results, got {}", result.records.len());
+        assert_eq!(result.records.len(), 2,
+            "UNION deduplicates to 2 here; the old >= 2 also passed when no branch after the first ran");
     }
 
     #[test]
@@ -5634,7 +5704,8 @@ mod tests {
         let q = parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name").unwrap();
         let result = QueryExecutor::new(&store).execute(&q).unwrap();
         // UNION ALL should return at least 2 records
-        assert!(result.records.len() >= 2, "UNION ALL should return at least 2 records, got {}", result.records.len());
+        assert_eq!(result.records.len(), 4,
+            "UNION ALL over 2 Person nodes is 4 rows, not 2");
     }
 
     // --- 4. UNWIND ---

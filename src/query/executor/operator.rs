@@ -169,7 +169,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("XOR requires boolean operands".to_string())),
         },
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            let cmp = left_prop.partial_cmp(&right_prop);
+            let cmp = cypher_ordering(&left_prop, &right_prop);
             match (op, cmp) {
                 (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
                 (BinaryOp::Le, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
@@ -1159,6 +1159,39 @@ fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
         _ => std::cmp::Ordering::Equal,
     });
     keys
+}
+
+/// Ordering between two property values, or `None` when Cypher cannot order
+/// them.
+///
+/// Cypher orders numbers against numbers, strings against strings, booleans
+/// against booleans, and temporal values against their own kind. Anything else
+/// is *unknown* — `0 > 'x'` is null, not false and not an error (#607).
+///
+/// This deliberately does not reuse `PropertyValue`'s `Ord`. That order is
+/// total by design because it backs the B-tree property index, so it answers
+/// every comparison confidently, including the ones Cypher says have no
+/// answer. Using it for a query-level comparison is what turned "unknown" into
+/// a definite `false`.
+fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::cmp::Ordering> {
+    use PropertyValue::*;
+    match (left, right) {
+        (Integer(l), Integer(r)) => Some(l.cmp(r)),
+        (Float(l), Float(r)) => l.partial_cmp(r),
+        (Integer(l), Float(r)) => (*l as f64).partial_cmp(r),
+        (Float(l), Integer(r)) => l.partial_cmp(&(*r as f64)),
+        (String(l), String(r)) => Some(l.cmp(r)),
+        (Boolean(l), Boolean(r)) => Some(l.cmp(r)),
+        (DateTime(l), DateTime(r)) => Some(l.cmp(r)),
+        // A timestamp against a raw epoch integer stays comparable: this is
+        // long-standing behaviour here and the two are the same quantity.
+        (DateTime(l), Integer(r)) | (Integer(l), DateTime(r)) => Some(l.cmp(r)),
+        (
+            Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
+            Duration { months: m2, days: d2, seconds: s2, nanos: n2 },
+        ) => Some(m1.cmp(m2).then(d1.cmp(d2)).then(s1.cmp(s2)).then(n1.cmp(n2))),
+        _ => None,
+    }
 }
 
 /// `STARTS WITH` / `ENDS WITH` / `CONTAINS` over one pair of operands.
@@ -3472,63 +3505,43 @@ impl FilterOperator {
     }
 
     fn compare_lt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l < r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l < r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) < *r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l < (*r as f64))),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l < r)),
-            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l < r)),
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l < r)),
-            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l < r)),
-            _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
-        }
+        // Incomparable types are null, not an error: raising here aborted
+        // the whole query, so rows that *did* compare never came back (#607).
+        Ok(match cypher_ordering(left, right) {
+            Some(std::cmp::Ordering::Less) => PropertyValue::Boolean(true),
+            Some(_) => PropertyValue::Boolean(false),
+            None => PropertyValue::Null,
+        })
     }
 
     fn compare_le(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) <= *r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l <= (*r as f64))),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l <= r)),
-            _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
-        }
+        // Incomparable types are null, not an error: raising here aborted
+        // the whole query, so rows that *did* compare never came back (#607).
+        Ok(match cypher_ordering(left, right) {
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
+            Some(_) => PropertyValue::Boolean(false),
+            None => PropertyValue::Null,
+        })
     }
 
     fn compare_gt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l > r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l > r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) > *r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l > (*r as f64))),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l > r)),
-            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l > r)),
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l > r)),
-            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l > r)),
-            _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
-        }
+        // Incomparable types are null, not an error: raising here aborted
+        // the whole query, so rows that *did* compare never came back (#607).
+        Ok(match cypher_ordering(left, right) {
+            Some(std::cmp::Ordering::Greater) => PropertyValue::Boolean(true),
+            Some(_) => PropertyValue::Boolean(false),
+            None => PropertyValue::Null,
+        })
     }
 
     fn compare_ge(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Boolean((*l as f64) >= *r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(*l >= (*r as f64))),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            (PropertyValue::DateTime(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            (PropertyValue::Integer(l), PropertyValue::DateTime(r)) => Ok(PropertyValue::Boolean(l >= r)),
-            _ => Err(ExecutionError::TypeError("Cannot compare these types".to_string())),
-        }
+        // Incomparable types are null, not an error: raising here aborted
+        // the whole query, so rows that *did* compare never came back (#607).
+        Ok(match cypher_ordering(left, right) {
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
+            Some(_) => PropertyValue::Boolean(false),
+            None => PropertyValue::Null,
+        })
     }
 
     fn logical_and(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {

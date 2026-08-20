@@ -1948,6 +1948,29 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
         }
     }
 
+    // A chain the rewrite above declined to expand — `1 < x < 3 AND ...`,
+    // where the top-level operators are not *all* comparisons.
+    //
+    // Left-associative parsing turns the chain into `(1 < x) < 3`, comparing a
+    // boolean to a number. That is null in Cypher (#607), so a WHERE built on
+    // it quietly matches nothing: the query returns zero rows where Neo4j
+    // returns the row. Refusing is the only honest option short of expanding
+    // chains inside arbitrary expressions, which means reimplementing operator
+    // precedence outside the Pratt parser — the thing this rewrite exists to
+    // avoid.
+    //
+    // Until then: an error the caller can see, never a silently empty result.
+    if ops.windows(2).any(|w| {
+        w[0].as_rule() == Rule::comparison_op && w[1].as_rule() == Rule::comparison_op
+    }) {
+        return Err(ParseError::SemanticError(
+            "a chained comparison (like `1 < x < 3`) is only supported when it is the \
+             whole expression; here it is combined with other operators. Write it as \
+             an explicit conjunction instead, for example `1 < x AND x < 3 AND ...`"
+                .to_string(),
+        ));
+    }
+
     PRATT_PARSER
         .map_primary(|primary| parse_term(primary))
         .map_prefix(|op, rhs| match op.as_rule() {

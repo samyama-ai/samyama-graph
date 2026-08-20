@@ -14,6 +14,12 @@
 //! That conservatism has a cost, pinned by the last test here: a chain mixed
 //! into a larger expression is still refused. It fails as an error rather than
 //! a wrong answer, which is the right way round to be incomplete.
+//!
+//! That refusal is now explicit rather than incidental. It used to fall out of
+//! `(1 < n.num) < 3` raising a type error; once incomparable ordering was
+//! corrected to null (#607), the same query silently returned no rows instead
+//! — Neo4j returns the row. An unsupported shape has to announce itself, so
+//! the parser rejects the shape directly and says how to rewrite it.
 
 use samyama::graph::GraphStore;
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
@@ -111,11 +117,22 @@ fn a_chain_inside_a_larger_expression_is_still_refused() {
     // This asserts the shape of the gap, not that the gap is desirable. An
     // error is the right way to be incomplete; the failure to avoid is
     // answering it wrongly.
-    let store = three_nodes();
-    let q = parse_query("MATCH (n) WHERE 1 < n.num < 3 AND n.num = 2 RETURN n.num AS v")
-        .expect("it parses");
+    // The refusal now happens at **parse** time rather than at execution.
+    //
+    // It used to be an execution error only by accident: the chain became
+    // `(1 < n.num) < 3`, and comparing a boolean to a number raised. Once that
+    // comparison was corrected to yield null (#607, matching Neo4j), the same
+    // query stopped erroring and started returning **zero rows** — Neo4j
+    // returns the row `2` here, so a silent wrong answer replaced a loud one.
+    //
+    // The parser therefore refuses the shape explicitly. What this test pins
+    // is unchanged: an unsupported chain must fail loudly. Only the stage
+    // moved, and earlier is better.
+    let err = parse_query("MATCH (n) WHERE 1 < n.num < 3 AND n.num = 2 RETURN n.num AS v")
+        .expect_err("a mixed chain must fail loudly rather than return the wrong rows");
+    let text = format!("{err}");
     assert!(
-        QueryExecutor::new(&store).execute(&q).is_err(),
-        "a mixed chain must fail loudly rather than return the wrong rows"
+        text.contains("chained comparison"),
+        "the refusal should say what is wrong and how to write it instead, got: {text}"
     );
 }
