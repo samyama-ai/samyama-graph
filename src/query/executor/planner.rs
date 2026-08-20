@@ -2829,7 +2829,7 @@ impl QueryPlanner {
                     if !pushed.is_empty() {
                         // Resolved to ids where possible: the property check
                         // costs a node fetch per candidate edge and this costs
-                        // a hash lookup (#664).
+                        // a hash lookup (#665).
                         if let Some(ids) =
                             self.resolve_target_ids(&segment.node.labels, &pushed, store)
                         {
@@ -2978,7 +2978,7 @@ impl QueryPlanner {
     /// label scan is used, which is worth it only because it happens once at
     /// plan time against a small label — 7,955 Organisations against 29,000
     /// edge candidates. The scan is capped for that reason: above the cap the
-    /// per-candidate check is the cheaper of the two (#664).
+    /// per-candidate check is the cheaper of the two (#665).
     fn resolve_target_ids(
         &self,
         labels: &[Label],

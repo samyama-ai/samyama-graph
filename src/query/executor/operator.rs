@@ -3683,7 +3683,7 @@ pub struct ExpandOperator {
     /// the expand became 74% of the query — the filter moved earlier and got
     /// *more* expensive per candidate. Resolving `org.name = "..."` to the one
     /// matching Organisation once, and testing membership here, replaces that
-    /// with a hash lookup (#664).
+    /// with a hash lookup (#665).
     target_ids: Option<std::collections::HashSet<NodeId>>,
     /// Direction
     direction: Direction,
@@ -3756,7 +3756,7 @@ impl ExpandOperator {
 
     /// The resolved node set for the target, when the planner could compute it.
     /// Preferred over `target_props`: an id membership test costs a hash
-    /// lookup where the property check costs a node fetch (#664).
+    /// lookup where the property check costs a node fetch (#665).
     pub fn with_target_ids(mut self, ids: std::collections::HashSet<NodeId>) -> Self {
         self.target_ids = Some(ids);
         self
