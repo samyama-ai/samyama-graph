@@ -5253,15 +5253,59 @@ impl QueryPlanner {
                         order_by_applied = true;
                     }
 
-                    let projections: Vec<(Expression, String)> = rc
-                        .items
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, i)| {
-                            let alias = i.column_name(idx);
-                            (i.expression.clone(), alias)
-                        })
-                        .collect();
+                    // An aggregate in RETURN needs an Aggregate below the
+                    // projection. Without this the pipeline projected
+                    // `count(*)` as an ordinary expression, it reached the
+                    // scalar evaluator, and the query died with "Unknown
+                    // function: count" — for every shape that opens with WITH,
+                    // which is what routes a query here in the first place.
+                    //
+                    // The `Clause::With` arm of this same function already did
+                    // this; only RETURN was missed, so the two clauses in one
+                    // pipeline disagreed about what an aggregate is.
+                    let mut agg_counter = 0usize;
+                    let mut aggregates: Vec<AggregateFunction> = Vec::new();
+                    let mut group_by: Vec<(Expression, String)> = Vec::new();
+                    let mut post_projections: Vec<(Expression, String)> = Vec::new();
+                    let mut has_aggregation = false;
+                    let mut rewritten_items: Vec<(Expression, Expression, String)> = Vec::new();
+
+                    for (idx, i) in rc.items.iter().enumerate() {
+                        let alias = i.column_name(idx);
+                        let (rewritten, extracted) =
+                            extract_nested_aggregates(&i.expression, &mut agg_counter);
+                        if !extracted.is_empty() {
+                            has_aggregation = true;
+                        }
+                        rewritten_items.push((i.expression.clone(), rewritten, alias));
+                        aggregates.extend(extracted);
+                    }
+
+                    let projections: Vec<(Expression, String)> = if has_aggregation {
+                        for (original, rewritten, alias) in &rewritten_items {
+                            // An item with no aggregate inside it is a grouping
+                            // key; one with an aggregate projects from the
+                            // aggregate's alias after the Aggregate runs.
+                            if rewritten == original {
+                                group_by.push((original.clone(), alias.clone()));
+                                post_projections
+                                    .push((Expression::Variable(alias.clone()), alias.clone()));
+                            } else {
+                                post_projections.push((rewritten.clone(), alias.clone()));
+                            }
+                        }
+                        operator = Box::new(AggregateOperator::new(
+                            operator,
+                            group_by,
+                            std::mem::take(&mut aggregates),
+                        ));
+                        post_projections
+                    } else {
+                        rewritten_items
+                            .into_iter()
+                            .map(|(original, _, alias)| (original, alias))
+                            .collect()
+                    };
                     output_columns = projections.iter().map(|(_, a)| a.clone()).collect();
                     operator = Box::new(ProjectOperator::new(operator, projections));
                     if rc.distinct {
