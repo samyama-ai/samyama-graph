@@ -98,3 +98,21 @@ jobs:
         # ```cypher,ignore, and the opt-out count is printed so it cannot grow
         # unnoticed.
         run: cargo run --release --example doc_check
+
+      - name: CH-API — the OpenAPI document and the server describe one API
+        # API-01. A documented endpoint the server does not serve is a broken
+        # client; a served endpoint nobody documented is an undocumented
+        # surface. #613 found one of each by hand, once. This makes it a gate
+        # so the two cannot drift apart again.
+        run: cargo run --release --example api_contract
+
+      - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
+        # ALGO-02. The reference values are regenerated from NetworkX on a
+        # cadence by the harness in samyama-graph-competitor-benchmarks; this
+        # step re-runs the algorithms against the *recorded* answers, so it
+        # catches our drift on every commit without needing Python here.
+        #
+        # It is therefore a regression check, not a parity check. Parity —
+        # comparing against a live reference implementation — is the harness's
+        # job, and the recorded file carries the date it was taken.
+        run: cargo run --release --example algo_parity_check

@@ -3,11 +3,16 @@
 //! Computes the local clustering coefficient for each node.
 //!
 //! Undirected: LCC(v) = 2 * T(v) / (deg(v) * (deg(v) - 1))
-//! Directed:   LCC(v) = T(v) / (deg(v) * (deg(v) - 1))
+//! Directed:   LCC(v) = T(v) / (d_tot(v) * (d_tot(v) - 1) - 2 * d_bi(v))
 //!
 //! where T(v) is the number of triangles (edges among neighbors) containing v,
-//! and deg(v) is the undirected degree (union of successors + predecessors) for
-//! undirected mode, or the number of distinct neighbors for directed mode.
+//! and deg(v) is the undirected degree (union of successors + predecessors).
+//!
+//! The directed case is Fagiolo (2007), matching NetworkX and igraph: d_tot
+//! counts a reciprocal neighbour twice and d_bi is the number of such
+//! neighbours. It is NOT deg*(deg-1) over distinct neighbours, which is what
+//! this module computed until #658 and which disagrees on exactly the nodes
+//! that have a reciprocal edge.
 
 use super::common::{GraphView, NodeId};
 use std::collections::{HashMap, HashSet};
@@ -30,6 +35,58 @@ pub fn local_clustering_coefficient(view: &GraphView) -> LccResult {
     local_clustering_coefficient_directed(view, false)
 }
 
+/// Fagiolo (2007) directed clustering coefficient, as NetworkX and igraph
+/// compute it.
+///
+/// The denominator is the part that is easy to get wrong. It was
+/// `deg * (deg - 1)` over the *distinct* neighbours, which counts a reciprocal
+/// pair once and admits triangles that cannot exist. Fagiolo uses
+///
+/// ```text
+/// d_tot(d_tot - 1) - 2 * d_bi
+/// ```
+///
+/// where `d_tot = |preds| + |succs|` counts a reciprocal neighbour **twice**,
+/// and `d_bi` is the number of neighbours that are both. Subtracting `2*d_bi`
+/// removes the pairs a reciprocal edge cannot close.
+///
+/// Exactly the nodes with a reciprocal edge disagreed under the old formula —
+/// 7 of 40 on the reference graph, every other node matching to 0.000e0
+/// (#658). ALGO-02 names NetworkX and igraph as the references and they agree
+/// with each other, so this is what the requirement asks for; ALGO-03 asks for
+/// the convention to be written down, and this comment is that.
+fn directed_clustering(
+    idx: usize,
+    predecessor_sets: &[HashSet<usize>],
+    successor_sets: &[HashSet<usize>],
+) -> f64 {
+    let ipreds = &predecessor_sets[idx];
+    let isuccs = &successor_sets[idx];
+
+    // Every directed triangle through `idx`, counted once per orientation —
+    // which is why the denominator carries a factor of two below.
+    let mut triangles = 0usize;
+    for &j in ipreds.iter().chain(isuccs.iter()) {
+        let jpreds = &predecessor_sets[j];
+        let jsuccs = &successor_sets[j];
+        triangles += ipreds.intersection(jpreds).count()
+            + ipreds.intersection(jsuccs).count()
+            + isuccs.intersection(jpreds).count()
+            + isuccs.intersection(jsuccs).count();
+    }
+    if triangles == 0 {
+        return 0.0;
+    }
+
+    let d_tot = ipreds.len() + isuccs.len();
+    let d_bi = ipreds.intersection(isuccs).count();
+    let denom = (d_tot * (d_tot.saturating_sub(1))).saturating_sub(2 * d_bi);
+    if denom == 0 {
+        return 0.0;
+    }
+    triangles as f64 / (denom as f64 * 2.0)
+}
+
 /// Compute local clustering coefficients for all nodes.
 ///
 /// When `directed=false`: uses undirected neighbor sets (union of successors +
@@ -38,7 +95,7 @@ pub fn local_clustering_coefficient(view: &GraphView) -> LccResult {
 ///
 /// When `directed=true`: uses undirected neighbor sets for neighborhood
 /// discovery, but counts *directed* edges (u→w) among neighbors, divides by
-/// `d*(d-1)` (the maximum number of directed edges among d nodes).
+/// Fagiolo's `d_tot(d_tot - 1) - 2*d_bi` (see `directed_clustering`).
 pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -> LccResult {
     let n = view.node_count;
     if n == 0 {
@@ -90,6 +147,24 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
         }).collect()
     };
 
+    // Predecessor sets, needed alongside the successors for Fagiolo's
+    // directed coefficient (#658).
+    let predecessor_sets: Vec<HashSet<usize>> = if directed {
+        (0..n)
+            .map(|idx| {
+                let mut set = HashSet::new();
+                for &p in view.predecessors(idx) {
+                    if p != idx {
+                        set.insert(p);
+                    }
+                }
+                set
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // For directed mode, build successor sets for directed edge checking
     let successor_sets: Vec<HashSet<usize>> = if directed {
         if use_parallel {
@@ -119,15 +194,7 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
             let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
             let cc = if directed {
-                let mut directed_edges = 0usize;
-                for i in 0..neighbor_vec.len() {
-                    for j in 0..neighbor_vec.len() {
-                        if i != j && successor_sets[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                            directed_edges += 1;
-                        }
-                    }
-                }
-                directed_edges as f64 / (deg * (deg - 1)) as f64
+                directed_clustering(idx, &predecessor_sets, &successor_sets)
             } else {
                 let mut triangle_edges = 0usize;
                 for i in 0..neighbor_vec.len() {
@@ -150,15 +217,7 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
             let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
             let cc = if directed {
-                let mut directed_edges = 0usize;
-                for i in 0..neighbor_vec.len() {
-                    for j in 0..neighbor_vec.len() {
-                        if i != j && successor_sets[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                            directed_edges += 1;
-                        }
-                    }
-                }
-                directed_edges as f64 / (deg * (deg - 1)) as f64
+                directed_clustering(idx, &predecessor_sets, &successor_sets)
             } else {
                 let mut triangle_edges = 0usize;
                 for i in 0..neighbor_vec.len() {
