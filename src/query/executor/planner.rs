@@ -207,6 +207,34 @@ fn extract_agg_inner(
                 else_result: else_result.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
             }
         }
+        // An aggregate can appear inside a collection literal or a
+        // comprehension's source: `[v IN collect(a.n) | v]`,
+        // `{k: collect(a)}`. Not recursing here left those to the scalar
+        // evaluator, which has no aggregate handling, so they failed with
+        // "Unknown function: collect" — an error naming one of Cypher's most
+        // ordinary functions (#670).
+        //
+        // Only the *source* of a comprehension is rewritten. Its body runs
+        // once per element with the loop variable bound, so an aggregate there
+        // is a different question and is left alone rather than silently
+        // hoisted out of the loop.
+        Expression::ListExpr(items) => Expression::ListExpr(
+            items.iter().map(|e| extract_agg_inner(e, counter, aggs)).collect(),
+        ),
+        Expression::MapExpr(entries) => Expression::MapExpr(
+            entries
+                .iter()
+                .map(|(k, e)| (k.clone(), extract_agg_inner(e, counter, aggs)))
+                .collect(),
+        ),
+        Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+            Expression::ListComprehension {
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                filter: filter.clone(),
+                map_expr: map_expr.clone(),
+            }
+        }
         // Leaf expressions and others — no aggregates possible
         other => other.clone(),
     }
@@ -1265,6 +1293,22 @@ impl QueryPlanner {
                     } else {
                         Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                     }
+                }
+                // A *leading* OPTIONAL MATCH has no left side, so there was
+                // nothing to null-fill and a query matching nothing returned
+                // **no rows** instead of one null row —
+                // `OPTIONAL MATCH (a:Nope) RETURN a` came back empty (#671).
+                // Joining against a single empty row gives the outer join the
+                // left side the clause implies.
+                None if match_clause.optional => {
+                    use crate::query::executor::operator::SingleRowOperator;
+                    let right_only: Vec<String> = clause_vars.iter().cloned().collect();
+                    Box::new(LeftOuterJoinOperator::new(
+                        Box::new(SingleRowOperator::new()),
+                        match_op,
+                        Vec::new(),
+                        right_only,
+                    )) as OperatorBox
                 }
                 None => match_op,
             });

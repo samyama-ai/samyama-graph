@@ -390,6 +390,34 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
     }
 }
 
+
+/// Read `<variable>.<property>` from a record.
+///
+/// One implementation, because there were **eight** and they had already
+/// drifted: some error on an unbound variable, some read it as null. Adding
+/// the `Value::Map` case to one of them fixed nothing, because the projection
+/// path uses a different copy — which is how `WITH {k: collect(a)} AS m RETURN
+/// m.k` still answered null after the "fix" (#670).
+fn read_property(
+    record: &Record,
+    variable: &str,
+    property: &str,
+    store: &GraphStore,
+    missing_is_null: bool,
+) -> ExecutionResult<Value> {
+    let val = match record.get(variable) {
+        Some(v) => v,
+        None if missing_is_null => &Value::Null,
+        None => return Err(ExecutionError::VariableNotFound(variable.to_string())),
+    };
+    // A map holding entities cannot answer through `resolve_property`, which
+    // returns a `PropertyValue` and so would degrade a node to null.
+    if let Value::Map(entries) = val {
+        return Ok(entries.get(property).cloned().unwrap_or(Value::Null));
+    }
+    Ok(Value::Property(val.resolve_property(property, store)))
+}
+
 /// Standalone expression evaluator usable from any operator
 fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
     match expr {
@@ -398,9 +426,7 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
                 .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
         }
         Expression::Property { variable, property } => {
-            let val = record.get(variable)
-                .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
-            Ok(Value::Property(val.resolve_property(property, store)))
+            read_property(record, variable, property, store, false)
         }
         // A collection literal whose elements are expressions. The
         // all-literal form never reaches here -- the grammar matches it as a
@@ -3179,11 +3205,9 @@ impl FilterOperator {
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable)
-                    .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
-
-                let prop = val.resolve_property(property, store);
-                Ok(Value::Property(prop))
+                return read_property(record, variable, property, store, false);
+                #[allow(unreachable_code)]
+                Ok(Value::Null)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -3784,6 +3808,17 @@ impl ExpandOperator {
         let source_val = record.get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
 
+        // Expanding from null yields nothing; it is not an error. An
+        // `OPTIONAL MATCH` that matched nothing binds null, and a following
+        // `MATCH (a)-->(b)` on that row must simply produce no rows — Cypher
+        // says so, and raising "a is not a node" fails the whole query over a
+        // row that should quietly disappear (#671).
+        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
+            self.current_edges.clear();
+            self.edge_index = 0;
+            return Ok(());
+        }
+
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
@@ -4326,13 +4361,18 @@ impl VarLengthExpandOperator {
     }
 
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
-        let source_id = record
+        let source_val = record
             .get(&self.source_var)
-            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?
-            .node_id()
-            .ok_or_else(|| {
-                ExecutionError::TypeError(format!("{} is not a node", self.source_var))
-            })?;
+            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
+        // See `ExpandOperator::load_edges`: a null source expands to nothing
+        // rather than failing (#671).
+        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
+            self.pending.clear();
+            return Ok(());
+        }
+        let source_id = source_val.node_id().ok_or_else(|| {
+            ExecutionError::TypeError(format!("{} is not a node", self.source_var))
+        })?;
 
         // Pinned target: one membership test instead of a BFS per row. The
         // planner only sets this when the destination resolves to a single
@@ -4569,11 +4609,9 @@ impl ProjectOperator {
                 }
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable)
-                    .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
-
-                let prop = val.resolve_property(property, store);
-                Ok(Value::Property(prop))
+                return read_property(record, variable, property, store, false);
+                #[allow(unreachable_code)]
+                Ok(Value::Null)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -4754,7 +4792,12 @@ enum AggregatorState {
     Avg { sum: f64, count: i64 },
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
-    Collect(Vec<PropertyValue>),
+    /// `Vec<Value>`, not `Vec<PropertyValue>`: `collect(n)` over nodes is one
+    /// of the most common aggregates in Cypher, and a `PropertyValue` cannot
+    /// hold an entity. `value.as_property()` returned `None` for a node and
+    /// the element was skipped, so `collect(a)` over two nodes produced an
+    /// **empty list** — no error, just nothing (#669).
+    Collect(Vec<Value>),
     CollectDistinct(BTreeSet<PropertyValue>),
     Percentile { values: Vec<f64>, pct: f64, cont: bool },
     StDev { values: Vec<f64>, population: bool },
@@ -4956,10 +4999,10 @@ impl AggregatorState {
             AggregatorState::Collect(items) => {
                 // collect() drops nulls, like every other aggregate (#358) — otherwise the
                 // list carries holes that every consumer has to filter again.
-                if let Some(prop) = value.as_property() {
-                    if !matches!(prop, PropertyValue::Null) {
-                        items.push(prop.clone());
-                    }
+                let is_null = matches!(value, Value::Null)
+                    || matches!(value.as_property(), Some(PropertyValue::Null));
+                if !is_null {
+                    items.push(value.clone());
                 }
             }
             AggregatorState::CollectDistinct(set) => {
@@ -5030,7 +5073,7 @@ impl AggregatorState {
                     }
                 }
             }
-            (AggregatorState::Collect(a), AggregatorState::Collect(b)) => a.extend(b),
+            (AggregatorState::Collect(a), AggregatorState::Collect(b)) => a.extend(b.clone()),
             (AggregatorState::CollectDistinct(a), AggregatorState::CollectDistinct(b)) => a.extend(b),
             (AggregatorState::Percentile { values, .. }, AggregatorState::Percentile { values: b, .. }) => {
                 values.extend(b)
@@ -5061,7 +5104,25 @@ impl AggregatorState {
             }
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
-            AggregatorState::Collect(items) => Value::Property(PropertyValue::Array(items.clone())),
+            AggregatorState::Collect(items) => {
+                // A list of scalars stays a `PropertyValue::Array`, exactly as
+                // before, so every existing consumer of that shape is
+                // untouched; only a collection holding entities needs the
+                // wider `Value::List` (#669).
+                if items.iter().all(|v| matches!(v, Value::Property(_))) {
+                    Value::Property(PropertyValue::Array(
+                        items
+                            .iter()
+                            .map(|v| match v {
+                                Value::Property(p) => p.clone(),
+                                _ => PropertyValue::Null,
+                            })
+                            .collect(),
+                    ))
+                } else {
+                    Value::List(items.clone())
+                }
+            }
             AggregatorState::CollectDistinct(set) => Value::Property(PropertyValue::Array(set.iter().cloned().collect())),
             AggregatorState::Percentile { values, pct, cont } => {
                 if values.is_empty() { return Value::Null; }
@@ -5129,9 +5190,7 @@ impl AggregateOperator {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable).unwrap_or(&Value::Null);
-                let prop = val.resolve_property(property, store);
-                Ok(Value::Property(prop))
+                read_property(record, variable, property, store, true)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -6316,11 +6375,9 @@ impl SortOperator {
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable)
-                    .ok_or_else(|| ExecutionError::VariableNotFound(variable.clone()))?;
-
-                let prop = val.resolve_property(property, store);
-                Ok(Value::Property(prop))
+                return read_property(record, variable, property, store, false);
+                #[allow(unreachable_code)]
+                Ok(Value::Null)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -11048,9 +11105,7 @@ impl WithBarrierOperator {
                 Ok(record.get(var).cloned().unwrap_or(Value::Null))
             }
             Expression::Property { variable, property } => {
-                let val = record.get(variable).unwrap_or(&Value::Null);
-                let prop = val.resolve_property(property, store);
-                Ok(Value::Property(prop))
+                read_property(record, variable, property, store, true)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {

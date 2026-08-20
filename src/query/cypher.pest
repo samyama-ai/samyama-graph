@@ -303,7 +303,10 @@ case_expression = { ^"CASE" ~ (!(^"WHEN") ~ expression)? ~ case_when+ ~ case_els
 case_when = { ^"WHEN" ~ expression ~ ^"THEN" ~ expression }
 case_else = { ^"ELSE" ~ expression }
 
-property_access = { variable ~ "." ~ property_key }
+// `(n).name` is the same thing as `n.name`. The TCK spells it both ways and
+// the parenthesised form was a parse error, which reads as SET not supporting
+// an ordinary target rather than as a missing four characters (#671).
+property_access = { ("(" ~ variable ~ ")" | variable) ~ "." ~ property_key }
 // Map path access: `d.meta.a`, `d.meta.a.b`. Kept separate from
 // `property_access` because that rule is shared with SET/REMOVE/constraints,
 // where a nested path would mean something this engine does not implement.
