@@ -676,6 +676,32 @@ async fn main() -> Result<(), Error> {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // An unrecognised flag is a hard error, not something to skip past.
+    //
+    // Every option below is read with `args.iter().position(|a| a == "--x")`,
+    // so a misspelling simply does not match and the bench runs with a default
+    // instead. That is how an SF10 run was taken with `--params` (the flag is
+    // `--params-file`): the built-in parameters were used, four reads came back
+    // empty, IC11 answered in 122 ms and the summary said `OK`. A timing taken
+    // against parameters nobody chose is not a measurement, and nothing in the
+    // output said so (#660).
+    const KNOWN: &[&str] = &[
+        "--data-dir", "--deletes", "--derive-params", "--explain", "--params-file",
+        "--profile", "--query", "--runs", "--updates", "--write-params",
+        // cargo passes this to bench targets.
+        "--bench", "--nocapture", "--test-threads", "--color", "--format",
+    ];
+    let unknown: Vec<&String> = args[1..]
+        .iter()
+        .filter(|a| a.starts_with("--") && !KNOWN.contains(&a.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        eprintln!("unknown option(s): {}", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+        eprintln!("known options: {}", KNOWN[..10].join(" "));
+        eprintln!("\nRefusing to run: an ignored flag produces a number measured under\nsettings nobody chose, and the output cannot tell you that happened.");
+        std::process::exit(64);
+    }
+
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
     let explicit_data_dir = args.iter().any(|a| a == "--data-dir");
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
