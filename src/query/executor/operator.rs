@@ -287,21 +287,9 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Mod requires numeric operands".to_string())),
         },
-        BinaryOp::StartsWith => match (&left_prop, &right_prop) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.starts_with(r.as_str())),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
-        },
-        BinaryOp::EndsWith => match (&left_prop, &right_prop) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.ends_with(r.as_str())),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
-        },
-        BinaryOp::Contains => match (&left_prop, &right_prop) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::Boolean(l.contains(r.as_str())),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
-        },
+        BinaryOp::StartsWith => string_position_op(StringPositionOp::StartsWith, &left_prop, &right_prop),
+        BinaryOp::EndsWith => string_position_op(StringPositionOp::EndsWith, &left_prop, &right_prop),
+        BinaryOp::Contains => string_position_op(StringPositionOp::Contains, &left_prop, &right_prop),
         BinaryOp::In => match eval_in_list(&left_prop, &right_prop) {
             Some(v) => v,
             None => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
@@ -365,6 +353,17 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
         // A map holding entities — `{k: collect(a)}` (#670).
         (Value::Map(map), Value::Property(PropertyValue::String(key))) => {
             Ok(map.get(key).cloned().unwrap_or(Value::Null))
+        }
+        // A *list* holding entities — `[a, 1]` where `a` is a node. The
+        // PropertyValue arm above cannot serve this: a PropertyValue list
+        // cannot hold an entity, so such a list is a `Value::List` and
+        // indexing it fell through to the catch-all and answered null.
+        (Value::List(items), Value::Property(PropertyValue::Integer(i))) => {
+            let idx = if *i < 0 { items.len() as i64 + *i } else { *i };
+            if idx < 0 {
+                return Ok(Value::Null);
+            }
+            Ok(items.get(idx as usize).cloned().unwrap_or(Value::Null))
         }
         // Indexing a *node or relationship* by name reads its property.
         // `startNode(r).id` desugars to `startNode(r)["id"]`, and without this
@@ -810,15 +809,26 @@ fn eval_predicate_function(
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
     let list_val = eval_expression(list_expr, record, store)?;
-    let items = match list_val {
-        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
+    // A list that holds entities is a `Value::List`; only a list of plain
+    // property values is a `PropertyValue`. Matching on the latter alone meant
+    // `any(x IN nodes WHERE ...)` fell through to `false` for every quantifier,
+    // silently — the caller gets a boolean it will branch on rather than an
+    // error it would notice (Quantifier1-4, scenarios 8 and 9).
+    let items: Vec<Value> = match list_val {
+        Value::Property(ref p) if p.as_list_items().is_some() => p
+            .as_list_items()
+            .unwrap()
+            .into_iter()
+            .map(Value::Property)
+            .collect(),
+        Value::List(items) => items,
         _ => return Ok(Value::Property(PropertyValue::Boolean(false))),
     };
 
     let mut true_count = 0usize;
     for item in &items {
         let mut inner_record = record.clone_with_capacity(1);
-        inner_record.bind(variable.to_string(), Value::Property(item.clone()));
+        inner_record.bind(variable.to_string(), item.clone());
         let result = eval_expression(predicate, &inner_record, store)?;
         if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
             true_count += 1;
@@ -1151,9 +1161,63 @@ fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
     keys
 }
 
+/// `STARTS WITH` / `ENDS WITH` / `CONTAINS` over one pair of operands.
+///
+/// Two strings answer the question; anything else is null. Cypher does not
+/// treat `1 STARTS WITH 'a'` as a caller error — the TCK asks for all 36
+/// pairings from `[1, 3.14, true, [], {}, null]` and expects null for every
+/// one (String8/9/10 scenario 8).
+///
+/// This exists because the comparison was implemented twice and both copies
+/// had independently settled on raising instead. Both now call here.
+fn string_position_op(
+    op: StringPositionOp,
+    left: &PropertyValue,
+    right: &PropertyValue,
+) -> PropertyValue {
+    match (left, right) {
+        (PropertyValue::String(l), PropertyValue::String(r)) => {
+            let r = r.as_str();
+            PropertyValue::Boolean(match op {
+                StringPositionOp::StartsWith => l.starts_with(r),
+                StringPositionOp::EndsWith => l.ends_with(r),
+                StringPositionOp::Contains => l.contains(r),
+            })
+        }
+        _ => PropertyValue::Null,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StringPositionOp {
+    StartsWith,
+    EndsWith,
+    Contains,
+}
+
+/// Functions that are asked *about* null and so must see it themselves.
+///
+/// Everything else propagates. Keeping the exceptions explicit — rather than
+/// letting each arm decide — is what stops the rule from drifting apart again:
+/// twenty-two TCK scenarios failed because twenty-two arms each answered the
+/// question separately, and most answered it with a type error.
+const NULL_TOLERANT_FUNCTIONS: &[&str] = &["coalesce", "exists"];
+
 /// Shared function evaluation for scalar functions (not aggregates)
 pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
-    match name.to_lowercase().as_str() {
+    let lowered = name.to_lowercase();
+
+    // Null in, null out. In Cypher null means "unknown", so a question asked
+    // about it has an unknown answer rather than being a caller error —
+    // `labels(null)` is the row where an OPTIONAL MATCH did not match, and
+    // raising there aborts a query Cypher answers with a null column.
+    if !NULL_TOLERANT_FUNCTIONS.contains(&lowered.as_str())
+        && args.iter().any(|a| matches!(a, Value::Null | Value::Property(PropertyValue::Null)))
+    {
+        return Ok(Value::Null);
+    }
+
+    match lowered.as_str() {
         // Hierarchy functions (ADR-035) — the direct surface for what the planner
         // rewrites cannot reach: an order test inside an arbitrary predicate, or a
         // roll-up in the middle of a larger projection.
@@ -1551,6 +1615,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     .first()
                     .map(|v| Value::Property(v.clone()))
                     .unwrap_or(Value::Null)),
+                // A list that holds entities is a Value::List, not a
+                // PropertyValue list — see eval_index.
+                Value::List(items) => Ok(items.first().cloned().unwrap_or(Value::Null)),
                 _ => Err(ExecutionError::TypeError("head() requires list".to_string())),
             }
         }
@@ -1562,6 +1629,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     .last()
                     .map(|v| Value::Property(v.clone()))
                     .unwrap_or(Value::Null)),
+                Value::List(items) => Ok(items.last().cloned().unwrap_or(Value::Null)),
                 _ => Err(ExecutionError::TypeError("last() requires list".to_string())),
             }
         }
@@ -1570,6 +1638,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::Array(arr)) => {
                     let tail: Vec<PropertyValue> = arr.iter().skip(1).cloned().collect();
                     Ok(Value::Property(PropertyValue::Array(tail)))
+                }
+                Value::List(items) => {
+                    Ok(Value::List(items.iter().skip(1).cloned().collect()))
                 }
                 _ => Err(ExecutionError::TypeError("tail() requires list".to_string())),
             }
@@ -3539,27 +3610,15 @@ impl FilterOperator {
     }
 
     fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.starts_with(r.as_str()))),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("STARTS WITH requires string operands".to_string())),
-        }
+        Ok(string_position_op(StringPositionOp::StartsWith, left, right))
     }
 
     fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.ends_with(r.as_str()))),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("ENDS WITH requires string operands".to_string())),
-        }
+        Ok(string_position_op(StringPositionOp::EndsWith, left, right))
     }
 
     fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::Boolean(l.contains(r.as_str()))),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("CONTAINS requires string operands".to_string())),
-        }
+        Ok(string_position_op(StringPositionOp::Contains, left, right))
     }
 
     fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
@@ -12358,8 +12417,13 @@ mod tests {
 
     #[test]
     fn test_eval_function_tostring_null() {
+        // null in, null out — *not* the four-character string "null", which
+        // would be indistinguishable from a genuine value and would make
+        // `toString(x) = 'null'` true for a missing property. The TCK has no
+        // scenario pinning this one, so it was checked against Neo4j 5
+        // directly: `toString(null) IS NULL` -> true.
         let result = eval_function("tostring", &[Value::Null], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("null".to_string())));
+        assert_eq!(result, Value::Null);
     }
 
     #[test]
@@ -12875,12 +12939,17 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_op_starts_with_type_error() {
+    fn test_binary_op_starts_with_non_string_is_null() {
+        // Not an error: `1 STARTS WITH 'x'` is null. openCypher TCK String8/9/10
+        // scenario 8 asks for all 36 pairings drawn from
+        // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
+        // Neo4j 5 agrees (`(1 STARTS WITH 'x') IS NULL` -> true). This test
+        // previously asserted the refusal the engine happened to implement.
         let result = eval_binary_op(&BinaryOp::StartsWith,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
@@ -12902,12 +12971,17 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_op_ends_with_type_error() {
+    fn test_binary_op_ends_with_non_string_is_null() {
+        // Not an error: `1 ENDS WITH 'x'` is null. openCypher TCK String8/9/10
+        // scenario 8 asks for all 36 pairings drawn from
+        // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
+        // Neo4j 5 agrees (`(1 ENDS WITH 'x') IS NULL` -> true). This test
+        // previously asserted the refusal the engine happened to implement.
         let result = eval_binary_op(&BinaryOp::EndsWith,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
@@ -12929,12 +13003,17 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_op_contains_type_error() {
+    fn test_binary_op_contains_non_string_is_null() {
+        // Not an error: `1 CONTAINS 'x'` is null. openCypher TCK String8/9/10
+        // scenario 8 asks for all 36 pairings drawn from
+        // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
+        // Neo4j 5 agrees (`(1 CONTAINS 'x') IS NULL` -> true). This test
+        // previously asserted the refusal the engine happened to implement.
         let result = eval_binary_op(&BinaryOp::Contains,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
