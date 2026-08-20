@@ -344,8 +344,11 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
     }
 }
 
-/// Shared list/map indexing evaluation
-fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
+/// Shared list/map indexing evaluation.
+///
+/// Takes the store because indexing a node or relationship by name reads a
+/// property, which may live in the column store rather than inline (#673).
+fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionResult<Value> {
     match (&collection, &index) {
         // Any value that reads as a list, so an all-float literal -- which
         // parses as a `Vector` -- indexes rather than returning null (#605).
@@ -358,6 +361,18 @@ fn eval_index(collection: Value, index: Value) -> ExecutionResult<Value> {
         }
         (Value::Property(PropertyValue::Map(map)), Value::Property(PropertyValue::String(key))) => {
             Ok(map.get(key).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+        }
+        // A map holding entities — `{k: collect(a)}` (#670).
+        (Value::Map(map), Value::Property(PropertyValue::String(key))) => {
+            Ok(map.get(key).cloned().unwrap_or(Value::Null))
+        }
+        // Indexing a *node or relationship* by name reads its property.
+        // `startNode(r).id` desugars to `startNode(r)["id"]`, and without this
+        // it answered null — parsing was only half the work, and the half that
+        // fails silently (#673).
+        (Value::Node(..) | Value::NodeRef(_) | Value::Edge(..) | Value::EdgeRef(..),
+         Value::Property(PropertyValue::String(key))) => {
+            Ok(Value::Property(collection.resolve_property(key, store)))
         }
         _ => Ok(Value::Null),
     }
@@ -464,7 +479,7 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
         Expression::Index { expr: e, index } => {
             let collection = eval_expression(e, record, store)?;
             let idx = eval_expression(index, record, store)?;
-            eval_index(collection, idx)
+            eval_index(collection, idx, store)
         }
         Expression::ListSlice { expr: e, start, end } => {
             let collection = eval_expression(e, record, store)?;
@@ -3255,7 +3270,7 @@ impl FilterOperator {
             Expression::Index { expr, index } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
                 let idx = self.evaluate_expression(index, record, store)?;
-                eval_index(collection, idx)
+                eval_index(collection, idx, store)
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
@@ -4635,7 +4650,7 @@ impl ProjectOperator {
             Expression::Index { expr, index } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
                 let idx = self.evaluate_expression(index, record, store)?;
-                eval_index(collection, idx)
+                eval_index(collection, idx, store)
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
@@ -5214,7 +5229,7 @@ impl AggregateOperator {
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
-                eval_index(collection, idx)
+                eval_index(collection, idx, store)
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
@@ -6401,7 +6416,7 @@ impl SortOperator {
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
-                eval_index(collection, idx)
+                eval_index(collection, idx, store)
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
@@ -11129,7 +11144,7 @@ impl WithBarrierOperator {
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
-                eval_index(collection, idx)
+                eval_index(collection, idx, store)
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
@@ -13510,7 +13525,7 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(1))).unwrap();
+        let result = eval_index(arr, Value::Property(PropertyValue::Integer(1)), &GraphStore::new()).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(20)));
     }
 
@@ -13521,14 +13536,14 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(-1))).unwrap();
+        let result = eval_index(arr, Value::Property(PropertyValue::Integer(-1)), &GraphStore::new()).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(30)));
     }
 
     #[test]
     fn test_eval_index_array_out_of_bounds() {
         let arr = Value::Property(PropertyValue::Array(vec![PropertyValue::Integer(10)]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(5))).unwrap();
+        let result = eval_index(arr, Value::Property(PropertyValue::Integer(5)), &GraphStore::new()).unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -13539,6 +13554,7 @@ mod tests {
         let result = eval_index(
             Value::Property(PropertyValue::Map(map)),
             Value::Property(PropertyValue::String("key".to_string())),
+            &GraphStore::new(),
         ).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(42)));
     }
@@ -13550,6 +13566,7 @@ mod tests {
         let result = eval_index(
             Value::Property(PropertyValue::Map(map)),
             Value::Property(PropertyValue::String("missing".to_string())),
+            &GraphStore::new(),
         ).unwrap();
         assert_eq!(result, Value::Null);
     }
@@ -13559,6 +13576,7 @@ mod tests {
         let result = eval_index(
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Integer(0)),
+            &GraphStore::new(),
         ).unwrap();
         assert_eq!(result, Value::Null);
     }

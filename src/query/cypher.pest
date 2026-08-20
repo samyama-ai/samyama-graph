@@ -227,13 +227,20 @@ order_direction = { ^"ASC" | ^"DESC" }
 // any comparison, which is the opposite of openCypher. Emitting it here lets the Pratt
 // parser give it a precedence between AND and the comparison operators.
 expression = { not_op* ~ term ~ (binary_op ~ not_op* ~ term)* }
-term = { unary_op* ~ primary ~ index_op* ~ postfix_op? }
+// `member_op*` alongside `index_op*`: `startNode(r).id` is property access on
+// the *result* of a call, and there was no rule for it. `n.id` is matched by
+// `property_access` inside `primary`, and `d.meta["a"]` by `index_op`, so the
+// gap was invisible until a TCK scenario wrote `f(x).prop` — which reads as
+// `startNode` being unsupported rather than as a missing suffix (#673).
+term = { unary_op* ~ primary ~ (index_op | member_op)* ~ postfix_op? }
 // `n:Label` used as a *value*, not as a pattern: `WHERE n:Person`,
 // `RETURN n:Person AS isPerson`. It is a postfix on a term, which gives it a
 // tighter binding than any comparison — the same shape as `IS NULL`.
 postfix_op = { label_check | (^"IS" ~ ^"NOT" ~ ^"NULL") | (^"IS" ~ ^"NULL") }
 label_check = { (":" ~ label)+ }
 index_op = { "[" ~ (slice_op | expression) ~ "]" }
+// `.name` applied to whatever the term has produced so far.
+member_op = { "." ~ property_key }
 slice_op = { slice_start ~ ".." ~ slice_end | slice_start ~ ".." | ".." ~ slice_end | ".." }
 slice_start = { expression }
 slice_end = { expression }

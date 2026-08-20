@@ -35,11 +35,17 @@ pub enum ValidationError {
     MergeOnBoundVariable(String),
     MergeRelationshipWithNullProperty(String),
     VariableTypeConflict(String),
+    PatternInSetValue,
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PatternInSetValue => write!(
+                f,
+                "a relationship pattern cannot be used as a value on the right of SET; \
+                 patterns belong in MATCH, WHERE or a pattern comprehension"
+            ),
             Self::VariableTypeConflict(name) => write!(
                 f,
                 "`{name}` is bound to a collection and cannot be used as a node or \
@@ -376,6 +382,50 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                     bound.insert(v.clone());
                 }
             }
+        }
+    }
+
+    // ---- A relationship pattern used as a *value* in SET.
+    //
+    // `SET n.prop = head(nodes(head((n)-[:REL]->()))).foo` is a compile-time
+    // error in Cypher: a pattern is a predicate or a comprehension source, not
+    // a thing you can store. This was unreachable until `f(x).prop` parsed
+    // (#673), so the TCK scenario asserting the error passed for an unrelated
+    // reason — making the parse work removed the accident, and the rule then
+    // has to be real.
+    //
+    // A pattern desugars to `ExistsSubquery`, so the check is structural
+    // rather than textual, and it looks *anywhere* in the value expression
+    // because the offending pattern is usually nested inside function calls.
+    {
+        fn holds_pattern(e: &Expression) -> bool {
+            match e {
+                Expression::ExistsSubquery { .. } | Expression::PatternComprehension { .. } => true,
+                Expression::Binary { left, right, .. } => holds_pattern(left) || holds_pattern(right),
+                Expression::Unary { expr, .. } => holds_pattern(expr),
+                Expression::Function { args, .. } => args.iter().any(holds_pattern),
+                Expression::Index { expr, index } => holds_pattern(expr) || holds_pattern(index),
+                Expression::ListExpr(items) => items.iter().any(holds_pattern),
+                Expression::MapExpr(entries) => entries.iter().any(|(_, v)| holds_pattern(v)),
+                _ => false,
+            }
+        }
+        fn set_values_of(sc: &crate::query::ast::SetClause) -> Vec<&Expression> {
+            let mut out: Vec<&Expression> = sc.items.iter().map(|i| &i.value).collect();
+            out.extend(sc.entity_items.iter().map(|i| &i.value));
+            out
+        }
+        let mut set_values: Vec<&Expression> = Vec::new();
+        for sc in &query.set_clauses {
+            set_values.extend(set_values_of(sc));
+        }
+        for clause in &query.clauses {
+            if let crate::query::ast::Clause::Set(sc) = clause {
+                set_values.extend(set_values_of(sc));
+            }
+        }
+        if set_values.into_iter().any(holds_pattern) {
+            return Err(ValidationError::PatternInSetValue);
         }
     }
 

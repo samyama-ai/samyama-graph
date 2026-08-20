@@ -2019,7 +2019,10 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     Rule::unary_op => prefix_ops.push(inner),
                     Rule::primary => primary_pair = Some(inner),
                     Rule::postfix_op => postfix_pair = Some(inner),
-                    Rule::index_op => index_pairs.push(inner),
+                    // Both suffixes go into one list so `f(x).a[0].b` applies
+                    // them in source order; splitting them would apply every
+                    // subscript before every member (#673).
+                    Rule::index_op | Rule::member_op => index_pairs.push(inner),
                     _ => {}
                 }
             }
@@ -2054,6 +2057,23 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             // Apply each index/slice suffix in source order, so chained
             // subscripts like m["a"]["b"] and xs[0][1] compose left to right.
             for index in index_pairs {
+                // `.name` desugars to `["name"]`, reusing the map indexing that
+                // `d.meta["a"]` already goes through — one evaluation path for
+                // both spellings rather than two that can drift (#452, #673).
+                if index.as_rule() == Rule::member_op {
+                    let key = index
+                        .into_inner()
+                        .find(|p| p.as_rule() == Rule::property_key)
+                        .map(|p| p.as_str().to_string())
+                        .ok_or_else(|| {
+                            ParseError::SemanticError("member access without a name".to_string())
+                        })?;
+                    expr = Expression::Index {
+                        expr: Box::new(expr),
+                        index: Box::new(Expression::Literal(PropertyValue::String(key))),
+                    };
+                    continue;
+                }
                 let mut handled = false;
                 for idx_inner in index.into_inner() {
                     if idx_inner.as_rule() == Rule::slice_op {
