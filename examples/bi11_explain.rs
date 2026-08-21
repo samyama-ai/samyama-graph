@@ -23,6 +23,11 @@ WHERE NOT EXISTS {
 RETURN count(reply) AS unrelatedReplies";
 
 // Sub-shapes, to separate "the anti-join is slow" from "the outer match is slow".
+const BI17: &str = "\
+MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a)
+WHERE a.id < b.id AND b.id < c.id
+RETURN count(a) AS triangleCount";
+
 const OUTER_ONLY: &str = "MATCH (reply:Comment)-[:REPLY_OF]->(post:Post) RETURN count(reply) AS c";
 const INNER_ONLY: &str = "MATCH (reply:Comment)-[:HAS_TAG]->(t:Tag) RETURN count(reply) AS c";
 
@@ -41,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ldbc_bi_common::load_dataset(&mut graph, &data_dir)?;
     eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
 
-    for (label, cypher) in [("BI-11", BI11), ("outer only", OUTER_ONLY), ("inner only", INNER_ONLY)] {
+    for (label, cypher) in [("BI-11", BI11), ("BI-17", BI17), ("outer only", OUTER_ONLY), ("inner only", INNER_ONLY)] {
         println!("\n================ {label} ================");
         println!("{cypher}\n");
         let q = parse_query(&format!("EXPLAIN {cypher}"))?;

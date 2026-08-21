@@ -3844,6 +3844,16 @@ pub struct ExpandOperator {
     /// `edge_types` resolved to interned ids, cached after the first use.
     /// `Some(vec)` once resolved; the wildcard case never populates it.
     type_ids: Option<Vec<u16>>,
+    /// Enforce relationship isomorphism: refuse an edge this pattern has
+    /// already traversed, and record the ones it takes (#684).
+    ///
+    /// Off for a single-hop pattern, which cannot violate the rule and should
+    /// not pay for the bookkeeping.
+    track_edges: bool,
+    /// This expand begins a MATCH clause, so it clears the inherited history
+    /// first. Isomorphism is per-clause — `MATCH (a)-[:R]-(b) MATCH (b)-[:R]-(c)`
+    /// may legitimately reuse the edge.
+    starts_clause: bool,
 }
 
 impl ExpandOperator {
@@ -3865,6 +3875,8 @@ impl ExpandOperator {
             target_labels: Vec::new(),
             target_props: Vec::new(),
             target_ids: None,
+            track_edges: false,
+            starts_clause: false,
             direction,
             current_record: None,
             current_edges: Vec::new(),
@@ -3897,6 +3909,16 @@ impl ExpandOperator {
     /// The resolved node set for the target, when the planner could compute it.
     /// Preferred over `target_props`: an id membership test costs a hash
     /// lookup where the property check costs a node fetch (#665).
+    /// Enforce relationship isomorphism for this expand.
+    ///
+    /// `starts_clause` marks the first expand of a MATCH clause, which drops
+    /// any history inherited from an earlier clause.
+    pub fn with_edge_isolation(mut self, starts_clause: bool) -> Self {
+        self.track_edges = true;
+        self.starts_clause = starts_clause;
+        self
+    }
+
     pub fn with_target_ids(mut self, ids: std::collections::HashSet<NodeId>) -> Self {
         self.target_ids = Some(ids);
         self
@@ -3988,9 +4010,24 @@ impl ExpandOperator {
             };
         let target_props = &self.target_props;
         let target_ids = self.target_ids.as_ref();
-        let keeps = |target: NodeId| -> bool {
-            // Cheapest discriminator first: if the planner resolved the target
-            // to a known set, membership settles it without touching the node.
+        // Relationship isomorphism (#684): an edge this pattern already walked
+        // is not a candidate. Checked here, during the adjacency walk, so a
+        // rejected edge never becomes a record.
+        let used_edges: &[crate::graph::EdgeId] = if self.track_edges && !self.starts_clause {
+            record.used_edge_slice()
+        } else {
+            &[]
+        };
+        let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
+            // Relationship isomorphism first: it is a comparison of a few u64s
+            // against a slice that is empty for every single-hop pattern, so it
+            // is cheaper than anything below and rejects the most rows on the
+            // patterns that need it.
+            if used_edges.contains(&eid) {
+                return false;
+            }
+            // Then the cheapest discriminator: if the planner resolved the
+            // target to a known set, membership settles it without touching the node.
             if let Some(ids) = target_ids {
                 if !ids.contains(&target) {
                     return false;
@@ -4019,21 +4056,21 @@ impl ExpandOperator {
         match self.direction {
             Direction::Outgoing => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
-                    if keeps(target) {
+                    if keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
                 });
             }
             Direction::Incoming => {
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
-                    if keeps(source) {
+                    if keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
                 });
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
-                    if keeps(target) {
+                    if keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
                 });
@@ -4046,7 +4083,7 @@ impl ExpandOperator {
                     if source == node_id {
                         return;
                     }
-                    if keeps(source) {
+                    if keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
                 });
@@ -4118,6 +4155,15 @@ impl PhysicalOperator for ExpandOperator {
                     new_record.bind(path_var.clone(), extended);
                 }
 
+                // Relationship isomorphism (#684): remember what this pattern
+                // has walked so a later segment cannot take the same edge back.
+                if self.track_edges {
+                    if self.starts_clause {
+                        new_record.clear_used_edges();
+                    }
+                    new_record.mark_edge_used(edge_id);
+                }
+
                 return Ok(Some(new_record));
             }
 
@@ -4177,6 +4223,15 @@ impl PhysicalOperator for ExpandOperator {
                         let extended =
                             extend_path(new_record.get(path_var), source_id, target_id, edge_id);
                         new_record.bind(path_var.clone(), extended);
+                    }
+                    // Same isomorphism bookkeeping as the single-row path
+                    // above. Missing it here would make the answer depend on
+                    // whether the plan happened to run batched (#684).
+                    if self.track_edges {
+                        if self.starts_clause {
+                            new_record.clear_used_edges();
+                        }
+                        new_record.mark_edge_used(edge_id);
                     }
                     expanded_records.push(new_record);
                 }

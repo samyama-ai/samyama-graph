@@ -2875,6 +2875,12 @@ impl QueryPlanner {
                 // after the whole path (#328).
                 let mut bound: HashSet<String> = HashSet::new();
                 bound.insert(start_var.clone());
+                // Relationship isomorphism (#684): a pattern with more than one
+                // segment must not walk the same edge twice. The first expand
+                // built is the first to execute, so it clears history from an
+                // earlier clause — the rule is per-clause.
+                let track_edges = path.segments.len() > 1;
+                let mut first_expand = true;
                 for (seg_idx, segment) in path.segments.iter().enumerate() {
                     let target_var = path_nodes[seg_idx + 1].var.clone();
 
@@ -2978,6 +2984,10 @@ impl QueryPlanner {
                         edge_types,
                         segment.edge.direction.clone(),
                     );
+                    if track_edges {
+                        expand = expand.with_edge_isolation(first_expand);
+                        first_expand = false;
+                    }
                     // A selective equality on the far side of the expansion —
                     // LDBC IC11's `org.name = "..."` — applied during the walk
                     // rather than to the rows it produces (#656).
@@ -3249,6 +3259,17 @@ impl QueryPlanner {
         let anchor = &nodes[anchor_idx];
         let anchor_var = anchor.var.clone();
 
+        // Relationship isomorphism (#684). A single-hop pattern cannot reuse an
+        // edge, so it does not pay for the bookkeeping; anything longer must.
+        //
+        // The first expand built here is also the first to execute — each one
+        // wraps the previous — so it is the one that drops history inherited
+        // from an earlier clause. That matters because the rule is scoped to a
+        // clause: `MATCH (a)-[:R]-(b) MATCH (b)-[:R]-(c)` may legitimately walk
+        // the same edge twice, and Neo4j agrees.
+        let track_edges = path.segments.len() > 1;
+        let mut first_expand = true;
+
         // Predicates referencing only the anchor variable can be evaluated at the
         // anchor scan; everything else is deferred until the whole path is built,
         // mirroring the conservative deferral used by the start-anchored builder.
@@ -3402,7 +3423,11 @@ impl QueryPlanner {
                 } else {
                     target.var.clone()
                 };
-                let expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, reversed_dir);
+                let mut expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, reversed_dir);
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {
@@ -3492,7 +3517,11 @@ impl QueryPlanner {
                 } else {
                     target.var.clone()
                 };
-                let expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, segment.edge.direction.clone());
+                let mut expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, segment.edge.direction.clone());
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {

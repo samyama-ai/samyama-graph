@@ -70,6 +70,22 @@ pub struct Record {
     /// copies a vector of pointer pairs and bumps refcounts, where before it
     /// allocated a fresh `String` for every variable name on every row.
     bindings: Vec<(Arc<str>, Value)>,
+    /// Relationships already traversed by the MATCH pattern being matched.
+    ///
+    /// openCypher uses **relationship isomorphism**: one edge may not appear
+    /// twice in a single pattern. Without this, `MATCH (a)-[:R]-(b)-[:R]-(c)`
+    /// over a three-node chain returned 6 rows where Cypher gives 2 — every
+    /// two-hop undirected pattern was inflated by walking an edge back on
+    /// itself (#684).
+    ///
+    /// A `Vec` rather than a set: patterns bind a handful of relationships, so
+    /// a linear scan over a few `u64`s beats hashing, and an **empty `Vec`
+    /// does not allocate** — single-hop patterns, which cannot violate the
+    /// rule, pay only the 24 bytes in the struct and a null clone.
+    ///
+    /// Scoped to one clause. `MATCH (a)-[:R]-(b) MATCH (b)-[:R]-(c)` *may*
+    /// reuse the edge (Neo4j agrees), so a clause boundary clears this.
+    used_edges: Vec<crate::graph::EdgeId>,
 }
 
 /// Value types that can be bound to variables in a query record.
@@ -183,6 +199,7 @@ impl Record {
     pub fn new() -> Self {
         Self {
             bindings: Vec::new(),
+            used_edges: Vec::new(),
         }
     }
 
@@ -200,7 +217,29 @@ impl Record {
     pub fn clone_with_capacity(&self, extra: usize) -> Record {
         let mut bindings = Vec::with_capacity(self.bindings.len() + extra);
         bindings.extend(self.bindings.iter().cloned());
-        Record { bindings }
+        Record { bindings, used_edges: self.used_edges.clone() }
+    }
+
+    /// Has this relationship already been traversed by the current pattern?
+    pub fn edge_used(&self, edge: crate::graph::EdgeId) -> bool {
+        self.used_edges.contains(&edge)
+    }
+
+    /// Record a relationship as traversed by the current pattern.
+    pub fn mark_edge_used(&mut self, edge: crate::graph::EdgeId) {
+        self.used_edges.push(edge);
+    }
+
+    /// The relationships already traversed, for a caller that filters
+    /// candidates in a hot loop and wants no allocation.
+    pub fn used_edge_slice(&self) -> &[crate::graph::EdgeId] {
+        &self.used_edges
+    }
+
+    /// Forget the traversed relationships — a new MATCH clause starts fresh,
+    /// because relationship isomorphism is scoped to one clause.
+    pub fn clear_used_edges(&mut self) {
+        self.used_edges.clear();
     }
 
     /// Bind a variable to a value, replacing any previous binding.
