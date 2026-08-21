@@ -503,7 +503,16 @@ fn import_tenant_inner(
                             }
                         }
                         _ => {
-                            // Complex types: merge into HashMap if not present
+                            // Complex types: into the column as well as the row.
+                            // Same reason as the insert path above — the column
+                            // can hold them now, and leaving them row-only makes
+                            // them invisible to a column read (#545).
+                            if matches!(
+                                store.node_columns.get_property(eid.as_u64() as usize, key),
+                                PropertyValue::Null
+                            ) {
+                                store.set_column_property(eid, key, pv.clone());
+                            }
                             if let Some(node) = store.get_node_mut(eid) {
                                 if node.get_property(key).is_none() {
                                     node.set_property(key.clone(), pv);
@@ -538,18 +547,33 @@ fn import_tenant_inner(
                         node.add_label(label.as_str());
                     }
                 }
-                // Set properties: simple types go to ColumnStore, complex to HashMap
+                // Every property reaches the ColumnStore, whatever its type.
+                //
+                // This used to route `String`/`Integer`/`Float`/`Boolean` to the
+                // column and everything else to the row map alone, from when the
+                // column had no representation for the rest. `Column::Other`
+                // holds every variant now (#545), so the split left arrays, maps
+                // and temporals readable only through the row fallback — a
+                // snapshot round trip returned `Null` from the column for them
+                // while the row still had the value.
+                //
+                // Queries were unaffected, because `resolve_property` reads the
+                // column and falls back to the row. That fallback is exactly the
+                // copy #545 proposes to delete, so this had to be true before
+                // that becomes safe.
                 for (key, json_val) in &snap_node.props {
                     let pv = json_to_property(json_val);
-                    match &pv {
+                    store.set_column_property(new_id, &key, pv.clone());
+                    // The row copy is still written for the non-scalars, as
+                    // before: MVCC and the persistence encoder read it, and
+                    // narrowing that is #545's decision, not this fix's.
+                    if !matches!(
+                        pv,
                         PropertyValue::String(_) | PropertyValue::Integer(_)
-                        | PropertyValue::Float(_) | PropertyValue::Boolean(_) => {
-                            store.set_column_property(new_id, &key, pv);
-                        }
-                        _ => {
-                            if let Some(node) = store.get_node_mut(new_id) {
-                                node.set_property(key.clone(), pv);
-                            }
+                            | PropertyValue::Float(_) | PropertyValue::Boolean(_)
+                    ) {
+                        if let Some(node) = store.get_node_mut(new_id) {
+                            node.set_property(key.clone(), pv);
                         }
                     }
                 }
