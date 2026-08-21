@@ -98,6 +98,77 @@ pub enum PropertyValue {
     Null,
 }
 
+
+/// Cypher's orderability, for `ORDER BY` — **not** the same order as
+/// [`PropertyValue`]'s `Ord`.
+///
+/// openCypher defines one total order over values of every type, ascending:
+///
+/// ```text
+/// Map < Node < Relationship < List < Path < String < Boolean < Number < NaN < null
+/// ```
+///
+/// `Ord` on this type is deliberately a *different* total order — Boolean,
+/// Number, String, DateTime, Array, Map, Vector, Duration, Null — because it
+/// backs the B-tree property index, where the requirement is a consistent
+/// order in which numbers compare numerically across `Integer` and `Float`.
+/// Any consistent order satisfies an index; only this one satisfies a query.
+/// Reusing the index order for `ORDER BY` sorted strings after numbers and
+/// lists after both.
+///
+/// Both orders are therefore kept. Do not "unify" them: changing `Ord` to
+/// match this would reorder every existing property index, and changing this
+/// to match `Ord` would answer `ORDER BY` wrongly.
+///
+/// Temporal values sort with the numbers, next to the timestamp they are.
+/// openCypher orders temporal types among themselves and the TCK scenarios
+/// here do not mix them with other types, so the placement is unconstrained by
+/// evidence and marked as such rather than presented as settled.
+pub fn cypher_order(a: &PropertyValue, b: &PropertyValue) -> Ordering {
+    use PropertyValue::*;
+
+    fn rank(v: &PropertyValue) -> u8 {
+        match v {
+            Map(_) => 0,
+            Array(_) | Vector(_) => 1,
+            String(_) => 2,
+            Boolean(_) => 3,
+            Integer(_) | Float(_) | DateTime(_) | Duration { .. } => 4,
+            Null => 5,
+        }
+    }
+
+    let (ra, rb) = (rank(a), rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+
+    match (a, b) {
+        // Element-wise, then by length: a shared prefix puts the shorter first.
+        (Array(x), Array(y)) => {
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                let c = cypher_order(xi, yi);
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+        // NaN sorts after every other number, before null.
+        (Float(x), Float(y)) if x.is_nan() || y.is_nan() => {
+            match (x.is_nan(), y.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                _ => unreachable!(),
+            }
+        }
+        // Within a rank the index order already does the right thing, and for
+        // numbers it is the thing that makes 999999 > 6.9 across variants.
+        _ => a.cmp(b),
+    }
+}
+
 impl Eq for PropertyValue {}
 
 impl PartialOrd for PropertyValue {

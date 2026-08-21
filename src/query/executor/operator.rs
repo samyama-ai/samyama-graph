@@ -6535,7 +6535,11 @@ impl SortOperator {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
             };
-            let ord = x.cmp(y);
+            // Cypher's orderability, not the index's: `ORDER BY` puts a
+            // string before a number and a list before both, where the `Ord`
+            // backing the property index does the opposite. See
+            // `graph::property::cypher_order` for why both orders exist.
+            let ord = crate::graph::property::cypher_order(x, y);
             if ord != std::cmp::Ordering::Equal {
                 return if *ascending { ord } else { ord.reverse() };
             }
@@ -11481,7 +11485,11 @@ impl WithBarrierOperator {
                     let val_b = Self::evaluate_expression(expr, b, store).unwrap_or(Value::Null);
                     let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
                     let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
-                    let ord = prop_a.cmp(prop_b);
+                    // Cypher's orderability, not the property index's — see
+                    // `graph::property::cypher_order`. A WITH ... ORDER BY
+                    // sorts here rather than in `SortOperator`, so wiring only
+                    // that one left every `WITH` sort on the old order.
+                    let ord = crate::graph::property::cypher_order(prop_a, prop_b);
                     if ord != std::cmp::Ordering::Equal {
                         return if *ascending { ord } else { ord.reverse() };
                     }
