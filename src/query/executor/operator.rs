@@ -7647,25 +7647,33 @@ impl PhysicalOperator for CreateNodeOperator {
             self.executed = true;
         }
 
-        // Return created nodes one by one
-        if self.current >= self.created_nodes.len() {
+        // One row, binding *every* node this CREATE made — not one row per node.
+        //
+        // `CREATE (a), (b) RETURN a, b` is a single row in Cypher with both
+        // bound. Emitting a record per node gave two rows, neither of which had
+        // both, so the RETURN failed with "Variable not found: b" while the
+        // nodes themselves were created correctly (#614). The relationship form
+        // was unaffected because `CreateNodesAndEdgesOperator` merges the
+        // bindings above this operator — which is why the bug looked like it
+        // was about commas rather than about rows.
+        if self.current > 0 || self.created_nodes.is_empty() {
             return Ok(None);
         }
-
-        let (node_id, variable) = &self.created_nodes[self.current];
-        self.current += 1;
-
-        let node = store.get_node(*node_id)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("Created node {:?} not found", node_id)))?;
+        self.current = 1;
 
         let mut record = Record::new();
-        // Always bind created node — use variable name if provided, otherwise
-        // generate an internal name so persistence code can discover it.
-        let bind_name = match variable {
-            Some(var) => var.clone(),
-            None => format!("__created_node_{}", self.current - 1),
-        };
-        record.bind(bind_name, Value::Node(*node_id, Box::new(node.clone())));
+        for (idx, (node_id, variable)) in self.created_nodes.iter().enumerate() {
+            let node = store.get_node(*node_id).ok_or_else(|| {
+                ExecutionError::RuntimeError(format!("Created node {:?} not found", node_id))
+            })?;
+            // Anonymous nodes still get a name, so persistence and edge wiring
+            // can find them; it is kept out of `output_columns` by the planner.
+            let bind_name = match variable {
+                Some(var) => var.clone(),
+                None => format!("__created_node_{idx}"),
+            };
+            record.bind(bind_name, Value::Node(*node_id, Box::new(node.clone())));
+        }
 
         Ok(Some(record))
     }
