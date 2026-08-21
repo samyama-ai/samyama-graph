@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use crate::query::ast::{Expression, Query};
+use crate::query::ast::{Expression, OrderByClause, Query, ReturnItem};
 
 /// Why a query was rejected. Carries the offending name so the message can
 /// say which one rather than that something, somewhere, was wrong.
@@ -36,11 +36,35 @@ pub enum ValidationError {
     MergeRelationshipWithNullProperty(String),
     VariableTypeConflict(String),
     PatternInSetValue,
+    /// An ORDER BY naming something the projection did not keep.
+    OrderByUndefinedVariable(String),
+    /// An ORDER BY item that mixes an aggregate with a grouping expression.
+    AmbiguousAggregationExpression,
+    /// An ORDER BY that aggregates when the projection does not.
+    InvalidAggregation,
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::OrderByUndefinedVariable(v) => write!(
+                f,
+                "`{v}` is not available to ORDER BY: the projection aggregates or is \
+                 DISTINCT, so only its own columns survive. Project `{v}` if the sort \
+                 needs it."
+            ),
+            Self::AmbiguousAggregationExpression => write!(
+                f,
+                "an ORDER BY item that contains an aggregate may not also contain a \
+                 grouping expression — it is ambiguous whether the expression means the \
+                 grouped value or the value inside the aggregate. Sort by the projected \
+                 alias instead."
+            ),
+            Self::InvalidAggregation => write!(
+                f,
+                "ORDER BY introduces an aggregate that the projection does not have. \
+                 Aggregate in the RETURN or WITH, then sort by its alias."
+            ),
             Self::PatternInSetValue => write!(
                 f,
                 "a relationship pattern cannot be used as a value on the right of SET; \
@@ -210,7 +234,281 @@ fn write_patterns(query: &Query) -> Vec<(WriteKind, &crate::query::ast::Pattern,
     out
 }
 
+
+/// The aggregate functions, by the name the parser produces.
+const AGGREGATE_NAMES: &[&str] = &[
+    "count", "sum", "avg", "min", "max", "collect", "stdev", "stdevp",
+    "percentilecont", "percentiledisc",
+];
+
+fn is_aggregate_call(expr: &Expression) -> bool {
+    matches!(expr, Expression::Function { name, .. }
+        if AGGREGATE_NAMES.contains(&name.to_lowercase().as_str()))
+}
+
+/// Does this expression contain an aggregate anywhere inside it?
+fn contains_aggregate(expr: &Expression) -> bool {
+    if is_aggregate_call(expr) {
+        return true;
+    }
+    let mut found = false;
+    walk_children(expr, &mut |e| {
+        if is_aggregate_call(e) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Variables named outside any aggregate call within `expr`.
+///
+/// `avg(person.age) + $p` names none: `person` sits inside the aggregate and
+/// `$p` is a parameter. `me.age + count(*)` names `me`, which is the case the
+/// TCK rejects.
+fn vars_outside_aggregates(expr: &Expression, out: &mut Vec<String>) {
+    match expr {
+        e if is_aggregate_call(e) => {}
+        Expression::Variable(v) => out.push(v.clone()),
+        Expression::Property { variable, .. } => out.push(variable.clone()),
+        other => walk_children(other, &mut |e| vars_outside_aggregates(e, out)),
+    }
+}
+
+/// Apply `f` to the immediate sub-expressions of `expr`.
+fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
+    match expr {
+        Expression::Binary { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        Expression::Unary { expr: inner, .. } => f(inner),
+        Expression::Function { args, .. } => args.iter().for_each(|a| f(a)),
+        Expression::Index { expr: inner, index } => {
+            f(inner);
+            f(index);
+        }
+        Expression::ListExpr(items) => items.iter().for_each(|e| f(e)),
+        Expression::MapExpr(pairs) => pairs.iter().for_each(|(_, e)| f(e)),
+        _ => {}
+    }
+}
+
+/// What an ORDER BY may reference once the projection has aggregated or
+/// de-duplicated the row.
+///
+/// Such a projection *replaces* the row, so a sort key has to be expressible in
+/// terms of what survived. openCypher makes anything else a compile-time error;
+/// we sorted on whatever the variable still happened to hold.
+///
+/// The rule has two halves, and both are needed — an earlier version enforced
+/// only the second and rejected two scenarios the TCK requires to work:
+///
+/// 1. **Every aggregate in the ORDER BY must match one the projection
+///    computed.** `RETURN me.age AS age, count(you.age) AS cnt ORDER BY
+///    me.age + count(you.age)` is fine because `count(you.age)` was projected;
+///    `WITH mod, min(sum) ORDER BY sum(sum)` is not, because `sum(sum)` was
+///    never computed and `sum` no longer exists to compute it from.
+///
+/// 2. **Every variable or property outside an aggregate must be a projected
+///    grouping key or an alias.** `me.age` qualifies when the projection says
+///    `me.age AS age`. It does not when the projection says
+///    `me.age + you.age` — the compound is projected, its parts are not, and
+///    which one the sort means is ambiguous.
+///
+/// Constants and parameters are always fine, which keeps
+/// `ORDER BY $age + avg(p.age) - 1000` legal.
+fn validate_order_by_scope(
+    items: &[ReturnItem],
+    distinct: bool,
+    order_by: Option<&OrderByClause>,
+) -> Result<(), ValidationError> {
+    let Some(order_by) = order_by else {
+        return Ok(());
+    };
+    let projection_aggregates = items.iter().any(|i| contains_aggregate(&i.expression));
+    if !projection_aggregates && !distinct {
+        for item in &order_by.items {
+            if contains_aggregate(&item.expression) {
+                return Err(ValidationError::InvalidAggregation);
+            }
+        }
+        return Ok(());
+    }
+
+    let aliases: HashSet<String> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| column_name_at(it, i))
+        .collect();
+    // What the projection computed: grouping keys, and the aggregates themselves.
+    let mut grouping: Vec<&Expression> = Vec::new();
+    let mut projected_aggs: Vec<&Expression> = Vec::new();
+    for it in items {
+        if contains_aggregate(&it.expression) {
+            collect_aggregates(&it.expression, &mut projected_aggs);
+        } else {
+            grouping.push(&it.expression);
+        }
+    }
+    let grouping_vars: HashSet<String> = {
+        let mut v = Vec::new();
+        for g in &grouping {
+            vars_outside_aggregates(g, &mut v);
+        }
+        v.into_iter().collect()
+    };
+
+    for item in &order_by.items {
+        let expr = &item.expression;
+
+        // (0) The whole sort key restates a projected grouping expression —
+        // `WITH a.num2 % 3 AS m ... ORDER BY a.num2 % 3`. That is the same
+        // value under a different spelling, and it is the commoner of the two
+        // spellings. Checked against the *item*, not against its leaves: an
+        // earlier version compared only leaves and rejected this.
+        //
+        // Deliberately before the aggregate branch and not inside it: a
+        // grouping expression buried in a sort key that also aggregates stays
+        // ambiguous, which is what separates this from the rejected case.
+        if grouping.iter().any(|g| *g == expr) {
+            continue;
+        }
+
+        // (1) aggregates in the sort key must be ones the projection computed
+        let mut sort_aggs: Vec<&Expression> = Vec::new();
+        collect_aggregates(expr, &mut sort_aggs);
+        for a in &sort_aggs {
+            if !projected_aggs.iter().any(|p| *p == *a) {
+                let mut inner = Vec::new();
+                collect_all_vars(a, &mut inner);
+                let unknown = inner.into_iter().find(|v| !aliases.contains(v));
+                return Err(match unknown {
+                    Some(v) => ValidationError::OrderByUndefinedVariable(v),
+                    None => ValidationError::InvalidAggregation,
+                });
+            }
+        }
+
+        // (2) everything outside an aggregate must be projected
+        let mut outside = Vec::new();
+        collect_leaf_exprs_outside_aggregates(expr, &mut outside);
+        for leaf in outside {
+            if let Expression::Variable(v) = leaf {
+                if aliases.contains(v) {
+                    continue;
+                }
+            }
+            if let Some(name) = simple_column_name(leaf) {
+                if aliases.contains(&name) {
+                    continue;
+                }
+            }
+            if grouping.iter().any(|g| *g == leaf) {
+                continue;
+            }
+            // `RETURN DISTINCT a ORDER BY a.name` — projecting the *entity*
+            // keeps its properties reachable, because `a` itself survives.
+            // That is what separates it from `RETURN DISTINCT a.name ORDER BY
+            // a.age`, where only the one property survived and `a` is gone.
+            if let Expression::Property { variable, .. } = leaf {
+                let entity_projected = aliases.contains(variable)
+                    || grouping
+                        .iter()
+                        .any(|g| matches!(g, Expression::Variable(v) if v == variable));
+                if entity_projected {
+                    continue;
+                }
+            }
+            let named = match leaf {
+                Expression::Variable(v) => v.clone(),
+                Expression::Property { variable, .. } => variable.clone(),
+                _ => continue,
+            };
+            // Projected as part of a compound the sort re-states: which of the
+            // two the sort means is ambiguous. Never projected at all: it is
+            // simply not there.
+            return Err(if grouping_vars.contains(&named) {
+                ValidationError::AmbiguousAggregationExpression
+            } else {
+                ValidationError::OrderByUndefinedVariable(named)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Every aggregate call inside `expr`, outermost first.
+fn collect_aggregates<'a>(expr: &'a Expression, out: &mut Vec<&'a Expression>) {
+    if is_aggregate_call(expr) {
+        out.push(expr);
+        return;
+    }
+    walk_children_ref(expr, &mut |e| collect_aggregates(e, out));
+}
+
+/// Variable/property leaves that are *not* inside an aggregate call.
+fn collect_leaf_exprs_outside_aggregates<'a>(expr: &'a Expression, out: &mut Vec<&'a Expression>) {
+    match expr {
+        e if is_aggregate_call(e) => {}
+        Expression::Variable(_) | Expression::Property { .. } => out.push(expr),
+        other => walk_children_ref(other, &mut |e| collect_leaf_exprs_outside_aggregates(e, out)),
+    }
+}
+
+/// Every variable named anywhere in `expr`, aggregates included.
+fn collect_all_vars(expr: &Expression, out: &mut Vec<String>) {
+    match expr {
+        Expression::Variable(v) => out.push(v.clone()),
+        Expression::Property { variable, .. } => out.push(variable.clone()),
+        other => walk_children_ref(other, &mut |e| collect_all_vars(e, out)),
+    }
+}
+
+/// `me.age` -> "me.age", `x` -> "x"; anything compound has no simple name.
+fn simple_column_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::Variable(v) => Some(v.clone()),
+        Expression::Property { variable, property } => Some(format!("{variable}.{property}")),
+        _ => None,
+    }
+}
+
+fn walk_children_ref<'a>(expr: &'a Expression, f: &mut impl FnMut(&'a Expression)) {
+    match expr {
+        Expression::Binary { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        Expression::Unary { expr: inner, .. } => f(inner),
+        Expression::Function { args, .. } => args.iter().for_each(|a| f(a)),
+        Expression::Index { expr: inner, index } => {
+            f(inner);
+            f(index);
+        }
+        Expression::ListExpr(items) => items.iter().for_each(|e| f(e)),
+        Expression::MapExpr(pairs) => pairs.iter().for_each(|(_, e)| f(e)),
+        _ => {}
+    }
+}
+
+/// The column a return item produces, by alias or by written form.
+fn column_name_at(item: &ReturnItem, _idx: usize) -> Option<String> {
+    item.alias.clone().or_else(|| match &item.expression {
+        Expression::Variable(v) => Some(v.clone()),
+        Expression::Property { variable, property } => Some(format!("{variable}.{property}")),
+        _ => None,
+    })
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    // ---- ORDER BY scope after an aggregating or DISTINCT projection.
+    if let Some(rc) = &query.return_clause {
+        validate_order_by_scope(&rc.items, rc.distinct, query.order_by.as_ref())?;
+    }
+    if let Some(wc) = &query.with_clause {
+        validate_order_by_scope(&wc.items, wc.distinct, wc.order_by.as_ref())?;
+    }
+
     // ---- Duplicate result columns.
     //
     // `RETURN a AS x, b AS x` cannot be answered: one of the two columns has
