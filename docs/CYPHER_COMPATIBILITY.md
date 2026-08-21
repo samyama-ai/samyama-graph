@@ -5,7 +5,31 @@
 
 ## How to read this
 
-There is **no measured OpenCypher coverage percentage** in this document, and there will not be one until the openCypher TCK is actually run (#434). A previous version of this page claimed "~90% OpenCypher coverage"; that figure was self-assessed, never checked against the TCK, and an earlier internal assessment of the same engine put the number at 40–50%. Rather than pick between two unverified numbers, the claim is withdrawn.
+The openCypher TCK **has now been run** (#434), so this page can give a measured
+number instead of withholding one:
+
+> **86.7% of evaluated scenarios** — 1,079 of 1,244, from 1,615 total with 371
+> skipped as unjudgeable by the harness. Measured 2026-08-21 at commit
+> `18adfbf`.
+
+Two numbers, both of which matter. The pass rate says what the engine gets
+right among scenarios the harness can judge; the **77.0% coverage** says how
+many it can judge at all. Quoting either alone misleads, which is why the
+harness prints both.
+
+For context rather than comfort: on the same pinned scenario set, Neo4j 5
+scores 98.9%, Memgraph 89.8% and FalkorDB 89.1% (#435). We are last of the
+four.
+
+A previous version of this page claimed "~90% OpenCypher coverage". That figure
+was self-assessed, never checked against the TCK, and an earlier internal
+assessment of the same engine put it at 40–50%. It was withdrawn rather than
+defended — and note that the measured number, 86.7%, is *below* the withdrawn
+claim while being worth considerably more, because it can be reproduced:
+
+```
+cargo run --release --example tck_runner -- --features <path to tck/features>
+```
 
 What this page reports instead is narrower and checkable: **78 probes, 77 supported, 1 not.** Each probe is one representative query for one feature. Re-run it with:
 
