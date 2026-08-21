@@ -721,7 +721,36 @@ fn exists_expand_hops(
         return Ok(false);
     }
 
+    // If the node this segment lands on is *already bound* and the segment is a
+    // single hop, only that node can close it. Recursing into every neighbour
+    // and rejecting them one level down is the same answer at O(degree) cost —
+    // and it clones the binding record per neighbour to get there.
+    //
+    // LDBC BI-11 is the case that makes this matter: `(t)<-[:HAS_TAG]-(post)`
+    // with `post` bound walks every node carrying that tag, ~250 of them on
+    // SF1, for each of ~1.19M outer rows (#681).
+    //
+    // Restricted to single-hop segments deliberately: in a variable-length
+    // segment the pin applies to the far end, not to the intermediate
+    // positions this loop is walking through, so filtering here would cut off
+    // legitimate paths.
+    let pinned_target: Option<NodeId> = if max_hops == 1 {
+        match segment.node.variable.as_deref().and_then(|v| bindings.get(v)) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => Some(*id),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     for (edge, neighbor) in exists_neighbors(store, current, &segment.edge) {
+        // The pin cannot be satisfied by any other neighbour, so skip before
+        // the record clone below rather than after the recursion.
+        if let Some(target) = pinned_target {
+            if neighbor != target {
+                continue;
+            }
+        }
         // Relationship isomorphism: an edge may not repeat within one path.
         if visited_edges.contains(&edge.id) {
             continue;
