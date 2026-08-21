@@ -3850,6 +3850,19 @@ pub struct ExpandOperator {
     /// Off for a single-hop pattern, which cannot violate the rule and should
     /// not pay for the bookkeeping.
     track_edges: bool,
+    /// Pin the target to whatever this variable is bound to on the current
+    /// row, resolved per input record rather than at plan time.
+    ///
+    /// A pattern that closes back onto a bound variable — LDBC BI-17's
+    /// `(a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(a)` — is planned as an expand
+    /// into a synthetic `__self_a_2` followed by `__self_a_2 = a`. That is
+    /// correct and enumerates every neighbour of `c` to keep one: ~41 per
+    /// person on SF1, over ~17.8M candidate paths. Pinning here rejects the
+    /// other 40 during the adjacency walk, before a record exists (#195).
+    ///
+    /// Distinct from `target_ids`, which is a plan-time constant set; this one
+    /// changes with every row.
+    target_bound_var: Option<Arc<str>>,
     /// This expand begins a MATCH clause, so it clears the inherited history
     /// first. Isomorphism is per-clause — `MATCH (a)-[:R]-(b) MATCH (b)-[:R]-(c)`
     /// may legitimately reuse the edge.
@@ -3877,6 +3890,7 @@ impl ExpandOperator {
             target_ids: None,
             track_edges: false,
             starts_clause: false,
+            target_bound_var: None,
             direction,
             current_record: None,
             current_edges: Vec::new(),
@@ -3909,6 +3923,12 @@ impl ExpandOperator {
     /// The resolved node set for the target, when the planner could compute it.
     /// Preferred over `target_props`: an id membership test costs a hash
     /// lookup where the property check costs a node fetch (#665).
+    /// Pin this expand's target to the node already bound to `var`.
+    pub fn with_target_bound_var(mut self, var: String) -> Self {
+        self.target_bound_var = Some(var.into());
+        self
+    }
+
     /// Enforce relationship isomorphism for this expand.
     ///
     /// `starts_clause` marks the first expand of a MATCH clause, which drops
@@ -4018,7 +4038,19 @@ impl ExpandOperator {
         } else {
             &[]
         };
+        // Resolved once per input record: the node the pattern must close on.
+        let pinned_target: Option<NodeId> = self
+            .target_bound_var
+            .as_ref()
+            .and_then(|v| record.get(v))
+            .and_then(|v| v.node_id());
         let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
+            // A closing hop can only land on the node it closes onto.
+            if let Some(p) = pinned_target {
+                if target != p {
+                    return false;
+                }
+            }
             // Relationship isomorphism first: it is a comparison of a few u64s
             // against a slice that is empty for every single-hop pattern, so it
             // is cheaper than anything below and rejects the most rows on the

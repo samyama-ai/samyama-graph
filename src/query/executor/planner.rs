@@ -2988,6 +2988,14 @@ impl QueryPlanner {
                         expand = expand.with_edge_isolation(first_expand);
                         first_expand = false;
                     }
+                    // A closing hop back onto an already-bound variable can
+                    // only land on that node. Without this the expand walks
+                    // every neighbour and the `__self_x = x` filter below
+                    // discards all but one — BI-17's triangle close is ~41
+                    // neighbours per person over ~17.8M paths (#195).
+                    if self_ref {
+                        expand = expand.with_target_bound_var(target_var.clone());
+                    }
                     // A selective equality on the far side of the expansion —
                     // LDBC IC11's `org.name = "..."` — applied during the walk
                     // rather than to the rows it produces (#656).
