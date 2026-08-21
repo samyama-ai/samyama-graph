@@ -59,13 +59,22 @@ jobs:
           # Share the cache across jobs in this workflow; key on Cargo.lock.
           shared-key: ci-test
 
-      # `cargo fmt --check` and `cargo clippy -D warnings` are deliberately NOT
-      # here yet. The tree currently has ~5,000 rustfmt diffs and ~680 clippy
-      # warnings, so either gate would be red on arrival -- and a gate that is
-      # always red is one everybody learns to ignore, which is worse than not
-      # having it. Adopting both needs a mechanical reformat commit and a lint
-      # ratchet; tracked separately so this lane can start green and mean
-      # something from its first run.
+      # `cargo fmt --check` and `cargo clippy -D warnings` are still not hard
+      # gates. Re-measured 2026-08-22: **5,958 rustfmt diffs and 769 clippy
+      # warnings** (the ~5,000/~680 above were the 2026-08-16 figures — the
+      # debt grew while it was described as static, which is the argument for
+      # the ratchet below).
+      #
+      # Either gate would be red on arrival, and a permanently red gate is one
+      # everybody learns to ignore. Adopting them needs a mechanical reformat
+      # touching nearly every file — `git blame` stops being useful and every
+      # branch in flight conflicts — which is a real decision and has not been
+      # made.
+      #
+      # The ratchet is the half that does not need that decision: the count may
+      # not rise. New code arrives clean, the backlog shrinks whenever anyone
+      # touches a file, and the big-bang stays available as a deliberate choice
+      # rather than a prerequisite (#487).
 
       - name: Tests
         # --no-fail-fast so one failing crate does not hide the rest; a PR
@@ -141,6 +150,11 @@ jobs:
         # after — a determinism gate added afterwards cannot tell a new bug
         # from a pre-existing one.
         run: ./scripts/check_thread_determinism.sh /tmp/openCypher/tck/features
+
+      - name: LINT-RATCHET — the clippy warning count may not rise
+        # A ceiling, not a clean-tree gate: the debt stops growing while what
+        # to do about the existing 769 stays open (#487).
+        run: ./scripts/check_lint_ratchet.sh 769
 
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
         # ALGO-02. The reference values are regenerated from NetworkX on a
