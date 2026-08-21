@@ -127,6 +127,21 @@ jobs:
           git clone --depth 1 --branch 2024.3             https://github.com/opencypher/openCypher.git /tmp/openCypher
           cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 1079
 
+      - name: CH-DETERM-THREADS — the answer does not depend on the thread count
+        # LANG-14 (#611). CH-DETERM varies the *process*, which catches a
+        # RandomState seed reaching results. It says nothing about a parallel
+        # operator emitting rows in a different order at 8 threads than at 1.
+        #
+        # This runs here rather than nightly because it is nearly free: a TCK
+        # run is ~0.8 s, so three of them add ~3 s to a step whose 55 s is
+        # almost entirely the clone above. #611 assumed minutes and proposed
+        # deferring to nightly on that basis; the measurement says otherwise.
+        #
+        # It must land before morsel-driven parallel expand (PERF-06), not
+        # after — a determinism gate added afterwards cannot tell a new bug
+        # from a pre-existing one.
+        run: ./scripts/check_thread_determinism.sh /tmp/openCypher/tck/features
+
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
         # ALGO-02. The reference values are regenerated from NetworkX on a
         # cadence by the harness in samyama-graph-competitor-benchmarks; this
