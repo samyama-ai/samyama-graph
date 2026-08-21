@@ -106,6 +106,27 @@ jobs:
         # so the two cannot drift apart again.
         run: cargo run --release --example api_contract
 
+      - name: CH-TCK — the openCypher pass count may not decrease
+        # LANG-01 (#436). The rate went 57.2% -> 86.7% over a few days with
+        # nothing stopping it going back: every fix so far has rested on this
+        # number, and an unguarded number is one refactor from being wrong.
+        #
+        # The scenario set is pinned to tag 2024.3. Not for reproducibility in
+        # the abstract — a moving denominator changes the rate without the
+        # engine changing, and then nobody can tell a regression from a new
+        # scenario.
+        #
+        # The floor is a *count*, not a percentage, for the same reason: a
+        # scenario the harness learns to judge moves from "skipped" to
+        # "evaluated" and shifts the percentage on its own. The count moves only
+        # when the engine does.
+        #
+        # Raise the floor when it goes up; lowering it is allowed but must say
+        # why in the same commit.
+        run: |
+          git clone --depth 1 --branch 2024.3             https://github.com/opencypher/openCypher.git /tmp/openCypher
+          cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 1079
+
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
         # ALGO-02. The reference values are regenerated from NetworkX on a
         # cadence by the harness in samyama-graph-competitor-benchmarks; this

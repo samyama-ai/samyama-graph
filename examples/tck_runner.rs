@@ -1335,6 +1335,36 @@ fn main() {
     println!("scenarios this harness can judge; the coverage says how many it can judge at");
     println!("all. Quoting either alone misleads.");
 
+    // Ratchet (#436). CI passes the count the engine is known to reach; a run
+    // below it fails the build.
+    //
+    // The *count* rather than the rate, because the rate has a denominator that
+    // can move: a scenario the harness learns to judge shifts a scenario from
+    // "skipped" into "evaluated", which changes the percentage without the
+    // engine changing at all. The count of passing scenarios only moves when
+    // the engine does — provided the scenario set is pinned, which is what
+    // `TCK_REF` in the harness is for.
+    if let Some(min) = arg("--min-pass").and_then(|v| v.parse::<usize>().ok()) {
+        println!();
+        if pass < min {
+            println!(
+                "RATCHET FAILED: {pass} scenarios pass, floor is {min}. \
+                 {} fewer than the recorded baseline.",
+                min - pass
+            );
+            println!(
+                "  A drop here means a change took working behaviour away. If it is \
+                 deliberate, lower the floor in the same commit and say why."
+            );
+            std::process::exit(1);
+        }
+        println!("RATCHET OK: {pass} pass, floor {min}{}.", if pass > min {
+            format!(" (+{} — raise the floor)", pass - min)
+        } else {
+            String::new()
+        });
+    }
+
     println!("\nTop skip reasons:");
     let mut reasons: Vec<_> = skip_reasons.into_iter().collect();
     reasons.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
