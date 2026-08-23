@@ -4536,6 +4536,21 @@ pub struct VarLengthExpandOperator {
     /// was in it. At SF10 that is the difference between finishing and hitting
     /// the query timeout.
     target_reach: Option<std::collections::HashSet<NodeId>>,
+    /// Enforce relationship isomorphism across the clause, not just within
+    /// this segment.
+    ///
+    /// The BFS already cannot repeat an edge *inside* one walk — a node-visited
+    /// set makes every emitted path simple — but it never knew what the rest of
+    /// the clause had walked. `MATCH (a)-[:R]-(y)-[:R*1..1]-(z)` over a single
+    /// edge therefore answered one row where openCypher answers none: the
+    /// segment took the same edge back (#710).
+    ///
+    /// `ExpandOperator` has carried this since #684; the var-length operator is
+    /// the path that did not inherit it.
+    track_edges: bool,
+    /// Marks the first expand of a MATCH clause, which starts with a clean
+    /// history rather than inheriting one from an earlier clause.
+    starts_clause: bool,
 }
 
 impl VarLengthExpandOperator {
@@ -4566,6 +4581,8 @@ impl VarLengthExpandOperator {
             type_ids: None,
             pinned_target: None,
             target_reach: None,
+            track_edges: false,
+            starts_clause: false,
         }
     }
 
@@ -4665,14 +4682,22 @@ impl VarLengthExpandOperator {
         }
     }
 
-    /// BFS from the source bound in `record`, buffering one output record per
-    /// distinct reachable target in `[min_hops, max_hops]`.
     /// Pin the target to a single node the planner resolved at plan time.
     ///
     /// Only valid when the destination really is that one node; the operator
     /// then answers "can this source reach it" rather than enumerating.
     pub fn with_pinned_target(mut self, target: NodeId) -> Self {
         self.pinned_target = Some(target);
+        self
+    }
+
+    /// Enforce relationship isomorphism for this segment against the whole
+    /// clause, not just within the segment. Same contract as
+    /// `ExpandOperator::with_edge_isolation`: `starts_clause` marks the first
+    /// expand of a MATCH, which begins with a clean history.
+    pub fn with_edge_isolation(mut self, starts_clause: bool) -> Self {
+        self.track_edges = true;
+        self.starts_clause = starts_clause;
         self
     }
 
@@ -4769,7 +4794,14 @@ impl VarLengthExpandOperator {
         // The path so far, as (node, edge-that-reached-it). `edges` is what
         // enforces relationship uniqueness.
         let mut path: Vec<(NodeId, crate::graph::EdgeId)> = Vec::new();
-        let mut edges: Vec<crate::graph::EdgeId> = Vec::new();
+        // Seeded with what the clause has already walked, so a trail cannot
+        // retake an edge an earlier segment used (#710).
+        let mut edges: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
+            record.used_edge_slice().to_vec()
+        } else {
+            Vec::new()
+        };
+        let inherited_len = edges.len();
         // Frontier per depth: the neighbours still to try at each level.
         let mut stack: Vec<Vec<(NodeId, crate::graph::EdgeId)>> = Vec::new();
 
@@ -4794,7 +4826,9 @@ impl VarLengthExpandOperator {
             let Some((nb, eid)) = frontier.pop() else {
                 stack.pop();
                 path.pop();
-                edges.pop();
+                if edges.len() > inherited_len {
+                    edges.pop();
+                }
                 continue;
             };
             path.push((nb, eid));
@@ -4832,6 +4866,8 @@ impl VarLengthExpandOperator {
         Ok(())
     }
 
+    /// BFS from the source bound in `record`, buffering one output record per
+    /// distinct reachable target in `[min_hops, max_hops]`.
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record
             .get(&self.source_var)
@@ -4846,10 +4882,33 @@ impl VarLengthExpandOperator {
             ExecutionError::TypeError(format!("{} is not a node", self.source_var))
         })?;
 
+        // Edges an earlier segment of this clause already walked. This segment
+        // may not retake them (#710). Empty for the first segment of a clause
+        // and for any single-segment pattern, which is why isolation costs
+        // nothing on the shapes LDBC actually runs.
+        let inherited: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
+            record.used_edge_slice().to_vec()
+        } else {
+            Vec::new()
+        };
+
         // Pinned target: one membership test instead of a BFS per row. The
         // planner only sets this when the destination resolves to a single
         // node, there is no path variable, and `min_hops <= 1`.
-        if let Some(target) = self.pinned_target {
+        //
+        // Skipped when the clause has already walked edges: the reachability
+        // set is built once, before any row, so it cannot know which edges this
+        // row is forbidden. Falling through to the BFS below answers the same
+        // question with the ban applied.
+        //
+        // The shortcut still does not *record* what it walked — it answers
+        // "reachable" without knowing by which route — so a later segment of
+        // the same clause may retake one of those edges. That is the behaviour
+        // this operator had everywhere before isolation existed, so it is a
+        // remaining gap and not a regression; closing it means either
+        // reconstructing the route (which is what the shortcut exists to avoid)
+        // or knowing at plan time that no segment follows. #710.
+        if let (true, Some(target)) = (inherited.is_empty(), self.pinned_target) {
             if self.target_reaches(source_id, store) && self.emit_ok(target, store) {
                 let empty: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
                     std::collections::HashMap::new();
@@ -4905,6 +4964,11 @@ impl VarLengthExpandOperator {
                 // separated. The emission order is unchanged: `next` is filled
                 // in exactly the order the old code emitted in.
                 self.for_each_neighbor(cur, type_filter, store, |nb, eid| {
+                    // An edge an earlier segment of this clause already walked
+                    // is not available to this one (#710).
+                    if inherited.contains(&eid) {
+                        return;
+                    }
                     if visited.insert(nb) {
                         parent.insert(nb, (cur, eid));
                         next.push(nb);
@@ -4945,6 +5009,20 @@ impl VarLengthExpandOperator {
     ) {
         let mut rec = base.clone();
         rec.bind(self.target_var.clone(), Value::NodeRef(target));
+
+        // Record what this segment walked, so a later segment of the same
+        // clause cannot retake it (#710). Reconstructed from `parent` rather
+        // than from the path variable, because isolation applies whether or not
+        // the pattern names the path.
+        if self.track_edges {
+            if self.starts_clause {
+                rec.clear_used_edges();
+            }
+            let (_, walked) = reconstruct_path(parent, source, target);
+            for e in walked {
+                rec.mark_edge_used(e);
+            }
+        }
         if self.path_variable.is_some() || self.rel_variable.is_some() {
             let (nodes, edges) = reconstruct_path(parent, source, target);
             if let Some(ref rv) = self.rel_variable {

@@ -2909,6 +2909,15 @@ impl QueryPlanner {
                             min_hops,
                             max_hops,
                         );
+                        // Relationship isomorphism applies to a var-length segment too: an
+                        // edge an earlier segment of this clause walked is not available to
+                        // it. `ExpandOperator` has done this since #684; this path did not
+                        // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                        // a row where openCypher answers none (#710).
+                        if track_edges {
+                            expand = expand.with_edge_isolation(first_expand);
+                            first_expand = false;
+                        }
                         if let Some(ref pv) = path.path_variable {
                             expand = expand.with_path_variable(pv.clone());
                         }
@@ -3380,6 +3389,15 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // Relationship isomorphism applies to a var-length segment too: an
+                // edge an earlier segment of this clause walked is not available to
+                // it. `ExpandOperator` has done this since #684; this path did not
+                // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                // a row where openCypher answers none (#710).
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
                 // relationships traversed. Dropping it made the query fail
                 // with "Variable not found: r" (#652).
@@ -3497,6 +3515,15 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // Relationship isomorphism applies to a var-length segment too: an
+                // edge an earlier segment of this clause walked is not available to
+                // it. `ExpandOperator` has done this since #684; this path did not
+                // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                // a row where openCypher answers none (#710).
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
                 // relationships traversed. Dropping it made the query fail
                 // with "Variable not found: r" (#652).

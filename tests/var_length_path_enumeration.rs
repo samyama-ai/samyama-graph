@@ -117,7 +117,6 @@ fn one_edge_cannot_be_walked_out_and_back_to_make_two_hops() {
 /// Without cross-operator edge tracking the segment walks the same edge back
 /// to `a` and returns one.
 #[test]
-#[ignore = "#710: the operator walks shortest paths, not paths"]
 fn a_var_length_segment_may_not_reuse_an_edge_the_clause_already_walked() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:N {name: \"a\"})");
