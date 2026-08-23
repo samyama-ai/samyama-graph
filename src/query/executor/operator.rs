@@ -4161,14 +4161,19 @@ impl ExpandOperator {
         // A label no node carries yields `None`, which matches nothing -- so
         // the whole expansion is empty, which is correct and is why the empty
         // case is distinguished from "no labels required".
-        let label_sets: Option<Vec<&std::collections::HashSet<NodeId>>> =
+        // ...and by a bit rather than a hash, since #592's `HashSet<NodeId>`
+        // probe is itself a random access into a structure the size of the
+        // label. Measured, that grows 10.2 -> 36.7 ns per candidate edge as the
+        // label goes from 300k to 1.2M nodes — 35% of the whole traversal —
+        // while the storage walk under it stays flat (#730).
+        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> =
             if self.target_labels.is_empty() {
                 None
             } else {
                 Some(
                     self.target_labels
                         .iter()
-                        .map(|l| store.nodes_with_label(l))
+                        .map(|l| store.label_bitset(l))
                         .collect::<Option<Vec<_>>>()
                         .unwrap_or_default(),
                 )
@@ -4214,7 +4219,9 @@ impl ExpandOperator {
                 None => true,
                 // `Some(empty)` means a required label exists on no node.
                 Some(sets) if sets.len() < self.target_labels.len() => false,
-                Some(sets) => sets.iter().all(|s| s.contains(&target)),
+                Some(sets) => sets
+                    .iter()
+                    .all(|s| GraphStore::bitset_contains(s, target)),
             };
             if !label_ok {
                 return false;

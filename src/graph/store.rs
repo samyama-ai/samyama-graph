@@ -626,6 +626,21 @@ pub struct GraphStore {
     /// Label index for fast lookups
     label_index: HashMap<Label, HashSet<NodeId>>,
 
+    /// `label_index` as a dense bitset per label, built on demand.
+    ///
+    /// The membership test on the expand's hot path is per **candidate edge**,
+    /// and probing the `HashSet` above means a random probe into a structure
+    /// the size of the label. Measured with `benches/adjacency_walk`, that cost
+    /// grows 10.2 -> 36.7 ns/edge as the label goes from 300k to 1.2M nodes —
+    /// 35% of the whole traversal — while everything under it stays flat
+    /// (#730). A bit per node is 150 KB for 1.2M and a load-shift-mask.
+    ///
+    /// Derived, never authoritative: `label_index` remains the representation
+    /// and this is dropped wholesale whenever it changes. Two structures that
+    /// can disagree is #491's shape, and the single `invalidate_label_bits`
+    /// call site per mutation is what keeps that from happening here.
+    label_bits: std::sync::RwLock<HashMap<Label, std::sync::Arc<Vec<u64>>>>,
+
     /// Edge type index for fast lookups
     edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>,
 
@@ -685,6 +700,7 @@ impl GraphStore {
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
             label_index: HashMap::new(),
+            label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
             vector_index: Arc::new(VectorIndexManager::new()),
             property_index: Arc::new(IndexManager::new()),
@@ -1011,6 +1027,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
 
+        // `label_index` changes here, so the derived bitsets are stale (#730).
+        self.invalidate_label_bits();
         for label in &labels {
             self.label_index
                 .entry(label.clone())
@@ -1093,6 +1111,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         node.version = self.current_version;
 
         // Add to label indices
+        // `label_index` changes here, so the derived bitsets are stale (#730).
+        self.invalidate_label_bits();
         for label in &labels {
             self.label_index
                 .entry(label.clone())
@@ -1213,6 +1233,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let mut node = Node::new_stub(node_id, label.clone());
         node.version = self.current_version;
 
+        // `label_index` changes here, so the derived bitsets are stale (#730).
+        self.invalidate_label_bits();
         self.label_index
             .entry(label.clone())
             .or_insert_with(HashSet::new)
@@ -1454,6 +1476,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // But to keep history, we should NOT remove from the Vec.
         
         // Remove from label indices and update catalog
+        // `label_index` changes here, so the derived bitsets are stale (#730).
+        self.invalidate_label_bits();
         for label in &latest_node.labels {
             if let Some(node_set) = self.label_index.get_mut(label) {
                 node_set.remove(&id);
@@ -1534,6 +1558,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return Ok(false);
         }
 
+        // `label_index` changes here, so the derived bitsets are stale (#730).
+        self.invalidate_label_bits();
         if let Some(members) = self.label_index.get_mut(label) {
             members.remove(&node_id);
             // An empty set is not the same as an absent one to the expansion
@@ -1558,6 +1584,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = node_id.as_u64() as usize;
 
         // Get the node and add the label
+        // Invalidated before the mutable borrow below, not after: the derived
+        // bitsets are stale either way, and taking `&self` while `node` is
+        // borrowed mutably does not compile (#730).
+        self.invalidate_label_bits();
+
         let node = self.nodes.get_mut(idx).and_then(|v| v.last_mut()).ok_or(GraphError::NodeNotFound(node_id))?;
         node.add_label(label.clone());
 
@@ -2416,6 +2447,57 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// `None` means no node carries the label, which matches nothing.
     pub fn nodes_with_label(&self, label: &Label) -> Option<&HashSet<NodeId>> {
         self.label_index.get(label)
+    }
+
+    /// `nodes_with_label` as a dense bitset, for callers testing many nodes
+    /// against one label.
+    ///
+    /// Same contract as `nodes_with_label`: `None` means no node carries the
+    /// label, which matches nothing — distinct from "no label required", and
+    /// conflating the two makes `-[:R]->(x:NoSuchLabel)` match everything.
+    ///
+    /// Built on first use and cached until any label changes. Sized by the node
+    /// vector, so a `NodeId` beyond it simply reads as absent rather than
+    /// panicking — which is what a node created after the bitset was built
+    /// would be, and it cannot happen, because creating one invalidates this.
+    pub fn label_bitset(&self, label: &Label) -> Option<std::sync::Arc<Vec<u64>>> {
+        if let Some(bits) = self.label_bits.read().unwrap().get(label) {
+            return Some(bits.clone());
+        }
+        let ids = self.label_index.get(label)?;
+        let words = (self.nodes.len() / 64) + 1;
+        let mut bits = vec![0u64; words];
+        for id in ids {
+            let idx = id.as_u64() as usize;
+            if let Some(w) = bits.get_mut(idx / 64) {
+                *w |= 1u64 << (idx % 64);
+            }
+        }
+        let bits = std::sync::Arc::new(bits);
+        self.label_bits
+            .write()
+            .unwrap()
+            .insert(label.clone(), bits.clone());
+        Some(bits)
+    }
+
+    /// Whether `id` is set in a bitset from `label_bitset`.
+    #[inline]
+    pub fn bitset_contains(bits: &[u64], id: NodeId) -> bool {
+        let idx = id.as_u64() as usize;
+        bits.get(idx / 64).is_some_and(|w| w & (1u64 << (idx % 64)) != 0)
+    }
+
+    /// Drop the derived label bitsets. Called wherever `label_index` changes.
+    ///
+    /// Wholesale rather than per-label on purpose: the cost is rebuilding on
+    /// next use, and the alternative is a second place where the two
+    /// structures can drift apart.
+    fn invalidate_label_bits(&self) {
+        let mut w = self.label_bits.write().unwrap();
+        if !w.is_empty() {
+            w.clear();
+        }
     }
 
     pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
