@@ -603,44 +603,106 @@ fn exists_node_matches(
     true
 }
 
-/// Neighbours of `node` reachable by an edge matching `edge_pat`, honouring the
-/// pattern's direction. Returns each matching edge with the node at its far end.
-fn exists_neighbors(
+/// Visit the neighbours of `node` reachable by an edge matching `edge_pat`.
+///
+/// This used to build a `Vec<(Edge, NodeId)>`: it fetched **every** edge
+/// incident to the node in the pattern's direction — all types, both
+/// directions for `-[:R]-` — cloned each one whole (an owned `Edge` carries its
+/// type string and its whole property map), and only then filtered by type and
+/// applied the pinned-target check.
+///
+/// For LDBC IS7 that is `EXISTS { MATCH (op)-[:KNOWS]-(author) }` evaluated per
+/// output row, where `op` is a Person with a few hundred incident edges of
+/// which ~20 are `:KNOWS`, and exactly one can satisfy the pinned `author`. It
+/// cost 95% of IS7 — 0.56 ms of 0.59 at SF1, and IS7 is 26.8 ms at SF10 against
+/// FalkorDB's 0.66 on the same host (#618).
+///
+/// `ExpandOperator` has walked adjacency this way since #520; the `EXISTS`
+/// evaluator simply never inherited it. Type ids are resolved once, the pin and
+/// the isomorphism check run inside the walk, and the `Edge` is materialised
+/// only for a survivor whose pattern actually needs it — an edge variable to
+/// bind or an edge property to test.
+///
+/// `visit` returns `Ok(true)` to stop the walk; the return value says whether
+/// it did.
+fn exists_for_each_neighbor(
     store: &GraphStore,
     node: NodeId,
     edge_pat: &crate::query::ast::EdgePattern,
-) -> Vec<(crate::graph::Edge, NodeId)> {
-    let types: Vec<&str> = edge_pat.types.iter().map(|t| t.as_str()).collect();
-    let edge_matches = |e: &crate::graph::Edge| -> bool {
-        if !types.is_empty() && !types.contains(&e.edge_type.as_str()) {
-            return false;
-        }
-        match &edge_pat.properties {
-            Some(props) => props
+    pinned_target: Option<NodeId>,
+    visited_edges: &[crate::graph::EdgeId],
+    mut visit: impl FnMut(crate::graph::EdgeId, NodeId) -> ExecutionResult<bool>,
+) -> ExecutionResult<bool> {
+    // `None` means "no type filter". A named type the graph has never seen
+    // contributes no id, so the resolved set is empty and matches nothing --
+    // which is correct, and is why the two cases are kept apart (#520).
+    let type_ids: Option<Vec<u16>> = if edge_pat.types.is_empty() {
+        None
+    } else {
+        Some(
+            edge_pat
+                .types
                 .iter()
-                .all(|(k, v)| e.properties.get(k).map_or(false, |pv| pv == v)),
-            None => true,
+                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+                .collect(),
+        )
+    };
+    let type_filter = type_ids.as_deref();
+
+    // Only a pattern that names edge properties needs the edge itself here.
+    let edge_props = edge_pat.properties.as_ref();
+
+    let mut stop = false;
+    let mut err: Option<ExecutionError> = None;
+    let mut keep = |eid: crate::graph::EdgeId, other: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
+        if *stop || err.is_some() {
+            return;
+        }
+        if let Some(target) = pinned_target {
+            if other != target {
+                return;
+            }
+        }
+        if visited_edges.contains(&eid) {
+            return;
+        }
+        if let Some(props) = edge_props {
+            match store.get_edge(eid) {
+                Some(e) => {
+                    if !props.iter().all(|(k, v)| e.properties.get(k).is_some_and(|pv| pv == v)) {
+                        return;
+                    }
+                }
+                None => return,
+            }
+        }
+        match visit(eid, other) {
+            Ok(true) => *stop = true,
+            Ok(false) => {}
+            Err(e) => *err = Some(e),
         }
     };
 
-    let mut out = Vec::new();
     if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
-        for e in store.get_outgoing_edges(node) {
-            if edge_matches(&e) {
-                let other = e.target;
-                out.push((e, other));
-            }
-        }
+        store.for_each_outgoing_neighbor(node, type_filter, |target, eid| {
+            keep(eid, target, &mut stop, &mut err);
+        });
     }
     if matches!(edge_pat.direction, Direction::Incoming | Direction::Both) {
-        for e in store.get_incoming_edges(node) {
-            if edge_matches(&e) {
-                let other = e.source;
-                out.push((e, other));
+        store.for_each_incoming_neighbor(node, type_filter, |source, eid| {
+            // A self-relationship is incident to its node twice. Undirected
+            // matching traverses each relationship once, so the outgoing walk
+            // above has already taken it (#640).
+            if matches!(edge_pat.direction, Direction::Both) && source == node {
+                return;
             }
-        }
+            keep(eid, source, &mut stop, &mut err);
+        });
     }
-    out
+    match err {
+        Some(e) => Err(e),
+        None => Ok(stop),
+    }
 }
 
 /// Match `path.segments[seg_idx..]` starting from `current`. Once every segment
@@ -743,46 +805,44 @@ fn exists_expand_hops(
         None
     };
 
-    for (edge, neighbor) in exists_neighbors(store, current, &segment.edge) {
-        // The pin cannot be satisfied by any other neighbour, so skip before
-        // the record clone below rather than after the recursion.
-        if let Some(target) = pinned_target {
-            if neighbor != target {
-                continue;
+    // The pin and the isomorphism check happen inside the walk, before any
+    // allocation: a neighbour that cannot close the segment costs a comparison
+    // rather than an `Edge` clone and a record clone.
+    exists_for_each_neighbor(
+        store,
+        current,
+        &segment.edge,
+        pinned_target,
+        visited_edges,
+        |eid, neighbor| {
+            let mut next_visited = visited_edges.to_vec();
+            next_visited.push(eid);
+
+            let mut next = bindings.clone();
+            if let Some(var) = segment.edge.variable.as_deref() {
+                // Only a pattern that binds the edge needs it materialised.
+                if let Some(edge) = store.get_edge(eid) {
+                    next.bind(
+                        var.to_string(),
+                        Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
+                    );
+                }
             }
-        }
-        // Relationship isomorphism: an edge may not repeat within one path.
-        if visited_edges.contains(&edge.id) {
-            continue;
-        }
-        let mut next_visited = visited_edges.to_vec();
-        next_visited.push(edge.id);
 
-        let mut next = bindings.clone();
-        if let Some(var) = segment.edge.variable.as_deref() {
-            next.bind(
-                var.to_string(),
-                Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
-            );
-        }
-
-        if exists_expand_hops(
-            path,
-            seg_idx,
-            neighbor,
-            depth + 1,
-            min_hops,
-            max_hops,
-            &next,
-            &next_visited,
-            where_clause,
-            store,
-        )? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+            exists_expand_hops(
+                path,
+                seg_idx,
+                neighbor,
+                depth + 1,
+                min_hops,
+                max_hops,
+                &next,
+                &next_visited,
+                where_clause,
+                store,
+            )
+        },
+    )
 }
 
 /// Evaluate list comprehension: [x IN list WHERE cond | expr]
