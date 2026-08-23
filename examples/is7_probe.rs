@@ -125,11 +125,15 @@ RETURN count(f) AS c"
         println!("{label:<44} median {:>8.3} ms   rows {rows}", times[times.len() / 2]);
     }
 
-    println!("\n--- plan of IS7 as written ---");
-    let q = parse_query(&format!("EXPLAIN {full}"))?;
-    for r in &QueryExecutor::new(&graph).execute(&q)?.records {
-        if let Some(v) = r.get("plan") {
-            println!("{}", format!("{v:?}").replace("\\n", "\n"));
+    // Plans for both, because the `count` shape is the slow one and #711
+    // described its plan by inference from IS7's rather than reading it.
+    for (label, cypher) in [("IS7 as written", &full), ("op's KNOWS degree, counted", &knows_only)] {
+        println!("\n--- plan of {label} ---");
+        let q = parse_query(&format!("EXPLAIN {cypher}"))?;
+        for r in &QueryExecutor::new(&graph).execute(&q)?.records {
+            if let Some(v) = r.get("plan") {
+                println!("{}", format!("{v:?}").replace("\\n", "\n"));
+            }
         }
     }
     Ok(())
