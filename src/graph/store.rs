@@ -622,6 +622,25 @@ pub struct GraphStore {
 
     /// Free edge IDs for reuse
     free_edge_ids: Vec<u64>,
+    /// Edge ids below this may be referenced by a frozen CSR segment and must
+    /// never be reused.
+    ///
+    /// `delete_edge` removes an edge's entry from the **write buffer**, but the
+    /// frozen segments are immutable and keep theirs. What hides a dead entry is
+    /// the `EDGE_TYPE_UNSET` tombstone in `edge_type_ids[id]`, which is why even
+    /// a wildcard walk consults that array.
+    ///
+    /// The same `delete_edge` pushed the id onto `free_edge_ids`, and
+    /// `create_edge` pops from it — so the next edge created overwrote the
+    /// tombstone with a real type and the stale entry became visible again,
+    /// pointing at the *deleted* edge's endpoints. One `compact_adjacency`
+    /// (which snapshot import always does), one delete and one unrelated
+    /// create was enough to make a node report a neighbour it has no edge to.
+    ///
+    /// An id created *after* the last compaction lives only in the write
+    /// buffer, where deletion really does remove it, so those stay reusable.
+    /// The watermark is what separates the two.
+    frozen_edge_watermark: u64,
 
     /// Label index for fast lookups
     label_index: HashMap<Label, HashSet<NodeId>>,
@@ -699,6 +718,7 @@ impl GraphStore {
             edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
+            frozen_edge_watermark: 0,
             label_index: HashMap::new(),
             label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
@@ -1988,8 +2008,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
         let tgt_labels: Vec<Label> = self.get_node(edge.target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
 
-        // Add to free list
-        self.free_edge_ids.push(id.as_u64());
+        // Add to free list — but only if no frozen segment can be holding a
+        // stale entry for this id. Reusing one that is frozen overwrites the
+        // tombstone that hides it and resurrects a deleted edge.
+        if id.as_u64() >= self.frozen_edge_watermark {
+            self.free_edge_ids.push(id.as_u64());
+        }
 
         // Remove from edge type index
         if let Some(edge_set) = self.edge_type_index.get_mut(&edge.edge_type) {
@@ -3081,6 +3105,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.frozen_outgoing.push(frozen_out);
         self.frozen_incoming.push(frozen_in);
 
+        // Every id in existence is now referenced by a frozen segment, so none
+        // of them may be recycled: reuse overwrites the tombstone that hides a
+        // deleted edge's immutable entry. Ids minted after this point live in
+        // the write buffer, where deletion removes the entry outright, and stay
+        // reusable. Any id already queued for reuse was freed while it was
+        // buffer-only, so it is still safe — except that it is about to be
+        // frozen if it was re-created, which the watermark covers because the
+        // re-created edge's entry is the one that got frozen.
+        self.frozen_edge_watermark = self.next_edge_id;
+        self.free_edge_ids.retain(|&id| id >= self.frozen_edge_watermark);
+
         // Clear write buffers in parallel (can be millions of Vecs)
         if self.outgoing.len() >= 10_000 {
             self.outgoing.par_iter_mut().for_each(|v| { v.clear(); v.shrink_to_fit(); });
@@ -3323,6 +3358,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.frozen_incoming.clear();
         self.free_node_ids.clear();
         self.free_edge_ids.clear();
+        self.frozen_edge_watermark = 0;
         self.label_index.clear();
         self.edge_type_index.clear();
         self.vector_index = Arc::new(VectorIndexManager::new());

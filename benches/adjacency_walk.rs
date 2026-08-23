@@ -199,6 +199,28 @@ fn main() {
     println!("{:<48} {:>9}  {:>12} {:>12}", "walk", "ns/edge", "visited", "kept");
     println!("{:-<48} {:->9}  {:->12} {:->12}", "", "", "", "");
 
+    // The no-probe baseline. `get_outgoing_neighbor_slice` hands back the write
+    // buffer's raw adjacency run without consulting `edge_type_ids` at all, so
+    // the difference between this line and the wildcard below **is** the type
+    // probe — one random read per edge into an array with one `u16` per edge in
+    // the graph.
+    //
+    // The bench previously had no such line: both of its walks probed, so the
+    // probe could only be inferred from how the total moved with graph size.
+    // At 18 MB and 72 MB that inference said "free"; #738 measures 25 ns/edge
+    // at SF10, where the array is 353 MB, and this is the line that says how
+    // much of that is the probe (#738).
+    let raw = run("raw adjacency slice (no type probe)", &|| {
+        let (mut seen, mut kept) = (0u64, 0u64);
+        for &id in &ids {
+            for &(_t, _e) in store.get_outgoing_neighbor_slice(id) {
+                seen += 1;
+                kept += 1;
+            }
+        }
+        (seen, kept)
+    });
+
     let unfiltered = run("wildcard (still probes the type array)", &|| {
         let (mut seen, mut kept) = (0u64, 0u64);
         for &id in &ids {
@@ -289,6 +311,16 @@ fn main() {
     println!();
     println!("LDBC IC5 and IC9 both measure ~300-365 ns per edge visited on SF1, whose type");
     println!("array is 42 MB (#520).");
+    println!();
+    println!(
+        "The type probe costs {:.1} ns per edge here: {raw:.1} ns to walk the raw adjacency",
+        (unfiltered - raw).max(0.0)
+    );
+    println!(
+        "slice against {unfiltered:.1} with the probe, on a {:.0} MB array. That difference is what",
+        store.edge_count() as f64 * 2.0 / 1e6
+    );
+    println!("#738 is about, and it is the number to watch as the array outgrows cache.");
     println!();
     println!("The walk itself is {unfiltered:.1} ns per edge. Running the same traversal through the");
     println!("query engine costs {expand_ns:.1} ns per edge visited -- {:.0}x the walk. Whatever `Expand`", expand_ns / unfiltered.max(0.01));
