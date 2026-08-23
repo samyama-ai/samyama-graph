@@ -1264,8 +1264,34 @@ impl QueryPlanner {
             }
         }
 
+        // Names for anonymous pattern variables, shared by both MATCH loops so
+        // a name minted before the first `WITH` cannot collide with one minted
+        // after it.
+        let mut anon_counter: usize = 0;
+
         // 1a. Handle pre-WITH MATCH clauses
         for (match_idx, match_clause) in pre_with_clauses.iter().enumerate() {
+            // A clause whose paths all start from a variable the pipeline has
+            // already bound is an expansion, not a second scan to join against.
+            // Only the post-`WITH` loop did this, so a query whose clauses all
+            // precede the first `WITH` — most queries — planned each one
+            // standalone and joined: `MATCH (m:Post {id: $id})-[:HAS_CREATOR]->(op)
+            // MATCH (op)-[:KNOWS]-(f) RETURN count(f)` scanned every `:Person`
+            // and hash-joined back to the one node already resolved (#711).
+            if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
+                let upstream = operator.take().unwrap();
+                let (current_op, new_vars) = self.plan_pushed_down_match(
+                    match_clause,
+                    per_match_where[match_idx].as_ref(),
+                    &pre_match_var_sets[match_idx],
+                    upstream,
+                    &mut anon_counter,
+                )?;
+                operator = Some(current_op);
+                known_vars.extend(new_vars);
+                continue;
+            }
+
             let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
@@ -1434,8 +1460,6 @@ impl QueryPlanner {
             all_with_stages.push((wc, stage_unwind, post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
-        let mut anon_counter: usize = 0;
-
         for (stage_idx, (with_clause, stage_unwind, stage_matches, stage_where)) in all_with_stages.iter().enumerate() {
             // Apply the WITH barrier
             if let Some(op) = operator {
@@ -1520,69 +1544,13 @@ impl QueryPlanner {
             for (match_idx, match_clause) in stage_matches.iter().enumerate() {
                 if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
                     let upstream = operator.take().unwrap();
-                    let preds = per_match_where[match_idx]
-                        .as_ref()
-                        .map(|wc| flatten_and_predicates(&wc.predicate))
-                        .unwrap_or_default();
-
-                    let mut current_op = upstream;
-                    let mut new_vars = HashSet::new();
-
-                    for path in &match_clause.pattern.paths {
-                        let start_var = path.start.variable.as_ref().unwrap();
-                        let path_var_set: HashSet<String> = {
-                            let mut vs = HashSet::new();
-                            vs.insert(start_var.clone());
-                            for seg in &path.segments {
-                                if let Some(v) = &seg.node.variable { vs.insert(v.clone()); }
-                                if let Some(v) = &seg.edge.variable { vs.insert(v.clone()); }
-                            }
-                            vs
-                        };
-                        let path_preds: Vec<Expression> = preds
-                            .iter()
-                            .filter(|p| {
-                                let mut pvars = HashSet::new();
-                                Self::collect_expression_variables(p, &mut pvars);
-                                pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
-                            })
-                            .cloned()
-                            .collect();
-
-                        let (expanded_op, path_vars) = self.plan_path_with_bound_start(
-                            path,
-                            start_var,
-                            path_preds,
-                            current_op,
-                            &mut anon_counter,
-                        )?;
-                        current_op = expanded_op;
-                        new_vars.extend(path_vars);
-                    }
-
-                    // Apply remaining predicates for this MATCH
-                    let remaining_preds: Vec<Expression> = preds
-                        .into_iter()
-                        .filter(|p| {
-                            let mut pvars = HashSet::new();
-                            Self::collect_expression_variables(p, &mut pvars);
-                            !pvars.is_empty()
-                                && !match_var_sets[match_idx]
-                                    .iter()
-                                    .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
-                        })
-                        .collect();
-                    if !remaining_preds.is_empty() {
-                        let filter_expr = remaining_preds
-                            .into_iter()
-                            .reduce(|acc, pred| Expression::Binary {
-                                left: Box::new(acc),
-                                op: BinaryOp::And,
-                                right: Box::new(pred),
-                            }).unwrap();
-                        current_op = Box::new(FilterOperator::new(current_op, filter_expr));
-                    }
-
+                    let (current_op, new_vars) = self.plan_pushed_down_match(
+                        match_clause,
+                        per_match_where[match_idx].as_ref(),
+                        &match_var_sets[match_idx],
+                        upstream,
+                        &mut anon_counter,
+                    )?;
                     operator = Some(current_op);
                     known_vars.extend(new_vars);
                 } else {
@@ -5609,10 +5577,140 @@ impl QueryPlanner {
 
     /// Check if all paths in a match clause have bound start variables and no special path types.
     /// Returns true if push-down can be applied to the entire clause.
+    /// Plan a MATCH whose paths all start from a variable the pipeline already
+    /// bound, chaining expands onto `upstream` instead of planning the clause
+    /// standalone and joining.
+    ///
+    /// The caller must have checked `can_pushdown_match`. Returns the operator
+    /// and the variables the clause introduced.
+    ///
+    /// This was inline in the post-`WITH` loop and nowhere else, so a query
+    /// whose clauses all precede the first `WITH` — which is most queries —
+    /// planned every clause independently and joined them. `MATCH (m:Post
+    /// {id: $id})-[:HAS_CREATOR]->(op) MATCH (op)-[:KNOWS]-(f) RETURN count(f)`
+    /// therefore scanned all 10,620 `:Person` nodes and hash-joined back to the
+    /// one node the first clause had already resolved: 99 ms to count one
+    /// person's ~23 friends (#711).
+    fn plan_pushed_down_match(
+        &self,
+        match_clause: &MatchClause,
+        where_clause: Option<&WhereClause>,
+        clause_vars: &HashSet<String>,
+        upstream: OperatorBox,
+        anon_counter: &mut usize,
+    ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
+        let preds = where_clause
+            .map(|wc| flatten_and_predicates(&wc.predicate))
+            .unwrap_or_default();
+
+        let mut current_op = upstream;
+        let mut new_vars = HashSet::new();
+
+        for path in &match_clause.pattern.paths {
+            let start_var = path
+                .start
+                .variable
+                .as_ref()
+                .expect("can_pushdown_match requires a bound start variable");
+            let path_var_set: HashSet<String> = {
+                let mut vs = HashSet::new();
+                vs.insert(start_var.clone());
+                for seg in &path.segments {
+                    if let Some(v) = &seg.node.variable {
+                        vs.insert(v.clone());
+                    }
+                    if let Some(v) = &seg.edge.variable {
+                        vs.insert(v.clone());
+                    }
+                }
+                vs
+            };
+            let path_preds: Vec<Expression> = preds
+                .iter()
+                .filter(|p| {
+                    let mut pvars = HashSet::new();
+                    Self::collect_expression_variables(p, &mut pvars);
+                    pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
+                })
+                .cloned()
+                .collect();
+
+            let (expanded_op, path_vars) = self.plan_path_with_bound_start(
+                path,
+                start_var,
+                path_preds,
+                current_op,
+                anon_counter,
+            )?;
+            current_op = expanded_op;
+            new_vars.extend(path_vars);
+        }
+
+        // Predicates the per-path pass did not take.
+        let remaining_preds: Vec<Expression> = preds
+            .into_iter()
+            .filter(|p| {
+                let mut pvars = HashSet::new();
+                Self::collect_expression_variables(p, &mut pvars);
+                !pvars.is_empty()
+                    && !clause_vars.iter().any(|_| pvars.iter().all(|v| new_vars.contains(v)))
+            })
+            .collect();
+        if !remaining_preds.is_empty() {
+            let filter_expr = remaining_preds
+                .into_iter()
+                .reduce(|acc, pred| Expression::Binary {
+                    left: Box::new(acc),
+                    op: BinaryOp::And,
+                    right: Box::new(pred),
+                })
+                .unwrap();
+            current_op = Box::new(FilterOperator::new(current_op, filter_expr));
+        }
+
+        Ok((current_op, new_vars))
+    }
+
     fn can_pushdown_match(match_clause: &MatchClause, known_vars: &HashSet<String>) -> bool {
         if match_clause.optional {
             return false;
         }
+        // Paths in one clause may not share a variable this clause introduces.
+        //
+        // The pushdown chains the paths, so a second path binding a variable
+        // the first already bound *rebinds* it rather than matching it, and
+        // the correlation between them is lost. TCK `Match3` [20]:
+        //
+        //   MATCH (a {name:'A'}), (b {name:'B'}), (c {name:'C'})
+        //   MATCH (a)-->(x), (b)-->(x), (c)-->(x) RETURN x
+        //
+        // wants the two nodes all three point at; chained, it answers with
+        // whatever the last path bound. A join across the paths gets this
+        // right, so a clause of that shape declines the pushdown.
+        let mut introduced: HashSet<&String> = HashSet::new();
+        for path in &match_clause.pattern.paths {
+            let mut this_path: Vec<&String> = Vec::new();
+            if let Some(v) = &path.start.variable {
+                this_path.push(v);
+            }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable {
+                    this_path.push(v);
+                }
+                if let Some(v) = &seg.edge.variable {
+                    this_path.push(v);
+                }
+            }
+            for v in this_path {
+                if known_vars.contains(v) {
+                    continue;
+                }
+                if !introduced.insert(v) {
+                    return false;
+                }
+            }
+        }
+
         for path in &match_clause.pattern.paths {
             // Must have a start variable that's bound
             let start_var = match &path.start.variable {
@@ -5621,6 +5719,30 @@ impl QueryPlanner {
             };
             if !known_vars.contains(start_var) {
                 return false;
+            }
+            // ...and nothing *after* the start may be bound already. The
+            // pushdown chains expands, which bind their target; a target that
+            // is already bound has to be *matched* against, and chaining
+            // rebinds it instead, losing the correlation the query asks for:
+            //
+            //   MATCH (b)<-[:ON]-(d1)-[:OF]->(v1)-[:VARIANT_OF]->(m) ...
+            //   MATCH (b)<-[:ON]-(d2)-[:OF]->(v2)-[:VARIANT_OF]->(m) ...
+            //
+            // pairs each model's fp32 variant with its *own* int8 variant --
+            // two rows. Chained, the second path rebinds `m` and answers four.
+            // A join on every shared variable gets this right (#360), so a
+            // clause that closes back onto a bound variable declines.
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable {
+                    if known_vars.contains(v) {
+                        return false;
+                    }
+                }
+                if let Some(v) = &seg.edge.variable {
+                    if known_vars.contains(v) {
+                        return false;
+                    }
+                }
             }
             // Skip shortestPath and variable-length patterns
             if !matches!(path.path_type, PathType::Normal) {
