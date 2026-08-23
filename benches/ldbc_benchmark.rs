@@ -1010,7 +1010,11 @@ async fn main() -> Result<(), Error> {
         println!();
         println!("Profiled {} query/queries in {}.", queries.len(), format_duration(bench_time));
         bench_setup::report_drift(calibration);
-        if errors > 0 {
+        // Same rule as the summary path below: a short or complex read that
+        // returned nothing did not measure a traversal, and a profile of it is
+        // a profile of an empty plan. Exiting 0 here is how `--query IS7
+        // --profile` reported success against a postId with no replies.
+        if errors > 0 || empty_reads > 0 {
             std::process::exit(1);
         }
         return Ok(());

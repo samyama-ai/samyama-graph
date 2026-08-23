@@ -122,6 +122,26 @@ test = true
 name = "property_bridge"
 test = true
 
+[[example]]
+name = "ldbc_loader"
+test = true
+
+[[example]]
+name = "aact_biomarker_extractor"
+test = true
+
+[[example]]
+name = "civic_loader"
+test = true
+
+[[example]]
+name = "hgnc_ensembl_loader"
+test = true
+
+[[example]]
+name = "oncokb_loader"
+test = true
+
 [[bench]]
 name = "aggregate_throughput"
 harness = false

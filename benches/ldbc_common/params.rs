@@ -401,8 +401,22 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
             posts_with_replies.insert(post);
         }
     })?;
+    // An empty constraint set means `usable` waves everything through, so a
+    // parse that silently drops every row turns "posts that have replies" into
+    // "any post at all" without a word. The checked-in SF1 file was written
+    // that way: its provenance says the postId has replies and it has none, so
+    // IS7 measured an empty result at SF1 from the day the file landed.
+    if posts_with_replies.is_empty() {
+        return Err("comment_replyOf_post_0_0.csv yielded no post ids -- \
+                    the reply constraint would silently not apply"
+            .into());
+    }
     let post_id = pick_own(&post_creator, person_id, &hop1, &posts_with_replies)
         .ok_or("no replied-to posts by the anchor or its immediate friends")?;
+    // The provenance line below states this as fact. State it only if it holds.
+    if !posts_with_replies.contains(&post_id) {
+        return Err(format!("chosen postId {post_id} has no replies -- IS7 would measure nothing").into());
+    }
 
     let mut comment_creator: HashMap<i64, i64> = HashMap::new();
     for_each_row(&dynamic.join("comment_hasCreator_person_0_0.csv"), |f| {
