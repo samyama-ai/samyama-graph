@@ -213,7 +213,77 @@ fn main() {
         ));
     }
     std::fs::write(&index_csv, ix.join("\n") + "\n").expect("write index stats");
-    eprintln!("[hier] wrote {out} and {}", index_csv.display());
+
+    // Who produced these numbers, written beside them.
+    //
+    // `results.csv` went a release out of step with `docs/BENCHMARKS.md` and
+    // nothing in either said so: the CSV had H1 at 0.25x where the prose had
+    // 1.1x, and a reader doing the right thing — going to the artifact rather
+    // than trusting the prose — got the worse, older number (#476). A file
+    // that cannot say when or where it came from cannot be checked against
+    // anything.
+    //
+    // Deliberately not a claim that the numbers are good: a run on a laptop
+    // writes a laptop here, which is exactly the fact a reader needs in order
+    // to decide whether to quote it.
+    let provenance = std::path::Path::new(&out)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("PROVENANCE.json");
+    let git = |args: &[&str]| -> String {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let field_after_colon = |path: &str, prefix: &str| -> String {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| {
+                t.lines()
+                    .find(|l| l.starts_with(prefix))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|v| v.trim().to_string())
+            })
+            .unwrap_or_default()
+    };
+    let whole_file = |path: &str| -> String {
+        std::fs::read_to_string(path).map(|t| t.trim().to_string()).unwrap_or_default()
+    };
+    let dirty = !git(&["status", "--porcelain"]).is_empty();
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
+        .unwrap_or_default();
+    std::fs::write(
+        &provenance,
+        format!(
+            "{{\n  \"commit\": \"{}\",\n  \"dirty\": {},\n  \"host\": \"{}\",\n  \
+             \"cpu\": \"{}\",\n  \"cores\": {},\n  \"load_average_1m\": \"{}\",\n  \
+             \"reps\": {},\n  \"corpus\": \"{}\",\n  \"queries\": {},\n  \
+             \"agreed\": {}\n}}\n",
+            git(&["rev-parse", "--short=7", "HEAD"]),
+            dirty,
+            whole_file("/proc/sys/kernel/hostname"),
+            field_after_colon("/proc/cpuinfo", "model name"),
+            cores,
+            load,
+            reps,
+            corpus_path,
+            total,
+            agreed,
+        ),
+    )
+    .expect("write provenance");
+    eprintln!(
+        "[hier] wrote {out}, {} and {}",
+        index_csv.display(),
+        provenance.display()
+    );
 
     if !skipped.is_empty() {
         println!();
