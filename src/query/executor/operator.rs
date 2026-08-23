@@ -4183,8 +4183,27 @@ impl ExpandOperator {
         // Relationship isomorphism (#684): an edge this pattern already walked
         // is not a candidate. Checked here, during the adjacency walk, so a
         // rejected edge never becomes a record.
+        //
+        // Filtered to the edges this expand could actually walk. An edge of a
+        // type outside `type_filter` is not a candidate for re-traversal, so
+        // keeping it only lengthens a `contains` that runs **per candidate
+        // edge**. On LDBC IC6 the clause walks `HAS_TAG`, `HAS_CREATOR` and
+        // `KNOWS`, so each expand inherits edges it could never take; the same
+        // reasoning applied to `VarLengthExpandOperator` is what took IC6 from
+        // forty minutes back to 309 ms (#734).
+        let used_owned: Vec<crate::graph::EdgeId>;
         let used_edges: &[crate::graph::EdgeId] = if self.track_edges && !self.starts_clause {
-            record.used_edge_slice()
+            let inherited = record.used_edge_slice();
+            if inherited.is_empty() {
+                &[]
+            } else {
+                used_owned = inherited
+                    .iter()
+                    .copied()
+                    .filter(|&e| store.edge_traversable_by(e, type_filter))
+                    .collect();
+                &used_owned
+            }
         } else {
             &[]
         };
