@@ -1292,6 +1292,37 @@ impl QueryPlanner {
                 continue;
             }
 
+            // The same idea for `OPTIONAL MATCH`, which `can_pushdown_match`
+            // declines outright because it has to emit a null-filled row when
+            // nothing matches. A single-segment optional clause hanging off a
+            // bound variable can do that inside the expand, and the difference
+            // is not marginal: `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with
+            // both ends bound scanned every `:Person` and cost 422 ms where
+            // the equivalent `EXISTS` cost 0.02 (#726).
+            //
+            // A `WHERE` on the clause keeps the join: in `OPTIONAL MATCH` the
+            // predicate is part of the optional pattern, so a row failing it
+            // must still emit nulls, and a filter above the expand would
+            // delete exactly that row.
+            if operator.is_some() && per_match_where[match_idx].is_none() {
+                if let Some(null_vars) =
+                    Self::optional_pushdown_vars(match_clause, &known_vars)
+                {
+                    let upstream = operator.take().unwrap();
+                    let path = &match_clause.pattern.paths[0];
+                    let start_var = path.start.variable.clone().unwrap();
+                    operator = Some(self.plan_optional_expand(
+                        path,
+                        &start_var,
+                        null_vars,
+                        &known_vars,
+                        upstream,
+                    ));
+                    known_vars.extend(pre_match_var_sets[match_idx].iter().cloned());
+                    continue;
+                }
+            }
+
             let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
@@ -5669,6 +5700,127 @@ impl QueryPlanner {
         }
 
         Ok((current_op, new_vars))
+    }
+
+    /// Build the optional expand for a clause `optional_pushdown_vars` accepted.
+    ///
+    /// One segment, so there is exactly one expand and no partial-match
+    /// ambiguity. Everything that decides whether the pattern matches has to
+    /// live *inside* the expand: a `FilterOperator` above it would delete the
+    /// null row the clause owes a source that matched nothing, turning
+    /// `OPTIONAL MATCH` back into `MATCH`. Inline properties therefore go
+    /// through `with_target_props`, which filters during the walk, and the
+    /// caller declines the pushdown when the clause carries a `WHERE`.
+    fn plan_optional_expand(
+        &self,
+        path: &PathPattern,
+        start_var: &str,
+        null_vars: Vec<String>,
+        known_vars: &HashSet<String>,
+        upstream: OperatorBox,
+    ) -> OperatorBox {
+        let segment = &path.segments[0];
+        let target_var = segment
+            .node
+            .variable
+            .clone()
+            .expect("optional_pushdown_vars requires a named far end");
+        let edge_types: Vec<String> =
+            segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+
+        let mut expand = ExpandOperator::new(
+            upstream,
+            start_var.to_string(),
+            target_var.clone(),
+            segment.edge.variable.clone(),
+            edge_types,
+            segment.edge.direction.clone(),
+        );
+        // A far end that is already bound is a closing hop: it can only land on
+        // that node, and the pin says so during the walk rather than after it.
+        // This is the `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` case.
+        if known_vars.contains(&target_var) {
+            expand = expand.with_target_bound_var(target_var.clone());
+        }
+        if !segment.node.labels.is_empty() {
+            expand = expand.with_target_labels(segment.node.labels.clone());
+        }
+        if let Some(props) = &segment.node.properties {
+            if !props.is_empty() {
+                let mut pushed: Vec<(String, PropertyValue)> =
+                    props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                pushed.sort_by(|a, b| a.0.cmp(&b.0));
+                expand = expand.with_target_props(pushed);
+            }
+        }
+        Box::new(expand.with_optional(null_vars))
+    }
+
+    /// Whether an `OPTIONAL MATCH` can be pushed onto the pipeline as an
+    /// optional expand instead of planned standalone and left-outer-joined.
+    ///
+    /// Deliberately narrower than `can_pushdown_match`. An optional clause has
+    /// to emit a null-filled row when it matches nothing, and only a
+    /// **single-segment** path makes that unambiguous: with two segments a
+    /// source row that matches the first hop and not the second still owes one
+    /// null row, not one per partial match, and the chain cannot tell the
+    /// difference. That case keeps the join, which already handles it.
+    ///
+    /// The shape this does cover is the common one — `OPTIONAL MATCH
+    /// (a)-[r:T]->(b)` hanging off something already bound — and it is the one
+    /// that costs 422 ms where the equivalent `EXISTS` costs 0.02 (#726).
+    ///
+    /// Returns the variables the clause introduces, which are the ones the
+    /// operator nulls when nothing matches. `author` in
+    /// `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with both ends bound is *not*
+    /// among them: nulling it would erase a binding the row already had.
+    fn optional_pushdown_vars(
+        match_clause: &MatchClause,
+        known_vars: &HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if !match_clause.optional {
+            return None;
+        }
+        let [path] = &match_clause.pattern.paths[..] else {
+            return None;
+        };
+        if !matches!(path.path_type, PathType::Normal) || path.path_variable.is_some() {
+            return None;
+        }
+        let [seg] = &path.segments[..] else {
+            return None;
+        };
+        if seg.edge.length.is_some() {
+            return None;
+        }
+        let start = path.start.variable.as_ref()?;
+        if !known_vars.contains(start) {
+            return None;
+        }
+        let mut introduced = Vec::new();
+        // The far node may be bound -- that is the pinned case, and the expand
+        // already knows how to close onto it -- or new, in which case it is
+        // nulled on a miss.
+        if let Some(v) = &seg.node.variable {
+            if !known_vars.contains(v) {
+                introduced.push(v.clone());
+            }
+        } else {
+            // An anonymous far end cannot be observed, so there is nothing to
+            // null and nothing to bind; the join is no worse and is simpler.
+            return None;
+        }
+        // A bound edge variable would have to be matched rather than rebound,
+        // which this path does not do.
+        match &seg.edge.variable {
+            Some(v) if known_vars.contains(v) => return None,
+            Some(v) => introduced.push(v.clone()),
+            None => {}
+        }
+        if introduced.is_empty() {
+            return None;
+        }
+        Some(introduced)
     }
 
     fn can_pushdown_match(match_clause: &MatchClause, known_vars: &HashSet<String>) -> bool {

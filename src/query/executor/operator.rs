@@ -3920,6 +3920,19 @@ pub struct ExpandOperator {
     /// the PERF-01 target. Applied here, a non-matching employer never
     /// becomes a row (#656).
     target_props: Vec<(String, PropertyValue)>,
+    /// The variables to bind to null when a source record matches nothing.
+    ///
+    /// `Some` marks this expand as an `OPTIONAL MATCH`: a source row that finds
+    /// no edge still produces a row, with the variables the clause introduces
+    /// set to null. `None` is an ordinary expand, where such a row disappears.
+    ///
+    /// Only the variables the clause *introduces* are listed. In
+    /// `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with both endpoints already
+    /// bound, that is `k` alone — nulling `author` would erase a binding the
+    /// row already had (#726).
+    optional_null_vars: Option<Vec<String>>,
+    /// Whether the current source record has emitted anything yet.
+    emitted_for_current: bool,
     /// The exact set of nodes the target may be, resolved once at plan time.
     ///
     /// `target_props` above still costs a `get_node` and a property compare per
@@ -3992,6 +4005,8 @@ impl ExpandOperator {
             target_labels: Vec::new(),
             target_props: Vec::new(),
             target_ids: None,
+            optional_null_vars: None,
+            emitted_for_current: false,
             track_edges: false,
             starts_clause: false,
             target_bound_var: None,
@@ -4043,6 +4058,13 @@ impl ExpandOperator {
         self
     }
 
+    /// Make this expand an `OPTIONAL MATCH`: a source row that matches nothing
+    /// still emits, with `null_vars` bound to null.
+    pub fn with_optional(mut self, null_vars: Vec<String>) -> Self {
+        self.optional_null_vars = Some(null_vars);
+        self
+    }
+
     pub fn with_target_ids(mut self, ids: std::collections::HashSet<NodeId>) -> Self {
         self.target_ids = Some(ids);
         self
@@ -4064,6 +4086,25 @@ impl ExpandOperator {
             .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
             .collect();
         self.type_ids = Some(ids);
+    }
+
+    /// The null-filled row an `OPTIONAL MATCH` owes a source record that
+    /// matched nothing, or `None` if it owes nothing.
+    ///
+    /// Consumes `current_record`, so it fires at most once per source row; the
+    /// caller then falls through to pulling the next input.
+    fn take_unmatched_optional_row(&mut self) -> Option<Record> {
+        let null_vars = self.optional_null_vars.as_ref()?;
+        if self.emitted_for_current {
+            return None;
+        }
+        let base = self.current_record.take()?;
+        let mut rec = base.clone_with_capacity(null_vars.len());
+        for v in null_vars {
+            rec.bind(v.clone(), Value::Null);
+        }
+        self.emitted_for_current = true;
+        Some(rec)
     }
 
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
@@ -4300,12 +4341,20 @@ impl PhysicalOperator for ExpandOperator {
                     new_record.mark_edge_used(edge_id);
                 }
 
+                self.emitted_for_current = true;
                 return Ok(Some(new_record));
+            }
+
+            // An OPTIONAL MATCH source row that matched nothing still emits,
+            // once, with the variables this clause introduces set to null.
+            if let Some(row) = self.take_unmatched_optional_row() {
+                return Ok(Some(row));
             }
 
             // Need new input record
             if let Some(record) = self.input.next(store)? {
                 self.current_record = Some(record.clone());
+                self.emitted_for_current = false;
                 self.load_edges(&record, store)?;
             } else {
                 return Ok(None);
@@ -4372,10 +4421,20 @@ impl PhysicalOperator for ExpandOperator {
                     expanded_records.push(new_record);
                 }
                 self.edge_index += take;
+                self.emitted_for_current = true;
             } else {
+                // Same rule as the single-row path: an OPTIONAL MATCH source
+                // row that matched nothing still emits once. Missing it here
+                // would make the answer depend on whether the plan happened to
+                // run batched, which is the shape of #684.
+                if let Some(row) = self.take_unmatched_optional_row() {
+                    expanded_records.push(row);
+                    continue;
+                }
                 // Need new input record
                 if let Some(record) = self.input.next(store)? {
                     self.current_record = Some(record.clone());
+                    self.emitted_for_current = false;
                     self.load_edges(&record, store)?;
                 } else {
                     break;
@@ -4398,6 +4457,9 @@ impl PhysicalOperator for ExpandOperator {
         self.current_record = None;
         self.current_edges.clear();
         self.edge_index = 0;
+        // Without this, a re-run would think the first source record had
+        // already emitted and would swallow its null row (#726).
+        self.emitted_for_current = false;
     }
 
     fn describe(&self) -> OperatorDescription {
