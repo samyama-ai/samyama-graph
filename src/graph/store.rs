@@ -2208,6 +2208,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Keeping the exclusion explicit here preserves that, including for the
     /// wildcard case where a filter-based check would otherwise let a stale
     /// adjacency entry through.
+    /// Public form of [`GraphStore::edge_type_matches`], for callers that need
+    /// to ask whether a *particular* edge could be traversed by a type-filtered
+    /// pattern segment.
+    ///
+    /// Used to decide whether relationship isomorphism can bite at all: an edge
+    /// an earlier segment walked is only a candidate for re-traversal if this
+    /// segment's type filter would accept it (#734).
+    #[inline]
+    pub fn edge_traversable_by(&self, edge_id: EdgeId, type_ids: Option<&[u16]>) -> bool {
+        self.edge_type_matches(edge_id, type_ids)
+    }
+
     #[inline]
     fn edge_type_matches(&self, edge_id: EdgeId, type_ids: Option<&[u16]>) -> bool {
         let id = self

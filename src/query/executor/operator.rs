@@ -4795,9 +4795,15 @@ impl VarLengthExpandOperator {
         // enforces relationship uniqueness.
         let mut path: Vec<(NodeId, crate::graph::EdgeId)> = Vec::new();
         // Seeded with what the clause has already walked, so a trail cannot
-        // retake an edge an earlier segment used (#710).
+        // retake an edge an earlier segment used (#710) — filtered to the edges
+        // this segment could actually walk, for the reason in `expand_from`.
         let mut edges: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
-            record.used_edge_slice().to_vec()
+            record
+                .used_edge_slice()
+                .iter()
+                .copied()
+                .filter(|&e| store.edge_traversable_by(e, type_filter))
+                .collect()
         } else {
             Vec::new()
         };
@@ -4884,10 +4890,33 @@ impl VarLengthExpandOperator {
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
-        // and for any single-segment pattern, which is why isolation costs
-        // nothing on the shapes LDBC actually runs.
+        // and for any single-segment pattern.
+        //
+        // **Filtered by this segment's own type filter**, which is not a
+        // refinement but the difference between IC6 taking 226 ms and taking
+        // over forty minutes. The planner reverses IC6 to anchor on its
+        // selective `:Tag`, so the var-length segment runs *last*:
+        //
+        //   VarLengthExpand ((friend)-[:KNOWS*1..2]-(p) [target pinned])
+        //
+        // The edges it inherits are `HAS_TAG` and `HAS_CREATOR`; the segment
+        // walks `:KNOWS`. They can never collide, so isolation has nothing to
+        // do here — but a non-empty `inherited` disabled the pinned-target
+        // shortcut below and turned one membership test per row into a whole
+        // BFS per row (#734).
+        //
+        // An edge of a type this segment cannot traverse is not a candidate for
+        // re-traversal, so dropping it changes no answer. An untyped segment
+        // filters nothing, which is correct: it can walk anything.
         let inherited: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
-            record.used_edge_slice().to_vec()
+            self.ensure_type_ids(store);
+            let types = self.type_ids.clone();
+            record
+                .used_edge_slice()
+                .iter()
+                .copied()
+                .filter(|&e| store.edge_traversable_by(e, types.as_deref()))
+                .collect()
         } else {
             Vec::new()
         };

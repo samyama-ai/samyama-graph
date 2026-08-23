@@ -239,3 +239,51 @@ fn a_range_above_the_lower_bound_keeps_matching() {
         vec!["a", "a", "b", "c"],
     );
 }
+
+/// A var-length segment must not be slowed by edges it could never walk.
+///
+/// The planner reverses LDBC IC6 to anchor on its selective `:Tag`, which puts
+/// the `KNOWS*1..2` segment **last** — so it inherits the `HAS_TAG` and
+/// `HAS_CREATOR` edges the earlier segments walked. Those can never be
+/// re-traversed by a `:KNOWS` segment, but a non-empty inherited set disabled
+/// the pinned-target shortcut and turned one membership test per row into a
+/// BFS per row: IC6 went from 226 ms to over forty minutes at SF10 (#734).
+///
+/// This asserts the answer, not the timing — a timing test would be a
+/// wall-clock assertion on a shared machine. What it pins is that the shape
+/// still resolves through the pinned-target path *and* still isolates edges of
+/// its own type, which the two assertions below separate.
+#[test]
+fn an_inherited_edge_of_another_type_does_not_constrain_a_typed_segment() {
+    let mut store = GraphStore::new();
+    run(&mut store, "CREATE (:N {name: \"a\"})");
+    run(&mut store, "CREATE (:N {name: \"b\"})");
+    run(&mut store, "CREATE (:M {name: \"t\"})");
+    // a -[:KNOWS]- b, and both tagged with t via a different type.
+    run(&mut store, "MATCH (a:N {name: \"a\"}), (b:N {name: \"b\"}) CREATE (a)-[:KNOWS]->(b)");
+    run(&mut store, "MATCH (b:N {name: \"b\"}), (t:M {name: \"t\"}) CREATE (b)-[:TAGGED]->(t)");
+
+    // The reversed shape: start at the selective far end, walk back through a
+    // different edge type, then take the var-length segment.
+    let rows = names(
+        &store,
+        "MATCH (t:M {name: \"t\"})<-[:TAGGED]-(b:N)-[:KNOWS*1..1]-(a:N) RETURN a.name AS n",
+    );
+    assert_eq!(
+        rows,
+        vec!["a".to_string()],
+        "the TAGGED edge the clause already walked cannot be walked by a KNOWS \
+         segment, so it must not constrain it"
+    );
+
+    // And the isolation itself still holds for an edge of the *same* type.
+    let same = names(
+        &store,
+        "MATCH (a:N {name: \"a\"})-[:KNOWS]-(b:N)-[:KNOWS*1..1]-(c:N) RETURN c.name AS n",
+    );
+    assert!(
+        same.is_empty(),
+        "the only KNOWS edge was walked by the first segment, so the var-length \
+         segment has none left: got {same:?}"
+    );
+}
