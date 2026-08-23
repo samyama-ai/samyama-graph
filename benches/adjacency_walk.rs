@@ -41,9 +41,26 @@
 //! traversal through the query engine costs **40x** that. Storage is a couple
 //! of percent of what `Expand` spends; the rest is the operator.
 //!
-//! One caveat this bench cannot settle at its default size: 9M edges makes the
-//! type array 18 MB, which fits in this host's L3. LDBC SF1's is 42 MB and does
-//! not. `--nodes 1000000` is the knob for testing that.
+//! That caveat about cache is now settled, and the answer is no. At 9M edges
+//! the type array is 18 MB and fits this host's 24 MB L3; at 36M it is 72 MB
+//! and does not. The walk is **1.4 ns/edge at both**, so the scattered type
+//! probe is not cache-bound — the prefetcher handles it, helped by `ByType`
+//! giving each node's run a constant stride.
+//!
+//! What *does* scale is the **target-label check**, which is not storage at
+//! all. `ExpandOperator::keeps` tests a far-end label by probing
+//! `nodes_with_label`, a `HashSet<NodeId>` holding every node carrying it, once
+//! per candidate edge:
+//!
+//! | nodes / edges | traversal, far end unlabelled | the label probe | total |
+//! |---|---:|---:|---:|
+//! | 300k / 9M | 52.5 ns/edge | **10.2** | 62.7 |
+//! | 1.2M / 36M | 67.2 ns/edge | **36.7** | ~104 |
+//!
+//! The probe grows 3.6x with the label, to **35% of the whole traversal**,
+//! because a label covering most of the graph is a multi-megabyte hash table
+//! and every candidate edge is a random probe into it. A dense bitset indexed
+//! by node id would be 150 KB for 1.2M nodes and a load-shift-mask (#665).
 //!
 //! It also fixes the normalisation. Per *edge visited*, IC5 (407 ns/row, keeps
 //! 513 of ~680) and IC9 (1976 ns/row, keeps 125 of ~680) look four times apart;
@@ -211,13 +228,41 @@ fn main() {
     let expand_ns = {
         use samyama::query::executor::QueryExecutor;
         use samyama::query::parser::parse_query;
-        let cypher = "MATCH (a:N)-[:TYPE0]->(b:N) RETURN count(b) AS c";
-        let query = parse_query(cypher).expect("query should parse");
-        let _ = QueryExecutor::new(&store).execute(&query).expect("query should run");
-        let started = Instant::now();
-        let out = QueryExecutor::new(&store).execute(&query).expect("query should run");
-        let ms = started.elapsed().as_secs_f64() * 1000.0;
-        let _ = out;
+        // Two forms, differing only in whether the far end carries a label.
+        //
+        // `keeps` tests a target label by probing `nodes_with_label`, a
+        // `HashSet<NodeId>` holding every node with that label — so a label
+        // covering most of the graph means a random probe into a multi-megabyte
+        // hash set **per candidate edge**. The difference between these two
+        // lines is what that costs, and it is the thing that scales with graph
+        // size while the walk itself does not (#665).
+        let labelled = "MATCH (a:N)-[:TYPE0]->(b:N) RETURN count(b) AS c";
+        let unlabelled = "MATCH (a:N)-[:TYPE0]->(b) RETURN count(b) AS c";
+        let time_it = |cypher: &str| -> f64 {
+            let query = parse_query(cypher).expect("query should parse");
+            let _ = QueryExecutor::new(&store).execute(&query).expect("query should run");
+            let started = Instant::now();
+            let out = QueryExecutor::new(&store).execute(&query).expect("query should run");
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let _ = out;
+            ms
+        };
+        let ms_unlabelled = time_it(unlabelled);
+        let ms = time_it(labelled);
+        println!(
+            "{:<48} {:>9.1}  {:>12} {:>12}",
+            "the same traversal, far end unlabelled",
+            ms_unlabelled * 1e6 / visited as f64,
+            visited,
+            visited / types
+        );
+        println!(
+            "{:<48} {:>9.1}  {:>12} {:>12}",
+            "  ... so the target-label probe costs",
+            (ms - ms_unlabelled) * 1e6 / visited as f64,
+            "",
+            ""
+        );
         // Rows emitted is the traversal's keep-count: one row per surviving edge.
         let emitted = visited / types;
         println!(
