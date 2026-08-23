@@ -532,6 +532,36 @@ const EXISTS_UNBOUNDED_MAX_HOPS: usize = 15;
 ///
 /// Returns true as soon as one complete path matches and the inner WHERE holds
 /// with every subquery variable bound.
+/// Refuse a hierarchy function when there is no hierarchy to consult.
+///
+/// `subsumes()` used to answer **false** whenever no index covered its
+/// arguments, on the stated reasoning that two nodes in no declared hierarchy
+/// are not in a subsumption relation. That is right when hierarchies exist and
+/// these nodes are outside them. It is a guess when *nothing* is declared, or
+/// when every index is stale — and it is a guess shaped exactly like an answer:
+/// on `c-[:BROADER]->b-[:BROADER]->a` the index and a plain traversal both say
+/// three nodes are subsumed by `a`, and with no index `subsumes` said zero,
+/// silently (#721).
+///
+/// There is no traversal fallback to offer, because without a declaration
+/// there is no relationship type to walk — the hierarchy *is* the declaration.
+/// So the honest answer is an error naming what is missing.
+fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
+    if store.hierarchy_index.any_usable() {
+        return Ok(());
+    }
+    let detail = if store.hierarchy_index.is_empty() {
+        "no hierarchy index is declared"
+    } else {
+        "every declared hierarchy index is stale or was declined"
+    };
+    Err(ExecutionError::RuntimeError(format!(
+        "{func}(): {detail}. Declare one with `CREATE HIERARCHY INDEX <name> ON \
+         ()-[:TYPE]->() ...`, REBUILD a stale one, or write the test as a \
+         variable-length traversal."
+    )))
+}
+
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
@@ -1370,8 +1400,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 None => match store.hierarchy_index.usable_containing(&[x, y]) {
                     Some(e) => e,
                     // Both nodes outside every hierarchy: they are not in a subsumption
-                    // relation anyone declared, which is FALSE rather than an error.
-                    None => return Ok(Value::Property(PropertyValue::Boolean(false))),
+                    // relation anyone declared, which is FALSE rather than an error --
+                    // but only once there is a hierarchy to be outside of (#721).
+                    None => {
+                        require_a_hierarchy(store, "subsumes")?;
+                        return Ok(Value::Property(PropertyValue::Boolean(false)));
+                    }
                 },
             };
             let guard = entry.read().unwrap();
@@ -1406,7 +1440,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 None => match store.hierarchy_index.usable_containing(&[root]) {
                     Some(e) => e,
-                    None => return Ok(Value::Property(PropertyValue::Null)),
+                    // Null for a root outside every hierarchy; an error when
+                    // there is no hierarchy at all (#721).
+                    None => {
+                        require_a_hierarchy(store, "hierarchy_rollup")?;
+                        return Ok(Value::Property(PropertyValue::Null));
+                    }
                 },
             };
             let guard = entry.read().unwrap();
@@ -1440,7 +1479,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 None => match store.hierarchy_index.usable_containing(&[a, b]) {
                     Some(e) => e,
-                    None => return Ok(Value::Property(PropertyValue::Array(Vec::new()))),
+                    // No common ancestor for two nodes outside every hierarchy;
+                    // an error when there is no hierarchy at all (#721).
+                    None => {
+                        require_a_hierarchy(store, "hierarchy_lca")?;
+                        return Ok(Value::Property(PropertyValue::Array(Vec::new())));
+                    }
                 },
             };
             let guard = entry.read().unwrap();

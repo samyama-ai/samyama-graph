@@ -9,11 +9,13 @@
 //! of 112 corpus entries whose baseline re-runs the same Cypher: for those the
 //! "ground truth" is the same index-dependent query with the index taken away.
 //!
-//! The expectation below is the traversal's answer, which is the definition of
-//! the relationship. It fails today and is `#[ignore]`d against #721 rather
-//! than weakened, because either resolution — compute it, or refuse — makes it
-//! pass, and asserting today's `0` would have to be rewritten by whoever picks
-//! it up.
+//! Resolved by refusing. There is no traversal fallback to offer: without a
+//! declaration there is no relationship type to walk, because the hierarchy
+//! *is* the declaration. So the function now errors and names what is missing.
+//!
+//! The distinction the fix preserves: two nodes outside every hierarchy, when
+//! hierarchies exist, are still legitimately `false`. Only "there is no
+//! hierarchy at all, or every one is stale" is an error.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
@@ -34,6 +36,14 @@ fn count(store: &GraphStore, cypher: &str) -> i64 {
     match out.records.first().and_then(|r| r.get("n")) {
         Some(Value::Property(PropertyValue::Integer(i))) => *i,
         other => panic!("expected integer n, got {other:?}"),
+    }
+}
+
+fn error(store: &GraphStore, cypher: &str) -> String {
+    let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}` should parse: {e}"));
+    match QueryExecutor::new(store).execute(&q) {
+        Ok(out) => panic!("`{cypher}` should have failed, got {:?}", out.records),
+        Err(e) => e.to_string(),
     }
 }
 
@@ -80,10 +90,49 @@ fn the_traversal_needs_no_index() {
     assert_eq!(count(&chain(false), BY_TRAVERSAL), 3);
 }
 
-/// Without the index, `subsumes` answers `0` where the relationship holds for
-/// three nodes. Answering *something* is the bug: an error would be fine.
+/// Without any hierarchy declared, `subsumes` refuses instead of answering
+/// `false` for every pair — which is what it used to do, giving `0` where the
+/// relationship holds for three nodes.
 #[test]
-#[ignore = "#721: subsumes answers false for everything with no hierarchy index"]
-fn subsumes_without_an_index_does_not_quietly_answer_no() {
-    assert_eq!(count(&chain(false), SUBSUMED), 3);
+fn subsumes_without_an_index_refuses_rather_than_answering_no() {
+    let why = error(&chain(false), SUBSUMED);
+    assert!(why.contains("subsumes()"), "{why}");
+    assert!(why.contains("no hierarchy index is declared"), "{why}");
+    // The message has to say what to do about it, not just what is wrong.
+    assert!(why.contains("CREATE HIERARCHY INDEX"), "{why}");
+}
+
+/// `hierarchy_rollup` and `hierarchy_lca` degrade the same way — to null and
+/// to an empty list — and get the same guard.
+#[test]
+fn the_other_hierarchy_functions_refuse_too() {
+    let store = chain(false);
+    let rollup = error(
+        &store,
+        "MATCH (r:Term {code:\"a\"}) RETURN hierarchy_rollup(r, \"sum\") AS n",
+    );
+    assert!(rollup.contains("hierarchy_rollup()"), "{rollup}");
+    let lca = error(
+        &store,
+        "MATCH (a:Term {code:\"b\"}), (b:Term {code:\"c\"}) RETURN hierarchy_lca(a, b) AS n",
+    );
+    assert!(lca.contains("hierarchy_lca()"), "{lca}");
+}
+
+/// Two nodes outside every hierarchy, where a hierarchy *does* exist, are
+/// still `false`. That was the deliberate decision behind the old behaviour
+/// and it is right — the fix narrows it rather than reversing it.
+#[test]
+fn nodes_outside_an_existing_hierarchy_are_still_false() {
+    let mut store = chain(true);
+    run(&mut store, "CREATE (:Other {code: \"x\"})");
+    run(&mut store, "CREATE (:Other {code: \"y\"})");
+    assert_eq!(
+        count(
+            &store,
+            "MATCH (d:Other {code:\"x\"}), (r:Other {code:\"y\"}) \
+             WHERE subsumes(d, r) RETURN count(d) AS n"
+        ),
+        0
+    );
 }
