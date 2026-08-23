@@ -1317,6 +1317,7 @@ impl QueryPlanner {
                         null_vars,
                         &known_vars,
                         upstream,
+                        store,
                     ));
                     known_vars.extend(pre_match_var_sets[match_idx].iter().cloned());
                     continue;
@@ -3122,29 +3123,6 @@ impl QueryPlanner {
         Ok(result)
     }
 
-    /// Attach any deferred predicate whose variables are all bound by now.
-    ///
-    /// The path builders used to hold every predicate that mentions a
-    /// non-anchor variable until the **whole path** was expanded. On LDBC IC3
-    /// that meant `m.creationDate >= … AND m.creationDate < …` -- which
-    /// references only `m`, bound by the *first* expand -- was evaluated after
-    /// the second expand had already produced 409,960 rows, of which 622
-    /// survived. The predicate could have cut the second expand's input by
-    /// ~80% (#328).
-    ///
-    /// Applying a conjunct as soon as its variables are bound cannot change
-    /// the answer of a conjunctive pattern: the rows it removes are rows the
-    /// later filter would have removed. `OPTIONAL MATCH` is not affected --
-    /// this runs inside a single path of a single MATCH, and the outer join is
-    /// built above it.
-    /// Equality predicates of the form `<var>.<prop> = <literal>` for one
-    /// variable, read out of the deferred set **without removing them**.
-    ///
-    /// Additive on purpose. The filter the planner would have built stays
-    /// where it is, so pushing these into an expand cannot change what the
-    /// query returns — only how much is materialised on the way. Getting a
-    /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
-    /// slow query.
     /// The exact node set a target's equality predicates admit, when that can
     /// be computed without scanning the whole store.
     ///
@@ -3169,18 +3147,25 @@ impl QueryPlanner {
     ) -> Option<HashSet<crate::graph::NodeId>> {
         let (key, value) = props.first()?;
 
-        // Preferred: an index answers without touching any node.
-        let candidates: Vec<Label> = labels
-            .iter()
-            .cloned()
-            .chain(store.catalog().label_counts.keys().cloned())
-            .collect();
-        for label in &candidates {
-            if let Some(index) = store.property_index.get_index(label, key) {
-                let ids = index.read().unwrap().get(value);
-                if !ids.is_empty() {
-                    return Some(ids.into_iter().collect());
-                }
+        // An unlabelled target cannot be resolved: a property index covers one
+        // label, and a node of any label may carry the property. Answering
+        // from one label's index would return the wrong set, not a wider one.
+        let label = labels.first()?;
+
+        // Preferred: an index answers without touching any node. Only this
+        // label's index — indexes are keyed by `(label, property)`, so
+        // consulting another label's answers a different question. Reading
+        // whichever index happened to hold the value first returned, say,
+        // `Person` ids for an `:Organisation` target: not a superset of the
+        // right answer but a disjoint set, so every correct row was dropped.
+        //
+        // A multi-label target resolves from the first label alone, which *is*
+        // a superset — the expand still applies `with_target_labels` and
+        // `target_props`, so a wider set only costs work, never rows.
+        if let Some(index) = store.property_index.get_index(label, key) {
+            let ids = index.read().unwrap().get(value);
+            if !ids.is_empty() {
+                return Some(ids.into_iter().collect());
             }
         }
 
@@ -3188,7 +3173,6 @@ impl QueryPlanner {
         // small — otherwise this trades a per-candidate cost for a per-query
         // one that is larger.
         const MAX_SCAN: usize = 50_000;
-        let label = labels.first()?;
         let nodes = store.get_nodes_by_label(label);
         if nodes.len() > MAX_SCAN {
             return None;
@@ -3202,6 +3186,14 @@ impl QueryPlanner {
         )
     }
 
+    /// Equality predicates of the form `<var>.<prop> = <literal>` for one
+    /// variable, read out of the deferred set **without removing them**.
+    ///
+    /// Additive on purpose. The filter the planner would have built stays
+    /// where it is, so pushing these into an expand cannot change what the
+    /// query returns — only how much is materialised on the way. Getting a
+    /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
+    /// slow query.
     fn target_equality_props(
         deferred: &[Expression],
         var: &str,
@@ -3225,6 +3217,21 @@ impl QueryPlanner {
         out
     }
 
+    /// Attach any deferred predicate whose variables are all bound by now.
+    ///
+    /// The path builders used to hold every predicate that mentions a
+    /// non-anchor variable until the **whole path** was expanded. On LDBC IC3
+    /// that meant `m.creationDate >= … AND m.creationDate < …` -- which
+    /// references only `m`, bound by the *first* expand -- was evaluated after
+    /// the second expand had already produced 409,960 rows, of which 622
+    /// survived. The predicate could have cut the second expand's input by
+    /// ~80% (#328).
+    ///
+    /// Applying a conjunct as soon as its variables are bound cannot change
+    /// the answer of a conjunctive pattern: the rows it removes are rows the
+    /// later filter would have removed. `OPTIONAL MATCH` is not affected --
+    /// this runs inside a single path of a single MATCH, and the outer join is
+    /// built above it.
     fn apply_ready_predicates(
         operator: OperatorBox,
         deferred: &mut Vec<Expression>,
@@ -5745,6 +5752,7 @@ impl QueryPlanner {
         null_vars: Vec<String>,
         known_vars: &HashSet<String>,
         upstream: OperatorBox,
+        store: &GraphStore,
     ) -> OperatorBox {
         let segment = &path.segments[0];
         let target_var = segment
@@ -5777,6 +5785,15 @@ impl QueryPlanner {
                 let mut pushed: Vec<(String, PropertyValue)> =
                     props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 pushed.sort_by(|a, b| a.0.cmp(&b.0));
+                // Same resolution the non-optional pushdown does: a hash
+                // lookup per candidate edge instead of a node fetch and a
+                // property compare (#665). This path was written after that
+                // one and did not inherit it.
+                if let Some(ids) =
+                    self.resolve_target_ids(&segment.node.labels, &pushed, store)
+                {
+                    expand = expand.with_target_ids(ids);
+                }
                 expand = expand.with_target_props(pushed);
             }
         }
@@ -5979,6 +5996,69 @@ mod tests {
         got.sort();
         wanted.sort();
         assert_eq!(got, wanted);
+    }
+
+    /// A property index belongs to one label, so only the target's own index
+    /// may answer for it.
+    ///
+    /// `resolve_target_ids` used to walk every label in the catalog and take
+    /// the first index that held the value. With an index on `Person.name` and
+    /// none on `Organisation.name`, an `:Organisation {name: "Acme"}` target
+    /// resolved to the *Person* whose name is "Acme" — a disjoint set, not a
+    /// wider one, so the expand dropped every correct row. Silent: the plan
+    /// looked identical and the query returned nothing.
+    #[test]
+    fn a_target_equality_ignores_another_label_index_on_the_same_property() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
+
+        let person = store.create_node(Label::new("Person"));
+        store
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let org = store.create_node(Label::new("Organisation"));
+        store
+            .set_node_property("default", org, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let planner = QueryPlanner::new();
+        let ids = planner
+            .resolve_target_ids(
+                &[Label::new("Organisation")],
+                &[("name".to_string(), PropertyValue::String("Acme".into()))],
+                &store,
+            )
+            .expect("the Organisation label is far under the scan cap");
+
+        assert_eq!(ids, std::iter::once(org).collect::<std::collections::HashSet<_>>());
+        assert!(!ids.contains(&person), "a Person index must not answer for an Organisation target");
+    }
+
+    /// An unlabelled target declines rather than guessing a label.
+    ///
+    /// Any label may carry the property, so no single label's index or scan
+    /// answers the question. Declining leaves `target_props` to do it.
+    #[test]
+    fn a_target_equality_without_a_label_declines() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
+        let person = store.create_node(Label::new("Person"));
+        store
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let planner = QueryPlanner::new();
+        let ids = planner.resolve_target_ids(
+            &[],
+            &[("name".to_string(), PropertyValue::String("Acme".into()))],
+            &store,
+        );
+        assert_eq!(ids, None);
     }
 
     /// A label bigger than the cap declines rather than scanning: above it the
