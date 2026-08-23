@@ -107,6 +107,21 @@ criterion = "0.5"
 samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.0" }
 http-body-util = "0.1"
 
+# These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
+# `test = false`, so without this the tests inside them compile and never run —
+# `cargo test --workspace` reported them as passing by never executing them.
+[[example]]
+name = "unified_benchmark"
+test = true
+
+[[example]]
+name = "tck_runner"
+test = true
+
+[[example]]
+name = "property_bridge"
+test = true
+
 [[bench]]
 name = "aggregate_throughput"
 harness = false
