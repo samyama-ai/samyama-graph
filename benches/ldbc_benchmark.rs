@@ -711,6 +711,20 @@ async fn main() -> Result<(), Error> {
         std::process::exit(64);
     }
 
+    // A *known* flag given twice is the same defect as an unknown one, and the
+    // refusal above did not cover it: every option is read with `position`,
+    // which finds the first and drops the rest (#733).
+    let repeated = ldbc_common::cli::repeated_single_valued(&args);
+    if !repeated.is_empty() {
+        eprintln!("option(s) given more than once: {}", repeated.join(" "));
+        eprintln!(
+            "\nRefusing to run: only the first is read and the rest are dropped, so the\n\
+             run would use a setting you did not choose and the output could not say so.\n\
+             (`--query` may repeat; these may not.)"
+        );
+        std::process::exit(64);
+    }
+
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
     let explicit_data_dir = args.iter().any(|a| a == "--data-dir");
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
@@ -725,11 +739,33 @@ async fn main() -> Result<(), Error> {
         5
     };
 
-    let filter_query: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--query") {
-        Some(args.get(pos + 1).expect("--query requires a query ID (e.g. IS1, IC3)").to_uppercase())
-    } else {
-        None
-    };
+    // Repeatable: `--query IC2 --query IC12` names two queries. It used to run
+    // IC2 and drop IC12 without a word (#733).
+    let filter_queries: Vec<String> = ldbc_common::cli::selected_query_ids(&args);
+
+    // A named query that does not exist is a refusal, not a silent omission:
+    // `--query IC2 --query IC99` would otherwise run IC2 and say nothing about
+    // IC99, which is the same defect one level down (#733).
+    //
+    // Checked here rather than beside the query list below, because the list
+    // is built after the dataset is loaded — a typo would otherwise cost a full
+    // SF10 load before anything said so. The id set is a pure function of the
+    // corpus and the two flags that extend it.
+    {
+        let mut known: Vec<&str> = ldbc_queries().iter().map(|q| q.id).collect();
+        known.extend(ldbc_updates().iter().map(|q| q.id));
+        known.extend(ldbc_deletes().iter().map(|q| q.id));
+        let missing: Vec<&str> = filter_queries
+            .iter()
+            .filter(|f| !known.contains(&f.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("ERROR: no such query: {}", missing.join(" "));
+            eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)");
+            std::process::exit(1);
+        }
+    }
 
     // `--profile` runs each selected query once under PROFILE and prints the
     // per-operator breakdown instead of a timing table. This is the
@@ -892,14 +928,16 @@ async fn main() -> Result<(), Error> {
         }
         all_queries.extend(ldbc_deletes());
     }
-    let queries: Vec<&LdbcQuery> = if let Some(ref filter) = filter_query {
-        all_queries.iter().filter(|q| q.id == filter.as_str()).collect()
-    } else {
+    // Corpus order, not command-line order, so two runs asking for the same set
+    // print the same table.
+    let queries: Vec<&LdbcQuery> = if filter_queries.is_empty() {
         all_queries.iter().collect()
+    } else {
+        all_queries.iter().filter(|q| filter_queries.iter().any(|f| f == q.id)).collect()
     };
 
     if queries.is_empty() {
-        eprintln!("ERROR: No matching query found for filter '{}'", filter_query.unwrap_or_default());
+        eprintln!("ERROR: no query selected");
         eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)");
         std::process::exit(1);
     }

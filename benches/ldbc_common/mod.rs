@@ -2,6 +2,7 @@
 //!
 //! Used by both `ldbc_loader` and `ldbc_benchmark` examples.
 
+pub mod cli;
 pub mod params;
 
 use std::collections::HashMap;
