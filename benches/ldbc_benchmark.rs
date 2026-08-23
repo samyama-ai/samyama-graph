@@ -214,12 +214,21 @@ RETURN f.id, f.title, mod.id, mod.firstName, mod.lastName",
             id: "IS7",
             name: "Replies to Post",
             category: "short",
-            // LDBC IS7: replies with isKnows check — uses EXISTS subquery (equivalent to OPTIONAL MATCH + CASE)
-            // Note: OPTIONAL MATCH version is semantically correct but triggers full Post scan in planner
+            // LDBC IS7: replies, with an isKnows check on the original poster.
+            //
+            // This is the `OPTIONAL MATCH` form the competitor corpus uses,
+            // character for character. It used to be an `EXISTS` subquery here
+            // and the comment said why: "OPTIONAL MATCH version is
+            // semantically correct but triggers full Post scan in planner".
+            // That was true and it made the cross-engine ratio meaningless —
+            // Samyama was answering an easier question than Neo4j and
+            // FalkorDB, by 21,000x on the same data (#725). #726 removed the
+            // reason, so the corpus can be one query again.
             cypher: "\
 MATCH (m:Post {id: {{postId}}})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(author:Person)
 MATCH (m)-[:HAS_CREATOR]->(op:Person)
-RETURN c.id, c.content, c.creationDate, author.id, author.firstName, author.lastName, EXISTS { MATCH (op)-[:KNOWS]-(author) } AS isKnows
+OPTIONAL MATCH (op)-[k:KNOWS]-(author)
+RETURN c.id, c.content, c.creationDate, author.id, author.firstName, author.lastName, (k IS NOT NULL) AS isKnows
 ORDER BY c.creationDate DESC
 LIMIT 20",
         },
@@ -361,8 +370,8 @@ LIMIT 20",
             category: "complex",
             // Full LDBC IC10: friends-of-friends NOT already friends, ranked by shared interests
             cypher: "\
-MATCH (p:Person {id: {{personId}}})-[:KNOWS*2]-(stranger:Person)
-WHERE stranger.id <> {{personId}} AND NOT EXISTS { MATCH (p)-[:KNOWS]-(stranger) }
+MATCH (p:Person {id: {{personId}}})-[:KNOWS*2..2]-(stranger:Person)
+WHERE stranger.id <> {{personId}} AND NOT (p)-[:KNOWS]-(stranger)
 WITH DISTINCT stranger
 MATCH (stranger)-[:HAS_INTEREST]->(tag:Tag)
 RETURN stranger.id, stranger.firstName, stranger.lastName, count(tag) AS commonInterests
