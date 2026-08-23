@@ -21,6 +21,9 @@
 #[path = "../benches/ldbc_common/mod.rs"]
 mod ldbc_common;
 
+#[path = "../benches/common/bench_setup.rs"]
+mod bench_setup;
+
 use samyama::graph::GraphStore;
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;
@@ -28,6 +31,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A probe that shares the machine with a build measures the build: this one
+    // reported IC11 at 16.9 ms next to a `cargo test --workspace` and 8.0 ms on
+    // a quiet host (#715). The calibration line makes the host part of the
+    // output rather than something the reader has to remember.
+    bench_setup::init();
+    let _calibration = bench_setup::report_calibration();
+
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
     let data_dir = arg("--data-dir").map(PathBuf::from).expect("--data-dir <path> is required");

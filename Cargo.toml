@@ -142,6 +142,13 @@ test = true
 name = "oncokb_loader"
 test = true
 
+# `ic11_probe` includes `benches/common/bench_setup.rs`, whose quiet-host check
+# carries the only tests that cover it. A bench target cannot run them: cargo
+# defaults `test = false` there too, and these benches set `harness = false`.
+[[example]]
+name = "ic11_probe"
+test = true
+
 [[bench]]
 name = "aggregate_throughput"
 harness = false

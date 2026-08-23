@@ -130,7 +130,92 @@ pub fn report_calibration() -> Duration {
         "  Compare this before comparing timings: two runs whose calibration differs\n  \
          were taken on hosts of different speed, whatever their milliseconds say (#529)."
     );
+    warn_if_busy(&host);
     calibration
+}
+
+/// How many *other* runnable threads make a host too busy to quote, as a
+/// fraction of its cores.
+///
+/// A quarter: below that the benchmark still gets a core essentially to
+/// itself, above it the timings are a measurement of the other workload.
+const BUSY_RUNNABLE_FRACTION: f64 = 0.25;
+
+/// The 1-minute load average is a lagging fallback for hosts with no
+/// `procs_running`. It is deliberately generous, because it is an average over
+/// a minute the run may only just have entered: 24 spinning threads on 16 cores
+/// read **9.56** after 25 seconds, by which time the calibration loop had
+/// already doubled from 33 ms to 66.
+const BUSY_LOAD_PER_CORE: f64 = 1.0;
+
+/// Threads currently runnable, from `/proc/stat`. Instantaneous, unlike
+/// `loadavg`.
+fn procs_running() -> Option<u64> {
+    std::fs::read_to_string("/proc/stat").ok().and_then(|s| {
+        s.lines()
+            .find_map(|l| l.strip_prefix("procs_running "))
+            .and_then(|v| v.trim().parse().ok())
+    })
+}
+
+/// Say so when the host is not quiet.
+///
+/// `report_drift` already catches a host whose speed *changes* during a run.
+/// It cannot catch a run that is uniformly slow because something else is
+/// resident for all of it: that run starts slow, ends slow, and drifts 1.00x.
+///
+/// This is not hypothetical. `ic11_probe` measured LDBC IC11 at 16.9 ms while a
+/// `cargo test --workspace` compiled on the same 16 cores; on a quiet machine
+/// the same probe says 8.0 ms. Every derived figure in that run was ~2x too
+/// large and two of them were almost entirely the load, and the drift check
+/// reported the host had held still — because it had (#715).
+pub fn warn_if_busy(host: &HostState) {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+    if let Some(why) = busy_reason(host, cores) {
+        eprintln!(
+            "  WARNING: {why}. These timings are not comparable with a quiet-host\n  \
+             run and are probably slower by roughly the ratio of the two calibration\n  \
+             figures. Do not put them in a document (#715)."
+        );
+    }
+}
+
+/// Why the host is too busy to quote, or `None` if it is quiet enough.
+fn busy_reason(host: &HostState, cores: f64) -> Option<String> {
+    busy_reason_from(procs_running(), host.load_average, cores)
+}
+
+/// The decision, separated from where the numbers come from so it can be
+/// tested without a busy machine.
+///
+/// `running` counts every runnable thread including this one, which is why it
+/// is decremented: a quiet host running only the benchmark reads 1.
+fn busy_reason_from(running: Option<u64>, load_average: Option<f64>, cores: f64) -> Option<String> {
+    if let Some(running) = running {
+        let others = running.saturating_sub(1) as f64;
+        if others > BUSY_RUNNABLE_FRACTION * cores {
+            return Some(format!(
+                "{others:.0} other runnable thread(s) on {cores:.0} cores"
+            ));
+        }
+        // `procs_running` is the better signal and it is available, so a
+        // lagging average must not override it — a load average still decaying
+        // from a finished job would otherwise condemn a host that is now idle.
+        return None;
+    }
+    match load_average {
+        Some(load) if load > BUSY_LOAD_PER_CORE * cores => {
+            Some(format!("1-minute load average {load:.2} on {cores:.0} cores"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the host is quiet enough to quote, for callers that would rather
+/// refuse than warn.
+pub fn host_is_quiet() -> bool {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+    busy_reason(&HostState::read(), cores).is_none()
 }
 
 /// Re-measure at the end of a suite and say whether the host held still.
@@ -157,5 +242,46 @@ pub fn report_drift(before: Duration) {
              of them is comparable with another session (#529).",
             (ratio - 1.0).abs() * 100.0
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host running only the benchmark is quiet, whatever the average says.
+    ///
+    /// The average is the lagging signal: 24 spinning threads on 16 cores read
+    /// 9.56 after 25 seconds, by which time the calibration loop had already
+    /// doubled. The reverse lag matters just as much — a load average decaying
+    /// from a job that has finished must not condemn an idle host, which is
+    /// what a run of this check observed at load 6.33 on a machine whose
+    /// calibration was back to its quiet figure.
+    #[test]
+    fn one_runnable_thread_is_quiet_even_with_a_stale_load_average() {
+        assert_eq!(busy_reason_from(Some(1), Some(6.33), 16.0), None);
+    }
+
+    /// Competition above a quarter of the cores is reported.
+    #[test]
+    fn other_runnable_threads_are_reported_with_the_count() {
+        let why = busy_reason_from(Some(26), Some(9.05), 16.0).expect("25 others on 16 cores");
+        assert!(why.contains("25 other runnable"), "{why}");
+        assert!(why.contains("16 cores"), "{why}");
+    }
+
+    /// A little background noise is not a busy host.
+    #[test]
+    fn a_few_other_threads_are_still_quiet() {
+        assert_eq!(busy_reason_from(Some(4), None, 16.0), None);
+        assert!(busy_reason_from(Some(6), None, 16.0).is_some());
+    }
+
+    /// Without `procs_running` the average is the fallback, not otherwise.
+    #[test]
+    fn the_load_average_is_only_consulted_when_the_runnable_count_is_missing() {
+        assert!(busy_reason_from(None, Some(20.0), 16.0).is_some());
+        assert_eq!(busy_reason_from(None, Some(3.0), 16.0), None);
+        assert_eq!(busy_reason_from(None, None, 16.0), None);
     }
 }
