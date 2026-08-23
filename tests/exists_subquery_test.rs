@@ -128,7 +128,20 @@ fn one_hop_traversal_with_exclusion_filter() {
 }
 
 /// 3-hop traversal + exclusion, to cover depth beyond the reported case.
-/// Shortest-path distance 3 from A is {E}; E is not a direct neighbour of A.
+///
+/// `*3` means *paths of exactly three relationships*, not "shortest distance
+/// three". Over `A-B, B-C, B-D, A-C, D-E` there are two such endpoints once
+/// `A` is excluded: `E` via `A-B, B-D, D-E`, and **`D` via `A-C, C-B, B-D`** —
+/// three distinct relationships, revisiting no edge. Nodes may repeat in a
+/// variable-length match; relationships may not.
+///
+/// This test asserted `["E"]` and its doc comment said "shortest-path distance
+/// 3 from A is {E}", which is true and is not what the query asks. It was
+/// encoding the engine's shortest-path walk rather than openCypher, and it
+/// went red the moment that walk was replaced for lower bounds above one
+/// (#710). Checked against the TCK, whose `Match6` scenario [14] expects four
+/// rows from a `*3..3` pattern that revisits a node and closes on an endpoint
+/// one hop away.
 #[test]
 fn three_hop_traversal_with_exclusion_filter() {
     let store = setup();
@@ -139,7 +152,7 @@ fn three_hop_traversal_with_exclusion_filter() {
          RETURN DISTINCT s.name AS name",
         "name",
     );
-    assert_eq!(got, vec!["E"]);
+    assert_eq!(got, vec!["D", "E"]);
 }
 
 /// Fixed-length 2-hop chain written out explicitly, rather than `*2`. This is a

@@ -4623,6 +4623,102 @@ impl VarLengthExpandOperator {
         self.target_reach.as_ref().is_some_and(|r| r.contains(&source))
     }
 
+    /// Enumerate every path from `source` of length `min_hops..=max_hops`
+    /// whose relationships are distinct, and emit its far end.
+    ///
+    /// Used only when `min_hops >= 2`, where the shortest-path walk in
+    /// `expand_from` returns an empty result rather than a smaller one (#710).
+    /// Nodes may repeat along the path; relationships may not — that is
+    /// openCypher's rule, and the same one #684 established for fixed-length
+    /// patterns.
+    ///
+    /// Depth-first with an explicit stack, so the working set is one path
+    /// rather than one frontier. An unbounded upper bound is still bounded in
+    /// practice by edge-distinctness, but the number of trails is not, so
+    /// `MAX_TRAILS` caps the walk and the cap is reported rather than
+    /// silently truncating: a benchmark that quietly runs a subset reports a
+    /// denominator that does not exist (#683), and the same is true of a
+    /// query.
+    fn expand_trails(
+        &mut self,
+        record: &Record,
+        source_id: NodeId,
+        store: &GraphStore,
+    ) -> ExecutionResult<()> {
+        /// Enough for any pattern a person writes by hand, small enough that a
+        /// runaway `*2..` cannot hang the query.
+        const MAX_TRAILS: usize = 1_000_000;
+
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
+        let type_filter = type_ids.as_deref();
+
+        // The path so far, as (node, edge-that-reached-it). `edges` is what
+        // enforces relationship uniqueness.
+        let mut path: Vec<(NodeId, crate::graph::EdgeId)> = Vec::new();
+        let mut edges: Vec<crate::graph::EdgeId> = Vec::new();
+        // Frontier per depth: the neighbours still to try at each level.
+        let mut stack: Vec<Vec<(NodeId, crate::graph::EdgeId)>> = Vec::new();
+
+        // Not a closure over `self`: `buffer` below needs `&mut self`, and a
+        // captured `&self` would still be alive.
+        macro_rules! collect {
+            ($cur:expr, $used:expr) => {{
+                let mut out = Vec::new();
+                self.for_each_neighbor($cur, type_filter, store, |nb, eid| {
+                    if !$used.contains(&eid) {
+                        out.push((nb, eid));
+                    }
+                });
+                out
+            }};
+        }
+
+        stack.push(collect!(source_id, edges));
+        let mut trails = 0usize;
+
+        while let Some(frontier) = stack.last_mut() {
+            let Some((nb, eid)) = frontier.pop() else {
+                stack.pop();
+                path.pop();
+                edges.pop();
+                continue;
+            };
+            path.push((nb, eid));
+            edges.push(eid);
+            let depth = path.len();
+
+            if depth >= self.min_hops && self.emit_ok(nb, store) {
+                trails += 1;
+                if trails > MAX_TRAILS {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "variable-length pattern produced more than {MAX_TRAILS} paths; \
+                         bound it with an upper hop limit or a more selective start"
+                    )));
+                }
+                // `parent` reconstructs the path for a bound path or
+                // relationship variable. Built from the current stack, so it
+                // describes *this* trail rather than a shortest route.
+                let mut parent: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
+                    std::collections::HashMap::new();
+                let mut prev = source_id;
+                for (n, e) in &path {
+                    parent.insert(*n, (prev, *e));
+                    prev = *n;
+                }
+                self.buffer(record, nb, &parent, source_id, store);
+            }
+
+            if depth < self.max_hops {
+                stack.push(collect!(nb, edges));
+            } else {
+                path.pop();
+                edges.pop();
+            }
+        }
+        Ok(())
+    }
+
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record
             .get(&self.source_var)
@@ -4647,6 +4743,24 @@ impl VarLengthExpandOperator {
                 self.buffer(record, target, &empty, source_id, store);
             }
             return Ok(());
+        }
+
+        // A lower bound above one cannot be answered by a shortest-path walk.
+        //
+        // The BFS below marks a node visited at the depth it is first reached
+        // and never reconsiders it, so `*2..2` over a triangle finds `b` and
+        // `c` at depth 1, declines to emit them (depth < min_hops), and then
+        // has nothing left at depth 2 — **zero rows, no error**, where
+        // openCypher matches `a-b-c` and `a-c-b`. Nodes may repeat in a
+        // variable-length match; only relationships may not.
+        //
+        // Enumerating trails is the general answer and is not affordable on
+        // the shapes that matter (#710): LDBC IC1's `KNOWS*1..3` reaches ~4,900
+        // nodes, and IC6 needs the pinned-target walk to stay cheap. Both have
+        // `min_hops == 1`, as does every LDBC pattern, so the enumeration is
+        // taken only where the BFS is not merely lossy but wrong.
+        if self.min_hops >= 2 {
+            return self.expand_trails(record, source_id, store);
         }
 
         // parent[node] = (predecessor, edge used) for path reconstruction.

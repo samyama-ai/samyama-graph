@@ -81,7 +81,6 @@ fn a_node_reachable_two_ways_within_the_bound_yields_two_rows() {
 /// A BFS that marks both visited at depth 1 and never revisits them returns
 /// nothing at all.
 #[test]
-#[ignore = "#710: the operator walks shortest paths, not paths"]
 fn a_lower_bound_still_matches_a_longer_route_to_a_near_node() {
     let store = triangle();
     assert_eq!(
@@ -130,5 +129,114 @@ fn a_var_length_segment_may_not_reuse_an_edge_the_clause_already_walked() {
             "MATCH (a:N {name:\"a\"})-[:R]-(y)-[:R*1..1]-(z) RETURN z.name AS n"
         ),
         Vec::<String>::new(),
+    );
+}
+
+/// A bound path variable over a lower-bounded segment describes *that* trail.
+///
+/// The shortest-path walk reconstructed a path from a `parent` map keyed on
+/// shortest distance, which has no entry for a longer route. The enumeration
+/// builds the map from the trail it is standing on.
+#[test]
+fn a_named_path_over_a_lower_bounded_segment_has_the_right_length() {
+    let store = triangle();
+    let q = parse_query(
+        "MATCH p = (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN length(p) AS n ORDER BY n",
+    )
+    .unwrap();
+    let out = QueryExecutor::new(&store).execute(&q).unwrap();
+    let lengths: Vec<i64> = out
+        .records
+        .iter()
+        .map(|r| match r.get("n") {
+            Some(Value::Property(PropertyValue::Integer(i))) => *i,
+            other => panic!("expected integer n, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(lengths, vec![2, 2]);
+}
+
+/// A relationship list bound over a lower-bounded segment holds one entry per
+/// hop, and they are distinct.
+#[test]
+fn a_relationship_list_over_a_lower_bounded_segment_has_one_entry_per_hop() {
+    let store = triangle();
+    let q =
+        parse_query("MATCH (a:N {name:\"a\"})-[rs:R*2..2]-(x) RETURN size(rs) AS n ORDER BY n")
+            .unwrap();
+    let out = QueryExecutor::new(&store).execute(&q).unwrap();
+    let sizes: Vec<i64> = out
+        .records
+        .iter()
+        .map(|r| match r.get("n") {
+            Some(Value::Property(PropertyValue::Integer(i))) => *i,
+            other => panic!("expected integer n, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(sizes, vec![2, 2]);
+}
+
+/// Direction is still honoured when the lower bound takes the other path.
+///
+/// A directed cycle a→b→c→a: `*2..2` outgoing from `a` reaches only `c`, and
+/// there is exactly one way to get there.
+#[test]
+fn direction_is_honoured_by_the_lower_bounded_walk() {
+    let mut store = GraphStore::new();
+    for n in ["a", "b", "c"] {
+        run(&mut store, &format!("CREATE (:N {{name: \"{n}\"}})"));
+    }
+    for (x, y) in [("a", "b"), ("b", "c"), ("c", "a")] {
+        run(
+            &mut store,
+            &format!("MATCH (x:N {{name:\"{x}\"}}), (y:N {{name:\"{y}\"}}) CREATE (x)-[:R]->(y)"),
+        );
+    }
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x) RETURN x.name AS n"),
+        vec!["c"],
+    );
+    // Undirected, the same graph has more: a-b-c forward, and a-c-b backward.
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"),
+        vec!["b", "c"],
+    );
+}
+
+/// A target label still filters what may be emitted.
+#[test]
+fn a_target_label_filters_the_lower_bounded_walk() {
+    let mut store = GraphStore::new();
+    run(&mut store, "CREATE (:N {name: \"a\"})");
+    run(&mut store, "CREATE (:N {name: \"b\"})");
+    run(&mut store, "CREATE (:M {name: \"c\"})");
+    for (x, xl, y, yl) in [("a", "N", "b", "N"), ("b", "N", "c", "M")] {
+        run(
+            &mut store,
+            &format!(
+                "MATCH (x:{xl} {{name:\"{x}\"}}), (y:{yl} {{name:\"{y}\"}}) CREATE (x)-[:R]->(y)"
+            ),
+        );
+    }
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:M) RETURN x.name AS n"),
+        vec!["c"],
+    );
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:N) RETURN x.name AS n"),
+        Vec::<String>::new(),
+    );
+}
+
+/// The upper bound is still an upper bound: `*2..3` over the triangle adds the
+/// three-hop trails that return to the start.
+#[test]
+fn a_range_above_the_lower_bound_keeps_matching() {
+    let store = triangle();
+    // Two-hop: b, c. Three-hop: every trail of three distinct edges from `a`
+    // ends back at `a` (a-b-c-a and a-c-b-a).
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..3]-(x) RETURN x.name AS n"),
+        vec!["a", "a", "b", "c"],
     );
 }
