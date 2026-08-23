@@ -19,10 +19,31 @@
 //! scattered read into an array with one entry per edge in the graph, which at
 //! LDBC SF1's 21.1M edges is 42 MB and misses cache essentially every time.
 //!
-//! **That hypothesis is wrong, and this bench is what refuted it.** The walk,
-//! type probe included, costs under 3 ns per edge. Running the same traversal
-//! through the query engine costs ~30x that. Storage is a few percent of what
-//! `Expand` spends; the rest is the operator.
+//! **That hypothesis is wrong, and this bench is what refuted it** — but the
+//! first version of the bench refuted it on a graph that never scattered
+//! anything. It wrote each node's whole adjacency consecutively, so the edge
+//! ids inside one run *were* contiguous and the probe walked the array in
+//! order. The premise in the paragraph above was not the thing being measured.
+//!
+//! `--order by-type` builds the layout a loader actually produces — every edge
+//! of one type across every node, then the next type, which is how LDBC loads
+//! `KNOWS`, then `HAS_INTEREST`, then `LIKES` — so a node's adjacency holds ids
+//! from widely separated ranges. It is now the default. 300k nodes x 30 edges
+//! over 6 types, one host, one run:
+//!
+//! | edges written | walk, wildcard | walk, one type of six | as Cypher |
+//! |---|---:|---:|---:|
+//! | node by node (the old build) | 2.6 ns/edge | 2.6 | 64.3 |
+//! | **type by type** | **1.5 ns/edge** | **1.6** | **60.0** |
+//!
+//! So the conclusion survives the corrected premise, and by a wider margin: the
+//! walk, type probe included, costs **1.5 ns** per edge. Running the same
+//! traversal through the query engine costs **40x** that. Storage is a couple
+//! of percent of what `Expand` spends; the rest is the operator.
+//!
+//! One caveat this bench cannot settle at its default size: 9M edges makes the
+//! type array 18 MB, which fits in this host's L3. LDBC SF1's is 42 MB and does
+//! not. `--nodes 1000000` is the knob for testing that.
 //!
 //! It also fixes the normalisation. Per *edge visited*, IC5 (407 ns/row, keeps
 //! 513 of ~680) and IC9 (1976 ns/row, keeps 125 of ~680) look four times apart;
@@ -41,25 +62,65 @@ use samyama::graph::GraphStore;
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
+/// The order edges are created in, which decides how the edge ids inside one
+/// node's adjacency run are laid out.
+///
+/// This distinction is the point of the bench and the first version did not
+/// make it. `ByNode` writes a node's whole adjacency consecutively, so its edge
+/// ids are contiguous and the `edge_type_ids` probe walks the array in order.
+/// `ByType` writes every edge of one type across every node before starting the
+/// next type, so a node's adjacency holds ids from `types` widely separated
+/// ranges — which is what a real loader produces, LDBC's included: it loads
+/// `KNOWS` for every person, then `HAS_INTEREST` for every person, then
+/// `LIKES`.
+#[derive(Clone, Copy, PartialEq)]
+enum Order {
+    ByNode,
+    ByType,
+}
+
 /// `nodes` nodes, each with `degree` outgoing edges to scattered targets, of
 /// which one in `types` is the type a query would ask for.
 ///
-/// Scattered targets on purpose: a node's adjacency run is contiguous, but the
-/// *edge ids* in it are not, and the whole question is what a scattered probe
-/// keyed on those ids costs.
-fn build(nodes: usize, degree: usize, types: usize) -> (GraphStore, Vec<samyama::graph::NodeId>) {
+/// Scattered *targets* in both orders; the edge ids are scattered only under
+/// `ByType`. The original bench built `ByNode`, described itself as measuring
+/// "what a scattered probe keyed on those ids costs", and concluded the
+/// scattered probe was cheap — on a layout that never scattered it.
+fn build(
+    nodes: usize,
+    degree: usize,
+    types: usize,
+    order: Order,
+) -> (GraphStore, Vec<samyama::graph::NodeId>) {
     let mut store = GraphStore::new();
     let ids: Vec<_> = (0..nodes).map(|_| store.create_node("N")).collect();
     let names: Vec<String> = (0..types).map(|t| format!("TYPE{t}")).collect();
-    for (i, &src) in ids.iter().enumerate() {
-        for d in 0..degree {
-            let x = (i as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add((d as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9));
-            let x = x ^ (x >> 31);
-            let target = ids[(x % nodes as u64) as usize];
-            if target != src {
-                let _ = store.create_edge(src, target, names[d % types].as_str());
+    let target_of = |i: usize, d: usize| -> samyama::graph::NodeId {
+        let x = (i as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add((d as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+        let x = x ^ (x >> 31);
+        ids[(x % nodes as u64) as usize]
+    };
+    match order {
+        Order::ByNode => {
+            for (i, &src) in ids.iter().enumerate() {
+                for d in 0..degree {
+                    let target = target_of(i, d);
+                    if target != src {
+                        let _ = store.create_edge(src, target, names[d % types].as_str());
+                    }
+                }
+            }
+        }
+        Order::ByType => {
+            for d in 0..degree {
+                for (i, &src) in ids.iter().enumerate() {
+                    let target = target_of(i, d);
+                    if target != src {
+                        let _ = store.create_edge(src, target, names[d % types].as_str());
+                    }
+                }
             }
         }
     }
@@ -78,9 +139,22 @@ fn main() {
     let degree = arg("--degree").unwrap_or(30);
     let types = arg("--types").unwrap_or(6);
 
-    eprintln!("Building {nodes} nodes x {degree} edges over {types} types…");
+    let order = match args.iter().position(|a| a == "--order").and_then(|i| args.get(i + 1)) {
+        Some(o) if o == "by-type" => Order::ByType,
+        Some(o) if o == "by-node" => Order::ByNode,
+        Some(o) => panic!("--order takes by-node or by-type, not {o}"),
+        // `by-type` is the default because it is the layout a loader produces.
+        // The old default was the other one, and it is what made this bench
+        // report that a scattered type probe costs nothing.
+        None => Order::ByType,
+    };
+
+    eprintln!(
+        "Building {nodes} nodes x {degree} edges over {types} types, {}…",
+        if order == Order::ByType { "edges written type by type" } else { "edges written node by node" }
+    );
     let started = Instant::now();
-    let (store, ids) = build(nodes, degree, types);
+    let (store, ids) = build(nodes, degree, types, order);
     eprintln!(
         "built {} edges in {:.1}s\n",
         store.edge_count(),

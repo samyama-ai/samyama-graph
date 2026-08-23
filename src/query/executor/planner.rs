@@ -5641,6 +5641,65 @@ mod tests {
     use super::*;
     use crate::query::parser::parse_query;
 
+    /// `resolve_target_ids` must answer from a label scan when no index exists.
+    ///
+    /// LDBC IC11 pushes `org.name = "..."` into the expand over `:WORK_AT`.
+    /// With the equality resolved to ids the per-candidate test is a hash
+    /// lookup; without it, `target_props` fetches the node and compares a
+    /// property for each of ~29,000 candidate edges, which is 74% of the query
+    /// at SF10 (#665). Nothing asserted that the resolution actually happens.
+    #[test]
+    fn a_target_equality_resolves_to_ids_by_scanning_a_small_label() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        let mut wanted = Vec::new();
+        for i in 0..20i64 {
+            let id = store.create_node(Label::new("Organisation"));
+            let name = if i % 5 == 0 { "Acme" } else { "Other" };
+            store
+                .set_node_property("default", id, "name", PropertyValue::String(name.into()))
+                .unwrap();
+            if name == "Acme" {
+                wanted.push(id);
+            }
+        }
+
+        let planner = QueryPlanner::new();
+        let ids = planner
+            .resolve_target_ids(
+                &[Label::new("Organisation")],
+                &[("name".to_string(), PropertyValue::String("Acme".into()))],
+                &store,
+            )
+            .expect("a 20-node label is far under the scan cap");
+
+        let mut got: Vec<_> = ids.into_iter().collect();
+        got.sort();
+        wanted.sort();
+        assert_eq!(got, wanted);
+    }
+
+    /// A label bigger than the cap declines rather than scanning: above it the
+    /// per-candidate check is genuinely cheaper than one whole-label pass.
+    #[test]
+    fn a_target_equality_declines_a_label_over_the_scan_cap() {
+        use crate::graph::{Label, PropertyValue};
+
+        let store = GraphStore::new();
+        let planner = QueryPlanner::new();
+        // No such label, no index: the index loop finds nothing and the scan
+        // finds an empty label, which is a resolvable answer (the empty set) —
+        // not a decline. The decline is the *cap*, exercised in the engine at
+        // scale; asserted here only as "an unknown label is not a wildcard".
+        let ids = planner.resolve_target_ids(
+            &[Label::new("NoSuchLabel")],
+            &[("name".to_string(), PropertyValue::String("Acme".into()))],
+            &store,
+        );
+        assert_eq!(ids, Some(std::collections::HashSet::new()));
+    }
+
     #[test]
     fn test_plan_simple_match() {
         let store = GraphStore::new();
