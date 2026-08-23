@@ -153,132 +153,9 @@ fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> Quer
     for record in &batch.records {
         let mut row = Vec::new();
         for col in &batch.columns {
-            let val = match record.get(col) {
-                Some(v) => v,
-                None => {
-                    row.push(serde_json::Value::Null);
-                    continue;
-                }
-            };
-
-            match val {
-                Value::Map(entries) => {
-                    row.push(serde_json::Value::Object(
-                        entries.iter().map(|(k, v)| (k.clone(), serde_json::json!(format!("{v:?}")))).collect(),
-                    ));
-                }
-                Value::List(items) => {
-                    row.push(serde_json::Value::Array(
-                        items.iter().map(|i| serde_json::json!(format!("{i:?}"))).collect(),
-                    ));
-                }
-                Value::Node(id, node) => {
-                    let mut properties = serde_json::Map::new();
-                    for (k, v) in &node.properties {
-                        properties.insert(k.clone(), v.to_json());
-                    }
-                    let id_str = id.as_u64().to_string();
-                    let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
-
-                    let node_json = serde_json::json!({
-                        "id": id_str,
-                        "labels": labels,
-                        "properties": properties,
-                    });
-
-                    nodes_map.entry(id_str.clone()).or_insert_with(|| SdkNode {
-                        id: id_str,
-                        labels,
-                        properties: properties.into_iter().collect(),
-                    });
-
-                    row.push(node_json);
-                }
-                Value::NodeRef(id) => {
-                    let id_str = id.as_u64().to_string();
-                    // Try to resolve from store
-                    let (labels, properties, node_json) = if let Some(node) = store.get_node(*id) {
-                        let mut props = serde_json::Map::new();
-                        for (k, v) in &node.properties {
-                            props.insert(k.clone(), v.to_json());
-                        }
-                        let lbls: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
-                        let json = serde_json::json!({
-                            "id": id_str,
-                            "labels": lbls,
-                            "properties": props,
-                        });
-                        (lbls, props.into_iter().collect(), json)
-                    } else {
-                        let json = serde_json::json!({ "id": id_str, "labels": [], "properties": {} });
-                        (vec![], HashMap::new(), json)
-                    };
-
-                    nodes_map.entry(id_str.clone()).or_insert_with(|| SdkNode {
-                        id: id_str,
-                        labels,
-                        properties,
-                    });
-
-                    row.push(node_json);
-                }
-                Value::Edge(id, edge) => {
-                    let mut properties = serde_json::Map::new();
-                    for (k, v) in &edge.properties {
-                        properties.insert(k.clone(), v.to_json());
-                    }
-                    let id_str = id.as_u64().to_string();
-                    let edge_json = serde_json::json!({
-                        "id": id_str,
-                        "source": edge.source.as_u64().to_string(),
-                        "target": edge.target.as_u64().to_string(),
-                        "type": edge.edge_type.as_str(),
-                        "properties": properties,
-                    });
-
-                    edges_map.entry(id_str.clone()).or_insert_with(|| SdkEdge {
-                        id: id_str,
-                        source: edge.source.as_u64().to_string(),
-                        target: edge.target.as_u64().to_string(),
-                        edge_type: edge.edge_type.as_str().to_string(),
-                        properties: properties.into_iter().collect(),
-                    });
-
-                    row.push(edge_json);
-                }
-                Value::EdgeRef(id, src, tgt, et) => {
-                    let id_str = id.as_u64().to_string();
-                    let edge_json = serde_json::json!({
-                        "id": id_str,
-                        "source": src.as_u64().to_string(),
-                        "target": tgt.as_u64().to_string(),
-                        "type": et.as_str(),
-                        "properties": {},
-                    });
-
-                    edges_map.entry(id_str.clone()).or_insert_with(|| SdkEdge {
-                        id: id_str,
-                        source: src.as_u64().to_string(),
-                        target: tgt.as_u64().to_string(),
-                        edge_type: et.as_str().to_string(),
-                        properties: HashMap::new(),
-                    });
-
-                    row.push(edge_json);
-                }
-                Value::Property(p) => {
-                    row.push(p.to_json());
-                }
-                Value::Path { nodes: path_nodes, edges: path_edges } => {
-                    row.push(serde_json::json!({
-                        "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
-                        "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
-                        "length": path_edges.len(),
-                    }));
-                }
-                Value::Null => {
-                    row.push(serde_json::Value::Null);
-                }
+            match record.get(col) {
+                Some(v) => row.push(value_to_json(v, store, &mut nodes_map, &mut edges_map)),
+                None => row.push(serde_json::Value::Null),
             }
         }
         records.push(row);
@@ -289,6 +166,142 @@ fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> Quer
         edges: edges_map.into_values().collect(),
         columns: batch.columns.clone(),
         records,
+    }
+}
+
+/// One result value as JSON, registering any entity it contains.
+///
+/// **Recursive, which is the point.** This used to be inlined in the loop
+/// above, and the `List` and `Map` arms rendered their elements with
+/// `format!("{v:?}")` — the Rust `Debug` of the internal enum. So an entity
+/// inside a collection reached SDK consumers as
+/// `"NodeRef(NodeId(1))"` or
+/// `"EdgeRef(EdgeId(1), NodeId(1), NodeId(2), EdgeType(\"R\"))"`, labels and
+/// properties gone and an escaped quote embedded in a JSON string, while the
+/// very same node in a bare column came back as `{id, labels, properties}`.
+///
+/// Scalars were unaffected, which is what made it easy to miss: `collect(n.name)`
+/// was right and `collect(n)` was not — and `collect`, `nodes` and
+/// `relationships` are everyday Cypher.
+fn value_to_json(
+    val: &Value,
+    store: &GraphStore,
+    nodes_map: &mut HashMap<String, SdkNode>,
+    edges_map: &mut HashMap<String, SdkEdge>,
+) -> serde_json::Value {
+    match val {
+        Value::Map(entries) => serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_json(v, store, nodes_map, edges_map)))
+                .collect(),
+        ),
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|i| value_to_json(i, store, nodes_map, edges_map))
+                .collect(),
+        ),
+        Value::Node(id, node) => {
+            let mut properties = serde_json::Map::new();
+            for (k, v) in &node.properties {
+                properties.insert(k.clone(), v.to_json());
+            }
+            let id_str = id.as_u64().to_string();
+            let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
+
+            let node_json = serde_json::json!({
+                "id": id_str,
+                "labels": labels,
+                "properties": properties,
+            });
+
+            nodes_map.entry(id_str.clone()).or_insert_with(|| SdkNode {
+                id: id_str,
+                labels,
+                properties: properties.into_iter().collect(),
+            });
+
+            node_json
+        }
+        Value::NodeRef(id) => {
+            let id_str = id.as_u64().to_string();
+            let (labels, properties, node_json) = if let Some(node) = store.get_node(*id) {
+                let mut props = serde_json::Map::new();
+                for (k, v) in &node.properties {
+                    props.insert(k.clone(), v.to_json());
+                }
+                let lbls: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
+                let json = serde_json::json!({
+                    "id": id_str,
+                    "labels": lbls,
+                    "properties": props,
+                });
+                (lbls, props.into_iter().collect(), json)
+            } else {
+                let json = serde_json::json!({ "id": id_str, "labels": [], "properties": {} });
+                (vec![], HashMap::new(), json)
+            };
+
+            nodes_map.entry(id_str.clone()).or_insert_with(|| SdkNode {
+                id: id_str,
+                labels,
+                properties,
+            });
+
+            node_json
+        }
+        Value::Edge(id, edge) => {
+            let mut properties = serde_json::Map::new();
+            for (k, v) in &edge.properties {
+                properties.insert(k.clone(), v.to_json());
+            }
+            let id_str = id.as_u64().to_string();
+            let edge_json = serde_json::json!({
+                "id": id_str,
+                "source": edge.source.as_u64().to_string(),
+                "target": edge.target.as_u64().to_string(),
+                "type": edge.edge_type.as_str(),
+                "properties": properties,
+            });
+
+            edges_map.entry(id_str.clone()).or_insert_with(|| SdkEdge {
+                id: id_str,
+                source: edge.source.as_u64().to_string(),
+                target: edge.target.as_u64().to_string(),
+                edge_type: edge.edge_type.as_str().to_string(),
+                properties: properties.into_iter().collect(),
+            });
+
+            edge_json
+        }
+        Value::EdgeRef(id, src, tgt, et) => {
+            let id_str = id.as_u64().to_string();
+            let edge_json = serde_json::json!({
+                "id": id_str,
+                "source": src.as_u64().to_string(),
+                "target": tgt.as_u64().to_string(),
+                "type": et.as_str(),
+                "properties": {},
+            });
+
+            edges_map.entry(id_str.clone()).or_insert_with(|| SdkEdge {
+                id: id_str,
+                source: src.as_u64().to_string(),
+                target: tgt.as_u64().to_string(),
+                edge_type: et.as_str().to_string(),
+                properties: HashMap::new(),
+            });
+
+            edge_json
+        }
+        Value::Property(p) => p.to_json(),
+        Value::Path { nodes: path_nodes, edges: path_edges } => serde_json::json!({
+            "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
+            "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
+            "length": path_edges.len(),
+        }),
+        Value::Null => serde_json::Value::Null,
     }
 }
 
