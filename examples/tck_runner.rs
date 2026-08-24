@@ -233,6 +233,21 @@ impl Cursor {
             Some('<') => self.parse_path(),
             _ => {
                 let word = self.take_while(|c| !matches!(c, ',' | ']' | '}' | ')' | ' '));
+                // A parser may decline to understand its input. It may not
+                // decline to *advance*.
+                //
+                // `(` is not a stop character, so `relativedelta(seconds=+13)`
+                // is consumed as far as the `)` and the `(` is swallowed into
+                // the word untracked. The scan then sits on an orphaned `)`,
+                // which is no collection's terminator, and every caller loop
+                // asks for another value at the same offset forever --
+                // `parse_list` pushing an empty item each time, which is
+                // 2.5 GB/s and an OOM-killed machine (#761).
+                if word.is_empty() {
+                    let c = self.peek();
+                    self.i += 1;
+                    return Tck::Opaque(c.map(String::from).unwrap_or_default());
+                }
                 match word.as_str() {
                     "null" => Tck::Null,
                     "true" => Tck::Bool(true),
@@ -301,6 +316,7 @@ impl Cursor {
         self.eat('[');
         let mut items = Vec::new();
         loop {
+            let before = self.i;
             self.skip_ws();
             if self.eat(']') || self.peek().is_none() {
                 break;
@@ -308,6 +324,14 @@ impl Cursor {
             items.push(self.parse());
             self.skip_ws();
             let _ = self.eat(',');
+            // Belt and braces over the progress guarantee in `parse`. This
+            // parser is a test *oracle*: it is fed whatever four engines
+            // choose to render, including things no one has seen yet. An
+            // unrecognised rendering must become a wrong answer, never a
+            // hang (#761).
+            if self.i == before {
+                break;
+            }
         }
         Tck::List(items)
     }
@@ -370,7 +394,15 @@ impl Cursor {
             match self.s[self.i] {
                 '<' => depth += 1,
                 '>' => {
-                    depth -= 1;
+                    // Saturating rather than `-= 1`. Unreachable today: this
+                    // function is only entered sitting on a `<`, so depth is
+                    // at least 1 before any `>` is seen. Hardened anyway
+                    // because a caller that stopped guaranteeing that would
+                    // wrap the counter in release and panic in debug, and the
+                    // guarantee is three call sites away. Deliberately without
+                    // a test -- there is no input that reaches it, and a test
+                    // that cannot fail is worse than none.
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         self.i += 1;
                         break;
@@ -426,6 +458,7 @@ impl Cursor {
         let mut m = BTreeMap::new();
         self.eat('{');
         loop {
+            let before = self.i;
             self.skip_ws();
             if self.eat('}') || self.peek().is_none() {
                 break;
@@ -444,6 +477,12 @@ impl Cursor {
             m.insert(key, val);
             self.skip_ws();
             let _ = self.eat(',');
+            // See `parse_list`. This loop is the one that hung without growing
+            // memory -- it re-inserts under the same empty key, so the map
+            // stays one entry wide while the process spins (#761).
+            if self.i == before {
+                break;
+            }
         }
         m
     }
@@ -1446,6 +1485,70 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parser must terminate on input no one anticipated.
+    ///
+    /// Both strings below are real engine output, recorded during the
+    /// cross-engine run. Both are perfectly *balanced* -- which is why a
+    /// bracket-matching check finds nothing wrong with them. The imbalance is
+    /// in the scanner: `(` is not a stop character for a bare word, so
+    /// `relativedelta(seconds=+13` is swallowed whole and the parser is left
+    /// sitting on an orphaned `)` that terminates no collection.
+    ///
+    /// Before the fix these did not fail, they **hung**: `parse_list` pushed an
+    /// empty item per iteration at ~2.5 GB/s until systemd-oomd killed the
+    /// machine, and `parse_props` spun at 87% CPU for 27 minutes without
+    /// growing, because it re-inserts under the same empty key (#761).
+    ///
+    /// A `#[timeout]` attribute would be the natural way to pin this; Rust's
+    /// test harness has none, so these assert on the *value* and rely on the
+    /// suite's own wall-clock to catch a regression. That is weaker than I
+    /// would like and is the honest state of it.
+    #[test]
+    fn an_unmatched_paren_does_not_hang_the_parser() {
+        // FalkorDB, Temporal4 [12] — a Python repr leaking through the driver.
+        let v = parse_expected("[relativedelta(seconds=+13)]");
+        match v {
+            Tck::List(items) => assert!(
+                items.len() < 8,
+                "a two-token list must not expand without bound, got {} items",
+                items.len()
+            ),
+            other => panic!("expected a list, got {other:?}"),
+        }
+
+        // Samyama, WithOrderBy1 [33] — our own Debug output where a TCK
+        // temporal literal belongs (#689).
+        let v = parse_expected("(:A {date: DateTime(-1882656000000)})");
+        match v {
+            Tck::Node(labels, props) => {
+                assert_eq!(labels, vec!["A".to_string()]);
+                assert!(props.len() < 8, "got {} props", props.len());
+            }
+            other => panic!("expected a node, got {other:?}"),
+        }
+    }
+
+    /// Every bare `parse` advances, whatever it is handed.
+    ///
+    /// This is the invariant the two hangs violated, stated directly rather
+    /// than through a caller. A character the scanner has no rule for is
+    /// consumed and reported as `Opaque` — declining to understand is fine,
+    /// declining to move is not.
+    #[test]
+    fn parse_always_consumes_at_least_one_character() {
+        for input in [")", "}", "]", ",", ")x", "}}}", "%", "\u{1f600}"] {
+            let mut p = Cursor::new(input);
+            let before = p.i;
+            let _ = p.parse();
+            assert!(
+                p.i > before,
+                "`{input}` left the cursor at {before}; every caller loop then \
+                 asks again at the same offset, forever"
+            );
+        }
+    }
+
 
     /// A `Background:` block applies to every scenario in its file.
     ///
