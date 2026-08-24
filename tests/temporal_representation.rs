@@ -284,18 +284,40 @@ fn timezone_offsets_parse_in_every_spelling() {
     }
 }
 
-/// A named zone is refused with a message that says why, rather than being
-/// read as UTC.
+/// A named zone resolves against the IANA database, and **its offset depends
+/// on the date**.
 ///
-/// Treating it as UTC would shift every value by the real offset and return a
-/// plausible-looking wrong instant. Tracked as #767; this test pins the
-/// refusal so nobody "fixes" it by defaulting to zero.
+/// This asserted the *refusal* until #767: with no tz database, erroring was
+/// better than reading `Europe/Stockholm` as UTC and shifting every value by
+/// the real offset. Now it resolves, and the property worth pinning is the
+/// date dependence — Stockholm is +01:00 in October and +02:00 in July. An
+/// implementation that resolved a zone to one offset and cached it would pass
+/// half of these and be wrong for half the year.
 #[test]
-fn a_named_zone_is_refused_rather_than_assumed_to_be_utc() {
-    let e = tmp::parse_timezone("Europe/Stockholm").expect_err("should refuse");
-    let msg = format!("{e}");
-    assert!(msg.contains("Europe/Stockholm"), "message should name the zone: {msg}");
-    assert!(msg.contains("tz database"), "message should say what is missing: {msg}");
+fn a_named_zone_resolves_and_its_offset_depends_on_the_date() {
+    use samyama::query::executor::temporal::{parse_timezone_spec, resolve_offset, zone_name};
+
+    let spec = parse_timezone_spec("Europe/Stockholm").expect("a known zone");
+    assert_eq!(zone_name(&spec).as_deref(), Some("Europe/Stockholm"));
+
+    // 1984-10-11 is CET (+01:00); 1984-07-20 is CEST (+02:00).
+    assert_eq!(P::Date(5397).to_cypher_string(), "1984-10-11", "sanity: reference date");
+    assert_eq!(resolve_offset(&spec, 5397, 0).unwrap(), 3600);
+    assert_eq!(P::Date(5314).to_cypher_string(), "1984-07-20", "sanity: reference date");
+    assert_eq!(resolve_offset(&spec, 5314, 0).unwrap(), 7200);
+
+    // A zone with no DST, so both dates agree — the control for the above.
+    let hst = parse_timezone_spec("Pacific/Honolulu").expect("a known zone");
+    assert_eq!(resolve_offset(&hst, 5397, 0).unwrap(), -36_000);
+    assert_eq!(resolve_offset(&hst, 5314, 0).unwrap(), -36_000);
+}
+
+/// An unknown zone is still an error, and names itself.
+#[test]
+fn an_unknown_zone_is_refused() {
+    use samyama::query::executor::temporal::parse_timezone_spec;
+    let e = parse_timezone_spec("Middle/Earth").expect_err("not a zone");
+    assert!(format!("{e}").contains("Middle/Earth"), "{e}");
 }
 
 /// Strings parse into the right type with full precision.

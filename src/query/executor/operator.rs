@@ -2444,12 +2444,22 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             zone: None,
                         }));
                     }
-                    let (offset_seconds, zone) = match map.get("timezone").and_then(|v| v.as_string()) {
-                        Some(tz) => tmp::parse_timezone(&tz)?,
-                        None => (0, None),
+                    let spec = match map.get("timezone").and_then(|v| v.as_string()) {
+                        Some(tz) => Some(tmp::parse_timezone_spec(&tz)?),
+                        None => None,
                     };
                     let (d, t) = compose_date_and_time(map)?;
                     let local = d as i64 * 86_400 * 1_000_000_000 + t;
+                    // A named zone has no single offset -- Europe/Stockholm is
+                    // +01:00 in October and +02:00 in July -- so it is resolved
+                    // against *this* local date, not at parse time (#767).
+                    let (offset_seconds, zone) = match &spec {
+                        Some(sp) => (
+                            tmp::resolve_offset(sp, d as i64, t)?,
+                            tmp::zone_name(sp),
+                        ),
+                        None => (0, None),
+                    };
                     // The components describe local time; store the instant.
                     let utc = local - offset_seconds as i64 * 1_000_000_000;
                     Ok(Value::Property(PropertyValue::ZonedDateTime {

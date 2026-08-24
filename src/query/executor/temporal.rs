@@ -136,36 +136,91 @@ fn weekday_from_iso(dow: u32) -> chrono::Weekday {
     }
 }
 
-/// A UTC offset in seconds from `Z`, `+01:00`, `+0100`, `+01`, or an IANA name.
+/// What a `timezone:` field named: a fixed offset, or an IANA zone.
 ///
-/// Returns the offset and the IANA name when one was given, because Cypher
-/// keeps both: an offset alone cannot survive a DST boundary and a name alone
-/// cannot express `+05:30` attached to nothing.
-pub fn parse_timezone(tz: &str) -> Result<(i32, Option<String>), ExecutionError> {
+/// They are different things and cannot be collapsed. A **fixed offset** is a
+/// constant. A **named zone** has no single offset — `Europe/Stockholm` is
+/// +01:00 in October and +02:00 in July — so its offset is only knowable once
+/// the local date is known, which is why resolution is a separate step from
+/// parsing (#767).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TzSpec {
+    Offset(i32),
+    Named(chrono_tz::Tz),
+}
+
+/// Parse `Z`, `+01:00`, `+0100`, `+01`, `+02:05:59`, or `Europe/Stockholm`.
+pub fn parse_timezone_spec(tz: &str) -> Result<TzSpec, ExecutionError> {
     let t = tz.trim();
     if t.eq_ignore_ascii_case("z") || t.eq_ignore_ascii_case("utc") {
-        return Ok((0, None));
+        return Ok(TzSpec::Offset(0));
     }
     if t.starts_with('+') || t.starts_with('-') {
         let sign = if t.starts_with('-') { -1 } else { 1 };
         let rest = &t[1..];
-        let (h, m) = match rest.split_once(':') {
-            Some((h, m)) => (h, m),
-            None if rest.len() == 4 => (&rest[..2], &rest[2..]),
-            None => (rest, "0"),
+        let parts: Vec<&str> = rest.split(':').collect();
+        let (h, m, sec) = match parts.as_slice() {
+            [h] if h.len() == 4 => (&h[..2], &h[2..], "0"),
+            [h] => (*h, "0", "0"),
+            [h, m] => (*h, *m, "0"),
+            // `+02:05:59` — an offset with seconds, which the TCK uses.
+            [h, m, sec] => (*h, *m, *sec),
+            _ => return Err(err(format!("bad timezone offset: {tz}"))),
         };
-        let h: i32 = h.parse().map_err(|_| err(format!("bad timezone offset: {tz}")))?;
-        let m: i32 = m.parse().map_err(|_| err(format!("bad timezone offset: {tz}")))?;
-        return Ok((sign * (h * 3600 + m * 60), None));
+        let p = |x: &str| x.parse::<i32>().map_err(|_| err(format!("bad timezone offset: {tz}")));
+        return Ok(TzSpec::Offset(sign * (p(h)? * 3600 + p(m)? * 60 + p(sec)?)));
     }
-    // A named zone. Resolving it to an offset needs a tz database, which the
-    // engine does not carry yet; the name is preserved so nothing is lost, and
-    // the offset is reported as unknown rather than guessed as UTC — guessing
-    // would silently shift every value by the real offset.
-    Err(err(format!(
-        "named time zone `{tz}` needs a tz database, which is not built in yet; \
-         use an offset such as +01:00"
-    )))
+    t.parse::<chrono_tz::Tz>()
+        .map(TzSpec::Named)
+        .map_err(|_| err(format!("unknown time zone: {tz}")))
+}
+
+/// The UTC offset this spec has at a given **local** wall-clock instant.
+///
+/// A local time can be ambiguous (the hour repeated when clocks go back) or
+/// non-existent (the hour skipped when they go forward). Cypher resolves both
+/// toward the earlier offset, which is what `LocalResult::earliest` gives;
+/// picking arbitrarily would make one hour a year silently wrong.
+pub fn resolve_offset(spec: &TzSpec, local_days: i64, local_nanos: i64) -> Result<i32, ExecutionError> {
+    match spec {
+        TzSpec::Offset(o) => Ok(*o),
+        TzSpec::Named(tz) => {
+            use chrono::TimeZone;
+            let naive = chrono::DateTime::from_timestamp(
+                local_days * 86_400 + local_nanos.div_euclid(NANOS_PER_SEC),
+                local_nanos.rem_euclid(NANOS_PER_SEC) as u32,
+            )
+            .ok_or_else(|| err("date-time out of range"))?
+            .naive_utc();
+            let resolved = tz
+                .from_local_datetime(&naive)
+                .earliest()
+                .or_else(|| tz.from_local_datetime(&naive).latest())
+                .ok_or_else(|| err(format!("{tz} has no offset for {naive}")))?;
+            use chrono::Offset as _;
+            Ok(resolved.offset().fix().local_minus_utc())
+        }
+    }
+}
+
+/// The IANA name, when the spec has one.
+pub fn zone_name(spec: &TzSpec) -> Option<String> {
+    match spec {
+        TzSpec::Named(tz) => Some(tz.name().to_string()),
+        TzSpec::Offset(_) => None,
+    }
+}
+
+/// Back-compatible shim for callers with no date in hand.
+///
+/// A named zone still needs a date to have an offset, so this resolves it
+/// against 1970-01-01 — correct for a fixed offset, and an approximation for a
+/// named zone that the date-bearing constructors do not use. Kept narrow on
+/// purpose: `time()` is the only caller, because a time of day genuinely has
+/// no date to resolve against.
+pub fn parse_timezone(tz: &str) -> Result<(i32, Option<String>), ExecutionError> {
+    let spec = parse_timezone_spec(tz)?;
+    Ok((resolve_offset(&spec, 0, 0)?, zone_name(&spec)))
 }
 
 /// `PropertyValue::Date` from an ISO string: `2015-07-21`, `20150721`,
