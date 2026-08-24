@@ -35,6 +35,12 @@ pub enum ValidationError {
     MergeOnBoundVariable(String),
     MergeRelationshipWithNullProperty(String),
     VariableTypeConflict(String),
+    /// One variable bound to two different kinds of entity.
+    VariableKindConflict {
+        name: String,
+        first: &'static str,
+        second: &'static str,
+    },
     PatternInSetValue,
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
@@ -69,6 +75,12 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "a relationship pattern cannot be used as a value on the right of SET; \
                  patterns belong in MATCH, WHERE or a pattern comprehension"
+            ),
+            Self::VariableKindConflict { name, first, second } => write!(
+                f,
+                "`{name}` is bound to {first} and then to {second} in the same scope. A \
+                 variable names one entity, and an entity is a node, a relationship or a \
+                 path -- not two of them. Rename one of the two."
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -500,7 +512,153 @@ fn column_name_at(item: &ReturnItem, _idx: usize) -> Option<String> {
     })
 }
 
+
+/// What a pattern binds a variable to. A variable may be exactly one of these
+/// for as long as it stays in scope.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EntityKind {
+    Node,
+    Relationship,
+    Path,
+}
+
+impl EntityKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Node => "a node",
+            Self::Relationship => "a relationship",
+            Self::Path => "a path",
+        }
+    }
+}
+
+/// Record `name` as binding `kind`, or report the clash.
+fn note_kind(
+    seen: &mut std::collections::HashMap<String, EntityKind>,
+    name: &Option<String>,
+    kind: EntityKind,
+) -> Result<(), ValidationError> {
+    let Some(name) = name else { return Ok(()) };
+    match seen.get(name) {
+        Some(prev) if *prev != kind => Err(ValidationError::VariableKindConflict {
+            name: name.clone(),
+            first: prev.noun(),
+            second: kind.noun(),
+        }),
+        _ => {
+            seen.insert(name.clone(), kind);
+            Ok(())
+        }
+    }
+}
+
+/// Collect the kinds one pattern binds.
+fn note_pattern_kinds(
+    seen: &mut std::collections::HashMap<String, EntityKind>,
+    pattern: &crate::query::ast::Pattern,
+) -> Result<(), ValidationError> {
+    for path in &pattern.paths {
+        note_kind(seen, &path.path_variable, EntityKind::Path)?;
+        note_kind(seen, &path.start.variable, EntityKind::Node)?;
+        for seg in &path.segments {
+            note_kind(seen, &seg.edge.variable, EntityKind::Relationship)?;
+            note_kind(seen, &seg.node.variable, EntityKind::Node)?;
+        }
+    }
+    Ok(())
+}
+
+/// A `WITH` opens a new scope. Variables it passes through *by name* keep the
+/// kind they had; anything it computes is a fresh value whose kind this check
+/// no longer claims to know, so it is dropped rather than guessed.
+fn carry_kinds_through_with(
+    seen: &std::collections::HashMap<String, EntityKind>,
+    wc: &crate::query::ast::WithClause,
+) -> std::collections::HashMap<String, EntityKind> {
+    let mut next = std::collections::HashMap::new();
+    for item in &wc.items {
+        if let Expression::Variable(v) = &item.expression {
+            if let Some(kind) = seen.get(v) {
+                // `WITH r AS x` carries the relationship under a new name.
+                next.insert(item.alias.clone().unwrap_or_else(|| v.clone()), *kind);
+            }
+        }
+    }
+    next
+}
+
+/// One variable may not be a node here and a relationship there.
+///
+/// openCypher binds a variable to an entity, and the entity has a kind: a node,
+/// a relationship, or a path. `MATCH (r), ()-[r]-()` asks for `r` to be both,
+/// which has no answer, and the TCK asserts a failure for every arrangement of
+/// it — same pattern, same clause, preceding clause, all three kinds against
+/// each other. **227 scenarios**, all of this one rule, and we returned rows
+/// for every one of them.
+///
+/// Rows, not an error: the second binding simply overwrote the first, so the
+/// query "succeeded" with an answer to a question that was never well-formed.
+///
+/// Only pattern bindings are examined. A `WITH` that recomputes a name is left
+/// alone -- see `carry_kinds_through_with` -- because the cost of being wrong
+/// here is rejecting a valid query, which is worse than accepting an invalid
+/// one (the rule this module opens with).
+fn validate_variable_kinds(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let mut seen: std::collections::HashMap<String, EntityKind> = std::collections::HashMap::new();
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => note_pattern_kinds(&mut seen, &mc.pattern)?,
+                Clause::Create(cc) => note_pattern_kinds(&mut seen, &cc.pattern)?,
+                Clause::Merge(mc) => note_pattern_kinds(&mut seen, &mc.pattern)?,
+                Clause::With(wc) => seen = carry_kinds_through_with(&seen, wc),
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // The by-kind representation. A query parsed into these fields has an empty
+    // `clauses`, so both shapes have to be walked or the rule holds for half
+    // the queries -- the same split that cost #710 a day.
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        note_pattern_kinds(&mut seen, &mc.pattern)?;
+    }
+    if let Some(wc) = &query.with_clause {
+        seen = carry_kinds_through_with(&seen, wc);
+        for mc in query.match_clauses.iter().skip(upto) {
+            note_pattern_kinds(&mut seen, &mc.pattern)?;
+        }
+    }
+    for (wc, _, matches, _) in &query.extra_with_stages {
+        seen = carry_kinds_through_with(&seen, wc);
+        for mc in matches {
+            note_pattern_kinds(&mut seen, &mc.pattern)?;
+        }
+    }
+    // CREATE and MERGE come *after* the WITH stages, so their kinds must be
+    // noted after the scope resets -- walking them first reads them against a
+    // scope they never see. `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` is legal:
+    // `r` is not carried through the WITH, so it is unbound and the CREATE
+    // makes a fresh node. Checked in the old order, that is Relationship vs
+    // Node and a **valid query gets rejected** -- the failure this module's
+    // opening comment warns is the worse one. Caught in review, not by a test,
+    // so `a_write_after_with_may_reuse_a_dropped_name` now pins it.
+    if let Some(cc) = &query.create_clause {
+        note_pattern_kinds(&mut seen, &cc.pattern)?;
+    }
+    if let Some(mc) = &query.merge_clause {
+        note_pattern_kinds(&mut seen, &mc.pattern)?;
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_variable_kinds(query)?;
+
     // ---- ORDER BY scope after an aggregating or DISTINCT projection.
     if let Some(rc) = &query.return_clause {
         validate_order_by_scope(&rc.items, rc.distinct, query.order_by.as_ref())?;
