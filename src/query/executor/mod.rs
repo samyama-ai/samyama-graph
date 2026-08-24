@@ -84,6 +84,7 @@ pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
+pub mod temporal;
 pub mod operator;
 pub mod profile;
 pub mod physical_planner;

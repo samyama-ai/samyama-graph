@@ -541,6 +541,19 @@ fn prop_to_tck(p: &PropertyValue) -> Tck {
         PropertyValue::Map(m) => {
             Tck::Map(m.iter().map(|(k, v)| (k.clone(), prop_to_tck(v))).collect())
         }
+        // Temporal values render as the TCK writes them -- a quoted ISO-8601
+        // string -- via the engine's own `to_cypher_string`, so the harness and
+        // `toString()` cannot disagree (#689).
+        //
+        // These previously fell to the `Debug` arm below and produced
+        // `DateTime(-1882656000000)`, which is not a TCK literal, is not
+        // anything, and is what fed #761 an input its value parser could not
+        // consume.
+        PropertyValue::Date(_)
+        | PropertyValue::LocalTime(_)
+        | PropertyValue::Time { .. }
+        | PropertyValue::LocalDateTime { .. }
+        | PropertyValue::ZonedDateTime { .. } => Tck::Str(p.to_cypher_string()),
         other => Tck::Opaque(format!("{other:?}")),
     }
 }
