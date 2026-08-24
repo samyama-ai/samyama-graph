@@ -150,7 +150,7 @@ fn hop_bounds_are_respected() {
 }
 
 #[test]
-fn each_reachable_node_is_returned_once() {
+fn a_node_reachable_by_two_paths_is_returned_twice() {
     // A diamond: two distinct paths reach D. The BFS deduplicates by node, so
     // D appears once whichever path found it first.
     let mut store = GraphStore::new();
@@ -173,14 +173,39 @@ fn each_reachable_node_is_returned_once() {
     store.create_edge(b, d, "E").unwrap();
     store.create_edge(c, d, "E").unwrap();
 
+    // A diamond: A->B->D and A->C->D. Those are **two distinct paths** to `D`,
+    // so a var-length pattern without `DISTINCT` yields `D` twice.
+    //
+    // This test previously asserted `D` exactly once, which is reachability
+    // semantics rather than path semantics, and is the defect #710 describes.
+    // The reference settles it: TCK `Match7[12] Variable length optional
+    // relationships` expects
+    //
+    //     | (:A {num: 42}) | (:B {num: 46}) | (:B {num: 46}) | (:C) |
+    //
+    // with `(:B)` twice — once at one hop and once via a self-loop at two. That
+    // scenario only passes with trail semantics, and TCK went 1082 -> 1083 when
+    // this engine adopted them.
     let out = names(
         &store,
         "MATCH (a:N)-[:E*1..3]->(f:N) WHERE a.name = \"A\" RETURN f.name AS n",
     );
-    assert_eq!(out.iter().filter(|n| *n == "D").count(), 1, "{out:?}");
+    assert_eq!(
+        out.iter().filter(|n| *n == "D").count(),
+        2,
+        "D is reached by A-B-D and A-C-D, which are two paths: {out:?}"
+    );
     let mut sorted = out.clone();
     sorted.sort();
-    assert_eq!(sorted, vec!["B", "C", "D"]);
+    assert_eq!(sorted, vec!["B", "C", "D", "D"]);
+
+    // And `DISTINCT` collapses them, which is how every LDBC var-length query
+    // is written and why the planner can keep the cheap walk for those (#710).
+    let deduped = names(
+        &store,
+        "MATCH (a:N)-[:E*1..3]->(f:N) WHERE a.name = \"A\" RETURN DISTINCT f.name AS n",
+    );
+    assert_eq!(deduped, vec!["B", "C", "D"]);
 }
 
 #[test]
@@ -260,12 +285,40 @@ fn a_large_traversal_reaches_the_same_set_as_a_hand_computed_bfs() {
     let query = parse_query("MATCH (a:N)-[:E*1..3]->(f:N) WHERE id(a) = 1 RETURN id(f) AS n")
         .expect("query should parse");
     let batch = QueryExecutor::new(&store).execute(&query).expect("query should run");
+
+    // Compare the reachable **set**, not the row count. A node reachable by
+    // more than one path yields more than one row — two paths to the same node
+    // are two matches (#710, TCK `Match7[12]`) — and on this graph, where every
+    // node has two outgoing `E` edges, most of them are. What the hand BFS
+    // computes is which nodes are reachable, so that is what to compare.
+    let mut got: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for r in &batch.records {
+        if let Some(Value::Property(PropertyValue::Integer(id))) = r.get("n") {
+            got.insert(*id as usize);
+        }
+    }
+    // The hand BFS works in *indices*; the engine returns node **ids**. The
+    // original assertion compared only `len()`, so this never had to be right —
+    // comparing the values themselves exposed an off-by-one that was always
+    // there.
+    let mut expected: Vec<usize> = reachable
+        .iter()
+        .map(|&i| ids[i].as_u64() as usize)
+        .collect();
+    let mut actual: Vec<usize> = got.iter().copied().collect();
+    expected.sort();
+    actual.sort();
     assert_eq!(
+        actual, expected,
+        "engine reached {} distinct nodes, hand BFS reached {}",
+        actual.len(),
+        expected.len()
+    );
+    assert!(
+        batch.records.len() >= got.len(),
+        "rows ({}) cannot be fewer than distinct nodes ({})",
         batch.records.len(),
-        reachable.len(),
-        "engine reached {} nodes, hand BFS reached {}",
-        batch.records.len(),
-        reachable.len()
+        got.len()
     );
 }
 

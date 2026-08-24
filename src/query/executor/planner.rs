@@ -331,6 +331,77 @@ fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -
     }
 }
 
+/// Can the query see how many times a var-length target is reached?
+///
+/// The BFS in `VarLengthExpandOperator` marks a node visited at the depth it is
+/// first reached, so `(a)-[:R*1..2]-(x)` over a triangle answers `b, c` where
+/// openCypher answers `b, b, c, c`. Enumerating trails is the correct walk and
+/// is far more expensive, so it is used only where the difference is
+/// observable (#710).
+///
+/// **Conservative by construction: it answers `false` only for shapes it can
+/// prove are insensitive.** Getting this wrong in one direction is a wrong
+/// answer and in the other is LDBC IC1 enumerating every trail within three
+/// hops of a person, so anything unrecognised enumerates.
+///
+/// The provably-insensitive shape is a `DISTINCT` that dedups *before*
+/// anything counts, orders or truncates:
+///
+/// * `RETURN DISTINCT …` with no aggregate among the items and no `WITH`
+///   pipeline in between (IC1, IC11), or
+/// * the first `WITH` is `WITH DISTINCT …` with no aggregate among its items
+///   (IC5's `WITH DISTINCT friend`, IC6's `WITH DISTINCT post`).
+///
+/// A `DISTINCT` that comes *after* an aggregate does not help — in
+/// `WITH count(x) AS n RETURN DISTINCT n` the count has already seen the
+/// duplicates — which is why the position matters and a plain "does the query
+/// contain DISTINCT" test would be unsound.
+fn multiplicity_is_observable(query: &Query) -> bool {
+    fn has_aggregate(items: &[crate::query::ast::ReturnItem]) -> bool {
+        items.iter().any(|i| expression_has_aggregate(&i.expression))
+    }
+
+    // The first WITH in the pipeline, if any, is the first thing that can
+    // dedup. `stages` holds the pipeline; `with_clause` the single-WITH form.
+    // `with_clause` is the first WITH; `extra_with_stages` holds any that
+    // follow. Only the first can dedup before anything else sees the rows.
+    let first_with = query
+        .with_clause
+        .as_ref()
+        .or_else(|| query.extra_with_stages.first().map(|st| &st.0));
+
+    if let Some(w) = first_with {
+        // A WITH that dedups before counting absorbs the multiplicity.
+        return !(w.distinct && !has_aggregate(&w.items));
+    }
+
+    match &query.return_clause {
+        Some(r) => !(r.distinct && !has_aggregate(&r.items)),
+        None => true,
+    }
+}
+
+/// Whether an expression contains an aggregate call, at any depth.
+fn expression_has_aggregate(expr: &Expression) -> bool {
+    match expr {
+        Expression::Function { name, args, .. } => {
+            const AGGREGATES: &[&str] = &[
+                "count", "sum", "avg", "min", "max", "collect", "stdev", "stdevp",
+                "percentilecont", "percentiledisc",
+            ];
+            if AGGREGATES.contains(&name.to_lowercase().as_str()) {
+                return true;
+            }
+            args.iter().any(expression_has_aggregate)
+        }
+        Expression::Binary { left, right, .. } => {
+            expression_has_aggregate(left) || expression_has_aggregate(right)
+        }
+        Expression::Unary { expr, .. } => expression_has_aggregate(expr),
+        _ => false,
+    }
+}
+
 fn resolve_sort_key(
     key: &Expression,
     return_items: &[(Expression, String)],
@@ -427,6 +498,14 @@ pub struct QueryPlanner {
     cache_generation: std::sync::atomic::AtomicU64,
     /// Planner configuration (ADR-015)
     config: PlannerConfig,
+    /// Whether the query being planned can observe var-length multiplicity.
+    ///
+    /// Set once per `plan` call from `multiplicity_is_observable` and read at
+    /// the three sites that build a `VarLengthExpandOperator`, which sit in
+    /// functions that never see the `Query`. Threading a bool through all of
+    /// them would touch far more code than the decision is worth; an atomic
+    /// keeps `&self` and stays `Sync` (#710).
+    trail_enumeration: std::sync::atomic::AtomicBool,
 }
 
 impl QueryPlanner {
@@ -437,6 +516,7 @@ impl QueryPlanner {
             plan_cache: Mutex::new(HashMap::new()),
             cache_generation: std::sync::atomic::AtomicU64::new(0),
             config: PlannerConfig::default(),
+            trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -447,6 +527,7 @@ impl QueryPlanner {
             plan_cache: Mutex::new(HashMap::new()),
             cache_generation: std::sync::atomic::AtomicU64::new(0),
             config,
+            trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -733,6 +814,14 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        // Decide once, here, whether a var-length walk must enumerate trails.
+        // See `multiplicity_is_observable`: the BFS answers `b, c` where
+        // openCypher answers `b, b, c, c`, and enumerating is only affordable
+        // where a `DISTINCT` makes the difference invisible (#710).
+        self.trail_enumeration.store(
+            multiplicity_is_observable(query),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // A query parsed as a clause sequence has empty by-kind fields — it is
         // there precisely because they cannot represent it. Planning it through
         // the established path would read those empty fields as "no MATCH, no
@@ -2910,6 +2999,12 @@ impl QueryPlanner {
                             min_hops,
                             max_hops,
                         );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
                         // Relationship isomorphism applies to a var-length segment too: an
                         // edge an earlier segment of this clause walked is not available to
                         // it. `ExpandOperator` has done this since #684; this path did not
@@ -3396,6 +3491,12 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not
@@ -3522,6 +3623,12 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not

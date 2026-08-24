@@ -4663,6 +4663,20 @@ pub struct VarLengthExpandOperator {
     /// was in it. At SF10 that is the difference between finishing and hitting
     /// the query timeout.
     target_reach: Option<std::collections::HashSet<NodeId>>,
+    /// Enumerate trails even when `min_hops < 2`, because the query can see
+    /// how many times a node is reached.
+    ///
+    /// The BFS marks a node visited at the depth it is first reached, so
+    /// `(a)-[:R*1..2]-(x)` over a triangle answers `b, c` where openCypher
+    /// answers `b, b, c, c` — `b` is reached directly and again via `c`. That
+    /// is a wrong answer, and the only correct walk is to enumerate trails.
+    ///
+    /// It is not the default because enumeration is not affordable where
+    /// nothing can observe the difference: LDBC IC1's `KNOWS*1..3` reaches
+    /// ~4,900 nodes and every LDBC var-length query dedups its result. The
+    /// planner sets this when the multiplicity is observable and leaves the
+    /// BFS in place when a `DISTINCT` absorbs it (#710).
+    enumerate_trails: bool,
     /// Enforce relationship isomorphism across the clause, not just within
     /// this segment.
     ///
@@ -4708,6 +4722,7 @@ impl VarLengthExpandOperator {
             type_ids: None,
             pinned_target: None,
             target_reach: None,
+            enumerate_trails: false,
             track_edges: false,
             starts_clause: false,
         }
@@ -4818,6 +4833,13 @@ impl VarLengthExpandOperator {
         self
     }
 
+    /// Enumerate trails rather than walking shortest paths, because the query
+    /// can observe how many times a node is reached. See `enumerate_trails`.
+    pub fn with_trail_enumeration(mut self) -> Self {
+        self.enumerate_trails = true;
+        self
+    }
+
     /// Enforce relationship isomorphism for this segment against the whole
     /// clause, not just within the segment. Same contract as
     /// `ExpandOperator::with_edge_isolation`: `starts_clause` marks the first
@@ -4913,6 +4935,20 @@ impl VarLengthExpandOperator {
         /// Enough for any pattern a person writes by hand, small enough that a
         /// runaway `*2..` cannot hang the query.
         const MAX_TRAILS: usize = 1_000_000;
+
+        // An empty interval matches nothing. `*1..0` and `*..0` (which parses
+        // as `*1..0`) are legal and must return no rows — TCK Match5 [12] and
+        // [13].
+        //
+        // The emit test below is `depth >= min_hops`, checked *before* the
+        // `depth < max_hops` that decides whether to descend, so without this
+        // a `*1..0` emits every neighbour at depth 1 and then stops. The bug
+        // was latent while this path was reachable only for `min_hops >= 2`:
+        // `*2..1` walks to depth 1, never reaches depth 2, and emits nothing by
+        // accident. `*1..0` has no such accident to save it.
+        if self.min_hops > self.max_hops {
+            return Ok(());
+        }
 
         self.ensure_type_ids(store);
         let type_ids: Option<Vec<u16>> = self.type_ids.clone();
@@ -5087,7 +5123,11 @@ impl VarLengthExpandOperator {
         // nodes, and IC6 needs the pinned-target walk to stay cheap. Both have
         // `min_hops == 1`, as does every LDBC pattern, so the enumeration is
         // taken only where the BFS is not merely lossy but wrong.
-        if self.min_hops >= 2 {
+        // `min_hops == 0` stays on the BFS: `expand_trails` walks outward from
+        // the source and has no way to emit the source itself, so routing
+        // `*0..n` into it silently drops the zero-length match — caught by
+        // `zero_hops_includes_the_target_itself`.
+        if self.min_hops >= 2 || (self.enumerate_trails && self.min_hops >= 1) {
             return self.expand_trails(record, source_id, store);
         }
 

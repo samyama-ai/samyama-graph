@@ -66,7 +66,6 @@ fn triangle() -> GraphStore {
 /// From `a` over `*1..2`: `b` (via a-b), `c` (via a-c), `c` (via a-b-c) and
 /// `b` (via a-c-b). Four rows. A shortest-path BFS emits two.
 #[test]
-#[ignore = "#710: the operator walks shortest paths, not paths"]
 fn a_node_reachable_two_ways_within_the_bound_yields_two_rows() {
     let store = triangle();
     assert_eq!(
@@ -286,4 +285,44 @@ fn an_inherited_edge_of_another_type_does_not_constrain_a_typed_segment() {
         "the only KNOWS edge was walked by the first segment, so the var-length \
          segment has none left: got {same:?}"
     );
+}
+
+/// `DISTINCT` absorbs the multiplicity, so the cheap walk is still correct.
+///
+/// Enumerating trails is the only correct walk when the query can count how
+/// many times a node is reached — but it is not affordable where nothing can:
+/// LDBC IC1's `KNOWS*1..3` reaches ~4,900 nodes, and **every** LDBC var-length
+/// query dedups (IC1 and IC11 with `RETURN DISTINCT`, IC5 and IC6 with
+/// `WITH DISTINCT`). The planner keeps the BFS for those (#710).
+///
+/// This pins the answer, which must be the same either way — a `DISTINCT` over
+/// duplicated rows and over deduplicated ones is the same set. What it protects
+/// is the *choice*: if the analysis ever decided to enumerate here it would
+/// still pass, and if it ever stopped enumerating for the non-DISTINCT case
+/// above, that test fails.
+#[test]
+fn distinct_absorbs_the_multiplicity() {
+    let store = triangle();
+    assert_eq!(
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN DISTINCT x.name AS n"),
+        vec!["b", "c"],
+    );
+}
+
+/// A `DISTINCT` that comes after an aggregate does not absorb anything.
+///
+/// In `RETURN DISTINCT count(x)` the count has already seen the duplicates, so
+/// the walk must enumerate. A plain "does the query contain DISTINCT" test
+/// would get this wrong, which is why the analysis looks at position.
+#[test]
+fn an_aggregate_before_distinct_still_needs_the_duplicates() {
+    let store = triangle();
+    let q = "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN DISTINCT count(x) AS n";
+    let parsed = parse_query(q).expect("parses");
+    let out = QueryExecutor::new(&store).execute(&parsed).expect("runs");
+    let got = match out.records[0].get("n") {
+        Some(Value::Property(PropertyValue::Integer(i))) => *i,
+        other => panic!("expected an integer count, got {other:?}"),
+    };
+    assert_eq!(got, 4, "b and c are each reached twice within *1..2");
 }
