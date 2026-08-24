@@ -4,6 +4,12 @@
 //! had never been run — a "~90% OpenCypher coverage" claim was withdrawn as
 //! unmeasured in #437. This produces the measurement.
 //!
+//! `Scenario Outline:` blocks are expanded against their `Examples:` rows
+//! (#756). They were skipped until then, which was 274 of the corpus's 1,615
+//! scenarios — more than every other skip reason combined, and ~2,280
+//! concrete cases once expanded. The pass rate quoted before that expansion,
+//! 87.1%, was measured over the 1,244 scenarios that remained.
+//!
 //! ## What it does and does not attempt
 //!
 //! The TCK is Gherkin. This implements the step vocabulary that covers the
@@ -20,7 +26,7 @@
 //!
 //!   * **pass rate over evaluated scenarios** — what the engine gets right
 //!     among the scenarios this harness can actually judge;
-//!   * **coverage** — how many of the 1,615 scenarios it can judge at all.
+//!   * **coverage** — how many of the corpus's scenarios it can judge at all.
 //!
 //! Both belong in any quote of the result.
 //!
@@ -665,6 +671,85 @@ struct Scenario {
     /// A step this harness does not implement; the scenario is skipped and this
     /// says which step, so the gap is legible.
     unsupported: Option<String>,
+    /// The `Examples:` blocks of a `Scenario Outline:`, each a header and its
+    /// rows. Empty for an ordinary scenario.
+    ///
+    /// An outline is a template: its steps carry `<placeholder>` tokens and
+    /// each example row is one concrete scenario. Skipping them cost 274 of
+    /// the TCK's 1,615 scenarios — the single largest reason the harness could
+    /// not judge a scenario, and larger than every other skip reason combined.
+    /// A block per entry rather than one flat table because an outline may
+    /// carry several, with different headers.
+    examples: Vec<(Vec<String>, Vec<Vec<String>>)>,
+    /// This scenario was declared `Scenario Outline:`.
+    ///
+    /// A separate flag rather than a preset `unsupported` marker. Marking it
+    /// unsupported at the header line -- before its steps are read -- makes
+    /// every later step handler see a scenario that is already skipped: the
+    /// generic `step:` fallback is guarded on `unsupported.is_none()` and so
+    /// records nothing, and expansion then has no way to tell an outline that
+    /// is merely an outline from one whose steps it cannot run. That is how 13
+    /// `Call5` scenarios went from "skipped: user-defined procedure" to
+    /// "errored: Unknown procedure" on the first version of this change.
+    is_outline: bool,
+}
+
+/// Substitute `<key>` for its example value throughout one scenario.
+///
+/// Plain textual replacement, because that is what the placeholder is: Gherkin
+/// interpolates before the step is read, so `<n>` inside a query, inside an
+/// expected cell, and inside an expected error kind are the same substitution.
+fn subst(text: &str, header: &[String], row: &[String]) -> String {
+    let mut out = text.to_string();
+    for (k, v) in header.iter().zip(row) {
+        out = out.replace(&format!("<{k}>"), v);
+    }
+    out
+}
+
+/// Expand an outline into one scenario per example row.
+///
+/// Returns the scenario unchanged when it is not an outline, so the caller does
+/// not branch. An outline whose `Examples:` block never arrived keeps its
+/// `unsupported` marker and stays a single skipped scenario — silently dropping
+/// it would make the coverage number claim work the harness did not do.
+fn expand_outline(mut s: Scenario) -> Vec<Scenario> {
+    if s.examples.is_empty() {
+        if s.is_outline && s.unsupported.is_none() {
+            s.unsupported = Some("Scenario Outline without Examples".into());
+        }
+        return vec![s];
+    }
+    let mut out = Vec::new();
+    for (header, rows) in &s.examples {
+        for row in rows {
+            if row.len() != header.len() {
+                continue;
+            }
+            let mut c = s.clone();
+            c.examples = Vec::new();
+            c.is_outline = false;
+            c.name = format!("{} [{}]", s.name, row.join(", "));
+            c.setup = s.setup.iter().map(|x| subst(x, header, row)).collect();
+            c.query = s.query.as_ref().map(|x| subst(x, header, row));
+            c.control_query = s.control_query.as_ref().map(|x| subst(x, header, row));
+            c.expect = s.expect.as_ref().map(|e| match e {
+                Expect::Rows { header: h, rows: r, ordered, list_order_insensitive } => Expect::Rows {
+                    header: h.iter().map(|x| subst(x, header, row)).collect(),
+                    rows: r
+                        .iter()
+                        .map(|cells| cells.iter().map(|x| subst(x, header, row)).collect())
+                        .collect(),
+                    ordered: *ordered,
+                    list_order_insensitive: *list_order_insensitive,
+                },
+                Expect::Empty => Expect::Empty,
+                Expect::Error(k) => Expect::Error(subst(k, header, row)),
+            });
+            out.push(c);
+        }
+    }
+    if out.is_empty() { vec![s] } else { out }
 }
 
 #[derive(Debug, PartialEq)]
@@ -698,7 +783,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 
     // The step a docstring or table belongs to.
     #[derive(PartialEq, Clone, Copy)]
-    enum Pending { None, Setup, Query, Control, Result(bool), Params }
+    enum Pending { None, Setup, Query, Control, Result(bool), Params, Examples }
     let mut pending = Pending::None;
 
     while i < lines.len() {
@@ -715,9 +800,19 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 control_query: None,
                 expect: None,
                 unsupported: None,
+                examples: Vec::new(),
+                is_outline: false,
             });
             in_background = true;
             pending = Pending::None;
+            continue;
+        }
+
+        if line.starts_with("Examples:") {
+            if let Some(s) = cur.as_mut() {
+                s.examples.push((Vec::new(), Vec::new()));
+            }
+            pending = Pending::Examples;
             continue;
         }
 
@@ -727,7 +822,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                     background = s.setup;
                     in_background = false;
                 } else {
-                    out.push(s);
+                    out.extend(expand_outline(s));
                 }
             }
             let mut s = Scenario {
@@ -738,12 +833,9 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 control_query: None,
                 expect: None,
                 unsupported: None,
+                examples: Vec::new(),
+                is_outline: line.starts_with("Scenario Outline:"),
             };
-            if line.starts_with("Scenario Outline:") {
-                // Outlines need Examples expansion, which this harness does not
-                // do. Reported rather than silently dropped.
-                s.unsupported = Some("Scenario Outline".into());
-            }
             cur = Some(s);
             pending = Pending::None;
             continue;
@@ -834,6 +926,16 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 .split('|')
                 .map(|c| c.trim().to_string())
                 .collect();
+            if pending == Pending::Examples {
+                if let Some((header, rows)) = s.examples.last_mut() {
+                    if header.is_empty() {
+                        *header = cells;
+                    } else {
+                        rows.push(cells);
+                    }
+                }
+                continue;
+            }
             match (&mut s.expect, pending) {
                 (Some(Expect::Rows { header, rows, .. }), Pending::Result(_)) => {
                     if header.is_empty() {
@@ -854,7 +956,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
     }
     if let Some(s) = cur.take() {
         if !in_background {
-            out.push(s);
+            out.extend(expand_outline(s));
         }
     }
     out
@@ -1370,6 +1472,13 @@ fn main() {
     println!("  PASS RATE          {pass_rate:.1}%  of evaluated scenarios");
     println!("  gate CH-TCK >= 85% of evaluated: {}", if pass_rate >= 85.0 { "MET" } else { "NOT MET" });
     println!();
+    println!("  The rate is over every scenario this harness can judge, outlines");
+    println!("  included. Before outlines were expanded it read 87.1% over 1,244");
+    println!("  scenarios; the same engine reads 55.9% over 3,761. Nothing regressed --");
+    println!("  the earlier figure was measured on a sample that left out the 274");
+    println!("  outlines, which are ~2,280 concrete cases and the harder ones. Quote the");
+    println!("  pair, never the rate alone.");
+    println!();
     println!("Both numbers matter. The pass rate says what the engine gets right among");
     println!("scenarios this harness can judge; the coverage says how many it can judge at");
     println!("all. Quoting either alone misleads.");
@@ -1383,6 +1492,12 @@ fn main() {
     // engine changing at all. The count of passing scenarios only moves when
     // the engine does — provided the scenario set is pinned, which is what
     // `TCK_REF` in the harness is for.
+    //
+    // The proviso has now been used once. Expanding outlines (#756) changed the
+    // scenario set, so the floor moved 1,083 -> 2,103 without the engine
+    // changing. That is a **re-baseline, not a gain**: a floor that jumps by a
+    // thousand is only honest if the commit that moves it says which of the two
+    // it is, so that the next reader does not read it as progress.
     if let Some(min) = arg("--min-pass").and_then(|v| v.parse::<usize>().ok()) {
         println!();
         if pass < min {
@@ -1421,6 +1536,26 @@ fn main() {
     for (f, p, ev, rate) in worst.iter().take(15) {
         println!("  {:>5.0}%  {p:>3}/{ev:<3}  {f}", rate * 100.0);
     }
+
+    println!("\nWhere the failures are (top 10 features by scenarios not passing):");
+    let mut deficit: Vec<_> = per_feature
+        .iter()
+        .map(|(f, (p, ev))| (f.clone(), ev - p, *ev))
+        .filter(|(_, miss, _)| *miss > 0)
+        .collect();
+    deficit.sort_by_key(|(_, miss, _)| std::cmp::Reverse(*miss));
+    let total_missed: usize = deficit.iter().map(|(_, m, _)| m).sum();
+    for (f, miss, ev) in deficit.iter().take(10) {
+        println!(
+            "  {miss:>5} of {ev:<5} ({:>4.1}% of all failures)  {f}",
+            *miss as f64 * 100.0 / total_missed as f64
+        );
+    }
+    println!(
+        "  {:>5} across {} features in total",
+        total_missed,
+        deficit.len()
+    );
 
     if let Some(path) = arg("--json") {
         let mut j = String::from("{\n");
@@ -1549,6 +1684,171 @@ mod tests {
         }
     }
 
+
+    /// An outline is a template; each `Examples:` row is one concrete scenario.
+    ///
+    /// Skipping them was the harness's single largest blind spot: 274 of the
+    /// TCK's 1,615 scenarios, more than every other skip reason combined, and
+    /// they expand to ~2,280 concrete cases the engine had never been judged
+    /// on. Coverage went 77.0% -> 96.5% when they started running, and the
+    /// pass rate went 87.1% -> 55.9%, because the 87.1% was measured over a
+    /// sample that excluded them.
+    #[test]
+    fn an_outline_expands_to_one_scenario_per_example_row() {
+        let text = "\
+Feature: Demo
+
+  Scenario Outline: [1] adds
+    Given an empty graph
+    When executing query:
+      \"\"\"
+      RETURN <a> + <b> AS r
+      \"\"\"
+    Then the result should be, in any order:
+      | r |
+      | <sum> |
+
+    Examples:
+      | a | b | sum |
+      | 1 | 2 | 3   |
+      | 4 | 5 | 9   |
+";
+        let out = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(out.len(), 2, "two example rows, two scenarios");
+        assert_eq!(out[0].query.as_deref(), Some("RETURN 1 + 2 AS r"));
+        assert_eq!(out[1].query.as_deref(), Some("RETURN 4 + 5 AS r"));
+        assert!(out.iter().all(|s| s.unsupported.is_none()), "expanded rows must run");
+
+        // The placeholder is substituted in the *expectation* too. A harness
+        // that interpolated only the query would score every row against the
+        // literal text `<sum>` and report a correct engine as wrong.
+        for (s, want) in out.iter().zip(["3", "9"]) {
+            match s.expect.as_ref().expect("expectation") {
+                Expect::Rows { rows, .. } => assert_eq!(rows, &vec![vec![want.to_string()]]),
+                other => panic!("expected rows, got {other:?}"),
+            }
+        }
+    }
+
+    /// The `Examples:` table must not be read as more expected rows.
+    ///
+    /// The two tables are adjacent and identical in syntax; the only thing
+    /// separating them is the `Examples:` keyword resetting what the parser is
+    /// collecting. Without that reset the example rows append to the
+    /// expectation, and a scenario that should assert one row asserts three.
+    #[test]
+    fn example_rows_do_not_land_in_the_expected_table() {
+        let text = "\
+Feature: Demo
+
+  Scenario Outline: [1] one row only
+    Given an empty graph
+    When executing query:
+      \"\"\"
+      RETURN <a> AS r
+      \"\"\"
+    Then the result should be, in any order:
+      | r   |
+      | <a> |
+
+    Examples:
+      | a |
+      | 7 |
+";
+        let out = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(out.len(), 1);
+        match out[0].expect.as_ref().expect("expectation") {
+            Expect::Rows { rows, header, .. } => {
+                assert_eq!(header, &vec!["r".to_string()]);
+                assert_eq!(rows, &vec![vec!["7".to_string()]], "one row, not the examples too");
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    /// An expanded row keeps a step the harness cannot run.
+    ///
+    /// This is the regression the first version of the change shipped: it
+    /// cleared `unsupported` on every clone, so 13 `Call5` scenarios stopped
+    /// being "skipped: user-defined procedure" and became "errored: Unknown
+    /// procedure". Expansion changed a *reported gap* into a *reported defect*
+    /// — the harness accusing the engine of the harness's own limitation.
+    #[test]
+    fn expansion_does_not_erase_a_reason_the_scenario_cannot_run() {
+        let text = "\
+Feature: Demo
+
+  Scenario Outline: [1] calls
+    Given an empty graph
+    And there exists a procedure test.my.proc() :: (a :: INTEGER?)
+    When executing query:
+      \"\"\"
+      CALL test.my.proc() YIELD <y> RETURN <y>
+      \"\"\"
+    Then the result should be, in any order:
+      | <y> |
+      | 1   |
+
+    Examples:
+      | y |
+      | a |
+";
+        let out = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].unsupported.as_deref(), Some("user-defined procedure"));
+    }
+
+    /// An outline whose `Examples:` block never arrived stays one skipped
+    /// scenario, and says so. Dropping it would shrink the denominator and
+    /// raise the coverage figure for work the harness did not do.
+    #[test]
+    fn an_outline_without_examples_is_skipped_not_dropped() {
+        let text = "\
+Feature: Demo
+
+  Scenario Outline: [1] no examples
+    Given an empty graph
+    When executing query:
+      \"\"\"
+      RETURN <a>
+      \"\"\"
+    Then the result should be empty
+";
+        let out = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].unsupported.as_deref(), Some("Scenario Outline without Examples"));
+    }
+
+    /// A single outline may carry several `Examples:` blocks, with different
+    /// headers. Flattening them into one table would misalign every row of the
+    /// second against the first block's header.
+    #[test]
+    fn several_examples_blocks_each_expand_against_their_own_header() {
+        let text = "\
+Feature: Demo
+
+  Scenario Outline: [1] two blocks
+    Given an empty graph
+    When executing query:
+      \"\"\"
+      RETURN <x>
+      \"\"\"
+    Then the result should be empty
+
+    Examples:
+      | x |
+      | 1 |
+
+    Examples:
+      | x |
+      | 2 |
+      | 3 |
+";
+        let out = parse_feature(Path::new("Demo.feature"), text);
+        assert_eq!(out.len(), 3);
+        let qs: Vec<_> = out.iter().filter_map(|s| s.query.clone()).collect();
+        assert_eq!(qs, vec!["RETURN 1", "RETURN 2", "RETURN 3"]);
+    }
 
     /// A `Background:` block applies to every scenario in its file.
     ///
