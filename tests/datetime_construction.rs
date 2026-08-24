@@ -32,11 +32,25 @@ fn one(cypher: &str) -> Result<PropertyValue, String> {
 
 const NOV_2023: i64 = 1_700_000_000_000;
 
+/// The instant `NOV_2023` names, as the type `datetime()` now returns.
+///
+/// Since #689 `datetime()` produces a `ZonedDateTime` rather than a bare
+/// millisecond `DateTime`. The *instant* asserted here is unchanged — only the
+/// type it is carried in — so these tests still check what #595 was about.
+fn nov_2023() -> PropertyValue {
+    PropertyValue::ZonedDateTime {
+        secs: NOV_2023 / 1000,
+        nanos: 0,
+        offset_seconds: 0,
+        zone: None,
+    }
+}
+
 #[test]
 fn epoch_millis_yields_that_instant() {
     assert_eq!(
         one("RETURN datetime({epochMillis: 1700000000000}) AS r").unwrap(),
-        PropertyValue::DateTime(NOV_2023)
+        nov_2023()
     );
 }
 
@@ -69,7 +83,7 @@ fn its_components_are_right() {
 fn epoch_seconds_works_too() {
     assert_eq!(
         one("RETURN datetime({epochSeconds: 1700000000}) AS r").unwrap(),
-        PropertyValue::DateTime(NOV_2023)
+        nov_2023()
     );
 }
 
@@ -120,6 +134,6 @@ fn epoch_millis_wins_over_calendar_components() {
     // as a test because the precedence is a choice, not an accident.
     assert_eq!(
         one("RETURN datetime({epochMillis: 1700000000000, year: 1999}) AS r").unwrap(),
-        PropertyValue::DateTime(NOV_2023)
+        nov_2023()
     );
 }

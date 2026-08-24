@@ -219,3 +219,37 @@ fn split_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
     }
     Ok((t, None))
 }
+
+/// Every map key the temporal constructors understand.
+const KNOWN_KEYS: &[&str] = &[
+    "epochMillis", "epochSeconds",
+    "year", "month", "day", "week", "dayOfWeek", "quarter", "dayOfQuarter", "ordinalDay",
+    "hour", "minute", "second", "millisecond", "microsecond", "nanosecond",
+    "timezone", "date", "time", "datetime",
+];
+
+/// Refuse a map that names nothing the constructor understands, and say which
+/// keys it was given.
+///
+/// This is the half of #595 that keeps the other half honest: before it, *any*
+/// unrecognised map fell through to the component defaults and produced
+/// `1970-01-01`, which is why a missing `epochMillis` arm went unnoticed for so
+/// long. A generic "needs a date" would have re-opened that hole by a different
+/// route -- it does not name what was actually passed, so a typo like
+/// `epochMilis` reads as "you forgot the date" rather than "that key is not a
+/// thing".
+pub fn reject_unknown_map(
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> Result<(), ExecutionError> {
+    if map.keys().any(|k| KNOWN_KEYS.contains(&k.as_str())) {
+        return Ok(());
+    }
+    let mut given: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+    given.sort_unstable();
+    Err(err(format!(
+        "this constructor understands none of the keys given ({}); \
+         expected one of: {}",
+        if given.is_empty() { "the map is empty".to_string() } else { given.join(", ") },
+        KNOWN_KEYS.join(", ")
+    )))
+}

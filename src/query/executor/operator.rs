@@ -2293,6 +2293,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
                 }
                 Value::Property(PropertyValue::Map(map)) => {
+                    crate::query::executor::temporal::reject_unknown_map(map)?;
                     let (d, t) = compose_date_and_time(map)?;
                     let total = d as i64 * 86_400 * 1_000_000_000 + t;
                     Ok(Value::Property(PropertyValue::LocalDateTime {
@@ -2336,6 +2337,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     }))
                 }
                 Value::Property(PropertyValue::Map(map)) => {
+                    tmp::reject_unknown_map(map)?;
                     // An epoch is a complete specification on its own, and is
                     // handled first: without this the map fell through to the
                     // component defaults and returned 1970-01-01 *silently*,
