@@ -480,6 +480,19 @@ impl Value {
                 .get(property)
                 .cloned()
                 .unwrap_or(PropertyValue::Null),
+            // Component access on the five temporal types (#689).
+            //
+            // Routed through one function so a `Date` and a `LocalDateTime`
+            // cannot disagree about what `.year` means. Before this, only the
+            // legacy `DateTime` had accessors, so teaching the constructors to
+            // return real types would have silently removed `dt.year` — which
+            // the suite caught, and which is Cypher-required behaviour rather
+            // than a test encoding the old shape.
+            Value::Property(p @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. })) => temporal_component(p, property),
             // Temporal component access: dt.year, dt.month, dur.days, etc.
             Value::Property(PropertyValue::DateTime(millis)) => {
                 use chrono::{Datelike, Timelike, TimeZone};
@@ -1154,6 +1167,93 @@ impl PropertyCursor {
             }
             Some(other) => other.resolve_property(&self.property, store),
             None => PropertyValue::Null,
+        }
+    }
+}
+
+/// One component of a temporal value: `.year`, `.hour`, `.offsetSeconds`, ...
+///
+/// Absent components are `Null`, which is Cypher's answer — `date.hour` has no
+/// meaning and is null rather than zero. Returning zero would read as midnight.
+fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
+    use chrono::{Datelike, Timelike};
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+
+    // Split into the date part (days since epoch) and the time part (nanos
+    // since midnight), each optional, and answer from those.
+    let (days, tod, offset, zone) = match v {
+        PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
+        PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
+        PropertyValue::Time { nanos, offset_seconds } => {
+            (None, Some(*nanos), Some(*offset_seconds), None)
+        }
+        PropertyValue::LocalDateTime { secs, nanos } => (
+            Some(secs.div_euclid(86_400)),
+            Some(secs.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64),
+            None,
+            None,
+        ),
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+            let local = secs + *offset_seconds as i64;
+            (
+                Some(local.div_euclid(86_400)),
+                Some(local.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64),
+                Some(*offset_seconds),
+                zone.clone(),
+            )
+        }
+        _ => return PropertyValue::Null,
+    };
+
+    let date = days.and_then(|d| {
+        chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?.checked_add_signed(chrono::Duration::days(d))
+    });
+    let int = |x: i64| PropertyValue::Integer(x);
+
+    match property {
+        "year" => date.map_or(PropertyValue::Null, |d| int(d.year() as i64)),
+        "month" => date.map_or(PropertyValue::Null, |d| int(d.month() as i64)),
+        "day" => date.map_or(PropertyValue::Null, |d| int(d.day() as i64)),
+        "quarter" => date.map_or(PropertyValue::Null, |d| int(((d.month() - 1) / 3 + 1) as i64)),
+        "dayOfQuarter" => date.map_or(PropertyValue::Null, |d| {
+            let qm = (d.month() - 1) / 3 * 3 + 1;
+            let start = chrono::NaiveDate::from_ymd_opt(d.year(), qm, 1);
+            start.map_or(PropertyValue::Null, |s| {
+                int(d.signed_duration_since(s).num_days() + 1)
+            })
+        }),
+        "week" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().week() as i64)),
+        "weekYear" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().year() as i64)),
+        "dayOfWeek" => date.map_or(PropertyValue::Null, |d| {
+            int(d.weekday().number_from_monday() as i64)
+        }),
+        "ordinalDay" => date.map_or(PropertyValue::Null, |d| int(d.ordinal() as i64)),
+
+        "hour" => tod.map_or(PropertyValue::Null, |n| int(n / 3_600_000_000_000)),
+        "minute" => tod.map_or(PropertyValue::Null, |n| int(n / 60_000_000_000 % 60)),
+        "second" => tod.map_or(PropertyValue::Null, |n| int(n / 1_000_000_000 % 60)),
+        "millisecond" => tod.map_or(PropertyValue::Null, |n| int(n % 1_000_000_000 / 1_000_000)),
+        "microsecond" => tod.map_or(PropertyValue::Null, |n| int(n % 1_000_000_000 / 1_000)),
+        "nanosecond" => tod.map_or(PropertyValue::Null, |n| int(n % 1_000_000_000)),
+
+        "offsetSeconds" => offset.map_or(PropertyValue::Null, |o| int(o as i64)),
+        "offsetMinutes" => offset.map_or(PropertyValue::Null, |o| int(o as i64 / 60)),
+        "offset" => offset.map_or(PropertyValue::Null, |o| {
+            PropertyValue::String(crate::graph::property::fmt_offset(o))
+        }),
+        "timezone" => match zone {
+            Some(z) => PropertyValue::String(z),
+            None => offset.map_or(PropertyValue::Null, |o| {
+                PropertyValue::String(crate::graph::property::fmt_offset(o))
+            }),
+        },
+        "epochMillis" => v.as_epoch_millis().map_or(PropertyValue::Null, int),
+        "epochSeconds" => v
+            .as_epoch_millis()
+            .map_or(PropertyValue::Null, |ms| int(ms.div_euclid(1000))),
+        _ => {
+            let _ = DAY_NS;
+            PropertyValue::Null
         }
     }
 }

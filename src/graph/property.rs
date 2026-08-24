@@ -654,7 +654,7 @@ pub(crate) fn fmt_time_of_day(total_nanos: i64) -> String {
 }
 
 /// A UTC offset as `Z`, `+01:00`, or `+05:30`.
-pub(crate) fn fmt_offset(offset_seconds: i32) -> String {
+pub fn fmt_offset(offset_seconds: i32) -> String {
     if offset_seconds == 0 {
         return "Z".to_string();
     }

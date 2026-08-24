@@ -6826,9 +6826,10 @@ mod tests {
         let result = QueryExecutor::new(&store).execute(
             &parse_query(r#"RETURN date("2024-06-15") AS d"#).unwrap()
         ).unwrap();
-        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("d").unwrap() {
+        if let Value::Property(p @ PropertyValue::Date(_)) = result.records[0].get("d").unwrap() {
+            assert_eq!(p.to_cypher_string(), "2024-06-15");
             use chrono::{Datelike, TimeZone};
-            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
+            let dt = chrono::Utc.timestamp_millis_opt(p.as_epoch_millis().unwrap()).unwrap();
             assert_eq!(dt.year(), 2024);
             assert_eq!(dt.month(), 6);
             assert_eq!(dt.day(), 15);
@@ -6841,16 +6842,19 @@ mod tests {
         let result = QueryExecutor::new(&store).execute(
             &parse_query("RETURN date() AS d").unwrap()
         ).unwrap();
-        assert!(matches!(result.records[0].get("d").unwrap(), Value::Property(PropertyValue::DateTime(_))));
+        // A Date, not a timestamp (#689): this assertion used to hold for
+        // `time()` and `datetime()` too, because all three returned the same
+        // variant.
+        assert!(matches!(result.records[0].get("d").unwrap(), Value::Property(PropertyValue::Date(_))));
     }
 
     #[test]
     fn test_time_constructor_string() {
         use crate::query::executor::operator::eval_function;
         let r = eval_function("time", &[Value::Property(PropertyValue::String("10:30:00".to_string()))], None).unwrap();
-        if let Value::Property(PropertyValue::DateTime(millis)) = r {
-            assert_eq!(millis, (10 * 3600 + 30 * 60) * 1000);
-        } else { panic!("time() should return DateTime"); }
+        if let Value::Property(p @ PropertyValue::Time { .. }) = r {
+            assert_eq!(p.to_cypher_string(), "10:30Z");
+        } else { panic!("time() should return Time, got {r:?}"); }
     }
 
     #[test]
@@ -6861,9 +6865,9 @@ mod tests {
         map.insert("minute".to_string(), PropertyValue::Integer(45));
         map.insert("second".to_string(), PropertyValue::Integer(30));
         let r = eval_function("time", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
-        if let Value::Property(PropertyValue::DateTime(millis)) = r {
-            assert_eq!(millis, (14 * 3600 + 45 * 60 + 30) * 1000);
-        } else { panic!("time() should return DateTime"); }
+        if let Value::Property(p @ PropertyValue::Time { .. }) = r {
+            assert_eq!(p.to_cypher_string(), "14:45:30Z");
+        } else { panic!("time() should return Time, got {r:?}"); }
     }
 
     #[test]
@@ -6872,9 +6876,10 @@ mod tests {
         let result = QueryExecutor::new(&store).execute(
             &parse_query(r#"RETURN localdatetime("2024-03-15T14:30:00") AS dt"#).unwrap()
         ).unwrap();
-        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("dt").unwrap() {
+        if let Value::Property(p @ PropertyValue::LocalDateTime { .. }) = result.records[0].get("dt").unwrap() {
+            assert_eq!(p.to_cypher_string(), "2024-03-15T14:30");
             use chrono::{Datelike, Timelike, TimeZone};
-            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
+            let dt = chrono::Utc.timestamp_millis_opt(p.as_epoch_millis().unwrap()).unwrap();
             assert_eq!(dt.year(), 2024);
             assert_eq!(dt.month(), 3);
             assert_eq!(dt.hour(), 14);
@@ -7022,11 +7027,11 @@ mod tests {
         let result = QueryExecutor::new(&store).execute(
             &parse_query(r#"RETURN datetime("2024-01-01T00:00:00Z") + duration({days: 1}) AS tomorrow"#).unwrap()
         ).unwrap();
-        if let Value::Property(PropertyValue::DateTime(millis)) = result.records[0].get("tomorrow").unwrap() {
-            use chrono::{Datelike, TimeZone};
-            let dt = chrono::Utc.timestamp_millis_opt(*millis).unwrap();
-            assert_eq!(dt.day(), 2);
-        } else { panic!("datetime + duration should return DateTime"); }
+        // Adding a duration keeps the operand's own type: a ZonedDateTime
+        // plus a duration is a ZonedDateTime, not a bare timestamp.
+        if let Value::Property(p @ PropertyValue::ZonedDateTime { .. }) = result.records[0].get("tomorrow").unwrap() {
+            assert_eq!(p.to_cypher_string(), "2024-01-02T00:00Z");
+        } else { panic!("datetime + duration should return ZonedDateTime, got {:?}", result.records[0].get("tomorrow")); }
     }
 
     #[test]

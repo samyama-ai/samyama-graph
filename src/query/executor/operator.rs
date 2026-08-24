@@ -225,6 +225,24 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Duration { months, days, seconds, .. }, PropertyValue::DateTime(dt)) => {
                 add_duration_to_datetime(*dt, *months, *days, *seconds)
             }
+            // Any of the five temporal types + Duration (#689). Without these
+            // arms, teaching the constructors to produce real types would have
+            // silently removed `datetime(...) + duration(...)`, which Cypher
+            // requires and which the suite already covered.
+            (t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             PropertyValue::Duration { months, days, seconds, nanos })
+            | (PropertyValue::Duration { months, days, seconds, nanos },
+               t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. })) => {
+                shift_temporal(t, *months, *days, *seconds, *nanos as i64)?
+            }
             // Duration + Duration
             (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
@@ -247,6 +265,25 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) => {
                 add_duration_to_datetime(*dt, -*months, -*days, -*seconds)
             }
+            (t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             PropertyValue::Duration { months, days, seconds, nanos }) => {
+                shift_temporal(t, -*months, -*days, -*seconds, -(*nanos as i64))?
+            }
+            // Two temporals of the same kind subtract to a Duration.
+            (a @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             b @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. })) => temporal_difference(a, b)?,
             // DateTime - DateTime = Duration
             (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => {
                 let diff_ms = a - b;
@@ -2593,6 +2630,140 @@ fn extract_float(val: &Value) -> ExecutionResult<f64> {
 }
 
 /// Add duration components to a DateTime (millis timestamp)
+
+/// Nanoseconds since the epoch that a temporal value denotes, and a way back.
+///
+/// `Date` is midnight and `LocalTime`/`Time` have no date, so these are the
+/// only two functions that decide what "the same value, shifted" means. Keeping
+/// that decision in one place is the point: the shift used to be written inline
+/// per operator, which is how `+` and `-` came to disagree about whether months
+/// were calendar months.
+fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
+    match v {
+        PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
+        PropertyValue::LocalTime(n) => Some(*n as i128),
+        PropertyValue::Time { nanos, offset_seconds } => {
+            Some(*nanos as i128 - *offset_seconds as i128 * 1_000_000_000)
+        }
+        PropertyValue::LocalDateTime { secs, nanos } => {
+            Some(*secs as i128 * 1_000_000_000 + *nanos as i128)
+        }
+        PropertyValue::ZonedDateTime { secs, nanos, .. } => {
+            Some(*secs as i128 * 1_000_000_000 + *nanos as i128)
+        }
+        PropertyValue::DateTime(ms) => Some(*ms as i128 * 1_000_000),
+        _ => None,
+    }
+}
+
+/// Shift a temporal value by a duration, keeping its own type.
+///
+/// Months are calendar months, so they are applied to the date rather than as
+/// a fixed number of seconds -- adding one month to 31 January is 28 February,
+/// not 3 March. Days and below are exact.
+fn shift_temporal(
+    v: &PropertyValue,
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanos: i64,
+) -> Result<PropertyValue, ExecutionError> {
+    use chrono::Datelike;
+    let exact = days as i128 * 86_400 * 1_000_000_000
+        + seconds as i128 * 1_000_000_000
+        + nanos as i128;
+
+    // Calendar months first, on whatever date part the value has.
+    let month_shift_nanos = if months == 0 {
+        0i128
+    } else {
+        let day0 = match v {
+            PropertyValue::Date(d) => *d as i64,
+            PropertyValue::LocalDateTime { secs, .. } => secs.div_euclid(86_400),
+            PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
+                (secs + *offset_seconds as i64).div_euclid(86_400)
+            }
+            // A time of day has no calendar to move.
+            _ => return Err(ExecutionError::TypeError(
+                "cannot add months to a value with no date part".to_string(),
+            )),
+        };
+        let base = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            .and_then(|e| e.checked_add_signed(chrono::Duration::days(day0)))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let total = base.year() as i64 * 12 + (base.month0() as i64) + months;
+        let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
+        // Clamp the day into the target month, which is what a calendar month
+        // shift means: 31 Jan + 1 month is 28/29 Feb.
+        let last = days_in_month(y as i32, m0 as u32 + 1);
+        let shifted = chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, base.day().min(last))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
+    };
+
+    let total = temporal_epoch_nanos(v)
+        .ok_or_else(|| ExecutionError::TypeError("not a temporal value".to_string()))?
+        + month_shift_nanos
+        + exact;
+    Ok(rebuild_temporal_like(v, total))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    let next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1);
+    match (first, next) {
+        (Some(a), Some(b)) => b.signed_duration_since(a).num_days() as u32,
+        _ => 31,
+    }
+}
+
+/// Put an epoch-nanosecond total back into the same type it came from, so a
+/// `Date` plus a duration is still a `Date`.
+fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyValue {
+    const DAY: i128 = 86_400 * 1_000_000_000;
+    match like {
+        PropertyValue::Date(_) => PropertyValue::Date(total_nanos.div_euclid(DAY) as i32),
+        PropertyValue::LocalTime(_) => {
+            PropertyValue::LocalTime(total_nanos.rem_euclid(DAY) as i64)
+        }
+        PropertyValue::Time { offset_seconds, .. } => PropertyValue::Time {
+            nanos: (total_nanos + *offset_seconds as i128 * 1_000_000_000).rem_euclid(DAY) as i64,
+            offset_seconds: *offset_seconds,
+        },
+        PropertyValue::LocalDateTime { .. } => PropertyValue::LocalDateTime {
+            secs: total_nanos.div_euclid(1_000_000_000) as i64,
+            nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
+        },
+        PropertyValue::ZonedDateTime { offset_seconds, zone, .. } => PropertyValue::ZonedDateTime {
+            secs: total_nanos.div_euclid(1_000_000_000) as i64,
+            nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
+            offset_seconds: *offset_seconds,
+            zone: zone.clone(),
+        },
+        _ => PropertyValue::DateTime((total_nanos / 1_000_000) as i64),
+    }
+}
+
+/// `a - b` for two temporals: the duration between them.
+fn temporal_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<PropertyValue, ExecutionError> {
+    let (na, nb) = match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+    };
+    let diff = na - nb;
+    let secs_total = diff.div_euclid(1_000_000_000) as i64;
+    Ok(PropertyValue::Duration {
+        months: 0,
+        days: secs_total / 86_400,
+        seconds: secs_total % 86_400,
+        nanos: diff.rem_euclid(1_000_000_000) as i32,
+    })
+}
+
 fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64) -> PropertyValue {
     use chrono::{Datelike, Months, Duration, TimeZone};
     let dt = chrono::Utc.timestamp_millis_opt(dt_millis).single();
@@ -12830,10 +13001,13 @@ mod tests {
 
     #[test]
     fn test_eval_function_date_no_args() {
+        // `date()` returns a Date, not a timestamp (#689). Asserting the
+        // *type* is the point: before, every temporal constructor returned the
+        // same `DateTime(millis)` and this test passed for `time()` too.
         let result = eval_function("date", &[], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => assert!(ts > 0),
-            _ => panic!("Expected DateTime"),
+            Value::Property(PropertyValue::Date(days)) => assert!(days > 0),
+            other => panic!("Expected Date, got {other:?}"),
         }
     }
 
@@ -12841,13 +13015,10 @@ mod tests {
     fn test_eval_function_date_string() {
         let result = eval_function("date", &[Value::Property(PropertyValue::String("2024-01-15".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                // 2024-01-15 00:00:00 UTC
-                let expected = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
-                    .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::Date(_)) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15");
             }
-            _ => panic!("Expected DateTime"),
+            other => panic!("Expected Date, got {other:?}"),
         }
     }
 
@@ -12859,10 +13030,8 @@ mod tests {
         map.insert("day".to_string(), PropertyValue::Integer(15));
         let result = eval_function("date", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                let expected = chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()
-                    .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::Date(_)) => {
+                assert_eq!(p.to_cypher_string(), "2024-06-15");
             }
             _ => panic!("Expected DateTime"),
         }
@@ -12894,8 +13063,8 @@ mod tests {
     fn test_eval_function_datetime_no_args() {
         let result = eval_function("datetime", &[], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => assert!(ts > 0),
-            _ => panic!("Expected DateTime"),
+            Value::Property(PropertyValue::ZonedDateTime { secs, .. }) => assert!(secs > 0),
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12903,11 +13072,10 @@ mod tests {
     fn test_eval_function_datetime_rfc3339() {
         let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00Z".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                let expected = chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
             }
-            _ => panic!("Expected DateTime"),
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12915,8 +13083,10 @@ mod tests {
     fn test_eval_function_datetime_naive() {
         let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(_ts)) => {} // valid
-            _ => panic!("Expected DateTime"),
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12931,9 +13101,11 @@ mod tests {
         map.insert("second".to_string(), PropertyValue::Integer(45));
         let result = eval_function("datetime", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-03-15T10:30:45Z");
                 use chrono::TimeZone;
                 let expected = chrono::Utc.with_ymd_and_hms(2024, 3, 15, 10, 30, 45).unwrap().timestamp_millis();
+                let ts = p.as_epoch_millis().unwrap();
                 assert_eq!(ts, expected);
             }
             _ => panic!("Expected DateTime"),
