@@ -6987,14 +6987,46 @@ mod tests {
         } else { panic!("toString(datetime) should return string"); }
     }
 
+    /// ISO-8601, as openCypher writes a duration.
+    ///
+    /// This asserted `P2M5DT3600S`, which is wrong twice over: years are split
+    /// out of months, and the seconds are broken into hours/minutes/seconds.
+    /// Checked against the TCK rather than against the new code — Temporal8
+    /// expects forms like `P12Y10M43DT18H9M3.500000003S` and
+    /// `P12Y6MT32H2M20.000000001S`, which pin the year split, the H/M/S
+    /// breakdown, the omission of zero components, and the fraction riding on
+    /// the seconds.
     #[test]
     fn test_tostring_duration() {
         use crate::query::executor::operator::eval_function;
-        let d = Value::Property(PropertyValue::Duration { months: 2, days: 5, seconds: 3600, nanos: 0 });
-        let r = eval_function("tostring", &[d], None).unwrap();
-        if let Value::Property(PropertyValue::String(s)) = r {
-            assert_eq!(s, "P2M5DT3600S");
-        } else { panic!("toString(duration) should return string"); }
+        let cases = [
+            (
+                PropertyValue::Duration { months: 2, days: 5, seconds: 3600, nanos: 0 },
+                "P2M5DT1H",
+            ),
+            // Years split out of months, and a fractional second.
+            (
+                PropertyValue::Duration { months: 154, days: 43, seconds: 65_343, nanos: 500_000_003 },
+                "P12Y10M43DT18H9M3.500000003S",
+            ),
+            // Zero components are omitted; an all-zero duration is not empty.
+            (PropertyValue::Duration { months: 0, days: 0, seconds: 0, nanos: 0 }, "PT0S"),
+            (PropertyValue::Duration { months: 0, days: 0, seconds: 0, nanos: 1 }, "PT0.000000001S"),
+            // Each component keeps its own sign: months and days have no fixed
+            // length, so they cannot be carried into one another.
+            (
+                PropertyValue::Duration { months: -154, days: -43, seconds: -65_343, nanos: -500_000_003 },
+                "P-12Y-10M-43DT-18H-9M-3.500000003S",
+            ),
+        ];
+        for (d, want) in cases {
+            let r = eval_function("tostring", &[Value::Property(d.clone())], None).unwrap();
+            if let Value::Property(PropertyValue::String(s)) = r {
+                assert_eq!(s, want, "toString({d:?})");
+            } else {
+                panic!("toString(duration) should return string");
+            }
+        }
     }
 
     // ==================== CY-32: WITH...RETURN ====================
