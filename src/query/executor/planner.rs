@@ -363,6 +363,27 @@ fn multiplicity_is_observable(query: &Query) -> bool {
 
     // The first WITH in the pipeline, if any, is the first thing that can
     // dedup. `stages` holds the pipeline; `with_clause` the single-WITH form.
+    // A query parsed as a **clause sequence** leaves every by-kind field empty —
+    // `return_clause` is `None` even for `RETURN DISTINCT` — so reading only
+    // those fields sends LDBC IC11 down the enumerating path and costs it 10%
+    // at SF10. Walk `clauses` when it is populated.
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                // The first projection decides: a DISTINCT here dedups before
+                // anything downstream can count the duplicates.
+                crate::query::ast::Clause::With(w) => {
+                    return !(w.distinct && !has_aggregate(&w.items));
+                }
+                crate::query::ast::Clause::Return(r) => {
+                    return !(r.distinct && !has_aggregate(&r.items));
+                }
+                _ => {}
+            }
+        }
+        return true;
+    }
+
     // `with_clause` is the first WITH; `extra_with_stages` holds any that
     // follow. Only the first can dedup before anything else sees the rows.
     let first_with = query
