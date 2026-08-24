@@ -186,3 +186,136 @@ fn the_zoned_ordering_stays_strict() {
     assert_ne!(a, b);
     assert_ne!(a.cmp(&b), std::cmp::Ordering::Equal, "must not tie: they are not Eq");
 }
+
+// ---------------------------------------------------------------------------
+// Construction from maps and strings. The representation above is only useful
+// if the constructors fill it correctly, and the component rules are where
+// this is easy to get subtly wrong.
+// ---------------------------------------------------------------------------
+
+use samyama::query::executor::temporal as tmp;
+use std::collections::HashMap;
+
+fn map(pairs: &[(&str, i64)]) -> HashMap<String, P> {
+    pairs.iter().map(|(k, v)| (k.to_string(), P::Integer(*v))).collect()
+}
+
+/// `millisecond`, `microsecond` and `nanosecond` are **additive**
+/// sub-components of the second, not alternative spellings of one field.
+///
+/// Straight from the TCK's own example: `{second: 14, nanosecond: 789,
+/// millisecond: 123, microsecond: 456}` is `14.123456789`. Reading any one of
+/// them as "the fraction" gives `.789`, `.123` or `.456` — three different
+/// wrong answers that all look plausible.
+#[test]
+fn sub_second_components_add_up() {
+    let n = tmp::time_of_day_nanos(&map(&[
+        ("hour", 12), ("minute", 31), ("second", 14),
+        ("nanosecond", 789), ("millisecond", 123), ("microsecond", 456),
+    ]))
+    .expect("valid");
+    assert_eq!(P::LocalTime(n).to_cypher_string(), "12:31:14.123456789");
+}
+
+/// Absent components are zero; present-but-out-of-range is an error.
+///
+/// A wrapped hour reads as a valid time, so 24:00 must not quietly become
+/// 00:00 of the next day.
+#[test]
+fn missing_components_default_but_bad_ones_are_refused() {
+    let n = tmp::time_of_day_nanos(&map(&[("hour", 10), ("minute", 35)])).expect("valid");
+    assert_eq!(P::LocalTime(n).to_cypher_string(), "10:35");
+
+    for bad in [
+        vec![("hour", 24)],
+        vec![("minute", 60)],
+        vec![("second", 60)],
+        vec![("millisecond", 1000)],
+        vec![("microsecond", 1_000_000)],
+        vec![("nanosecond", 1_000_000_000)],
+        vec![("hour", -1)],
+    ] {
+        assert!(
+            tmp::time_of_day_nanos(&map(&bad)).is_err(),
+            "{bad:?} should be refused, not wrapped"
+        );
+    }
+}
+
+/// A date can be written four ways and the TCK uses all of them. Only the
+/// calendar form used to work; the other three fell through to 1 January.
+#[test]
+fn all_four_date_spellings_are_understood() {
+    let cal = tmp::date_days(&map(&[("year", 1984), ("month", 10), ("day", 11)])).unwrap();
+    assert_eq!(P::Date(cal).to_cypher_string(), "1984-10-11");
+
+    let ord = tmp::date_days(&map(&[("year", 1984), ("ordinalDay", 202)])).unwrap();
+    assert_eq!(P::Date(ord).to_cypher_string(), "1984-07-20");
+
+    let wk = tmp::date_days(&map(&[("year", 1984), ("week", 10), ("dayOfWeek", 3)])).unwrap();
+    assert_eq!(P::Date(wk).to_cypher_string(), "1984-03-07");
+
+    let q = tmp::date_days(&map(&[("year", 1984), ("quarter", 3), ("dayOfQuarter", 45)])).unwrap();
+    assert_eq!(P::Date(q).to_cypher_string(), "1984-08-14");
+}
+
+/// The three non-calendar forms must not be mistaken for each other, and a
+/// date with no year is an error rather than 1970.
+#[test]
+fn a_date_needs_a_year_and_bad_components_are_refused() {
+    assert!(tmp::date_days(&map(&[("month", 5), ("day", 6)])).is_err(), "no year");
+    assert!(tmp::date_days(&map(&[("year", 1984), ("quarter", 5)])).is_err(), "quarter 5");
+    assert!(tmp::date_days(&map(&[("year", 1984), ("week", 10), ("dayOfWeek", 8)])).is_err());
+    assert!(tmp::date_days(&map(&[("year", 1984), ("ordinalDay", 400)])).is_err());
+    assert!(tmp::date_days(&map(&[("year", 1984), ("month", 13), ("day", 1)])).is_err());
+}
+
+/// Offsets parse in every spelling the TCK uses, including half-hours, which
+/// an hours-only parser silently truncates.
+#[test]
+fn timezone_offsets_parse_in_every_spelling() {
+    for (input, want) in [
+        ("Z", 0), ("z", 0), ("+01:00", 3600), ("-05:00", -18_000),
+        ("+0530", 19_800), ("+05:30", 19_800), ("-08:00", -28_800),
+    ] {
+        let (secs, zone) = tmp::parse_timezone(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert_eq!(secs, want, "offset of {input}");
+        assert_eq!(zone, None, "{input} is an offset, not a named zone");
+    }
+}
+
+/// A named zone is refused with a message that says why, rather than being
+/// read as UTC.
+///
+/// Treating it as UTC would shift every value by the real offset and return a
+/// plausible-looking wrong instant. Tracked as #767; this test pins the
+/// refusal so nobody "fixes" it by defaulting to zero.
+#[test]
+fn a_named_zone_is_refused_rather_than_assumed_to_be_utc() {
+    let e = tmp::parse_timezone("Europe/Stockholm").expect_err("should refuse");
+    let msg = format!("{e}");
+    assert!(msg.contains("Europe/Stockholm"), "message should name the zone: {msg}");
+    assert!(msg.contains("tz database"), "message should say what is missing: {msg}");
+}
+
+/// Strings parse into the right type with full precision.
+#[test]
+fn strings_parse_into_their_types() {
+    assert_eq!(tmp::parse_date("2015-07-21").unwrap().to_cypher_string(), "2015-07-21");
+    assert_eq!(tmp::parse_date("20150721").unwrap().to_cypher_string(), "2015-07-21");
+
+    let (nanos, off) = tmp::parse_time_parts("12:31:14.645876123").unwrap();
+    assert_eq!(P::LocalTime(nanos).to_cypher_string(), "12:31:14.645876123");
+    assert_eq!(off, None, "no offset in the string");
+
+    let (nanos, off) = tmp::parse_time_parts("12:31:14+01:00").unwrap();
+    assert_eq!(off, Some(3600));
+    assert_eq!(
+        P::Time { nanos, offset_seconds: off.unwrap() }.to_cypher_string(),
+        "12:31:14+01:00"
+    );
+
+    // A negative offset must not be mistaken for part of the clock.
+    let (_, off) = tmp::parse_time_parts("10:35-08:00").unwrap();
+    assert_eq!(off, Some(-28_800));
+}
