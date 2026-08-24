@@ -619,15 +619,32 @@ async fn run_benchmark(
     query: &LdbcQuery,
     cypher: &str,
     runs: usize,
+    warmup_runs: usize,
 ) -> BenchResult {
     let is_update = query.category == "update" || query.category == "delete";
-    // Warm-up: 1 run, discard (skip for updates — they mutate state)
-    let warmup = if is_update {
-        client.query("default", cypher).await
-    } else {
-        client.query_readonly("default", cypher).await
-    };
-    if let Err(e) = &warmup {
+    // Warm-up runs, discarded. Skipped entirely for updates, which mutate
+    // state and cannot be repeated.
+    //
+    // One is not always enough. Measured at SF10 with 21 runs and the series
+    // printed (#749), the first *timed* run is the slowest in ~15 of 21
+    // queries and IC4 takes **three** runs to settle — 27.7, 22.5, 19.9
+    // against a steady ~19.3. With `--runs 3` the reported median is then the
+    // middle of three warming runs, biased high by up to 17% and unevenly
+    // across queries, which distorts ratios (#752).
+    let passes = if is_update { 1 } else { warmup_runs.max(1) };
+    let mut warmup_err: Option<String> = None;
+    for _ in 0..passes {
+        let r = if is_update {
+            client.query("default", cypher).await
+        } else {
+            client.query_readonly("default", cypher).await
+        };
+        if let Err(e) = r {
+            warmup_err = Some(e.to_string());
+            break;
+        }
+    }
+    if let Some(e) = &warmup_err {
         return BenchResult {
             id: query.id,
             name: query.name,
@@ -713,7 +730,7 @@ async fn main() -> Result<(), Error> {
     // output said so (#660).
     const KNOWN: &[&str] = &[
         "--data-dir", "--deletes", "--derive-params", "--explain", "--params-file",
-        "--print-runs", "--profile", "--query", "--runs", "--updates", "--write-params",
+        "--print-runs", "--profile", "--query", "--runs", "--updates", "--warmup", "--write-params",
         // cargo passes this to bench targets.
         "--bench", "--nocapture", "--test-threads", "--color", "--format",
     ];
@@ -794,6 +811,21 @@ async fn main() -> Result<(), Error> {
     // Off by default: the table is the headline and `ch_bench_ldbc.py` parses
     // it with a regex, so this is an extra block rather than a changed one.
     let print_runs = args.iter().any(|a| a == "--print-runs");
+    // Warm-up runs before timing, discarded.
+    //
+    // Default 1, which is what every published number was taken with. It is
+    // **not** enough — IC4 needs three (#752) — but raising the default shifts
+    // every figure in the series downwards, so that is a decision to make and
+    // re-run against, not one to slip in with the flag that makes it
+    // measurable.
+    let warmup_runs: usize = if let Some(pos) = args.iter().position(|a| a == "--warmup") {
+        args.get(pos + 1)
+            .expect("--warmup requires a count")
+            .parse()
+            .expect("--warmup must be a non-negative integer")
+    } else {
+        1
+    };
     // `--explain` prints the plan **without running the query**. `--profile`
     // executes, which is useless for exactly the queries most worth looking at:
     // IC6 times out at SF10, so the one plan you most want to see is the one
@@ -919,7 +951,7 @@ async fn main() -> Result<(), Error> {
         format_duration(idx_start.elapsed())
     );
 
-    eprintln!("Runs per query: {}", runs);
+    eprintln!("Runs per query: {} ({} warm-up, discarded)", runs, warmup_runs);
     eprintln!(
         "Params: personId={} person2Id={} postId={} messageId={} firstName=\"{}\" tagName=\"{}\"",
         params.person_id, params.person2_id, params.post_id, params.message_id,
@@ -1049,7 +1081,7 @@ async fn main() -> Result<(), Error> {
             continue;
         }
 
-        let result = run_benchmark(&client, query, &cypher, runs).await;
+        let result = run_benchmark(&client, query, &cypher, runs, warmup_runs).await;
         if print_runs {
             all_results.push(result.clone());
         }
