@@ -50,6 +50,34 @@ fn every_variant() -> Vec<(&'static str, PropertyValue)> {
             "duration",
             PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
         ),
+        // The five temporal types (#689). Added here rather than left out,
+        // because this file's whole claim is "every variant" -- adding
+        // variants to `PropertyValue` without extending it would quietly turn
+        // the name into a lie, and the loss would surface as missing data
+        // after #545 removes the row copy, not here.
+        //
+        // Values chosen so a lossy round trip cannot pass by accident: the
+        // nanoseconds do not fit in milliseconds, and the offset is a
+        // half-hour one that an hours-only path truncates.
+        ("date", PropertyValue::Date(16_637)),
+        ("localtime", PropertyValue::LocalTime(45_074_645_876_123)),
+        (
+            "time",
+            PropertyValue::Time { nanos: 45_074_645_876_123, offset_seconds: 19_800 },
+        ),
+        (
+            "localdatetime",
+            PropertyValue::LocalDateTime { secs: 1_437_514_832, nanos: 142_000_042 },
+        ),
+        (
+            "zoneddatetime",
+            PropertyValue::ZonedDateTime {
+                secs: 1_437_514_832,
+                nanos: 999_999_999,
+                offset_seconds: 3600,
+                zone: Some("Europe/London".to_string()),
+            },
+        ),
     ]
 }
 

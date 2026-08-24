@@ -92,9 +92,15 @@ fn test_datetime_named_constructor_in_with() {
     ).unwrap();
     assert_eq!(result.len(), 1);
     let dt_val = result.records[0].get("dt").unwrap().as_property().unwrap();
+    // `datetime()` returns a ZonedDateTime since #689, not a bare millisecond
+    // timestamp. The value is asserted as well as the type, which is stricter
+    // than the original `DateTime(_)` — that pattern also matched `date()` and
+    // `localtime()`, because all three used to return the same variant.
     match dt_val {
-        PropertyValue::DateTime(_) => {}, // good
-        other => panic!("Expected DateTime from named constructor, got {:?}", other),
+        PropertyValue::ZonedDateTime { .. } => {
+            assert_eq!(dt_val.to_cypher_string(), "2026-03-04T00:00Z");
+        }
+        other => panic!("Expected ZonedDateTime from named constructor, got {:?}", other),
     }
 }
 
@@ -110,10 +116,10 @@ fn test_datetime_no_args_returns_now() {
     assert_eq!(result.len(), 1);
     let dt_val = result.records[0].get("now").unwrap().as_property().unwrap();
     match dt_val {
-        PropertyValue::DateTime(millis) => {
-            assert!(*millis > 0, "datetime() should return positive millis");
-        },
-        other => panic!("Expected DateTime from datetime(), got {:?}", other),
+        PropertyValue::ZonedDateTime { secs, .. } => {
+            assert!(*secs > 0, "datetime() should return a positive instant");
+        }
+        other => panic!("Expected ZonedDateTime from datetime(), got {:?}", other),
     }
 }
 
