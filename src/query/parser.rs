@@ -3206,6 +3206,54 @@ mod tests {
         assert!(ret.distinct);
     }
 
+    /// `ASCENDING` and `DESCENDING` are the long forms, and the grammar only
+    /// had the short ones.
+    ///
+    /// `^"ASC"` matched the first three letters of `ASCENDING` and left
+    /// `ENDING` unconsumed, so this was a **parse error**, not a mis-sort --
+    /// and a parse error is invisible to any test that checks sort order. The
+    /// openCypher TCK uses the long forms throughout: 56 scenarios across
+    /// WithOrderBy1, WithOrderBy2 and WithOrderBy3 failed on this one rule.
+    #[test]
+    fn order_by_accepts_the_long_direction_keywords() {
+        for (q, want_asc) in [
+            ("MATCH (n) RETURN n ORDER BY n.age ASCENDING", true),
+            ("MATCH (n) RETURN n ORDER BY n.age DESCENDING", false),
+            ("MATCH (n) RETURN n ORDER BY n.age ascending", true),
+            ("MATCH (n) RETURN n ORDER BY n.age descending", false),
+            ("MATCH (n) RETURN n ORDER BY n.age ASC", true),
+            ("MATCH (n) RETURN n ORDER BY n.age DESC", false),
+        ] {
+            let parsed = parse_query(q).unwrap_or_else(|e| panic!("`{q}` should parse: {e:?}"));
+            let items = &parsed
+                .order_by
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{q}` should have an ORDER BY"))
+                .items;
+            assert_eq!(
+                items[0].ascending, want_asc,
+                "`{q}` sorts the wrong way -- parsing the keyword is not enough, \
+                 it has to reach `ascending`"
+            );
+        }
+    }
+
+    /// The long forms are only useful if they sort. A grammar that accepts
+    /// `DESCENDING` but hands the Rust side something it compares against
+    /// `\"DESC\"` would parse every scenario and silently sort all of them
+    /// ascending -- turning 56 parse errors into 56 wrong answers, which is
+    /// worse, because a parse error is loud.
+    #[test]
+    fn a_mixed_direction_list_keeps_each_direction_with_its_own_key() {
+        let q = "MATCH (n) RETURN n ORDER BY n.a DESCENDING, n.b ASCENDING, n.c DESC";
+        let parsed = parse_query(q).expect("should parse");
+        let items = &parsed.order_by.as_ref().expect("ORDER BY").items;
+        assert_eq!(items.len(), 3);
+        assert!(!items[0].ascending, "n.a DESCENDING");
+        assert!(items[1].ascending, "n.b ASCENDING");
+        assert!(!items[2].ascending, "n.c DESC");
+    }
+
     #[test]
     fn test_parse_order_by_desc() {
         let query = "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC";
