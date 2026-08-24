@@ -578,6 +578,7 @@ DELETE k",
 // BENCHMARK RUNNER
 // ============================================================================
 
+#[derive(Clone)]
 struct BenchResult {
     id: &'static str,
     name: &'static str,
@@ -585,6 +586,18 @@ struct BenchResult {
     min: Duration,
     median: Duration,
     max: Duration,
+    /// Every timing, **in the order it was run**.
+    ///
+    /// Min/median/max cannot distinguish a warm-up artefact (run 1 slow, the
+    /// rest tight) from genuine per-execution variance (all n scattered), and
+    /// those want opposite fixes. Both were measured here and only three
+    /// numbers kept, which is how two claims in the adjacency-tier comparison
+    /// survived long enough to be published and then fail to reproduce
+    /// (#736, #746).
+    ///
+    /// Execution order, not sorted, because "the first one is the outlier" is
+    /// the thing being looked for.
+    series: Vec<Duration>,
     error: Option<String>,
 }
 
@@ -623,6 +636,7 @@ async fn run_benchmark(
             min: Duration::ZERO,
             median: Duration::ZERO,
             max: Duration::ZERO,
+            series: Vec::new(),
             error: Some(e.to_string()),
         };
     }
@@ -652,12 +666,14 @@ async fn run_benchmark(
                     min: Duration::ZERO,
                     median: Duration::ZERO,
                     max: Duration::ZERO,
+                    series: Vec::new(),
                     error: Some(e.to_string()),
                 };
             }
         }
     }
 
+    let series = timings.clone();
     timings.sort();
 
     BenchResult {
@@ -667,6 +683,7 @@ async fn run_benchmark(
         min: timings[0],
         median: timings[timings.len() / 2],
         max: timings[timings.len() - 1],
+        series,
         error: None,
     }
 }
@@ -696,7 +713,7 @@ async fn main() -> Result<(), Error> {
     // output said so (#660).
     const KNOWN: &[&str] = &[
         "--data-dir", "--deletes", "--derive-params", "--explain", "--params-file",
-        "--profile", "--query", "--runs", "--updates", "--write-params",
+        "--print-runs", "--profile", "--query", "--runs", "--updates", "--write-params",
         // cargo passes this to bench targets.
         "--bench", "--nocapture", "--test-threads", "--color", "--format",
     ];
@@ -772,6 +789,11 @@ async fn main() -> Result<(), Error> {
     // `CH-PROFILE-01` deliverable: the gate is "at least 90% of wall-clock
     // attributed" for IC1/IC6/IC9, and a total by itself attributes nothing.
     let profile_mode = args.iter().any(|a| a == "--profile");
+    // Print every timing, in execution order, after the table.
+    //
+    // Off by default: the table is the headline and `ch_bench_ldbc.py` parses
+    // it with a regex, so this is an extra block rather than a changed one.
+    let print_runs = args.iter().any(|a| a == "--print-runs");
     // `--explain` prints the plan **without running the query**. `--profile`
     // executes, which is useless for exactly the queries most worth looking at:
     // IC6 times out at SF10, so the one plan you most want to see is the one
@@ -953,6 +975,8 @@ async fn main() -> Result<(), Error> {
     let mut empty_reads = 0usize;
     let mut last_category = "";
     let bench_start = Instant::now();
+    // Only collected when asked for, so the default path allocates nothing.
+    let mut all_results: Vec<BenchResult> = Vec::new();
 
     for query in &queries {
         // Print section separator when category changes
@@ -1026,6 +1050,9 @@ async fn main() -> Result<(), Error> {
         }
 
         let result = run_benchmark(&client, query, &cypher, runs).await;
+        if print_runs {
+            all_results.push(result.clone());
+        }
 
         if let Some(ref err) = result.error {
             println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  ERROR",
@@ -1071,6 +1098,33 @@ async fn main() -> Result<(), Error> {
     // ========================================================================
     // Summary
     // ========================================================================
+    // The series, when asked for. Ordered as executed, so a slow first run —
+    // a warm-up artefact — is visible rather than inferred from where the
+    // median sits between min and max. Those two want opposite fixes and
+    // min/median/max cannot tell them apart (#736).
+    if print_runs {
+        println!();
+        println!("Per-run timings, in execution order:");
+        for r in &all_results {
+            if r.series.is_empty() {
+                continue;
+            }
+            let spread = if r.min.as_secs_f64() > 0.0 {
+                r.max.as_secs_f64() / r.min.as_secs_f64()
+            } else {
+                1.0
+            };
+            let runs: Vec<String> = r.series.iter().map(|d| format_ms(*d)).collect();
+            // `runs` first, deliberately. `ch_bench_ldbc.py` and
+            // `analyse_noise.py` both scrape the results table with
+            //   ^\s*(?:Running\s+\w+\.\.\.)?(I[SC]\d+)\s+.+?\s+(\d+)\s+…
+            // and a line beginning `  IS3   …` is one format change away from
+            // being ingested as a result row. A leading word that is not
+            // `Running` and not a query id cannot match at all.
+            println!("  runs {:<6} spread {:>5.2}x  {}", r.id, spread, runs.join(" "));
+        }
+    }
+
     println!();
     println!("Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
         passed, queries.len(), empty_reads, errors, format_duration(bench_time));
