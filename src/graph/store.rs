@@ -3356,6 +3356,122 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         true
     }
 
+    /// Rebuild the frozen tiers into a single segment, dropping dead entries.
+    ///
+    /// `compact_adjacency` only ever **appends** a segment, which leaves two
+    /// costs behind (#740):
+    ///
+    /// * A deleted edge's adjacency entry survives in an immutable segment,
+    ///   hidden only by the `EDGE_TYPE_UNSET` tombstone. #739 stopped that id
+    ///   being recycled — reuse overwrote the tombstone and resurrected the
+    ///   edge — at the price of **retiring the id permanently**, and
+    ///   `edge_type_ids` / `edge_endpoints` are indexed by id, so churn against
+    ///   a compacted store grows them without bound.
+    /// * `for_each_outgoing_neighbor` loops over every segment for every node,
+    ///   so a store compacted N times pays N offset lookups per node on every
+    ///   expand.
+    ///
+    /// This merges all segments plus the write buffer into one, keeping only
+    /// live edges, and then **releases the ids of the dropped ones** and lowers
+    /// the watermark — which is the part that makes the growth bounded rather
+    /// than merely slower.
+    ///
+    /// O(edges) and it allocates a whole new CSR, so it is an explicit
+    /// operation, not something a query triggers.
+    pub fn merge_frozen_segments(&mut self) {
+        if self.frozen_outgoing.is_empty() && self.frozen_incoming.is_empty() {
+            return;
+        }
+        self.invalidate_statistics_cache();
+
+        let capacity = self
+            .frozen_outgoing
+            .node_capacity()
+            .max(self.frozen_incoming.node_capacity())
+            .max(self.outgoing.len())
+            .max(self.incoming.len());
+
+        let live = |st: &Self, eid: EdgeId| -> bool {
+            st.edge_type_ids
+                .get(eid.as_u64() as usize)
+                .copied()
+                .unwrap_or(Self::EDGE_TYPE_UNSET)
+                != Self::EDGE_TYPE_UNSET
+        };
+
+        let mut out: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
+        let mut inc: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
+        let mut kept: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for idx in 0..capacity {
+            for seg in &self.frozen_outgoing.segments {
+                for &(t, e) in seg.neighbors(idx) {
+                    if live(self, e) {
+                        out[idx].push((t, e));
+                        kept.insert(e.as_u64());
+                    }
+                }
+            }
+            if let Some(buf) = self.outgoing.get(idx) {
+                for &(t, e) in buf {
+                    if live(self, e) {
+                        out[idx].push((t, e));
+                        kept.insert(e.as_u64());
+                    }
+                }
+            }
+            for seg in &self.frozen_incoming.segments {
+                for &(sv, e) in seg.neighbors(idx) {
+                    if live(self, e) {
+                        inc[idx].push((sv, e));
+                    }
+                }
+            }
+            if let Some(buf) = self.incoming.get(idx) {
+                for &(sv, e) in buf {
+                    if live(self, e) {
+                        inc[idx].push((sv, e));
+                    }
+                }
+            }
+        }
+
+        let (fo, fi) = rayon::join(
+            || FrozenAdjacency::from_vec_of_vec(&out),
+            || FrozenAdjacency::from_vec_of_vec(&inc),
+        );
+        self.frozen_outgoing.clear();
+        self.frozen_incoming.clear();
+        self.frozen_outgoing.push(fo);
+        self.frozen_incoming.push(fi);
+        for v in &mut self.outgoing {
+            v.clear();
+            v.shrink_to_fit();
+        }
+        for v in &mut self.incoming {
+            v.clear();
+            v.shrink_to_fit();
+        }
+
+        // Nothing references a dead id any more, so it can be reused — which is
+        // what #739's watermark had to forbid. Ids below the new watermark that
+        // are *not* in `kept` are free.
+        for id in 0..self.next_edge_id {
+            if !kept.contains(&id)
+                && self
+                    .edge_type_ids
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Self::EDGE_TYPE_UNSET)
+                    == Self::EDGE_TYPE_UNSET
+            {
+                self.free_edge_ids.push(id);
+            }
+        }
+        self.free_edge_ids.sort_unstable();
+        self.free_edge_ids.dedup();
+        self.frozen_edge_watermark = 0;
+    }
+
     /// Compact the write buffer into the frozen CSR tier.
     /// After compaction, the write buffer is cleared and all adjacency data
     /// lives in the memory-efficient CSR format.
