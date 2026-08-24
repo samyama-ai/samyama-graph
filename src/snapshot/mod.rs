@@ -767,6 +767,28 @@ fn property_to_json(pv: &PropertyValue) -> serde_json::Value {
             // Wrap in an object to distinguish from plain integer
             serde_json::json!({"__type": "DateTime", "value": dt})
         }
+        // The five real temporal types (#689). Same `__type` scheme as
+        // DateTime/Vector/Duration, and each carries its own components rather
+        // than an epoch, because an epoch cannot represent a `Date` without a
+        // zone or a `LocalTime` without a date. `DateTime` above stays exactly
+        // as it was so snapshots written before this still read back.
+        PropertyValue::Date(days) => serde_json::json!({"__type": "Date", "days": days}),
+        PropertyValue::LocalTime(nanos) => {
+            serde_json::json!({"__type": "LocalTime", "nanos": nanos})
+        }
+        PropertyValue::Time { nanos, offset_seconds } => {
+            serde_json::json!({"__type": "Time", "nanos": nanos, "offset": offset_seconds})
+        }
+        PropertyValue::LocalDateTime { secs, nanos } => {
+            serde_json::json!({"__type": "LocalDateTime", "secs": secs, "nanos": nanos})
+        }
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+            serde_json::json!({
+                "__type": "ZonedDateTime",
+                "secs": secs, "nanos": nanos,
+                "offset": offset_seconds, "zone": zone
+            })
+        }
         PropertyValue::Array(arr) => {
             serde_json::Value::Array(arr.iter().map(property_to_json).collect())
         }
@@ -822,6 +844,42 @@ fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                     "DateTime" => {
                         if let Some(dt) = obj.get("value").and_then(|v| v.as_i64()) {
                             return PropertyValue::DateTime(dt);
+                        }
+                    }
+                    "Date" => {
+                        if let Some(d) = obj.get("days").and_then(|v| v.as_i64()) {
+                            return PropertyValue::Date(d as i32);
+                        }
+                    }
+                    "LocalTime" => {
+                        if let Some(n) = obj.get("nanos").and_then(|v| v.as_i64()) {
+                            return PropertyValue::LocalTime(n);
+                        }
+                    }
+                    "Time" => {
+                        if let Some(n) = obj.get("nanos").and_then(|v| v.as_i64()) {
+                            return PropertyValue::Time {
+                                nanos: n,
+                                offset_seconds: obj.get("offset").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            };
+                        }
+                    }
+                    "LocalDateTime" => {
+                        if let Some(sec) = obj.get("secs").and_then(|v| v.as_i64()) {
+                            return PropertyValue::LocalDateTime {
+                                secs: sec,
+                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                            };
+                        }
+                    }
+                    "ZonedDateTime" => {
+                        if let Some(sec) = obj.get("secs").and_then(|v| v.as_i64()) {
+                            return PropertyValue::ZonedDateTime {
+                                secs: sec,
+                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                offset_seconds: obj.get("offset").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                                zone: obj.get("zone").and_then(|v| v.as_str()).map(|z| z.to_string()),
+                            };
                         }
                     }
                     "Vector" => {
@@ -1997,5 +2055,66 @@ mod dedup_tests {
 
         // Without dedup, we get 2 Drug nodes
         assert_eq!(combined.node_count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod temporal_snapshot_tests {
+    use super::{json_to_property, property_to_json};
+    use crate::graph::PropertyValue as P;
+
+    /// The snapshot's own `__type` scheme, round-tripped through the two
+    /// functions that actually write and read it.
+    ///
+    /// This lives here rather than in `tests/` because both functions are
+    /// private, and making them public purely to test them would widen the
+    /// API for no caller. The integration test in
+    /// `tests/temporal_representation.rs` covers serde; this covers disk, and
+    /// they are genuinely different encodings — a value can survive one and be
+    /// destroyed by the other.
+    #[test]
+    fn temporal_values_survive_the_snapshot_encoding() {
+        let values = vec![
+            P::Date(16637),
+            P::Date(-25567),
+            P::LocalTime(45_074_645_876_123),
+            P::Time { nanos: 45_074_645_876_123, offset_seconds: 19_800 },
+            P::Time { nanos: 0, offset_seconds: -18_000 },
+            P::LocalDateTime { secs: 1_437_514_832, nanos: 142_000_000 },
+            P::ZonedDateTime {
+                secs: 1_437_514_832,
+                nanos: 999_999_999,
+                offset_seconds: 3600,
+                zone: Some("Europe/London".to_string()),
+            },
+            P::ZonedDateTime { secs: 0, nanos: 0, offset_seconds: 0, zone: None },
+            // Nested, because properties can be arrays and maps of temporals
+            // and the recursion is a separate thing to get wrong.
+            P::Array(vec![P::Date(1), P::LocalTime(2)]),
+        ];
+        for v in values {
+            let encoded = property_to_json(&v);
+            let back = json_to_property(&encoded);
+            assert_eq!(back, v, "{v:?} did not survive the snapshot encoding: {encoded}");
+        }
+    }
+
+    /// A snapshot written before #689 still reads back. This is the
+    /// compatibility promise; nothing else would catch breaking it.
+    #[test]
+    fn a_pre_689_snapshot_still_loads() {
+        let legacy = serde_json::json!({"__type": "DateTime", "value": 1_437_514_832_142i64});
+        assert_eq!(json_to_property(&legacy), P::DateTime(1_437_514_832_142));
+        // And it still writes in the old shape, so a downgrade reads it too.
+        assert_eq!(property_to_json(&P::DateTime(1_437_514_832_142)), legacy);
+    }
+
+    /// An unknown or malformed `__type` must not be silently read as something
+    /// else. A truncated temporal that came back as `Null` would look like a
+    /// missing property rather than a corrupt one.
+    #[test]
+    fn a_malformed_temporal_tag_does_not_become_a_plausible_value() {
+        let broken = serde_json::json!({"__type": "Date"});          // no `days`
+        assert_ne!(json_to_property(&broken), P::Date(0), "must not default to the epoch");
     }
 }
