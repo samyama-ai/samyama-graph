@@ -1777,9 +1777,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_else(|| format!("DateTime({})", millis))
                 }
-                Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
-                    format!("P{}M{}DT{}S", months, days, seconds)
-                }
+                // Through the one function that owns the format (#769). The old
+                // `P{}M{}DT{}S` emitted `P0M0DT0S` for a zero duration where
+                // Cypher writes `PT0S`, and dropped nanoseconds entirely.
+                Value::Property(p @ PropertyValue::Duration { .. }) => p.to_cypher_string(),
                 // The five temporal types render through the one function that
                 // owns the format, so `toString()` and the TCK harness cannot
                 // disagree about what a value looks like (#689).
@@ -2408,21 +2409,94 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
         }
         // duration component accessors
+        // `<type>.truncate(unit, value, map)` for all five namespaces (#769).
+        // The namespace names the *result* type, so `date.truncate` over a
+        // datetime returns a Date.
+        "date.truncate" | "time.truncate" | "localtime.truncate"
+        | "localdatetime.truncate" | "datetime.truncate" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires a unit and a temporal value")));
+            }
+            let unit = match &args[0] {
+                Value::Property(PropertyValue::String(u)) => u.clone(),
+                _ => return Err(ExecutionError::TypeError(
+                    "the first argument of truncate() is the unit, as a string".to_string(),
+                )),
+            };
+            let value = match &args[1] {
+                Value::Property(PropertyValue::Null) | Value::Null => {
+                    return Ok(Value::Property(PropertyValue::Null))
+                }
+                Value::Property(p) => p.clone(),
+                _ => return Err(ExecutionError::TypeError(
+                    "truncate() needs a temporal value".to_string(),
+                )),
+            };
+            let empty = std::collections::HashMap::new();
+            let overrides = match args.get(2) {
+                Some(Value::Property(PropertyValue::Map(m))) => m.clone(),
+                _ => empty,
+            };
+            let target = lowered.split('.').next().unwrap_or("date");
+            Ok(Value::Property(crate::query::executor::temporal::truncate(
+                target, &unit, &value, &overrides,
+            )?))
+        }
+        // `duration.inSeconds/inDays/inMonths(a, b)` — the difference between
+        // two temporals, expressed in one unit. `duration.between` was already
+        // implemented; these three were not, and all four were unreachable from
+        // Cypher until the grammar learned to parse a dotted name.
+        "duration.inseconds" | "duration.indays" | "duration.inmonths" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires 2 arguments")));
+            }
+            let (a, b) = match (&args[0], &args[1]) {
+                (Value::Property(PropertyValue::Null), _) | (_, Value::Property(PropertyValue::Null))
+                | (Value::Null, _) | (_, Value::Null) => {
+                    return Ok(Value::Property(PropertyValue::Null))
+                }
+                (Value::Property(a), Value::Property(b)) => (a.clone(), b.clone()),
+                _ => return Err(ExecutionError::TypeError(format!("{lowered}() needs two temporal values"))),
+            };
+            let diff = temporal_difference(&a, &b)?;
+            let (days, seconds, nanos) = match diff {
+                PropertyValue::Duration { days, seconds, nanos, .. } => (days, seconds, nanos),
+                _ => (0, 0, 0),
+            };
+            Ok(Value::Property(match lowered.as_str() {
+                // Seconds carries the whole difference in seconds plus the
+                // sub-second remainder; days and months carry only whole units,
+                // with the remainder discarded rather than rounded.
+                "duration.inseconds" => PropertyValue::Duration {
+                    months: 0, days: 0, seconds: days * 86_400 + seconds, nanos,
+                },
+                "duration.indays" => PropertyValue::Duration {
+                    months: 0, days: days + seconds / 86_400, seconds: 0, nanos: 0,
+                },
+                _ => PropertyValue::Duration {
+                    months: (days + seconds / 86_400) / 30, days: 0, seconds: 0, nanos: 0,
+                },
+            }))
+        }
         "duration_between" | "duration.between" => {
             if args.len() < 2 { return Err(ExecutionError::RuntimeError("duration.between() requires 2 arguments".to_string())); }
+            // Accepts any two temporals, not only the legacy millisecond
+            // `DateTime`. It matched that one variant alone, so the moment the
+            // constructors started returning real types (#689) every
+            // `duration.between(date(...), date(...))` became a type error --
+            // and the grammar fix (#769) that finally made this function
+            // reachable from Cypher exposed exactly that on 20 scenarios.
+            //
+            // Argument order is (from, to): `between(a, b)` is b - a.
             match (&args[0], &args[1]) {
-                (Value::Property(PropertyValue::DateTime(a)), Value::Property(PropertyValue::DateTime(b))) => {
-                    let diff_ms = b - a;
-                    let total_seconds = diff_ms / 1000;
-                    let remaining_days = total_seconds / 86400;
-                    Ok(Value::Property(PropertyValue::Duration {
-                        months: 0,
-                        days: remaining_days,
-                        seconds: total_seconds % 86400,
-                        nanos: ((diff_ms % 1000) * 1_000_000) as i32,
-                    }))
+                (Value::Property(a), Value::Property(b)) => {
+                    Ok(Value::Property(temporal_difference(b, a).map_err(|_| {
+                        ExecutionError::TypeError(
+                            "duration.between() requires two temporal arguments".to_string(),
+                        )
+                    })?))
                 }
-                _ => Err(ExecutionError::TypeError("duration.between() requires two datetime arguments".to_string())),
+                _ => Err(ExecutionError::TypeError("duration.between() requires two temporal arguments".to_string())),
             }
         }
         // CY-20: properties() — return all properties as a map

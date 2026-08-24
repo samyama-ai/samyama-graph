@@ -549,7 +549,10 @@ fn prop_to_tck(p: &PropertyValue) -> Tck {
         // `DateTime(-1882656000000)`, which is not a TCK literal, is not
         // anything, and is what fed #761 an input its value parser could not
         // consume.
-        PropertyValue::Date(_)
+        // A Duration is an ISO-8601 string too, and fell to the same `Debug`
+        // arm -- `Duration { months: 0, days: 0, ... }` where `'PT6H'` belongs.
+        PropertyValue::Duration { .. }
+        | PropertyValue::Date(_)
         | PropertyValue::LocalTime(_)
         | PropertyValue::Time { .. }
         | PropertyValue::LocalDateTime { .. }

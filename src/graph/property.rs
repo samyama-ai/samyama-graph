@@ -691,6 +691,44 @@ pub(crate) fn fmt_local_date_time(secs: i64, nanos: u32) -> String {
 }
 
 
+
+/// A duration as openCypher writes it: `PT6H`, `P1Y2M3DT4H5M6.5S`, `PT0S`.
+///
+/// Zero components are omitted, and an all-zero duration is `PT0S` rather than
+/// the empty `P`. Components keep their own sign — Cypher does not normalise
+/// `PT-1H30M` into a single signed quantity, because months and days have no
+/// fixed length and so cannot be carried into each other.
+pub(crate) fn fmt_duration(months: i64, days: i64, seconds: i64, nanos: i32) -> String {
+    let (years, rem_months) = (months / 12, months % 12);
+    let (hours, rem) = (seconds / 3600, seconds % 3600);
+    let (minutes, secs) = (rem / 60, rem % 60);
+
+    let mut out = String::from("P");
+    if years != 0 { out.push_str(&format!("{years}Y")); }
+    if rem_months != 0 { out.push_str(&format!("{rem_months}M")); }
+    if days != 0 { out.push_str(&format!("{days}D")); }
+
+    let has_time = hours != 0 || minutes != 0 || secs != 0 || nanos != 0;
+    if has_time {
+        out.push('T');
+        if hours != 0 { out.push_str(&format!("{hours}H")); }
+        if minutes != 0 { out.push_str(&format!("{minutes}M")); }
+        if secs != 0 || nanos != 0 {
+            if nanos == 0 {
+                out.push_str(&format!("{secs}S"));
+            } else {
+                // The fraction belongs to the seconds and carries the sign with
+                // them: -1.5s is `-1.5S`, not `-1.-5S`.
+                let sign = if secs < 0 || (secs == 0 && nanos < 0) { "-" } else { "" };
+                let frac = format!("{:09}", nanos.abs());
+                out.push_str(&format!("{sign}{}.{}S", secs.abs(), frac.trim_end_matches('0')));
+            }
+        }
+    }
+    if out == "P" { out.push_str("T0S"); }
+    out
+}
+
 impl PropertyValue {
     /// How openCypher writes this value — the string `toString()` returns and
     /// the TCK compares against.
@@ -708,6 +746,9 @@ impl PropertyValue {
                 format!("{}{}", fmt_time_of_day(*nanos), fmt_offset(*offset_seconds))
             }
             PropertyValue::LocalDateTime { secs, nanos } => fmt_local_date_time(*secs, *nanos),
+            PropertyValue::Duration { months, days, seconds, nanos } => {
+                fmt_duration(*months, *days, *seconds, *nanos)
+            }
             PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
                 // `secs` is the UTC instant; render it in the stored offset.
                 let local = fmt_local_date_time(secs + *offset_seconds as i64, *nanos);

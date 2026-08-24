@@ -253,3 +253,166 @@ pub fn reject_unknown_map(
         KNOWN_KEYS.join(", ")
     )))
 }
+
+/// `<type>.truncate(unit, value, map)` — round a temporal down to a unit, then
+/// apply the map's components as overrides.
+///
+/// The namespace decides the *result* type, not the input type: `date.truncate`
+/// over a `datetime` returns a `Date`. That is why this takes the target
+/// separately rather than reading it off the value.
+///
+/// Units coarser than a day zero the clock and move the date to the start of
+/// the period; units finer than a day keep the date and zero everything below
+/// the unit. `week` goes to Monday, and `weekYear` to the first day of the ISO
+/// week-year — which is not 1 January, and is the one that a "just zero the
+/// smaller fields" implementation silently gets wrong.
+pub fn truncate(
+    target: &str,
+    unit: &str,
+    value: &PropertyValue,
+    overrides: &std::collections::HashMap<String, PropertyValue>,
+) -> Result<PropertyValue, ExecutionError> {
+    use chrono::{Datelike, NaiveDate};
+
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is a date");
+    let (days, tod, offset, zone) = decompose(value)?;
+    let date = epoch
+        .checked_add_signed(chrono::Duration::days(days.unwrap_or(0)))
+        .ok_or_else(|| err("date out of range"))?;
+
+    // How much of the clock survives, and where the date lands.
+    let (new_date, mut new_tod) = match unit.to_ascii_lowercase().as_str() {
+        "millennium" => (ymd(date.year() - date.year().rem_euclid(1000), 1, 1)?, 0),
+        "century" => (ymd(date.year() - date.year().rem_euclid(100), 1, 1)?, 0),
+        "decade" => (ymd(date.year() - date.year().rem_euclid(10), 1, 1)?, 0),
+        "year" => (ymd(date.year(), 1, 1)?, 0),
+        "weekyear" => (
+            NaiveDate::from_isoywd_opt(date.iso_week().year(), 1, chrono::Weekday::Mon)
+                .ok_or_else(|| err("week-year out of range"))?,
+            0,
+        ),
+        "quarter" => (ymd(date.year(), (date.month() - 1) / 3 * 3 + 1, 1)?, 0),
+        "month" => (ymd(date.year(), date.month(), 1)?, 0),
+        "week" => (
+            date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64),
+            0,
+        ),
+        "day" => (date, 0),
+        "hour" => (date, tod.unwrap_or(0) / 3_600_000_000_000 * 3_600_000_000_000),
+        "minute" => (date, tod.unwrap_or(0) / 60_000_000_000 * 60_000_000_000),
+        "second" => (date, tod.unwrap_or(0) / NANOS_PER_SEC * NANOS_PER_SEC),
+        "millisecond" => (date, tod.unwrap_or(0) / 1_000_000 * 1_000_000),
+        "microsecond" => (date, tod.unwrap_or(0) / 1_000 * 1_000),
+        other => return Err(err(format!("unknown truncation unit: {other}"))),
+    };
+
+    // Overrides are applied *after* truncation, so `{day: 2}` on a millennium
+    // truncation gives 2000-01-02 rather than being rounded away.
+    let mut new_days = new_date.signed_duration_since(epoch).num_days();
+    if !overrides.is_empty() {
+        let mut y = new_date.year();
+        let mut m = new_date.month();
+        let mut d = new_date.day();
+        if let Some(v) = field(overrides, "year") { y = v as i32; }
+        if let Some(v) = field(overrides, "month") { m = v as u32; }
+        if let Some(v) = field(overrides, "day") { d = v as u32; }
+        if overrides.contains_key("dayOfWeek") {
+            let want = field(overrides, "dayOfWeek").unwrap_or(1) as i64;
+            let base = ymd(y, m, d)?;
+            let cur = base.weekday().num_days_from_monday() as i64;
+            new_days = (base + chrono::Duration::days(want - 1 - cur))
+                .signed_duration_since(epoch)
+                .num_days();
+        } else {
+            new_days = ymd(y, m, d)?.signed_duration_since(epoch).num_days();
+        }
+        // Clock overrides add on top of what truncation left.
+        for (key, mult) in [
+            ("hour", 3_600_000_000_000i64),
+            ("minute", 60_000_000_000),
+            ("second", NANOS_PER_SEC),
+            ("millisecond", 1_000_000),
+            ("microsecond", 1_000),
+            ("nanosecond", 1),
+        ] {
+            if let Some(v) = field(overrides, key) {
+                let unit_span = match key {
+                    "hour" => 86_400 * NANOS_PER_SEC,
+                    "minute" => 3_600_000_000_000,
+                    "second" => 60_000_000_000,
+                    _ => mult * 1_000,
+                };
+                // Replace that field rather than adding to it.
+                let below = new_tod % mult;
+                let above = new_tod / unit_span * unit_span;
+                new_tod = above + v * mult + below;
+            }
+        }
+    }
+
+    build(target, new_days, new_tod, offset, zone)
+}
+
+fn ymd(y: i32, m: u32, d: u32) -> Result<chrono::NaiveDate, ExecutionError> {
+    chrono::NaiveDate::from_ymd_opt(y, m, d).ok_or_else(|| err(format!("invalid date {y}-{m}-{d}")))
+}
+
+/// Split any temporal into (days, time-of-day, offset, zone), each optional.
+#[allow(clippy::type_complexity)]
+fn decompose(
+    v: &PropertyValue,
+) -> Result<(Option<i64>, Option<i64>, Option<i32>, Option<String>), ExecutionError> {
+    Ok(match v {
+        PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
+        PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
+        PropertyValue::Time { nanos, offset_seconds } => (None, Some(*nanos), Some(*offset_seconds), None),
+        PropertyValue::LocalDateTime { secs, nanos } => (
+            Some(secs.div_euclid(86_400)),
+            Some(secs.rem_euclid(86_400) * NANOS_PER_SEC + *nanos as i64),
+            None,
+            None,
+        ),
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+            let local = secs + *offset_seconds as i64;
+            (
+                Some(local.div_euclid(86_400)),
+                Some(local.rem_euclid(86_400) * NANOS_PER_SEC + *nanos as i64),
+                Some(*offset_seconds),
+                zone.clone(),
+            )
+        }
+        other => return Err(err(format!("not a temporal value: {}", other.type_name()))),
+    })
+}
+
+/// Assemble the type the namespace asked for.
+fn build(
+    target: &str,
+    days: i64,
+    tod: i64,
+    offset: Option<i32>,
+    zone: Option<String>,
+) -> Result<PropertyValue, ExecutionError> {
+    Ok(match target {
+        "date" => PropertyValue::Date(days as i32),
+        "localtime" => PropertyValue::LocalTime(tod.rem_euclid(NANOS_PER_DAY)),
+        "time" => PropertyValue::Time {
+            nanos: tod.rem_euclid(NANOS_PER_DAY),
+            offset_seconds: offset.unwrap_or(0),
+        },
+        "localdatetime" => PropertyValue::LocalDateTime {
+            secs: days * 86_400 + tod.div_euclid(NANOS_PER_SEC),
+            nanos: tod.rem_euclid(NANOS_PER_SEC) as u32,
+        },
+        "datetime" => {
+            let off = offset.unwrap_or(0);
+            PropertyValue::ZonedDateTime {
+                secs: days * 86_400 + tod.div_euclid(NANOS_PER_SEC) - off as i64,
+                nanos: tod.rem_euclid(NANOS_PER_SEC) as u32,
+                offset_seconds: off,
+                zone,
+            }
+        }
+        other => return Err(err(format!("cannot truncate to {other}"))),
+    })
+}
