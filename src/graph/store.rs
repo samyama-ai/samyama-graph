@@ -421,6 +421,50 @@ impl FrozenAdjacencyStore {
 /// Compressed Sparse Row (CSR) storage for bulk-loaded adjacency data.
 /// Immutable after construction — all new edges go to the write buffer (Vec-of-Vec).
 /// Queries merge results from frozen tier + write buffer transparently.
+/// Adjacency for **one edge type and direction**, derived on demand.
+///
+/// A typed expand walks every edge incident to a node and rejects the ones
+/// whose type does not match. On LDBC SF10 that means IC11 visits ~6.6M edges
+/// to use ~29,000 — an LDBC `Person` has ~495 outgoing edges, 438 of them
+/// `LIKES` and 2.2 of them `WORK_AT` — and the walk is ~75% of the query
+/// (#738).
+///
+/// This is the same shape as `label_bitset`: **derived, never authoritative,
+/// and dropped wholesale when the thing it derives from changes.** It is built
+/// by walking the adjacency exactly as `for_each_outgoing_neighbor` does, so
+/// it contains precisely what that walk would have visited — including the
+/// tombstone exclusion, which is why it cannot disagree with the slow path.
+#[derive(Debug)]
+pub struct TypeAdjacency {
+    /// Node -> `(start, len)` into `entries`. Sparse: only nodes with at least
+    /// one edge of this type appear, which is what keeps it small — `WORK_AT`
+    /// touches 65,645 of SF10's 30M nodes.
+    index: HashMap<NodeId, (u32, u32)>,
+    entries: Vec<(NodeId, EdgeId)>,
+}
+
+impl TypeAdjacency {
+    /// This node's neighbours of the indexed type, or empty.
+    #[inline]
+    pub fn neighbors(&self, node: NodeId) -> &[(NodeId, EdgeId)] {
+        match self.index.get(&node) {
+            Some(&(start, len)) => &self.entries[start as usize..(start + len) as usize],
+            None => &[],
+        }
+    }
+
+    /// Entries held, for the memory cap and for tests.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FrozenAdjacency {
     /// Offset table: offsets[node_idx] .. offsets[node_idx + 1] gives the range
@@ -622,6 +666,16 @@ pub struct GraphStore {
 
     /// Free edge IDs for reuse
     free_edge_ids: Vec<u64>,
+    /// Per-`(type, direction)` adjacency, derived on demand and dropped whole
+    /// on any edge change. See [`TypeAdjacency`]. `None` caches a *declined*
+    /// build so a type over the cap is not re-attempted on every row.
+    type_adj: std::sync::RwLock<HashMap<(u16, bool), Option<std::sync::Arc<TypeAdjacency>>>>,
+    /// Whether `type_adj` holds anything.
+    ///
+    /// Invalidation runs on every edge mutation, and a bulk load is 176M of
+    /// them at SF10. A relaxed atomic load is free; taking a lock 176M times
+    /// to clear an empty map is not.
+    type_adj_live: std::sync::atomic::AtomicBool,
     /// Edge ids below this may be referenced by a frozen CSR segment and must
     /// never be reused.
     ///
@@ -718,6 +772,8 @@ impl GraphStore {
             edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
+            type_adj: std::sync::RwLock::new(HashMap::new()),
+            type_adj_live: std::sync::atomic::AtomicBool::new(false),
             frozen_edge_watermark: 0,
             label_index: HashMap::new(),
             label_bits: std::sync::RwLock::new(HashMap::new()),
@@ -2517,6 +2573,203 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Some(bits)
     }
 
+    /// Entries a single `(type, direction)` index may hold before it is
+    /// declined.
+    ///
+    /// 4M entries is ~64 MB. Above that the index costs more than the walk it
+    /// replaces: the point is a type that is *selective* against the degree of
+    /// the nodes it hangs off, and a type holding a fifth of the graph's edges
+    /// is not that. At SF10 `WORK_AT` (143k), `KNOWS` (1.9M) and
+    /// `HAS_INTEREST` (1.5M) build; `LIKES` (28.7M) and `HAS_TAG` (38M) decline.
+    const TYPE_ADJ_MAX_ENTRIES: usize = 4_000_000;
+
+    /// Adjacency for one edge type and direction, building it if worthwhile.
+    ///
+    /// Returns `None` when the type is too large to index, and caches that
+    /// decision. Built by walking the adjacency exactly as the typed walk
+    /// does, so the two cannot disagree.
+    pub fn type_adjacency(&self, type_id: u16, outgoing: bool) -> Option<std::sync::Arc<TypeAdjacency>> {
+        if let Some(cached) = self.type_adj.read().unwrap().get(&(type_id, outgoing)) {
+            return cached.clone();
+        }
+
+        // Fast build: iterate just this type's edges.
+        //
+        // The general build below walks every node's adjacency — one full pass,
+        // ~176M edge visits at SF10, seconds. That is charged to whichever
+        // query first crosses the row threshold, which in a server is a
+        // multi-second stall on a user's first typed query. Iterating
+        // `edge_type_index` instead touches only the type's own edges: 143k for
+        // `WORK_AT` rather than 176M.
+        //
+        // Only sound when that index is complete. `create_edge_stub` (the
+        // bulk-load path) deliberately skips it and `rebuild_edge_type_index`
+        // repairs it afterwards, so a graph mid-load would silently produce a
+        // *short* index — which is a wrong answer, not a slow one. The totals
+        // are compared to decide, and the walk stands whenever they disagree.
+        // When `edge_type_index` is complete it also answers, in O(1), whether
+        // this type is worth indexing at all — and a *cheap decline* matters as
+        // much as a cheap build. Falling through to the walk below for a type
+        // that will be rejected anyway costs a partial adjacency pass, and for
+        // a type whose owners sit late in node-id order (`HAS_TAG` hangs off
+        // Comments, the last 21.8M ids at SF10) that partial pass is most of
+        // the graph. Measured: 9.4 s across an LDBC suite, spent entirely on
+        // types that were then declined.
+        if self.edge_type_index_is_complete() {
+            let too_big = self
+                .edge_type_table
+                .get(type_id as usize)
+                .and_then(|name| self.edge_type_index.get(name))
+                .map(|ids| ids.len() > Self::TYPE_ADJ_MAX_ENTRIES)
+                .unwrap_or(false);
+            if too_big {
+                self.type_adj
+                    .write()
+                    .unwrap()
+                    .insert((type_id, outgoing), None);
+                self.type_adj_live
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+            if let Some(built) = self.type_adjacency_from_type_index(type_id, outgoing) {
+                self.type_adj
+                    .write()
+                    .unwrap()
+                    .insert((type_id, outgoing), Some(built.clone()));
+                self.type_adj_live
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return Some(built);
+            }
+        }
+
+        let filter = [type_id];
+        let node_capacity = self
+            .frozen_outgoing
+            .node_capacity()
+            .max(self.frozen_incoming.node_capacity())
+            .max(self.outgoing.len())
+            .max(self.incoming.len());
+
+        let mut index: HashMap<NodeId, (u32, u32)> = HashMap::new();
+        let mut entries: Vec<(NodeId, EdgeId)> = Vec::new();
+        let mut over_cap = false;
+
+        for idx in 0..node_capacity {
+            let node = NodeId::new(idx as u64);
+            let start = entries.len();
+            if outgoing {
+                self.for_each_outgoing_neighbor(node, Some(&filter), |t, e| entries.push((t, e)));
+            } else {
+                self.for_each_incoming_neighbor(node, Some(&filter), |t, e| entries.push((t, e)));
+            }
+            let len = entries.len() - start;
+            if len > 0 {
+                index.insert(node, (start as u32, len as u32));
+            }
+            if entries.len() > Self::TYPE_ADJ_MAX_ENTRIES {
+                over_cap = true;
+                break;
+            }
+        }
+
+        let built = if over_cap {
+            None
+        } else {
+            Some(std::sync::Arc::new(TypeAdjacency { index, entries }))
+        };
+        self.type_adj
+            .write()
+            .unwrap()
+            .insert((type_id, outgoing), built.clone());
+        self.type_adj_live
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        built
+    }
+
+    /// Whether `edge_type_index` accounts for every edge in the adjacency.
+    ///
+    /// `create_edge_stub` (the bulk-load path) deliberately skips that index
+    /// and `rebuild_edge_type_index` repairs it afterwards, so mid-load it is
+    /// **short** — and a type index built from a short set is a wrong answer
+    /// rather than a slow one.
+    fn edge_type_index_is_complete(&self) -> bool {
+        let indexed: usize = self.edge_type_index.values().map(|s| s.len()).sum();
+        indexed == self.edge_count()
+    }
+
+    /// Build a type index from `edge_type_index`, or `None` if that cannot be
+    /// trusted or the type is too large.
+    ///
+    /// Endpoints come from `edge_endpoints` and liveness from `edge_type_ids`,
+    /// which is the same tombstone rule `edge_type_matches` applies — so an
+    /// index built this way holds exactly what the walk would visit.
+    fn type_adjacency_from_type_index(
+        &self,
+        type_id: u16,
+        outgoing: bool,
+    ) -> Option<std::sync::Arc<TypeAdjacency>> {
+        if !self.edge_type_index_is_complete() {
+            return None;
+        }
+        let name = self.edge_type_table.get(type_id as usize)?;
+        let ids = self.edge_type_index.get(name)?;
+        if ids.len() > Self::TYPE_ADJ_MAX_ENTRIES {
+            return None;
+        }
+
+        let mut rows: Vec<(NodeId, NodeId, EdgeId)> = Vec::with_capacity(ids.len());
+        for &eid in ids {
+            let idx = eid.as_u64() as usize;
+            if self.edge_type_ids.get(idx).copied().unwrap_or(Self::EDGE_TYPE_UNSET) != type_id {
+                continue; // deleted, or retyped: the walk would not see it either
+            }
+            let (src, tgt) = *self.edge_endpoints.get(idx)?;
+            if outgoing {
+                rows.push((src, tgt, eid));
+            } else {
+                rows.push((tgt, src, eid));
+            }
+        }
+        rows.sort_unstable_by_key(|(owner, _, _)| owner.as_u64());
+
+        let mut index: HashMap<NodeId, (u32, u32)> = HashMap::new();
+        let mut entries: Vec<(NodeId, EdgeId)> = Vec::with_capacity(rows.len());
+        let mut i = 0;
+        while i < rows.len() {
+            let owner = rows[i].0;
+            let start = entries.len() as u32;
+            while i < rows.len() && rows[i].0 == owner {
+                entries.push((rows[i].1, rows[i].2));
+                i += 1;
+            }
+            index.insert(owner, (start, entries.len() as u32 - start));
+        }
+        Some(std::sync::Arc::new(TypeAdjacency { index, entries }))
+    }
+
+    /// Drop every derived type index.
+    ///
+    /// Called wherever adjacency or edge types change. Wholesale, for the same
+    /// reason `invalidate_label_bits` is: an index that can disagree with the
+    /// thing it derives from is #491's shape, and a stale one here would
+    /// silently drop or invent edges.
+    fn invalidate_type_adj(&self) {
+        if self
+            .type_adj_live
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.type_adj.write().unwrap().clear();
+        }
+    }
+
+    /// Whether any type index is currently held. Test-only observability: a
+    /// cache whose invalidation cannot be seen is a cache whose invalidation
+    /// cannot be tested.
+    #[doc(hidden)]
+    pub fn type_adjacency_cached(&self) -> usize {
+        self.type_adj.read().unwrap().len()
+    }
+
     /// Whether `id` is set in a bitset from `label_bitset`.
     #[inline]
     pub fn bitset_contains(bits: &[u64], id: NodeId) -> bool {
@@ -2698,6 +2951,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     pub fn invalidate_statistics_cache(&self) {
         *self.statistics_cache.write().unwrap() = None;
+        // The derived per-type adjacency goes with it. Hooked here rather than
+        // at each mutation site because every path that changes an edge already
+        // calls this, so a new one cannot forget the index without also
+        // forgetting statistics — the failure this codebase has had twice
+        // (#491, and the edge-type index after stub loading).
+        self.invalidate_type_adj();
     }
 
     /// Rebuild `edge_type_index` from the compact `edge_type_ids` array.

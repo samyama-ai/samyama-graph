@@ -3891,6 +3891,16 @@ fn extend_path(
     }
 }
 
+/// Per-direction type indexes for one expand: `(outgoing, incoming)`.
+///
+/// `None` = not yet asked. `Some(None)` = asked and declined, so the walk
+/// stands and is not re-asked per row.
+type TypeIndexPair = (
+    Option<std::sync::Arc<crate::graph::TypeAdjacency>>,
+    Option<std::sync::Arc<crate::graph::TypeAdjacency>>,
+);
+type TypeIndexSlot = Option<Option<TypeIndexPair>>;
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -3942,6 +3952,18 @@ pub struct ExpandOperator {
     /// matching Organisation once, and testing membership here, replaces that
     /// with a hash lookup (#665).
     target_ids: Option<std::collections::HashSet<NodeId>>,
+    /// Source records this expand has processed, for amortising the type index.
+    ///
+    /// `GraphStore::type_adjacency` costs one pass over the adjacency to build.
+    /// That is a large loss for a query touching a handful of rows and a large
+    /// win for one touching thousands, and the operator is the only place that
+    /// knows which it is — so it counts, and asks only once the walk it would
+    /// replace has clearly become the dominant cost (#738).
+    rows_seen: usize,
+    /// The type index for this expand's single edge type, once requested.
+    /// `Some(None)` means asked and declined, so it is not asked again.
+    #[allow(clippy::type_complexity)]
+    type_index: TypeIndexSlot,
     /// Direction
     direction: Direction,
     /// Current input record
@@ -4005,6 +4027,8 @@ impl ExpandOperator {
             target_labels: Vec::new(),
             target_props: Vec::new(),
             target_ids: None,
+            rows_seen: 0,
+            type_index: None,
             optional_null_vars: None,
             emitted_for_current: false,
             track_edges: false,
@@ -4047,6 +4071,12 @@ impl ExpandOperator {
         self.target_bound_var = Some(var.into());
         self
     }
+
+    /// Rows after which the type index is worth its build.
+    ///
+    /// Below this the walk is cheaper than one pass over the adjacency; above
+    /// it, decisively not. IC11 feeds this expand 13,306 rows.
+    const TYPE_INDEX_AFTER_ROWS: usize = 512;
 
     /// Enforce relationship isomorphism for this expand.
     ///
@@ -4256,20 +4286,98 @@ impl ExpandOperator {
             }
         };
 
+        // A selective type against a high-degree node is the case #738 is
+        // about: IC11 visits ~6.6M edges to use ~29,000, because an LDBC
+        // `Person` has ~495 outgoing edges of which 2.2 are `WORK_AT`. Once
+        // enough rows have gone through to pay for it, ask the store for an
+        // index of just this type and walk that instead.
+        //
+        // Only for a single type: with two, the union would have to be merged
+        // and the saving no longer obviously beats the walk.
+        let single_type = match type_filter {
+            Some([t]) => Some(*t),
+            _ => None,
+        };
+        self.rows_seen += 1;
+        if self.type_index.is_none() && self.rows_seen > Self::TYPE_INDEX_AFTER_ROWS {
+            if let Some(t) = single_type {
+                // An undirected pattern walks both sides, so it needs both
+                // indexes or neither — half an index would mean half the walk
+                // takes the fast path and the accounting for self-loops below
+                // stops lining up.
+                let out = store.type_adjacency(t, true);
+                let inc = match self.direction {
+                    Direction::Outgoing => None,
+                    _ => store.type_adjacency(t, false),
+                };
+                let usable = match self.direction {
+                    Direction::Outgoing => out.is_some(),
+                    Direction::Incoming => inc.is_some(),
+                    Direction::Both => out.is_some() && inc.is_some(),
+                };
+                self.type_index = Some(if usable { Some((out, inc)) } else { None });
+            }
+        }
+        let typed = match (&self.type_index, single_type) {
+            (Some(Some(pair)), Some(_)) => Some(pair.clone()),
+            _ => None,
+        };
+        let empty: [(NodeId, crate::graph::EdgeId); 0] = [];
+        let out_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
+            match p { Some((Some(i), _)) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
+        };
+        let in_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
+            match p { Some((_, Some(i))) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
+        };
+
         match self.direction {
             Direction::Outgoing => {
-                store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                if typed.is_some() {
+                    for (target, eid) in out_of(&typed, node_id) {
+                        if keeps(target, eid) {
+                            collected.push((eid, node_id, target));
+                        }
+                    }
+                } else {
+                    store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                        if keeps(target, eid) {
+                            collected.push((eid, node_id, target));
+                        }
+                    });
+                }
+            }
+            Direction::Incoming => {
+                if typed.is_some() {
+                    for (source, eid) in in_of(&typed, node_id) {
+                        if keeps(source, eid) {
+                            collected.push((eid, source, node_id));
+                        }
+                    }
+                } else {
+                    store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                        if keeps(source, eid) {
+                            collected.push((eid, source, node_id));
+                        }
+                    });
+                }
+            }
+            Direction::Both if typed.is_some() => {
+                for (target, eid) in out_of(&typed, node_id) {
                     if keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
-                });
-            }
-            Direction::Incoming => {
-                store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                }
+                for (source, eid) in in_of(&typed, node_id) {
+                    // Same self-loop rule as the walk below: an edge incident
+                    // to its own node appears in both indexes and must be
+                    // taken once (#640).
+                    if source == node_id {
+                        continue;
+                    }
                     if keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
-                });
+                }
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
