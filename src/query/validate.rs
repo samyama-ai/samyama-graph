@@ -656,7 +656,185 @@ fn validate_variable_kinds(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+
+/// Variables a pattern binds.
+fn pattern_vars(pattern: &crate::query::ast::Pattern, out: &mut HashSet<String>) {
+    for path in &pattern.paths {
+        if let Some(v) = &path.path_variable { out.insert(v.clone()); }
+        if let Some(v) = &path.start.variable { out.insert(v.clone()); }
+        for seg in &path.segments {
+            if let Some(v) = &seg.edge.variable { out.insert(v.clone()); }
+            if let Some(v) = &seg.node.variable { out.insert(v.clone()); }
+        }
+    }
+}
+
+/// The names a projection makes available downstream.
+fn projected_names(items: &[ReturnItem]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for item in items {
+        if let Some(a) = &item.alias {
+            out.insert(a.clone());
+        } else if let Expression::Variable(v) = &item.expression {
+            out.insert(v.clone());
+        }
+    }
+    out
+}
+
+/// Every variable an expression reads.
+fn expression_vars(e: &Expression, out: &mut HashSet<String>) {
+    use Expression::*;
+    match e {
+        Variable(v) => { out.insert(v.clone()); }
+        Property { variable, .. } => { out.insert(variable.clone()); }
+        Binary { left, right, .. } => { expression_vars(left, out); expression_vars(right, out); }
+        Unary { expr, .. } => expression_vars(expr, out),
+        Function { args, .. } => for a in args { expression_vars(a, out) },
+        Index { expr, index } => { expression_vars(expr, out); expression_vars(index, out); }
+        Case { operand, when_clauses, else_result } => {
+            if let Some(o) = operand { expression_vars(o, out); }
+            for (w, t) in when_clauses { expression_vars(w, out); expression_vars(t, out); }
+            if let Some(e) = else_result { expression_vars(e, out); }
+        }
+        _ => {}
+    }
+}
+
+/// `ORDER BY` may not name a variable that is not in scope.
+///
+/// ```text
+/// MATCH (a:A), (b:B), (c:C)
+/// WITH a, b
+/// WITH a ORDER BY c        <-- c was dropped two clauses ago
+/// RETURN a
+/// ```
+///
+/// 40 TCK scenarios across WithOrderBy1 and WithOrderBy3 assert a
+/// `SyntaxError` here and we answered them, sorting by a column that does not
+/// exist.
+///
+/// **Deliberately conservative**, because this module opens by saying scope
+/// analysis is absent precisely so that valid queries are not rejected. Two
+/// choices keep it safe:
+///
+/// * the allowed set is the projection **plus the scope that preceded it**, not
+///   the projection alone. `MATCH (n) RETURN n.name ORDER BY n.age` is legal —
+///   `n` is in scope even though the projected column is `n.name` — and a
+///   stricter rule would reject it.
+/// * anything the walk cannot account for leaves the scope *empty*, and an
+///   empty scope checks nothing. A query shape this does not model is passed
+///   through rather than guessed at.
+fn validate_order_by_in_scope(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let mut scope: HashSet<String> = HashSet::new();
+    let mut seen_any_binding = false;
+
+    // The by-kind shape. A multi-WITH query parses into `with_clause` plus
+    // `extra_with_stages` and leaves `clauses` empty, so declining it here
+    // would leave the rule checking nothing at all -- which is exactly what
+    // the first version of this did, and it measured +0. The two-representation
+    // split has now cost four separate fixes; assume neither shape.
+    if query.clauses.is_empty() {
+        // The by-kind shape, and its WITH order is **not** the obvious one:
+        // `extra_with_stages` holds the *earlier* WITHs in order and
+        // `with_clause` holds the **last** one. Walking `with_clause` first --
+        // which is what it looks like it should be -- checks the final ORDER BY
+        // against the scope of the first clause and silently finds nothing.
+        // Verified against a three-WITH query rather than assumed.
+        let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+        for mc in query.match_clauses.iter().take(upto) {
+            pattern_vars(&mc.pattern, &mut scope);
+            seen_any_binding = true;
+        }
+        for (wc, _, matches, _) in &query.extra_with_stages {
+            let projected = projected_names(&wc.items);
+            if let Some(ob) = &wc.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+            scope = projected;
+            // A WITH projection *is* exact scope knowledge -- more exact than a
+            // pattern, in fact -- so it satisfies the guard. Requiring a
+            // pattern binding first silently skipped every query of the form
+            // `WITH 1 AS a ... ORDER BY c`, which is 30 of the 40 scenarios
+            // this rule exists for.
+            seen_any_binding = true;
+            for mc in matches {
+                pattern_vars(&mc.pattern, &mut scope);
+            }
+        }
+        if let Some(wc) = &query.with_clause {
+            let projected = projected_names(&wc.items);
+            if let Some(ob) = &wc.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+            scope = projected;
+            for mc in query.match_clauses.iter().skip(upto) {
+                pattern_vars(&mc.pattern, &mut scope);
+            }
+        }
+        if let Some(rc) = &query.return_clause {
+            let projected = projected_names(&rc.items);
+            if let Some(ob) = &query.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+        }
+        return Ok(());
+    }
+
+    for clause in &query.clauses {
+        match clause {
+            Clause::Match(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Create(cc) => { pattern_vars(&cc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Merge(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Unwind(u) => { scope.insert(u.variable.clone()); seen_any_binding = true; }
+            Clause::With(wc) => {
+                let projected = projected_names(&wc.items);
+                if let Some(ob) = &wc.order_by {
+                    check_order_by(ob, &projected, &scope, seen_any_binding)?;
+                }
+                scope = projected;
+                seen_any_binding = true;
+            }
+            Clause::Return(rc) => {
+                let projected = projected_names(&rc.items);
+                if let Some(ob) = &query.order_by {
+                    check_order_by(ob, &projected, &scope, seen_any_binding)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_order_by(
+    ob: &OrderByClause,
+    projected: &HashSet<String>,
+    scope: &HashSet<String>,
+    seen_any_binding: bool,
+) -> Result<(), ValidationError> {
+    // Nothing was bound anywhere the walk could see, so there is no scope to
+    // check against. Saying "undefined" here would reject `RETURN 1 ORDER BY 1`
+    // and anything else this walk does not model.
+    if !seen_any_binding {
+        return Ok(());
+    }
+    for item in &ob.items {
+        let mut used = HashSet::new();
+        expression_vars(&item.expression, &mut used);
+        for v in used {
+            if !projected.contains(&v) && !scope.contains(&v) {
+                return Err(ValidationError::OrderByUndefinedVariable(v));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_order_by_in_scope(query)?;
+
     validate_variable_kinds(query)?;
 
     // ---- ORDER BY scope after an aggregating or DISTINCT projection.
