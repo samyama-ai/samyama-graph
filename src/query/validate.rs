@@ -37,6 +37,8 @@ pub enum ValidationError {
     VariableTypeConflict(String),
     /// A boolean operator given an operand that cannot be a boolean.
     NonBooleanOperand(&'static str),
+    /// Property access on a value that cannot carry properties.
+    PropertyAccessOnNonMap { name: String, what: &'static str },
     /// One variable bound to two different kinds of entity.
     VariableKindConflict {
         name: String,
@@ -83,6 +85,11 @@ impl std::fmt::Display for ValidationError {
                 "`{name}` is bound to {first} and then to {second} in the same scope. A \
                  variable names one entity, and an entity is a node, a relationship or a \
                  path -- not two of them. Rename one of the two."
+            ),
+            Self::PropertyAccessOnNonMap { name, what } => write!(
+                f,
+                "`{name}` is {what}, so it has no properties to read. Only a map, \
+                 a node or a relationship does."
             ),
             Self::NonBooleanOperand(what) => write!(
                 f,
@@ -969,7 +976,107 @@ fn all_expressions(query: &Query) -> Vec<&Expression> {
     out
 }
 
+
+/// Property access on something that cannot have properties (#791).
+///
+/// ```text
+/// WITH 123 AS nonMap RETURN nonMap.num     -> TypeError: InvalidArgumentType
+/// ```
+///
+/// The TCK asks for this **at compile time**, which bounds what can be
+/// checked: only a variable whose value is a literal of a non-map type, taken
+/// from the projection that introduced it. `n.name` where `n` is a node, or a
+/// map, or anything read from the graph, is untouched — the type is not known
+/// from the text, and rejecting it would break every ordinary query.
+///
+/// So this fires on `WITH <literal> AS x ... x.prop` and nothing else. Narrow
+/// on purpose: `validate.rs` opens by naming over-rejection as the worse
+/// failure, and property access is the single most common expression in Cypher.
+fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Literal types that cannot carry properties. A map can; a node,
+    /// relationship or anything read at run time is not visible here.
+    fn non_map_literal(e: &Expression) -> Option<&'static str> {
+        match e {
+            Expression::Literal(p) => match p {
+                crate::graph::PropertyValue::Integer(_) => Some("an integer"),
+                crate::graph::PropertyValue::Float(_) => Some("a float"),
+                crate::graph::PropertyValue::String(_) => Some("a string"),
+                crate::graph::PropertyValue::Boolean(_) => Some("a boolean"),
+                crate::graph::PropertyValue::Array(_) => Some("a list"),
+                _ => None,
+            },
+            Expression::ListExpr(_) => Some("a list"),
+            _ => None,
+        }
+    }
+
+    // Names a projection binds to a literal of a non-map type.
+    let mut bad: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+    let mut note = |items: &[ReturnItem], bad: &mut std::collections::HashMap<String, &'static str>| {
+        for item in items {
+            let Some(alias) = &item.alias else { continue };
+            match non_map_literal(&item.expression) {
+                Some(what) => { bad.insert(alias.clone(), what); }
+                // Re-binding the name to anything else clears it.
+                None => { bad.remove(alias); }
+            }
+        }
+    };
+
+    let mut check = |e: &Expression, bad: &std::collections::HashMap<String, &'static str>|
+        -> Result<(), ValidationError> {
+        if let Expression::Property { variable, .. } = e {
+            if let Some(what) = bad.get(variable) {
+                return Err(ValidationError::PropertyAccessOnNonMap {
+                    name: variable.clone(),
+                    what,
+                });
+            }
+        }
+        Ok(())
+    };
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::With(w) => {
+                    for item in &w.items { check(&item.expression, &bad)?; }
+                    note(&w.items, &mut bad);
+                }
+                Clause::Return(r) => {
+                    for item in &r.items { check(&item.expression, &bad)?; }
+                }
+                Clause::Where(w) => check(&w.predicate, &bad)?,
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // The by-kind shape: earlier WITHs first, then the last, then RETURN.
+    for (wc, _, _, _) in &query.extra_with_stages {
+        for item in &wc.items { check(&item.expression, &bad)?; }
+        note(&wc.items, &mut bad);
+    }
+    if let Some(wc) = &query.with_clause {
+        for item in &wc.items { check(&item.expression, &bad)?; }
+        note(&wc.items, &mut bad);
+    }
+    if let Some(w) = &query.where_clause {
+        check(&w.predicate, &bad)?;
+    }
+    if let Some(rc) = &query.return_clause {
+        for item in &rc.items { check(&item.expression, &bad)?; }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_property_access_targets(query)?;
+
     validate_boolean_operands(query)?;
 
     validate_order_by_in_scope(query)?;
