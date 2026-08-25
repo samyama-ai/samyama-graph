@@ -1763,10 +1763,19 @@ fn apply_date_overrides(
         chrono::NaiveDate::from_yo_opt(year, ord as u32)
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid ordinalDay {ord}")))?
     } else if map.contains_key("week") || map.contains_key("dayOfWeek") {
+        // In a week date the year is the **ISO week year**, which is not the
+        // calendar year near a year boundary: 1816-12-30 is a Monday belonging
+        // to 1817-W01, so `{date: date('1816-12-30'), week: 2}` is in January
+        // 1817. Defaulting to `cur.year()` sent it to 1816-W02, eleven and a
+        // half months early -- a real date, in the wrong year (#851).
+        //
+        // An explicit `year` still wins, and is likewise read as the week year:
+        // `{date: date('1816-12-31'), year: 1817, week: 2}` is 1817-W02.
+        let week_year = g("year").unwrap_or(cur.iso_week().year() as i64) as i32;
         let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
         let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
-        chrono::NaiveDate::from_isoywd_opt(year, week, weekday_from_iso_num(dow))
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {year}-W{week}-{dow}")))?
+        chrono::NaiveDate::from_isoywd_opt(week_year, week, weekday_from_iso_num(dow))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {week_year}-W{week}-{dow}")))?
     } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
         let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
         // The day within the quarter defaults to the **current** one, exactly
@@ -1876,23 +1885,21 @@ fn compose_date_and_time(
         }
     };
 
-    // Date overrides on top of a selected date.
-    if base_date.is_some()
-        && ["year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter"]
-            .iter()
-            .any(|k| map.contains_key(*k))
-    {
-        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-        let cur = epoch
-            .checked_add_signed(chrono::Duration::days(days as i64))
-            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
-        let y = map.get("year").and_then(|v| v.as_integer()).unwrap_or(cur.year() as i64) as i32;
-        let mo = map.get("month").and_then(|v| v.as_integer()).unwrap_or(cur.month() as i64) as u32;
-        let d = map.get("day").and_then(|v| v.as_integer()).unwrap_or(cur.day() as i64) as u32;
-        days = chrono::NaiveDate::from_ymd_opt(y, mo, d)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {y}-{mo}-{d}")))?
-            .signed_duration_since(epoch)
-            .num_days() as i32;
+    // Date overrides on top of a selected date, through the same function
+    // `date()` uses.
+    //
+    // This was a **second implementation** of the rule, and it tested for
+    // `week`, `dayOfWeek`, `ordinalDay`, `quarter` and `dayOfQuarter` in its
+    // condition and then handled only `year`/`month`/`day`. So
+    // `localdatetime({date: date('1816-12-31'), week: 2})` entered the branch,
+    // recomputed the same y/m/d it started with, and returned the date
+    // unchanged -- a correct-looking value from an override that did nothing.
+    //
+    // Routing both through `apply_date_overrides` also gives the composite
+    // constructors the week-year rule (#851) and the `quarter` fix (#838),
+    // neither of which they had (#851).
+    if base_date.is_some() {
+        days = apply_date_overrides(days, map)?;
     }
 
     let clock_keys = ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
