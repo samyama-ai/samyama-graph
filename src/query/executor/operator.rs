@@ -15144,14 +15144,29 @@ mod tests {
         assert_eq!(result, Value::Null);
     }
 
+    /// Indexing a non-collection is a **type error**, not null (#789).
+    ///
+    /// This asserted `Value::Null`, which was the behaviour and is not
+    /// Cypher's: `List1 [6]` expects `TypeError: InvalidArgumentType` for
+    /// `true[0]`, `123[0]`, `4.7[0]` and `'1'[0]`. The test encoded the defect,
+    /// checked against the TCK rather than against the new code.
+    ///
+    /// The distinction it destroyed is the useful one: a list with no element
+    /// 5 is a different thing from a value that was never a list. The
+    /// neighbouring `test_eval_index_map_missing_key` still asserts null, and
+    /// still passes, because a missing key genuinely is null.
     #[test]
     fn test_eval_index_non_collection() {
-        let result = eval_index(
+        let err = eval_index(
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Integer(0)),
             &GraphStore::new(),
-        ).unwrap();
-        assert_eq!(result, Value::Null);
+        )
+        .expect_err("indexing an integer is a type error");
+        assert!(
+            format!("{err:?}").contains("not a list or a map"),
+            "the message should name the problem: {err:?}"
+        );
     }
 
     #[test]
