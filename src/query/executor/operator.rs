@@ -505,7 +505,57 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
          Value::Property(PropertyValue::String(key))) => {
             Ok(Value::Property(collection.resolve_property(key, store)))
         }
-        _ => Ok(Value::Null),
+
+        // Null in, null out — an unknown collection or index has an unknown
+        // element, which is Cypher's answer and not an error.
+        (Value::Null | Value::Property(PropertyValue::Null), _)
+        | (_, Value::Null | Value::Property(PropertyValue::Null)) => Ok(Value::Null),
+
+        // Everything else is a **type error**, not null (#789).
+        //
+        // The catch-all here used to answer null for every unhandled pair, so
+        // `true[0]` and `[1,2]['x']` returned a value where Cypher raises. That
+        // is the failure mode this codebase keeps producing: a wrong answer
+        // that looks like a legitimate "no such element".
+        //
+        // The two cases are distinguished because the TCK does: indexing a
+        // *non-list* is one error, indexing a list with a *non-integer* is
+        // another, and reporting one for the other sends the reader to the
+        // wrong operand.
+        (Value::Property(p), _) if p.as_list_items().is_some() => {
+            Err(ExecutionError::TypeError(format!(
+                "a list index must be an integer, not {}",
+                type_name_of(&index)
+            )))
+        }
+        (Value::List(_), _) => Err(ExecutionError::TypeError(format!(
+            "a list index must be an integer, not {}",
+            type_name_of(&index)
+        ))),
+        (Value::Property(PropertyValue::Map(_)) | Value::Map(_), _) => {
+            Err(ExecutionError::TypeError(format!(
+                "a map key must be a string, not {}",
+                type_name_of(&index)
+            )))
+        }
+        _ => Err(ExecutionError::TypeError(format!(
+            "cannot index {}: it is not a list or a map",
+            type_name_of(&collection)
+        ))),
+    }
+}
+
+/// A value's type, for an error message that names the operand rather than
+/// saying something went wrong somewhere.
+fn type_name_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Property(p) => p.type_name(),
+        Value::Node(..) | Value::NodeRef(_) => "Node",
+        Value::Edge(..) | Value::EdgeRef(..) => "Relationship",
+        Value::Path { .. } => "Path",
+        Value::List(_) => "List",
+        Value::Map(_) => "Map",
     }
 }
 
