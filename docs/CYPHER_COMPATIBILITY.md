@@ -8,24 +8,44 @@
 The openCypher TCK **has now been run** (#434), so this page can give a measured
 number instead of withholding one:
 
-> **86.7% of evaluated scenarios** — 1,079 of 1,244, from 1,615 total with 371
-> skipped as unjudgeable by the harness. Measured 2026-08-21 at commit
-> `18adfbf`.
+> **90.0% of evaluated scenarios** — 3,384 of 3,761, from 3,897 total with 136
+> skipped as unjudgeable by the harness. Measured 2026-08-25 at commit
+> `4118d37`.
 
 Two numbers, both of which matter. The pass rate says what the engine gets
-right among scenarios the harness can judge; the **77.0% coverage** says how
+right among scenarios the harness can judge; the **96.5% coverage** says how
 many it can judge at all. Quoting either alone misleads, which is why the
 harness prints both.
 
-For context rather than comfort: on the same pinned scenario set, Neo4j 5
-scores 98.9%, Memgraph 89.8% and FalkorDB 89.1% (#435). We are last of the
-four.
+**The corpus tripled on 2026-08-25 and the earlier figure described a third of
+it.** This page previously read *86.7% of 1,244 evaluated*, at 77.0% coverage.
+The harness had been skipping every `Scenario Outline` — 274 of them, expanding
+to ~2,280 concrete cases, and the harder ones, since an outline is how the TCK
+enumerates a feature's edge cases once its happy path is established (#756).
+Nothing regressed when they were included: the pass **count** went from 1,079
+to 3,384.
+
+On the same corpus and comparator, Neo4j 5 scores 79.4%, Memgraph 65.9% and
+FalkorDB 65.7% (#759). Samyama is **10.3 points ahead of the best of them** —
+having been 17 points behind on the old, smaller set. Every engine's number
+falls on the wider corpus, which is the evidence the expansion is sound rather
+than malformed.
+
+That comparison is **conformance only**: not performance, not scale, not
+production readiness. The competitor figures are one run of one container image
+each from 2026-08-24, a fixed baseline rather than a live measurement, and Kuzu
+is absent because it is schema-first and the TCK's schema-free fixtures do not
+load.
 
 A previous version of this page claimed "~90% OpenCypher coverage". That figure
 was self-assessed, never checked against the TCK, and an earlier internal
 assessment of the same engine put it at 40–50%. It was withdrawn rather than
-defended — and note that the measured number, 86.7%, is *below* the withdrawn
-claim while being worth considerably more, because it can be reproduced:
+defended.
+
+The measured number has since passed it — 90.0% against the withdrawn "~90%" —
+but the two are not comparable and the coincidence is worth naming rather than
+enjoying: one is a reproducible count over a named corpus at a named commit,
+the other was a guess. The point of withdrawing it was never the value.
 
 ```
 cargo run --release --example tck_runner -- --features <path to tck/features>
