@@ -1634,6 +1634,23 @@ impl QueryPlanner {
                 }
             }
 
+            // UNWINDs written after the final WITH. They belong here, above the
+            // barrier, because they read what the WITH projected -- applying
+            // them with the leading run gave `VariableNotFound` on a variable
+            // the WITH defines one line earlier (#785).
+            if stage_idx + 1 == all_with_stages.len() {
+                for extra in &query.post_with_unwind_clauses {
+                    if let Some(op) = operator {
+                        operator = Some(Box::new(UnwindOperator::new(
+                            op,
+                            extra.expression.clone(),
+                            extra.variable.clone(),
+                        )));
+                        known_vars.insert(extra.variable.clone());
+                    }
+                }
+            }
+
             // Process post-WITH MATCH clauses for this stage
             // Pre-compute variable sets
             let match_var_sets: Vec<HashSet<String>> = stage_matches.iter().map(|mc| {

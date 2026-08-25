@@ -958,7 +958,17 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     let post_matches: Vec<_> = query.match_clauses.drain(split..).collect();
                     let post_where = query.post_with_where_clause.take();
                     let prev_with = query.with_clause.take().unwrap();
-                    let prev_unwind = query.unwind_clause.take();
+                    // The UNWIND that belongs to the stage being closed is the
+                    // one written *after* its WITH, not the query's leading
+                    // one. Taking `unwind_clause` here moved the head UNWIND
+                    // into a later stage, which is the same position-losing
+                    // mistake as #785 pointing the other way; it survived only
+                    // because `unwind_leading` then suppressed the stage copy.
+                    let prev_unwind = if query.post_with_unwind_clauses.is_empty() {
+                        query.unwind_clause.take()
+                    } else {
+                        Some(query.post_with_unwind_clauses.remove(0))
+                    };
                     query.extra_with_stages.push((prev_with, prev_unwind, post_matches, post_where));
                 }
                 // Record where WITH splits pre-WITH from post-WITH match clauses
@@ -992,8 +1002,16 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::unwind_clause => {
                 // The first UNWIND stays in `unwind_clause`; the rest queue up
                 // behind it, each a cross product with everything before.
+                //
+                // Unless a WITH has already been seen, in which case the UNWIND
+                // belongs *after* that WITH and must be kept apart: the planner
+                // applies the leading run before the WITH barrier, so a
+                // post-WITH unwind put there reads a variable the WITH has not
+                // projected yet (#785).
                 let u = parse_unwind_clause(inner)?;
-                if query.unwind_clause.is_none() {
+                if query.with_clause.is_some() {
+                    query.post_with_unwind_clauses.push(u);
+                } else if query.unwind_clause.is_none() {
                     query.unwind_clause = Some(u);
                 } else {
                     query.extra_unwind_clauses.push(u);

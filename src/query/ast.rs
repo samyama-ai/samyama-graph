@@ -145,6 +145,14 @@ pub struct Query {
     /// single-UNWIND field is read in a dozen places that only ever care
     /// about the first one.
     pub extra_unwind_clauses: Vec<UnwindClause>,
+    /// `UNWIND`s that appear **after** the last `WITH`.
+    ///
+    /// Kept apart from `extra_unwind_clauses` because position is the whole
+    /// point: the planner applies the leading run before the WITH barrier, and
+    /// applying a post-WITH unwind there reads a variable the WITH has not
+    /// projected yet. `UNWIND [1,2] AS a WITH [3,4] AS b UNWIND b AS c` failed
+    /// with `VariableNotFound("b")` for exactly that reason (#785).
+    pub post_with_unwind_clauses: Vec<UnwindClause>,
     /// Whether the UNWIND *led* the statement (`UNWIND ... MATCH ...`) rather than
     /// following the match. The AST keeps a single `unwind_clause` with no position, but
     /// the two orders plan differently: a leading UNWIND must bind its variable before the
@@ -851,6 +859,7 @@ impl Query {
             clauses: Vec::new(),
             needs_clause_pipeline: false,
             extra_unwind_clauses: Vec::new(),
+            post_with_unwind_clauses: Vec::new(),
             unwind_leading: false,
             merge_clause: None,
             union_queries: Vec::new(),
