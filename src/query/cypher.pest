@@ -308,7 +308,20 @@ reduce_expression = { ^"reduce" ~ "(" ~ variable ~ "=" ~ expression ~ "," ~ vari
 pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~ expression ~ "]" }
 
 // EXISTS { MATCH pattern WHERE condition }
-exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }
+// `EXISTS { ... }` in all three spellings openCypher allows:
+//
+//   EXISTS { (n)-->() }                     a bare pattern, no MATCH keyword
+//   EXISTS { (n)-->(m) WHERE n.p = m.p }    and an optional WHERE
+//   EXISTS { MATCH (n)-->() RETURN true }   a full subquery
+//
+// `MATCH` was required and `RETURN` was forbidden, so eight of the nine
+// existential-subquery scenarios never reached the evaluator (#858).
+//
+// The projection is parsed and **discarded**: `EXISTS { ... }` is true iff the
+// subquery produces at least one row, so what those rows contain cannot change
+// the answer. The parser already ignored every inner rule but `pattern` and
+// `where_clause`, which is why allowing RETURN needed no evaluator change.
+exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}" }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is
