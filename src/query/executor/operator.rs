@@ -714,7 +714,7 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause } => {
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
             eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -4348,7 +4348,7 @@ impl FilterOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -6240,7 +6240,7 @@ impl ProjectOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -6819,7 +6819,7 @@ impl AggregateOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -8010,7 +8010,7 @@ impl SortOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -12746,7 +12746,7 @@ impl WithBarrierOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {

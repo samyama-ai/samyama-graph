@@ -2268,6 +2268,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::ExistsSubquery {
                     pattern: Pattern { paths: vec![parse_path(inner)?] },
                     where_clause: None,
+                    bare_pattern: true,
                 });
             }
             Rule::reduce_expression => {
@@ -2418,6 +2419,9 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     Ok(Expression::ExistsSubquery {
         pattern: pattern.ok_or_else(|| ParseError::SemanticError("EXISTS missing pattern".to_string()))?,
         where_clause: where_clause.map(Box::new),
+        // `EXISTS { ... }` may introduce variables; a bare pattern predicate
+        // may not (#798).
+        bare_pattern: false,
     })
 }
 
@@ -2975,7 +2979,7 @@ mod tests {
         let result = parse_query(query);
         assert!(result.is_ok(), "Failed to parse EXISTS with WHERE: {:?}", result.err());
         let ast = result.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause } = &ast.where_clause.unwrap().predicate {
+        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &ast.where_clause.unwrap().predicate {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_some());
         } else {
@@ -3716,7 +3720,7 @@ mod tests {
         assert!(result.is_ok(), "Failed to parse EXISTS subquery: {:?}", result.err());
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause } = &wc.predicate {
+        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &wc.predicate {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_none());
         } else {

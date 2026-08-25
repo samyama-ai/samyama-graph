@@ -3817,7 +3817,7 @@ impl QueryPlanner {
             Expression::Function { args, .. } => {
                 for arg in args { Self::collect_expression_variables(arg, vars); }
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 // An EXISTS subquery's pattern routinely references variables bound
                 // by the enclosing query — `NOT EXISTS { MATCH (a)-[:KNOWS]-(b) }`
                 // where both `a` and `b` come from the outer MATCH. Those are real

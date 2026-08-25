@@ -498,6 +498,15 @@ pub enum Expression {
         pattern: Pattern,
         /// Optional WHERE predicate
         where_clause: Option<Box<WhereClause>>,
+        /// True when this came from a **bare pattern predicate** —
+        /// `WHERE (n)-[r]->(a)` — rather than from `EXISTS { ... }`.
+        ///
+        /// The two desugar to the same node because they evaluate identically,
+        /// but one rule separates them: a bare predicate may **not** introduce
+        /// variables, while `EXISTS` may. Without this flag the check cannot
+        /// tell them apart, and applying it to both rejects every
+        /// `EXISTS { MATCH (n)-->(m) ... }` — which is what happened (#798).
+        bare_pattern: bool,
     },
     /// List comprehension: [x IN list WHERE cond | expr]
     ListComprehension {

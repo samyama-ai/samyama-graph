@@ -1148,7 +1148,11 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
         e: &Expression,
         bound: &HashSet<String>,
     ) -> Result<(), ValidationError> {
-        if let Expression::ExistsSubquery { pattern, .. } = e {
+        // Only a *bare* pattern predicate is restricted. `EXISTS { ... }`
+        // desugars to the same node and may introduce names -- that is the
+        // whole difference between the two spellings, and checking both
+        // rejects every `EXISTS { MATCH (n)-->(m) }` (#798).
+        if let Expression::ExistsSubquery { pattern, bare_pattern: true, .. } = e {
             for name in pattern_named(pattern) {
                 if !bound.contains(&name) {
                     return Err(ValidationError::UnboundPatternVariable(name));

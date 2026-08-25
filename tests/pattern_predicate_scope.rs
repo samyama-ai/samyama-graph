@@ -79,19 +79,23 @@ fn already_bound_variables_are_fine() {
 /// documented way to express this.
 #[test]
 fn exists_subqueries_may_introduce_variables() {
+    // Asserted, not merely warned about. The first version of this test only
+    // checked *which* error came back if one did, so it passed while the rule
+    // rejected every EXISTS in the codebase -- the workspace suite caught it
+    // instead, via `test_parse_exists_subquery_with_where`. A test that
+    // tolerates failure cannot report one.
+    // The `EXISTS { MATCH ... RETURN ... }` form does not parse at all yet —
+    // a pre-existing grammar gap, tracked by the TCK as ExistentialSubquery2,
+    // and nothing to do with this rule. Only the forms that *do* parse are
+    // asserted here, so this test reports on what it actually governs.
     for q in [
-        "MATCH (n) WHERE EXISTS { (n)-[r]->(a) } RETURN n",
-        "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) RETURN m } RETURN n",
+        "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age > 30 } RETURN n",
     ] {
-        // Some of these may not parse for unrelated reasons; what must not
-        // happen is a rejection *by this rule*.
-        if let Err(e) = parse_query(q) {
-            let msg = format!("{e:?}");
-            assert!(
-                !msg.contains("used as a predicate"),
-                "EXISTS must be allowed to introduce names: {q}\n  {msg}"
-            );
-        }
+        assert!(
+            accepted(q),
+            "EXISTS may introduce names and must be accepted: {q}\n  {:?}",
+            parse_query(q).err()
+        );
     }
 }
 
