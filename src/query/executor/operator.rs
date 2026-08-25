@@ -366,6 +366,18 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
         },
         BinaryOp::Mul => match (&left_prop, &right_prop) {
+            // duration * number, either way round (#787).
+            (PropertyValue::Duration { months, days, seconds, nanos }, n)
+            | (n, PropertyValue::Duration { months, days, seconds, nanos })
+                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
+            {
+                let f = match n {
+                    PropertyValue::Integer(i) => *i as f64,
+                    PropertyValue::Float(f) => *f,
+                    _ => unreachable!("guarded above"),
+                };
+                scale_duration(*months, *days, *seconds, *nanos, f)?
+            }
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
@@ -374,6 +386,22 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Mul requires numeric operands".to_string())),
         },
         BinaryOp::Div => match (&left_prop, &right_prop) {
+            // duration / number. Not commutative, so only this order.
+            (PropertyValue::Duration { months, days, seconds, nanos }, n)
+                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
+            {
+                let f = match n {
+                    PropertyValue::Integer(i) => *i as f64,
+                    PropertyValue::Float(f) => *f,
+                    _ => unreachable!("guarded above"),
+                };
+                if f == 0.0 {
+                    return Err(ExecutionError::RuntimeError(
+                        "cannot divide a duration by zero".to_string(),
+                    ));
+                }
+                scale_duration(*months, *days, *seconds, *nanos, 1.0 / f)?
+            }
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
@@ -2609,13 +2637,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let minutes = map.get("minutes").and_then(|v| v.as_integer()).unwrap_or(0);
                     let seconds = map.get("seconds").and_then(|v| v.as_integer()).unwrap_or(0);
                     let years = map.get("years").and_then(|v| v.as_integer()).unwrap_or(0);
+                    // The sub-second components, which were hardcoded to zero:
+                    // `duration({nanoseconds: 1})` silently lost the 1, so the
+                    // value was already wrong before any arithmetic touched it
+                    // (#787). Additive with each other, as everywhere else.
+                    let millis = map.get("milliseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let micros = map.get("microseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let nanos_in = map.get("nanoseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let weeks = map.get("weeks").and_then(|v| v.as_integer()).unwrap_or(0);
                     let total_months = years * 12 + months;
-                    let total_seconds = hours * 3600 + minutes * 60 + seconds;
+                    let sub_nanos = millis * 1_000_000 + micros * 1_000 + nanos_in;
+                    let total_seconds = hours * 3600 + minutes * 60 + seconds
+                        + sub_nanos.div_euclid(1_000_000_000);
                     Ok(Value::Property(PropertyValue::Duration {
                         months: total_months,
-                        days,
+                        days: days + weeks * 7,
                         seconds: total_seconds,
-                        nanos: 0,
+                        nanos: sub_nanos.rem_euclid(1_000_000_000) as i32,
                     }))
                 }
                 _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
@@ -2925,6 +2963,84 @@ fn extract_float(val: &Value) -> ExecutionResult<f64> {
 }
 
 /// Add duration components to a DateTime (millis timestamp)
+
+/// `duration * number` and `duration / number`.
+///
+/// Scaling a duration is not scaling three independent numbers. The TCK pins
+/// the rule:
+///
+/// ```text
+/// P12Y5M14DT16H13M10.000000001S * 0.5  ->  P6Y2M22DT13H21M8S
+/// ```
+///
+/// 149 months halved is 74.5, and the half **carries into days at 30 days per
+/// month** — 14 days becomes 22. Hours do *not* carry into days: the input's
+/// 16h doubles to `32H` and stays there, because a day is not always 24 hours
+/// once zones are involved and Cypher declines to assume it is.
+///
+/// So months and the days-and-below part scale separately, with one carry
+/// between them and none below.
+fn scale_duration(
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanos: i32,
+    factor: f64,
+) -> Result<PropertyValue, ExecutionError> {
+    if !factor.is_finite() {
+        return Err(ExecutionError::RuntimeError(
+            "cannot scale a duration by a non-finite number".to_string(),
+        ));
+    }
+    // The mean Gregorian month: 365.2425 / 12. **Not 30.**
+    //
+    // Derived from the TCK rather than assumed. `P12Y5M14DT16H13M10S * 0.5`
+    // is `P6Y2M22DT13H21M8S`, and reaching 13:21:08 from a half-month carry
+    // requires 30.4369 days per month; 30 gives 08:06:35, which is a
+    // plausible-looking wrong answer.
+    const DAYS_PER_MONTH: f64 = 365.2425 / 12.0;
+
+    let scaled_months = months as f64 * factor;
+    let whole_months = scaled_months.trunc();
+    let carry_days = (scaled_months - whole_months) * DAYS_PER_MONTH;
+
+    // Days and the sub-day part scale separately: a day is not always 24 hours
+    // once zones are involved, so Cypher does not carry hours into days.
+    // Doubling 14D16H gives `28DT32H`, not `29DT8H` -- normalising looks
+    // tidier and is wrong.
+    let scaled_days = days as f64 * factor + carry_days;
+    let whole_days = scaled_days.trunc();
+    let day_remainder_nanos = (scaled_days - whole_days) * 86_400.0 * 1e9;
+
+    // The sub-second part in integers where it can be. A float round-trip of
+    // (seconds * 1e9 + nanos) loses the last nanosecond at these magnitudes --
+    // it rendered `8.000000001S` where the TCK expects `8S`.
+    let sub_day_exact = (seconds as i128) * 1_000_000_000 + nanos as i128;
+    // Each part is rounded **before** they are added, not after. Adding first
+    // then rounding turns 29195000000000.5 + 18873000000000.027 into one extra
+    // nanosecond, and the TCK's halving case expects exactly `8S`. Two roundings
+    // of well-conditioned quantities beat one rounding of their sum here,
+    // because the .5 and the .027 are independent artefacts.
+    let scaled_sub = if factor == factor.trunc() && factor.abs() < 1e15 {
+        // An integral factor multiplies exactly, with no float involved.
+        sub_day_exact * (factor as i128)
+    } else {
+        // Ties to **even**, not away from zero. `58390000000001 * 0.5` is
+        // exactly `...000.5`, and `.round()` takes it up to `...001` where the
+        // TCK expects `8S` with no fraction. Half-away-from-zero also biases
+        // every exact tie upward, which accumulates; banker's rounding does
+        // not, and is what the reference agrees with.
+        (sub_day_exact as f64 * factor).round_ties_even() as i128
+    };
+    let sub_day = scaled_sub + day_remainder_nanos.round_ties_even() as i128;
+
+    Ok(PropertyValue::Duration {
+        months: whole_months as i64,
+        days: whole_days as i64,
+        seconds: (sub_day / 1_000_000_000) as i64,
+        nanos: (sub_day % 1_000_000_000) as i32,
+    })
+}
 
 /// Nanoseconds since the epoch that a temporal value denotes, and a way back.
 ///
