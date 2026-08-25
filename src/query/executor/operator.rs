@@ -3351,9 +3351,26 @@ fn shift_temporal(
     nanos: i64,
 ) -> Result<PropertyValue, ExecutionError> {
     use chrono::Datelike;
-    let exact = days as i128 * 86_400 * 1_000_000_000
-        + seconds as i128 * 1_000_000_000
-        + nanos as i128;
+    // A `Date` has no clock, so a duration's **sub-day part is dropped** rather
+    // than applied — and dropped *before* the components are combined.
+    //
+    // `days: -14` with a `+15h49m` remainder combines to -13.34 days, and
+    // truncating that gives -13: one day off, because the fractional part
+    // belongs to the clock the date does not have. Keeping the days field and
+    // discarding the rest gives -14, which is what the calendar arithmetic
+    // means.
+    //
+    // Addition looked correct throughout — a positive remainder truncates back
+    // to the same day — so this only showed up on subtraction and on
+    // mixed-sign durations (#817).
+    let drop_sub_day = matches!(v, PropertyValue::Date(_));
+    let exact = if drop_sub_day {
+        days as i128 * 86_400 * 1_000_000_000
+    } else {
+        days as i128 * 86_400 * 1_000_000_000
+            + seconds as i128 * 1_000_000_000
+            + nanos as i128
+    };
 
     // Calendar months first, on whatever date part the value has.
     let month_shift_nanos = if months == 0 {
