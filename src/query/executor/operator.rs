@@ -1648,6 +1648,22 @@ fn date_part_of(v: &PropertyValue) -> Option<i32> {
     }
 }
 
+/// Split a (days-since-epoch, nanoseconds-of-day) pair into the
+/// (seconds, nanos) a `LocalDateTime` or `ZonedDateTime` stores.
+///
+/// Computing `days * 86_400 * 1_000_000_000` first **overflows i64**: that
+/// product spans only about ±292 years from 1970, so `year: 1` silently became
+/// 1754 and `year: 9999` became 1815. Well-formed date-times, wrapped.
+///
+/// Seconds are the wider unit and cover ±292 *billion* years, so the days go
+/// through seconds and only the sub-day remainder is ever counted in
+/// nanoseconds (#814).
+fn day_and_nanos_to_secs(days: i32, nanos_of_day: i64) -> (i64, u32) {
+    let secs = days as i64 * 86_400 + nanos_of_day.div_euclid(1_000_000_000);
+    (secs, nanos_of_day.rem_euclid(1_000_000_000) as u32)
+}
+
+
 /// Apply a map's date components on top of an already-selected date.
 ///
 /// `{date: other, day: 28}` keeps `other`'s year and month and replaces the
@@ -2681,11 +2697,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
                     crate::query::executor::temporal::reject_unknown_map(map)?;
                     let (d, t) = compose_date_and_time(map)?;
-                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
-                    Ok(Value::Property(PropertyValue::LocalDateTime {
-                        secs: total.div_euclid(1_000_000_000),
-                        nanos: total.rem_euclid(1_000_000_000) as u32,
-                    }))
+                    let (secs, nanos) = day_and_nanos_to_secs(d, t);
+                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                 // A bare temporal value: take its date and time parts.
@@ -2695,11 +2708,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(p) if date_part_of(p).is_some() => {
                     let d = date_part_of(p).unwrap_or(0);
                     let t = time_part_of(p).unwrap_or(0);
-                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
-                    Ok(Value::Property(PropertyValue::LocalDateTime {
-                        secs: total.div_euclid(1_000_000_000),
-                        nanos: total.rem_euclid(1_000_000_000) as u32,
-                    }))
+                    let (secs, nanos) = day_and_nanos_to_secs(d, t);
+                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
                 }
                 _ => Err(ExecutionError::TypeError(
                     "localdatetime() requires a string, a map, or a temporal value".to_string(),
@@ -2787,7 +2797,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         None => None,
                     };
                     let (d, t) = compose_date_and_time(map)?;
-                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
+                    // Seconds, not nanoseconds: the nanosecond product spans
+                    // only ±292 years from 1970 and wraps for anything outside
+                    // 1678..2262 (#814).
+                    let (local_secs, local_nanos) = day_and_nanos_to_secs(d, t);
                     // A named zone has no single offset -- Europe/Stockholm is
                     // +01:00 in October and +02:00 in July -- so it is resolved
                     // against *this* local date, not at parse time (#767).
@@ -2829,15 +2842,15 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             _ => None,
                         });
                     // The components describe local time; store the instant.
-                    let utc = match source_offset {
-                        // A re-zoning: `local` is already the source's wall
+                    let utc_secs = match source_offset {
+                        // A re-zoning: the reading is already the source's wall
                         // clock, so undo *its* offset, not the target's.
-                        Some(src) if spec.is_some() => local - src as i64 * 1_000_000_000,
-                        _ => local - offset_seconds as i64 * 1_000_000_000,
+                        Some(src) if spec.is_some() => local_secs - src as i64,
+                        _ => local_secs - offset_seconds as i64,
                     };
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
-                        secs: utc.div_euclid(1_000_000_000),
-                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        secs: utc_secs,
+                        nanos: local_nanos,
                         offset_seconds,
                         zone,
                     }))
@@ -2857,11 +2870,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     };
                     let d = date_part_of(p).unwrap_or(0);
                     let t = time_part_of(p).unwrap_or(0);
-                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
-                    let utc = local - off as i64 * 1_000_000_000;
+                    let (local_secs, nanos) = day_and_nanos_to_secs(d, t);
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
-                        secs: utc.div_euclid(1_000_000_000),
-                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        secs: local_secs - off as i64,
+                        nanos,
                         offset_seconds: off,
                         zone,
                     }))
