@@ -512,21 +512,60 @@ impl Value {
                 }
             }
             Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
+                // Duration accessors come in two families, and the difference
+                // is the whole design (#819):
+                //
+                //   * **Totals** -- `minutes` is the entire time part in
+                //     minutes (61 for PT1H1M1S), `nanoseconds` is the entire
+                //     time part in nanoseconds.
+                //   * **Remainders**, spelled `<unit>Of<Unit>` -- `minutesOfHour`
+                //     is the same value modulo the next unit up (1).
+                //
+                // `minutes` was returning the remainder and `nanoseconds` was
+                // returning only the sub-second field, so both read as the
+                // wrong family. Nine more accessors were absent and returned
+                // null, which is indistinguishable from a legitimate zero.
+                //
+                // Time and date parts never mix: a month is not a fixed number
+                // of days, so `days` cannot be derived from `months`, and the
+                // two families are computed independently.
+                const NPS: i64 = 1_000_000_000;
+                // Total sub-day time, normalized so the nanosecond remainder is
+                // **non-negative** -- `duration.between` of -86399.9s reports
+                // `seconds = -86400` with `nanosecondsOfSecond = +100000000`,
+                // not -86399 with -900000000.
+                //
+                // This is a presentation split and does not contradict the
+                // sign-consistency invariant (#806), which governs the stored
+                // components: those stay -86399/-900000000 so the duration
+                // still renders as `PT-23H-59M-59.9S`.
+                let total_nanos = *seconds as i128 * NPS as i128 + *nanos as i128;
+                let sec = total_nanos.div_euclid(NPS as i128) as i64;
+                let nos = total_nanos.rem_euclid(NPS as i128) as i64;
+                let int = |x: i64| PropertyValue::Integer(x);
                 match property {
-                    "months" => PropertyValue::Integer(*months),
-                    "days" => PropertyValue::Integer(*days),
-                    "seconds" => PropertyValue::Integer(*seconds),
-                    "nanoseconds" => PropertyValue::Integer(*nanos as i64),
-                    "hours" => PropertyValue::Integer(*seconds / 3600),
-                    "minutes" => PropertyValue::Integer((*seconds % 3600) / 60),
-                    "minutesOfHour" => PropertyValue::Integer((*seconds % 3600) / 60),
-                    "secondsOfMinute" => PropertyValue::Integer(*seconds % 60),
-                    // The sub-second accessors. `nanosecondsOfSecond` returned
-                    // null, so a scenario asserting 0 got null -- which reads
-                    // as "no such field" rather than "zero nanoseconds".
-                    "nanosecondsOfSecond" => PropertyValue::Integer(*nanos as i64),
-                    "millisecondsOfSecond" => PropertyValue::Integer(*nanos as i64 / 1_000_000),
-                    "microsecondsOfSecond" => PropertyValue::Integer(*nanos as i64 / 1_000),
+                    // Date part: totals, then remainders.
+                    "years" => int(*months / 12),
+                    "quarters" => int(*months / 3),
+                    "months" => int(*months),
+                    "weeks" => int(*days / 7),
+                    "days" => int(*days),
+                    "quartersOfYear" => int(*months / 3 % 4),
+                    "monthsOfQuarter" => int(*months % 3),
+                    "monthsOfYear" => int(*months % 12),
+                    "daysOfWeek" => int(*days % 7),
+                    // Time part: totals, then remainders.
+                    "hours" => int(sec / 3600),
+                    "minutes" => int(sec / 60),
+                    "seconds" => int(sec),
+                    "milliseconds" => int((total_nanos / 1_000_000) as i64),
+                    "microseconds" => int((total_nanos / 1_000) as i64),
+                    "nanoseconds" => int(total_nanos as i64),
+                    "minutesOfHour" => int(sec % 3600 / 60),
+                    "secondsOfMinute" => int(sec % 60),
+                    "millisecondsOfSecond" => int(nos / 1_000_000),
+                    "microsecondsOfSecond" => int(nos / 1_000),
+                    "nanosecondsOfSecond" => int(nos),
                     _ => PropertyValue::Null,
                 }
             }
