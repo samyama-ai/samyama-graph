@@ -1193,24 +1193,61 @@ fn eval_predicate_function(
         _ => return Ok(Value::Property(PropertyValue::Boolean(false))),
     };
 
+    // Quantifiers are **three-valued**: a predicate that evaluates to null on
+    // some element makes the answer null unless the elements that *did* decide
+    // already settle it (#826).
+    //
+    // Counting nulls as "not true" -- which is what tracking only `true_count`
+    // does -- collapses the third value into `false`, and `false` is a
+    // perfectly usable answer that the caller will branch on:
+    //
+    //     any(x IN [0, null] WHERE x = 2)     null, was false
+    //     all(x IN [2, null] WHERE x = 2)     null, was false
+    //     single(x IN [2, null] WHERE x = 2)  null, was true
+    //
+    // The last one is the worst of the three: it flips to the *opposite*
+    // certainty rather than to a weaker one.
     let mut true_count = 0usize;
+    let mut false_count = 0usize;
+    let mut unknown = false;
     for item in &items {
         let mut inner_record = record.clone_with_capacity(1);
         inner_record.bind(variable.to_string(), item.clone());
-        let result = eval_expression(predicate, &inner_record, store)?;
-        if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
-            true_count += 1;
+        match eval_expression(predicate, &inner_record, store)? {
+            Value::Property(PropertyValue::Boolean(true)) => true_count += 1,
+            Value::Property(PropertyValue::Boolean(false)) => false_count += 1,
+            Value::Property(PropertyValue::Null) | Value::Null => unknown = true,
+            // A predicate that is neither boolean nor null keeps its existing
+            // treatment. Cypher would raise here; making that change without a
+            // scenario to check it against would be guessing.
+            _ => false_count += 1,
         }
     }
 
-    let result = match name {
-        "all" => true_count == items.len(),
-        "any" => true_count > 0,
-        "none" => true_count == 0,
-        "single" => true_count == 1,
-        _ => false,
+    // Each quantifier has one outcome it can be *certain* of from a single
+    // element. Reaching it beats an unknown; failing to reach it does not,
+    // because the unknown elements could have supplied it.
+    let decided = match name {
+        "all" => (false_count > 0).then_some(false),
+        "any" => (true_count > 0).then_some(true),
+        "none" => (true_count > 0).then_some(false),
+        // `single` is the one that can be settled by *either* certainty:
+        // two trues rule it out no matter what the unknowns hold.
+        "single" => (true_count > 1).then_some(false),
+        _ => Some(false),
     };
-    Ok(Value::Property(PropertyValue::Boolean(result)))
+    let result = match decided {
+        Some(v) => PropertyValue::Boolean(v),
+        None if unknown => PropertyValue::Null,
+        None => PropertyValue::Boolean(match name {
+            "all" => true,
+            "any" => false,
+            "none" => true,
+            "single" => true_count == 1,
+            _ => false,
+        }),
+    };
+    Ok(Value::Property(result))
 }
 
 /// Evaluate reduce(acc = init, x IN list | expr)
