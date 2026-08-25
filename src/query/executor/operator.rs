@@ -625,6 +625,20 @@ fn type_name_of(v: &Value) -> &'static str {
 }
 
 fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) -> ExecutionResult<Value> {
+    // A bound that is present and **null** makes the whole slice null:
+    // `[1,2,3][1..null]` is null, not `[2,3]` (#845).
+    //
+    // An *absent* bound is a different thing and still means "to the end":
+    // `[1,2,3][1..]` is `[2,3]`. The two were indistinguishable here because
+    // both arms fell through to the same `_` default, so a null bound was
+    // silently read as an omitted one -- and the result is a perfectly good
+    // list, which is why nothing downstream noticed.
+    let is_null = |b: &Option<Value>| {
+        matches!(b, Some(Value::Property(PropertyValue::Null)) | Some(Value::Null))
+    };
+    if is_null(&start) || is_null(&end) {
+        return Ok(Value::Property(PropertyValue::Null));
+    }
     match &collection {
         Value::Property(PropertyValue::Array(arr)) => {
             let len = arr.len() as i64;
