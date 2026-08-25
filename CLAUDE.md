@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Samyama is a high-performance distributed graph database written in Rust with Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v1.7.0.
 
-Cypher conformance is **measured, not estimated**: 90.0% of the openCypher TCK's evaluated scenarios pass (3,384 of 3,761, 96.5% coverage, 2026-08-25). The `~90% OpenCypher support` this line used to claim was a self-assessment withdrawn in `#437` as unmeasured — the resemblance to today's figure is a coincidence, and only one of the two can be reproduced. Quote the pass rate **with** its coverage: a high rate over a small evaluated set is how this measurement is usually inflated, and that is exactly what the earlier 87.1% turned out to be.
+Cypher conformance is **measured, not estimated**: 94.1% of the openCypher TCK's evaluated scenarios pass (3,540 of 3,761, 96.5% coverage, 2026-08-25). The `~90% OpenCypher support` this line used to claim was a self-assessment withdrawn in `#437` as unmeasured; the measured figure has now passed it, which settles nothing, because only one of the two can be reproduced. Quote the pass rate **with** its coverage: a high rate over a small evaluated set is how this measurement is usually inflated, and that is exactly what the earlier 87.1% turned out to be.
 
 ## Build & Development Commands
 

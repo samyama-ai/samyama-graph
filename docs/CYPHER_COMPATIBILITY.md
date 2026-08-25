@@ -8,9 +8,9 @@
 The openCypher TCK **has now been run** (#434), so this page can give a measured
 number instead of withholding one:
 
-> **90.0% of evaluated scenarios** — 3,384 of 3,761, from 3,897 total with 136
+> **94.1% of evaluated scenarios** — 3,540 of 3,761, from 3,897 total with 136
 > skipped as unjudgeable by the harness. Measured 2026-08-25 at commit
-> `4118d37`.
+> `3dd1a65`.
 
 Two numbers, both of which matter. The pass rate says what the engine gets
 right among scenarios the harness can judge; the **96.5% coverage** says how
@@ -23,10 +23,10 @@ The harness had been skipping every `Scenario Outline` — 274 of them, expandin
 to ~2,280 concrete cases, and the harder ones, since an outline is how the TCK
 enumerates a feature's edge cases once its happy path is established (#756).
 Nothing regressed when they were included: the pass **count** went from 1,079
-to 3,384.
+to 3,540.
 
 On the same corpus and comparator, Neo4j 5 scores 79.4%, Memgraph 65.9% and
-FalkorDB 65.7% (#759). Samyama is **10.3 points ahead of the best of them** —
+FalkorDB 65.7% (#759). Samyama is **14.5 points ahead of the best of them** —
 having been 17 points behind on the old, smaller set. Every engine's number
 falls on the wider corpus, which is the evidence the expansion is sound rather
 than malformed.
@@ -42,10 +42,10 @@ was self-assessed, never checked against the TCK, and an earlier internal
 assessment of the same engine put it at 40–50%. It was withdrawn rather than
 defended.
 
-The measured number has since passed it — 90.0% against the withdrawn "~90%" —
-but the two are not comparable and the coincidence is worth naming rather than
-enjoying: one is a reproducible count over a named corpus at a named commit,
-the other was a guess. The point of withdrawing it was never the value.
+The measured number has since passed it — 94.1% against the withdrawn "~90%" —
+but the two are not comparable, and passing it settles nothing: one is a
+reproducible count over a named corpus at a named commit, the other was a
+guess. The point of withdrawing it was never the value.
 
 ```
 cargo run --release --example tck_runner -- --features <path to tck/features>
