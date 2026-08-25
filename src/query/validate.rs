@@ -48,6 +48,8 @@ pub enum ValidationError {
         second: &'static str,
     },
     PatternInSetValue,
+    /// `size()` applied to a pattern or a path (#843).
+    SizeOfNonCollection(&'static str),
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
@@ -104,6 +106,11 @@ impl std::fmt::Display for ValidationError {
                 "AND, OR and XOR need boolean operands, and this one is {what}. \
                  A value whose type is only known at run time is fine here; a \
                  literal of the wrong type is not."
+            ),
+            Self::SizeOfNonCollection(what) => write!(
+                f,
+                "size() takes a list or a string, not {what}; \
+                 use length() for a path"
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -1254,7 +1261,80 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
     Ok(())
 }
 
+/// `size()` takes a list or a string, and nothing else (#843).
+///
+/// ```text
+/// MATCH (a), (b), (c) RETURN size((a)-[:REL]->(b))
+/// MATCH p = (a)-[*]->(b) RETURN size(p)
+/// ```
+///
+/// Both must fail **at compile time**, and the reason the TCK insists on that
+/// rather than accepting a runtime error is visible in these very scenarios:
+/// they run against an empty graph, so `MATCH (a), (b), (c)` binds nothing, the
+/// argument is never evaluated, and a runtime check never fires. The query
+/// "succeeds" with zero rows.
+///
+/// The engine did raise a `TypeError` -- but only when the pattern matched
+/// something. A probe against an empty store showed the error and a probe with
+/// data showed it too; what neither showed is that the *scenario* never reaches
+/// either, because the failure has to happen before any row exists.
+///
+/// `size()` on a path is a separate spelling error rather than a type error:
+/// `length()` is the function for a path, and `size()` accepted one silently.
+fn validate_size_arguments(query: &Query) -> Result<(), ValidationError> {
+    // Every name bound as a path, from both AST representations.
+    let mut paths: HashSet<String> = HashSet::new();
+    let mut note = |pattern: &crate::query::ast::Pattern| {
+        for path in &pattern.paths {
+            if let Some(v) = &path.path_variable {
+                paths.insert(v.clone());
+            }
+        }
+    };
+    for mc in &query.match_clauses {
+        note(&mc.pattern);
+    }
+    for clause in &query.clauses {
+        if let crate::query::ast::Clause::Match(mc) = clause {
+            note(&mc.pattern);
+        }
+    }
+
+    fn walk(e: &Expression, paths: &HashSet<String>) -> Result<(), ValidationError> {
+        if let Expression::Function { name, args, .. } = e {
+            if name.eq_ignore_ascii_case("size") {
+                for arg in args {
+                    match arg {
+                        // A bare pattern. `EXISTS { ... }` desugars to the same
+                        // node, so the flag is what separates them -- widening
+                        // this to both would reject `size(...)` nowhere and
+                        // `EXISTS` everywhere, which is how #798 went wrong.
+                        Expression::ExistsSubquery { bare_pattern: true, .. } => {
+                            return Err(ValidationError::SizeOfNonCollection("a pattern"));
+                        }
+                        Expression::Variable(v) if paths.contains(v) => {
+                            return Err(ValidationError::SizeOfNonCollection("a path"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, paths)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        walk(e, &paths)?;
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_size_arguments(query)?;
+
     validate_pattern_predicate_vars(query)?;
 
     validate_property_access_targets(query)?;
