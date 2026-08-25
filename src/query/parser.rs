@@ -92,9 +92,16 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::in_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
-        // Exponentiation binds tightest and associates to the *right*:
-        // `2 ^ 3 ^ 2` is 2^(3^2), not (2^3)^2.
-        .op(Op::infix(Rule::pow_op, Assoc::Right))
+        // Exponentiation binds tightest and associates to the **left**:
+        // `2 ^ 3 ^ 2` is (2^3)^2 = 64, not 2^(3^2) = 512.
+        //
+        // This is where Cypher parts company with mathematical convention, and
+        // the convention is what was implemented. openCypher's grammar makes
+        // `PowerOfExpression` left-recursive, and two `Precedence2` scenarios
+        // pin it independently: `4 ^ 5 ^ 3` is 1073741824 (4^15) and
+        // `4 ^ 1 ^ 3` is 64, both of which only the left grouping produces
+        // (#835).
+        .op(Op::infix(Rule::pow_op, Assoc::Left))
 });
 
 /// Parser errors
