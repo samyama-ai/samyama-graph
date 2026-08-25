@@ -515,7 +515,7 @@ fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Q
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::label => label = Some(Label::new(inner.as_str())),
-            Rule::property_key => properties.push(inner.as_str().to_string()),
+            Rule::property_key => properties.push(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -571,7 +571,7 @@ fn parse_create_hierarchy_index_statement(
                 for part in &parts {
                     match part.as_rule() {
                         Rule::label => measure_label = Some(part.as_str().to_string()),
-                        Rule::property_key => measure_property = Some(part.as_str().to_string()),
+                        Rule::property_key => measure_property = Some(unescape_name(part.as_str())),
                         _ => {}
                     }
                 }
@@ -609,7 +609,7 @@ fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Que
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::label => label = Some(Label::new(inner.as_str())),
-            Rule::property_key => property = Some(inner.as_str().to_string()),
+            Rule::property_key => property = Some(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -652,7 +652,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
                 // Extract property from property_access (variable.property)
                 for pa in inner.into_inner() {
                     if pa.as_rule() == Rule::property_key {
-                        property = Some(pa.as_str().to_string());
+                        property = Some(unescape_name(pa.as_str()));
                     }
                 }
             }
@@ -687,7 +687,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 label = Some(Label::new(inner.as_str()));
             }
             Rule::property_key => {
-                property_key = Some(inner.as_str().to_string());
+                property_key = Some(unescape_name(inner.as_str()));
             }
             Rule::options => {
                 let options_map = parse_properties(inner)?;
@@ -800,6 +800,23 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
         }
     }
     Ok(())
+}
+
+/// A name written delimited in backticks, with its delimiters removed.
+///
+/// Cypher spells a name that is a keyword, starts with a digit or contains
+/// punctuation by wrapping it in backticks, and doubles a literal backtick
+/// inside. Undelimited names pass through unchanged.
+///
+/// Every `Rule::property_key` read site goes through this. There are fourteen,
+/// and a key left with its backticks on round-trips through the engine
+/// perfectly well -- it just becomes a property nobody can find under the name
+/// they wrote (#847).
+fn unescape_name(raw: &str) -> String {
+    match raw.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
+        Some(inner) => inner.replace("``", "`"),
+        None => raw.to_string(),
+    }
 }
 
 /// Strip the surrounding quotes from a string literal and interpret its escape sequences.
@@ -1244,7 +1261,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
                         for pa in si.into_inner() {
                             match pa.as_rule() {
                                 Rule::variable => variable = pa.as_str().to_string(),
-                                Rule::property_key => property = pa.as_str().to_string(),
+                                Rule::property_key => property = unescape_name(pa.as_str()),
                                 _ => {}
                             }
                         }
@@ -1279,7 +1296,7 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 for pa in children[0].clone().into_inner() {
                     match pa.as_rule() {
                         Rule::variable => variable = pa.as_str().to_string(),
-                        Rule::property_key => property = pa.as_str().to_string(),
+                        Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
                 }
@@ -1438,7 +1455,7 @@ fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
                 for pa in inner.into_inner() {
                     match pa.as_rule() {
                         Rule::variable => variable = pa.as_str().to_string(),
-                        Rule::property_key => property = pa.as_str().to_string(),
+                        Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
                 }
@@ -1711,7 +1728,7 @@ fn parse_properties_split(pair: pest::iterators::Pair<Rule>) -> ParseResult<Spli
                     let mut key = String::new();
                     for part in prop.into_inner() {
                         match part.as_rule() {
-                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::property_key => key = unescape_name(part.as_str()),
                             Rule::value => {
                                 literals.insert(key.clone(), parse_value(part)?);
                             }
@@ -1743,7 +1760,7 @@ fn parse_properties(pair: pest::iterators::Pair<Rule>) -> ParseResult<HashMap<St
                     for part in prop.into_inner() {
                         match part.as_rule() {
                             Rule::property_key => {
-                                key = part.as_str().to_string();
+                                key = unescape_name(part.as_str());
                             }
                             Rule::value => {
                                 value = parse_value(part)?;
@@ -1821,7 +1838,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                         
                         for part in entry.into_inner() {
                             match part.as_rule() {
-                                Rule::property_key => key = part.as_str().to_string(),
+                                Rule::property_key => key = unescape_name(part.as_str()),
                                 Rule::string => {
                                     key = unescape_string_literal(part.as_str());
                                 }
@@ -2133,7 +2150,7 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     let key = index
                         .into_inner()
                         .find(|p| p.as_rule() == Rule::property_key)
-                        .map(|p| p.as_str().to_string())
+                        .map(|p| unescape_name(p.as_str()))
                         .ok_or_else(|| {
                             ParseError::SemanticError("member access without a name".to_string())
                         })?;
@@ -2259,7 +2276,7 @@ fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResul
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
-            Rule::property_key => keys.push(inner.as_str().to_string()),
+            Rule::property_key => keys.push(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -2367,7 +2384,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     let mut value = None;
                     for part in entry.into_inner() {
                         match part.as_rule() {
-                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::property_key => key = unescape_name(part.as_str()),
                             Rule::string => {
                                 key = unescape_string_literal(part.as_str());
                             }
@@ -2636,7 +2653,12 @@ fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     }
 
     let variable = parts[0].as_str().to_string();
-    let property = parts[1].as_str().to_string();
+    // The fifteenth read site, and the one a grep for `Rule::property_key`
+    // does not find: this one indexes positionally. Without the unescape,
+    // `map.`name`` parsed to `Property { property: "`name`" }` and looked up a
+    // key with backticks in its name -- null, from a query that had just been
+    // taught to parse (#847).
+    let property = unescape_name(parts[1].as_str());
 
     Ok(Expression::Property { variable, property })
 }

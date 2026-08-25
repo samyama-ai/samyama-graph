@@ -204,7 +204,16 @@ property = { property_key ~ ":" ~ (value ~ !expression_continues | expression) }
 // A literal followed by an operator is really the start of an expression
 // (`{n: 1 + 2}`), so `value` must not win in that case.
 expression_continues = { "+" | "-" | "*" | "/" | "%" | "." | "[" | "=" | "<" | ">" | "!" }
-property_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// A property key may be written **delimited in backticks**, which is how
+// Cypher spells a name that is a keyword, starts with a digit, or contains
+// punctuation: `{`null`: 'x'}.`null``. A literal backtick inside is doubled.
+//
+// The rule stays atomic, so `as_str()` returns the text with its delimiters
+// still on; every read site goes through `unescape_name`, because a key stored
+// with its backticks still round-trips through the engine and only shows up as
+// a property nobody can find (#847).
+escaped_name = @{ "`" ~ ("``" | (!"`" ~ ANY))* ~ "`" }
+property_key = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // RETURN items
 //
