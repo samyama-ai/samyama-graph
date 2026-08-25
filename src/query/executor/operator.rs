@@ -3320,6 +3320,95 @@ fn scale_duration(
 /// that decision in one place is the point: the shift used to be written inline
 /// per operator, which is how `+` and `-` came to disagree about whether months
 /// were calendar months.
+/// The zone a value carries, if it carries one.
+///
+/// A `ZonedDateTime` may name a *region* whose offset depends on the moment it
+/// is applied to — `Europe/Stockholm` is +02:00 in summer and +01:00 in winter
+/// — so the name is kept rather than collapsed to the stored offset. A `Time`
+/// only ever carries a fixed offset.
+///
+/// The legacy `DateTime` is deliberately absent: it exists for snapshot
+/// compatibility and is already read as UTC everywhere.
+fn zone_of(v: &PropertyValue) -> Option<crate::query::executor::temporal::TzSpec> {
+    use crate::query::executor::temporal::{parse_timezone_spec, TzSpec};
+    match v {
+        PropertyValue::ZonedDateTime { zone, offset_seconds, .. } => Some(
+            zone.as_deref()
+                .and_then(|z| parse_timezone_spec(z).ok())
+                .unwrap_or(TzSpec::Offset(*offset_seconds)),
+        ),
+        PropertyValue::Time { offset_seconds, .. } => Some(TzSpec::Offset(*offset_seconds)),
+        _ => None,
+    }
+}
+
+/// Both values as instants, with an unzoned value read **in the other's zone**.
+///
+/// Cypher does not compare a local temporal against a zoned one by treating the
+/// local one as UTC. The local one is placed in the zoned one's zone, and only
+/// then are the two instants compared:
+///
+/// ```text
+/// duration.between(localdatetime('2015-07-21T21:40:32.142'),
+///                  datetime('2015-07-21T21:40:32.142+0100'))   ->  PT0S
+/// ```
+///
+/// Reading the left side as UTC gives `PT1H`. Every wrong answer in this class
+/// was off by exactly one offset, which is why it looked like a sign or
+/// rounding bug rather than a missing rule.
+///
+/// Two consequences that are easy to miss:
+///
+///   * **A value with no date borrows the other's.** `duration.between` of a
+///     `time` and a `datetime` compares them on the datetime's day — otherwise
+///     the time-of-day sits at the epoch and the answer is decades.
+///   * **DST is resolved at the local side's own wall clock**, not the zoned
+///     side's. On 2017-10-29 Stockholm falls back at 03:00, so a local
+///     midnight is still +02:00 while 04:00 is already +01:00:
+///
+/// ```text
+/// duration.between(localdatetime({year: 2017, month: 10, day: 29, hour: 0}),
+///                  datetime({year: 2017, month: 10, day: 29, hour: 4,
+///                            timezone: 'Europe/Stockholm'}))    ->  PT5H
+/// ```
+///
+/// `PT5H`, not the `PT4H` the wall clocks suggest. That one hour is the whole
+/// reason this cannot be done by subtracting local readings (#821).
+///
+/// Returns `None` when neither side is zoned, leaving the existing local-only
+/// paths untouched.
+fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, i128)> {
+    use crate::query::executor::temporal::resolve_offset;
+    let (za, zb) = (zone_of(a), zone_of(b));
+    if za.is_none() && zb.is_none() {
+        return None;
+    }
+    let (da, db) = (date_part_of(a), date_part_of(b));
+    // A date-less value borrows the other's day. When neither has one — two
+    // `time`s — the day is arbitrary and cancels.
+    let (day_a, day_b) = (da.or(db).unwrap_or(0), db.or(da).unwrap_or(0));
+    // A clock-less value is midnight, which is what a bare `date` means.
+    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+    let instant = |own: &Option<_>, other: &Option<_>, day: i32, nanos_of_day: i64| {
+        // Own zone first; the other's only when there is none of one's own.
+        let spec: Option<crate::query::executor::temporal::TzSpec> =
+            own.clone().or_else(|| other.clone());
+        let offset = match &spec {
+            Some(s) => resolve_offset(s, day as i64, nanos_of_day).ok()?,
+            None => 0,
+        };
+        // Seconds carry the day, so a far-off year cannot overflow the way a
+        // nanosecond product does (#814).
+        let secs = day as i128 * 86_400 + nanos_of_day.div_euclid(1_000_000_000) as i128
+            - offset as i128;
+        Some(secs * 1_000_000_000 + nanos_of_day.rem_euclid(1_000_000_000) as i128)
+    };
+    Some((
+        instant(&za, &zb, day_a, ta)?,
+        instant(&zb, &za, day_b, tb)?,
+    ))
+}
+
 fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
     match v {
         PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
@@ -3501,6 +3590,22 @@ fn temporal_difference_calendar(
         // convert to, so the offset is not applied to the other. Normalising
         // unconditionally gets the first right and the second wrong; not
         // normalising at all does the reverse.
+        // Both sides have a clock and at least one carries a zone: the two are
+        // real instants on a shared day, and only that treatment gets the
+        // daylight-saving rows right (#821). A side with no clock at all — a
+        // bare `date` against a `localtime` — keeps the shared-component rule
+        // below instead, since there is no instant to compare.
+        if time_part_of(a).is_some() && time_part_of(b).is_some() {
+            if let Some((na, nb)) = zone_aligned_instants(a, b) {
+                let diff = na - nb;
+                return Ok(PropertyValue::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: (diff / 1_000_000_000) as i64,
+                    nanos: (diff % 1_000_000_000) as i32,
+                });
+            }
+        }
         let has_offset = |v: &PropertyValue| matches!(v, PropertyValue::Time { .. });
         let both_zoned = has_offset(a) && has_offset(b);
         let clock = |v: &PropertyValue| -> Option<i64> {
@@ -3657,9 +3762,14 @@ fn temporal_difference(
     a: &PropertyValue,
     b: &PropertyValue,
 ) -> Result<PropertyValue, ExecutionError> {
-    let (na, nb) = match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
-        (Some(x), Some(y)) => (x, y),
-        _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+    // When either side carries a zone the other is read in it, rather than as
+    // UTC (#821).
+    let (na, nb) = match zone_aligned_instants(a, b) {
+        Some(pair) => pair,
+        None => match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
+            (Some(x), Some(y)) => (x, y),
+            _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+        },
     };
     let diff = na - nb;
     // Truncating division, not Euclidean. `div_euclid`/`rem_euclid` floor
