@@ -1269,7 +1269,12 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
         }),
         "week" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().week() as i64)),
         "weekYear" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().year() as i64)),
-        "dayOfWeek" => date.map_or(PropertyValue::Null, |d| {
+        // Cypher spells the **accessor** `weekDay` and the **constructor key**
+        // `dayOfWeek`, for the same quantity. Only the constructor spelling was
+        // here, so `d.weekDay` returned null -- indistinguishable from a
+        // component the value does not have, which is what a date's `hour`
+        // legitimately returns (#862).
+        "weekDay" | "dayOfWeek" => date.map_or(PropertyValue::Null, |d| {
             int(d.weekday().number_from_monday() as i64)
         }),
         "ordinalDay" => date.map_or(PropertyValue::Null, |d| int(d.ordinal() as i64)),

@@ -160,6 +160,22 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
             }
             if unknown { None } else { Some(true) }
         }
+        // **A number equals a number across the two representations.**
+        // `1 = 1.0` is true in Cypher, and `PropertyValue`'s derived `PartialEq`
+        // compares variants, so it was answering false -- a wrong answer in the
+        // most ordinary comparison there is, and one that reads as a legitimate
+        // "these differ" (#860).
+        //
+        // Compared as integers rather than through `as f64`, so no bit is lost
+        // above 2^53: a float with a fractional part cannot equal an integer,
+        // and one without is exact.
+        (Integer(x), Float(y)) | (Float(y), Integer(x)) => Some(
+            y.is_finite()
+                && y.fract() == 0.0
+                && *y >= i64::MIN as f64
+                && *y <= i64::MAX as f64
+                && (*y as i64) == *x,
+        ),
         _ => Some(a == b),
     }
 }
@@ -212,10 +228,46 @@ pub(crate) mod statement_clock {
 
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
-    // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
+    // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
+    // p1 = p2).
+    //
+    // Only *nodes* were handled, so `r = r` on a relationship and `p1 = p2` on
+    // two paths raised "Binary op requires property values" -- an error from
+    // the most ordinary comparison there is, and the reason `WITH a MATCH ...
+    // WHERE a = b` could not be written at all (#860).
     if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-        if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
-            let eq = lid == rid;
+        let same = match (&left, &right) {
+            (Value::NodeRef(a) | Value::Node(a, _), Value::NodeRef(b) | Value::Node(b, _)) => {
+                Some(a == b)
+            }
+            (
+                Value::EdgeRef(a, ..) | Value::Edge(a, _),
+                Value::EdgeRef(b, ..) | Value::Edge(b, _),
+            ) => Some(a == b),
+            // Paths are equal when they visit the same nodes and traverse the
+            // same relationships in the same order. The TCK's scenario is a
+            // self-loop, where a path and its reverse have the identical node
+            // sequence -- so structural equality is what it asks for, and a
+            // direction-insensitive rule would be inventing something it does
+            // not test.
+            (
+                Value::Path { nodes: n1, edges: e1 },
+                Value::Path { nodes: n2, edges: e2 },
+            ) => Some(n1 == n2 && e1 == e2),
+            // An entity is never equal to a non-entity, and that is `false`
+            // rather than an error or a null: the two are comparable, they
+            // simply differ.
+            (Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. }, other)
+            | (other, Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. })
+                if !matches!(other, Value::Property(PropertyValue::Null) | Value::Null) =>
+            {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(eq) = same {
             return Ok(Value::Property(PropertyValue::Boolean(
                 if matches!(op, BinaryOp::Eq) { eq } else { !eq }
             )));
@@ -5220,246 +5272,33 @@ impl FilterOperator {
         }
     }
 
+    /// The filter's binary operator, **delegated** to `eval_binary_op` (#860).
+    ///
+    /// This was a second, drifted implementation -- 67 lines against 346 -- and
+    /// its own comment already said so: *"Note this is a second comparison
+    /// implementation, the two must agree, and did not."* It agreed on the easy
+    /// things and diverged on every rule added since, so a `WHERE` attached to a
+    /// `MATCH` quietly used a weaker comparison engine than the same expression
+    /// in a `RETURN` or after a `WITH`:
+    ///
+    /// ```text
+    /// MATCH ()-[a]->() MATCH ()-[b]->() WHERE a = b   TypeError
+    /// MATCH ()-[a]->() MATCH ()-[b]->() RETURN a = b  true
+    /// ```
+    ///
+    /// It was missing relationship and path identity, the three-valued list and
+    /// map equality of `cypher_equals`, the NaN and list ordering rules, and
+    /// integer-float equality -- every comparison rule fixed this cycle applied
+    /// everywhere *except* the clause most queries filter in.
+    ///
+    /// The seventeen `coerced_eq` / `compare_*` / `arithmetic_*` helpers it
+    /// called are **deleted**, not left unused. One of them carried a rule
+    /// Cypher does not have -- a String/Boolean coercion that made
+    /// `i.active = 'true'` match the boolean `true` -- and keeping them as dead
+    /// code invites the next change to route through them again, which is how
+    /// the two engines drifted apart in the first place.
     fn evaluate_binary_op(&self, op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
-        // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
-        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
-                let eq = lid == rid;
-                return Ok(Value::Property(PropertyValue::Boolean(
-                    if matches!(op, BinaryOp::Eq) { eq } else { !eq }
-                )));
-            }
-        }
-
-        // Extract property values
-        let left_prop = match left {
-            Value::Property(p) => p,
-            Value::Null => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
-        };
-
-        let right_prop = match right {
-            Value::Property(p) => p,
-            Value::Null => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
-        };
-
-        // Three-valued logic, same rule as `eval_binary_op`: a comparison with a null
-        // operand is unknown, and a WHERE excludes unknown. `null <> 1` evaluating to true
-        // kept every row whose property was merely absent. Note this is a *second*
-        // comparison implementation — the two must agree, and did not.
-        if matches!(
-            op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-        ) && (matches!(left_prop, PropertyValue::Null)
-            || matches!(right_prop, PropertyValue::Null))
-        {
-            return Ok(Value::Property(PropertyValue::Null));
-        }
-
-        let result = match op {
-            BinaryOp::Eq => PropertyValue::Boolean(self.coerced_eq(&left_prop, &right_prop)),
-            BinaryOp::Ne => PropertyValue::Boolean(!self.coerced_eq(&left_prop, &right_prop)),
-            BinaryOp::Lt => self.compare_lt(&left_prop, &right_prop)?,
-            BinaryOp::Le => self.compare_le(&left_prop, &right_prop)?,
-            BinaryOp::Gt => self.compare_gt(&left_prop, &right_prop)?,
-            BinaryOp::Ge => self.compare_ge(&left_prop, &right_prop)?,
-            BinaryOp::And => self.logical_and(&left_prop, &right_prop)?,
-            BinaryOp::Or => self.logical_or(&left_prop, &right_prop)?,
-            // Delegated so `^` and XOR have one definition rather than two that
-            // can drift; this evaluator differs from `eval_binary_op` only in
-            // its comparison coercions, which neither operator uses.
-            BinaryOp::Pow | BinaryOp::Xor => {
-                match eval_binary_op(op, Value::Property(left_prop.clone()), Value::Property(right_prop.clone()))? {
-                    Value::Property(p) => p,
-                    other => return Err(ExecutionError::TypeError(format!("unexpected {other:?}"))),
-                }
-            }
-            BinaryOp::Add => self.arithmetic_add(&left_prop, &right_prop)?,
-            BinaryOp::Sub => self.arithmetic_sub(&left_prop, &right_prop)?,
-            BinaryOp::Mul => self.arithmetic_mul(&left_prop, &right_prop)?,
-            BinaryOp::Div => self.arithmetic_div(&left_prop, &right_prop)?,
-            BinaryOp::Mod => self.arithmetic_mod(&left_prop, &right_prop)?,
-            BinaryOp::StartsWith => self.string_starts_with(&left_prop, &right_prop)?,
-            BinaryOp::EndsWith => self.string_ends_with(&left_prop, &right_prop)?,
-            BinaryOp::Contains => self.string_contains(&left_prop, &right_prop)?,
-            BinaryOp::In => self.eval_in(&left_prop, &right_prop)?,
-            BinaryOp::RegexMatch => self.regex_match(&left_prop, &right_prop)?,
-        };
-
-        Ok(Value::Property(result))
-    }
-
-    /// Equality with type coercion: Integer↔Float numeric promotion,
-    /// String↔Boolean coercion ("true"/"false"), and Null handling.
-    fn coerced_eq(&self, left: &PropertyValue, right: &PropertyValue) -> bool {
-        match (left, right) {
-            // Same-type: use derived PartialEq
-            _ if std::mem::discriminant(left) == std::mem::discriminant(right) => left == right,
-            // Integer ↔ Float promotion
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => (*l as f64) == *r,
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => *l == (*r as f64),
-            // DateTime ↔ Integer coercion (DateTime stores epoch millis as i64)
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) |
-            (PropertyValue::Integer(r), PropertyValue::DateTime(l)) => l == r,
-            // String ↔ Boolean coercion (LLMs often generate `prop = 'true'`)
-            (PropertyValue::Boolean(b), PropertyValue::String(s)) |
-            (PropertyValue::String(s), PropertyValue::Boolean(b)) => {
-                match s.to_lowercase().as_str() {
-                    "true" => *b,
-                    "false" => !*b,
-                    _ => false,
-                }
-            }
-            // Everything else: not equal
-            _ => false,
-        }
-    }
-
-    fn compare_lt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Less) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_le(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_gt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Greater) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_ge(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn logical_and(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Cypher three-valued logic: false AND x → false, true AND null → null
-        match (left, right) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l && *r)),
-            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => Ok(PropertyValue::Boolean(false)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("AND requires boolean operands".to_string())),
-        }
-    }
-
-    fn logical_or(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Cypher three-valued logic: true OR x → true, false OR null → null
-        match (left, right) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l || *r)),
-            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => Ok(PropertyValue::Boolean(true)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("OR requires boolean operands".to_string())),
-        }
-    }
-
-    fn arithmetic_add(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l + r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l + r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 + r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l + *r as f64)),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::String(format!("{}{}", l, r))),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Addition requires numeric or string operands".to_string())),
-        }
-    }
-
-    fn arithmetic_sub(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l - r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l - r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 - r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l - *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Subtraction requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_mul(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l * r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l * r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 * r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l * *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Multiplication requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_div(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Division by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l / r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l / r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 / r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l / *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Division requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_mod(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l % r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l % r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 % r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l % *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Modulo requires numeric operands".to_string())),
-        }
-    }
-
-    fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::StartsWith, left, right))
-    }
-
-    fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::EndsWith, left, right))
-    }
-
-    fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::Contains, left, right))
-    }
-
-    fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        eval_in_list(left, right)
-            .ok_or_else(|| ExecutionError::TypeError("IN requires a list on the right side".to_string()))
-    }
-
-    fn regex_match(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
-                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
-                Ok(PropertyValue::Boolean(re.is_match(text)))
-            }
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
-        }
+        eval_binary_op(op, left, right)
     }
 
     // evaluate_function removed — FilterOperator now delegates to global eval_function
