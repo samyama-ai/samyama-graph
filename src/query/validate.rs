@@ -214,6 +214,34 @@ enum WriteKind {
     Merge,
 }
 
+/// A `WITH` re-scopes: only names it projects *by name* stay bound on the far
+/// side, so a name it drops is free again and a later CREATE/MERGE may reuse it.
+///
+/// This mirrors `carry_kinds_through_with` for the bound-variable checks.
+/// Without it, `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` was rejected because `r`
+/// looked already-bound, even though the WITH does not carry it through — a
+/// valid query refused for no reason the user can act on (#764).
+///
+/// Only a bare `WITH v` (optionally `AS alias`) keeps a name bound as an entity.
+/// `WITH count(r) AS r` recomputes the name into a scalar that is no longer the
+/// original entity, so it does not carry forward here — reusing that name in a
+/// CREATE is legal, and any genuine type conflict is `validate_variable_kinds`'
+/// concern, not this one.
+fn carry_names_through_with(
+    bound: &HashSet<String>,
+    wc: &crate::query::ast::WithClause,
+) -> HashSet<String> {
+    let mut next = HashSet::new();
+    for item in &wc.items {
+        if let Expression::Variable(v) = &item.expression {
+            if bound.contains(v) {
+                next.insert(item.alias.clone().unwrap_or_else(|| v.clone()));
+            }
+        }
+    }
+    next
+}
+
 /// Every write pattern in the order it was written, each paired with the
 /// variables in scope *before* it.
 ///
@@ -245,18 +273,29 @@ fn write_patterns(query: &Query) -> Vec<(WriteKind, &crate::query::ast::Pattern,
                     out.push((WriteKind::Merge, &mc.pattern, bound.clone()));
                     pattern_variables(&mc.pattern, &mut bound);
                 }
-                // A WITH re-projects rather than binds new pattern variables,
-                // and its aliases are what survive it. Anything this does not
-                // model can only *shrink* the bound set, which risks accepting
-                // an invalid query rather than rejecting a valid one -- the
-                // trade this module states up front.
+                // A WITH re-scopes: only the names it projects survive it, so a
+                // name it drops is free for a later CREATE/MERGE to reuse. Not
+                // applying this boundary rejected valid queries like
+                // `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` (#764).
+                Clause::With(wc) => bound = carry_names_through_with(&bound, wc),
                 _ => {}
             }
         }
         return out;
     }
 
-    for mc in &query.match_clauses {
+    // Pre-WITH matches bind first; a WITH then re-scopes the set to only what
+    // it projects, so a CREATE/MERGE after the WITH may reuse a name the WITH
+    // dropped (#764). `with_split_index` marks where the leading WITH cuts the
+    // match list.
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        pattern_variables(&mc.pattern, &mut bound);
+    }
+    if let Some(wc) = &query.with_clause {
+        bound = carry_names_through_with(&bound, wc);
+    }
+    for mc in query.match_clauses.iter().skip(upto) {
         pattern_variables(&mc.pattern, &mut bound);
     }
     if let Some(create) = &query.create_clause {
