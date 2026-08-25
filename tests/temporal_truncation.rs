@@ -139,3 +139,69 @@ fn duration_between_is_reachable_now() {
 fn truncation_propagates_null() {
     assert_eq!(one("RETURN date.truncate('year', null) AS r").unwrap(), PropertyValue::Null);
 }
+
+/// A `timezone` in the override map re-zones the truncated result (#781).
+///
+/// Without this the truncation was correct and the zone was silently dropped —
+/// `2000-01-01T00:00Z` where `2000-01-01T00:00+01:00[Europe/Stockholm]` was
+/// expected. 31 scenarios, all of them producing a *plausible* datetime in the
+/// wrong zone.
+///
+/// The offset is resolved against the **truncated** local time, not the
+/// original: truncating 2017 to its century lands in 2000, and a zone's offset
+/// is a property of the instant you end up at, not the one you started from.
+#[test]
+fn a_timezone_override_re_zones_the_result() {
+    let d = "date({year: 2017, month: 10, day: 11})";
+    assert_eq!(
+        rendered(&format!(
+            "RETURN datetime.truncate('century', {d}, {{timezone: 'Europe/Stockholm'}}) AS r"
+        )),
+        "2000-01-01T00:00+01:00[Europe/Stockholm]"
+    );
+    // A summer landing point gets the summer offset, from the same zone.
+    assert_eq!(
+        rendered(&format!(
+            "RETURN datetime.truncate('month', date({{year: 2017, month: 7, day: 11}}), {{timezone: 'Europe/Stockholm'}}) AS r"
+        )),
+        "2017-07-01T00:00+02:00[Europe/Stockholm]"
+    );
+}
+
+/// An offset with seconds is rendered with them.
+///
+/// Not a curiosity: pre-standardisation local mean times carry seconds, and
+/// the TCK uses one — Stockholm before 1879 is `+00:53:28`. Truncating to
+/// hours and minutes silently loses 28 seconds of a real instant.
+#[test]
+fn an_offset_with_seconds_keeps_them() {
+    assert_eq!(
+        rendered("RETURN datetime('1818-07-21T21:40:32.142[Europe/Stockholm]') AS r"),
+        "1818-07-21T21:40:32.142+00:53:28[Europe/Stockholm]"
+    );
+}
+
+/// The sub-second duration accessors return a number, including zero.
+///
+/// `nanosecondsOfSecond` returned null, so a scenario asserting `0` got
+/// `null` — which reads as "no such field" rather than "zero nanoseconds".
+#[test]
+fn a_duration_reports_its_sub_second_components() {
+    let store = GraphStore::new();
+    for (expr, want) in [
+        ("d.nanosecondsOfSecond", 0i64),
+        ("d.millisecondsOfSecond", 0),
+        ("d.microsecondsOfSecond", 0),
+    ] {
+        let q = parse_query(&format!(
+            "WITH duration.between(localtime('12:00:00'), localtime('18:00:00')) AS d RETURN {expr} AS r"
+        ))
+        .expect("parses");
+        let batch = QueryExecutor::new(&store).execute(&q).expect("runs");
+        assert_eq!(
+            batch.records[0].get("r"),
+            Some(&Value::Property(PropertyValue::Integer(want))),
+            "{expr} must be a number, not null"
+        );
+    }
+}

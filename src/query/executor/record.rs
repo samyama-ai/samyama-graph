@@ -521,6 +521,12 @@ impl Value {
                     "minutes" => PropertyValue::Integer((*seconds % 3600) / 60),
                     "minutesOfHour" => PropertyValue::Integer((*seconds % 3600) / 60),
                     "secondsOfMinute" => PropertyValue::Integer(*seconds % 60),
+                    // The sub-second accessors. `nanosecondsOfSecond` returned
+                    // null, so a scenario asserting 0 got null -- which reads
+                    // as "no such field" rather than "zero nanoseconds".
+                    "nanosecondsOfSecond" => PropertyValue::Integer(*nanos as i64),
+                    "millisecondsOfSecond" => PropertyValue::Integer(*nanos as i64 / 1_000_000),
+                    "microsecondsOfSecond" => PropertyValue::Integer(*nanos as i64 / 1_000),
                     _ => PropertyValue::Null,
                 }
             }

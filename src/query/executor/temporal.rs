@@ -386,6 +386,22 @@ pub fn truncate(
         }
     }
 
+    // A `timezone` in the override map re-zones the result. Without this,
+    // `datetime.truncate('century', d, {timezone: 'Europe/Stockholm'})` came
+    // back as `...Z` — the truncation was right and the zone was dropped, which
+    // is 31 TCK scenarios (#781).
+    //
+    // The offset is resolved against the *truncated* local time, not the
+    // original: truncating 2017 to its century lands in 2000, and Stockholm's
+    // offset is a property of the instant you end up at.
+    let (offset, zone) = match overrides.get("timezone").and_then(|v| v.as_string()) {
+        Some(tz) => {
+            let spec = parse_timezone_spec(&tz)?;
+            (Some(resolve_offset(&spec, new_days, new_tod)?), zone_name(&spec))
+        }
+        None => (offset, zone),
+    };
+
     build(target, new_days, new_tod, offset, zone)
 }
 

@@ -653,14 +653,24 @@ pub(crate) fn fmt_time_of_day(total_nanos: i64) -> String {
     out
 }
 
-/// A UTC offset as `Z`, `+01:00`, or `+05:30`.
+/// A UTC offset as `Z`, `+01:00`, `+05:30`, or `+00:53:28`.
+///
+/// Seconds are rendered when the offset has them. That is not a curiosity:
+/// pre-standardisation local mean times carry them, and the TCK uses one —
+/// Stockholm before 1879 is `+00:53:28`. Truncating to hours and minutes turns
+/// that into `+00:53` and loses 28 seconds of a real instant.
 pub fn fmt_offset(offset_seconds: i32) -> String {
     if offset_seconds == 0 {
         return "Z".to_string();
     }
     let sign = if offset_seconds < 0 { '-' } else { '+' };
     let a = offset_seconds.abs();
-    format!("{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
+    let (h, m, sec) = (a / 3600, (a % 3600) / 60, a % 60);
+    if sec == 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}:{m:02}:{sec:02}")
+    }
 }
 
 /// A date as `2015-07-21`, from days since the Unix epoch.
