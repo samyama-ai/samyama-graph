@@ -3797,54 +3797,9 @@ fn temporal_difference_calendar(
     }
 
     let (da, db) = (date_part_of(a), date_part_of(b));
-    if da.is_none() || db.is_none() {
-        // Compare instants only when **both** sides carry an offset; otherwise
-        // compare the local readings.
-        //
-        // `time('14:30')` vs `time('16:30+0100')` is `PT1H` — both are zoned, so
-        // the second is 15:30 UTC. But `localtime('14:30')` vs
-        // `time('16:30+0100')` is `PT2H`: the unzoned side has no instant to
-        // convert to, so the offset is not applied to the other. Normalising
-        // unconditionally gets the first right and the second wrong; not
-        // normalising at all does the reverse.
-        // Both sides have a clock and at least one carries a zone: the two are
-        // real instants on a shared day, and only that treatment gets the
-        // daylight-saving rows right (#821). A side with no clock at all — a
-        // bare `date` against a `localtime` — keeps the shared-component rule
-        // below instead, since there is no instant to compare.
-        if time_part_of(a).is_some() && time_part_of(b).is_some() {
-            if let Some((na, nb)) = zone_aligned_instants(a, b) {
-                let diff = na - nb;
-                return Ok(PropertyValue::Duration {
-                    months: 0,
-                    days: 0,
-                    seconds: (diff / 1_000_000_000) as i64,
-                    nanos: (diff % 1_000_000_000) as i32,
-                });
-            }
-        }
-        let has_offset = |v: &PropertyValue| matches!(v, PropertyValue::Time { .. });
-        let both_zoned = has_offset(a) && has_offset(b);
-        let clock = |v: &PropertyValue| -> Option<i64> {
-            let local = time_part_of(v)?;
-            Some(match v {
-                PropertyValue::Time { offset_seconds, .. } if both_zoned => {
-                    local - *offset_seconds as i64 * 1_000_000_000
-                }
-                _ => local,
-            })
-        };
-        let (ta, tb) = (clock(a), clock(b));
-        // One side may have a date and no time — `duration.between(date(...),
-        // localtime(...))` compares the clocks, and a date's clock is midnight.
-        let (ta, tb) = (ta.unwrap_or(0), tb.unwrap_or(0));
-        let diff = ta - tb;
-        return Ok(PropertyValue::Duration {
-            months: 0,
-            days: 0,
-            seconds: diff / 1_000_000_000,
-            nanos: (diff % 1_000_000_000) as i32,
-        });
+    if let Some(shared) = shared_component_difference(a, b) {
+        let _ = (da, db);
+        return shared;
     }
     let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
@@ -3975,10 +3930,69 @@ fn shift_months_clamped(
         .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
 }
 
+/// Only the components two temporals **share**, when one of them has no date.
+///
+/// A date has no time and a time has no date, so
+/// `duration.between(date(...), localtime('16:30'))` is `PT16H30M` — the clock
+/// difference alone, with the date side contributing nothing. Treating the
+/// missing part as zero instead gave `P-5396DT-7H-30M`: a real duration between
+/// two instants that were never comparable (#807).
+///
+/// Returns `None` when **both** sides carry a date, which is the ordinary case
+/// the callers handle themselves.
+///
+/// This lived inside `temporal_difference_calendar`, so `duration.between` had
+/// the rule and `duration.inDays`/`inSeconds` did not — the same difference
+/// measured two ways disagreed by fifteen years, and only on the mixed pairs
+/// (#849).
+fn shared_component_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Option<Result<PropertyValue, ExecutionError>> {
+    if date_part_of(a).is_some() && date_part_of(b).is_some() {
+        return None;
+    }
+    // Both sides have a clock and at least one carries a zone: they are real
+    // instants on a shared day, and only that treatment gets the
+    // daylight-saving rows right (#821). A side with no clock at all -- a bare
+    // `date` against a `localtime` -- falls through to the reading below,
+    // since there is no instant to compare.
+    if time_part_of(a).is_some() && time_part_of(b).is_some() {
+        if let Some((na, nb)) = zone_aligned_instants(a, b) {
+            let diff = na - nb;
+            return Some(Ok(PropertyValue::Duration {
+                months: 0,
+                days: 0,
+                seconds: (diff / 1_000_000_000) as i64,
+                nanos: (diff % 1_000_000_000) as i32,
+            }));
+        }
+    }
+    // Neither side is zoned: compare the local readings. A date's clock is
+    // midnight.
+    let (ta, tb) = (
+        time_part_of(a).unwrap_or(0),
+        time_part_of(b).unwrap_or(0),
+    );
+    let diff = ta - tb;
+    Some(Ok(PropertyValue::Duration {
+        months: 0,
+        days: 0,
+        seconds: diff / 1_000_000_000,
+        nanos: (diff % 1_000_000_000) as i32,
+    }))
+}
+
 fn temporal_difference(
     a: &PropertyValue,
     b: &PropertyValue,
 ) -> Result<PropertyValue, ExecutionError> {
+    // Only the shared components, when one side has no date (#807). This lived
+    // in the calendar function alone, so `duration.between` had the rule and
+    // `duration.inDays`/`inSeconds` did not (#849).
+    if let Some(shared) = shared_component_difference(a, b) {
+        return shared;
+    }
     // When either side carries a zone the other is read in it, rather than as
     // UTC (#821).
     let (na, nb) = match zone_aligned_instants(a, b) {
