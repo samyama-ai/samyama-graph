@@ -1736,7 +1736,19 @@ fn apply_date_overrides(
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {year}-W{week}-{dow}")))?
     } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
         let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
-        let d = g("dayOfQuarter").unwrap_or(1);
+        // The day within the quarter defaults to the **current** one, exactly
+        // as `week`/`dayOfWeek` above default from `cur`. Defaulting to 1 made
+        // `{date: <1984-11-11>, quarter: 3}` answer 1984-07-01 instead of
+        // 1984-08-11: an override that names one component silently reset two
+        // others, and the result is a perfectly ordinary date (#838).
+        let cur_quarter_start = chrono::NaiveDate::from_ymd_opt(
+            cur.year(),
+            ((cur.month() - 1) / 3) * 3 + 1,
+            1,
+        )
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let cur_day_of_quarter = cur.signed_duration_since(cur_quarter_start).num_days() + 1;
+        let d = g("dayOfQuarter").unwrap_or(cur_day_of_quarter);
         let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid quarter {q}")))?;
         start
@@ -2691,26 +2703,65 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
-                    let offset = match map.get("timezone").and_then(|v| v.as_string()) {
-                        Some(tz) => tmp::parse_timezone(&tz)?.0,
-                        None => 0,
+                    let named = match map.get("timezone").and_then(|v| v.as_string()) {
+                        Some(tz) => Some(tmp::parse_timezone(&tz)?.0),
+                        None => None,
                     };
                     if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
                         if let Some(n) = time_part_of(src) {
+                            // Selecting a time from a zoned value **inherits its
+                            // offset**. Defaulting to 0 relabelled 12:00+01:00 as
+                            // 12:00Z -- a different instant, rendered as a
+                            // perfectly good time (#838).
+                            let src_offset = offset_seconds_of(src);
+                            let from = src_offset.unwrap_or(0);
+                            // A `timezone` given alongside a **zoned** source
+                            // converts the instant rather than renaming the
+                            // offset: `{time: <12:00+01:00>, timezone: '+05:00'}`
+                            // is 16:00+05:00, the same moment read elsewhere.
+                            // Overrides apply after the conversion, so
+                            // `second: 42` on that gives 16:00:42+05:00.
+                            //
+                            // A **local** source has no instant to convert
+                            // from, so the timezone labels its clock and leaves
+                            // it where it is:
+                            // `{time: localtime('12:31'), timezone: '+05:00'}`
+                            // is 12:31+05:00, not 16:31. Converting
+                            // unconditionally gets the zoned rows right and
+                            // these four wrong -- the same asymmetry as #821,
+                            // one constructor over.
+                            let to = named.unwrap_or(from);
+                            let shifted = if src_offset.is_some() {
+                                (n + (to - from) as i64 * 1_000_000_000)
+                                    .rem_euclid(86_400 * 1_000_000_000)
+                            } else {
+                                n
+                            };
                             return Ok(Value::Property(PropertyValue::Time {
-                                nanos: apply_time_overrides(n, map),
-                                offset_seconds: offset,
+                                nanos: apply_time_overrides(shifted, map),
+                                offset_seconds: to,
                             }));
                         }
                     }
+                    // Built from components, `timezone` names the offset the
+                    // clock is *in*; there is no source instant to convert.
                     Ok(Value::Property(PropertyValue::Time {
                         nanos: tmp::time_of_day_nanos(map)?,
-                        offset_seconds: offset,
+                        offset_seconds: named.unwrap_or(0),
                     }))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-                other => match value_as_property(other).and_then(|p| time_part_of(&p)) {
-                    Some(n) => Ok(Value::Property(PropertyValue::Time { nanos: n, offset_seconds: 0 })),
+                other => match value_as_property(other) {
+                    // `time(<zoned value>)` keeps the value's own offset (#838).
+                    Some(p) => match time_part_of(&p) {
+                        Some(n) => Ok(Value::Property(PropertyValue::Time {
+                            nanos: n,
+                            offset_seconds: offset_seconds_of(&p).unwrap_or(0),
+                        })),
+                        None => Err(ExecutionError::TypeError(
+                            "time() requires a string, a map, or a temporal value".to_string(),
+                        )),
+                    },
                     None => Err(ExecutionError::TypeError(
                         "time() requires a string, a map, or a temporal value".to_string(),
                     )),
@@ -3419,6 +3470,20 @@ fn scale_duration(
 ///
 /// The legacy `DateTime` is deliberately absent: it exists for snapshot
 /// compatibility and is already read as UTC everywhere.
+/// The UTC offset a value carries, if it carries one.
+///
+/// A `LocalTime` or `LocalDateTime` has none; a `Date` has none. Only the two
+/// zoned types answer, and the caller decides what "none" means -- inheriting
+/// zero and inheriting nothing are different (#838).
+fn offset_seconds_of(v: &PropertyValue) -> Option<i32> {
+    match v {
+        PropertyValue::Time { offset_seconds, .. }
+        | PropertyValue::ZonedDateTime { offset_seconds, .. } => Some(*offset_seconds),
+        PropertyValue::DateTime(_) => Some(0),
+        _ => None,
+    }
+}
+
 fn zone_of(v: &PropertyValue) -> Option<crate::query::executor::temporal::TzSpec> {
     use crate::query::executor::temporal::{parse_timezone_spec, TzSpec};
     match v {
