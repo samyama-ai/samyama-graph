@@ -164,6 +164,52 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
     }
 }
 
+/// The instant "now" means for the duration of one statement.
+///
+/// Cypher fixes the clock **once per query**, not once per call. Without that,
+/// `duration.inSeconds(datetime(), datetime())` returns `PT0.00000016S` -- the
+/// two calls land microseconds apart -- where the TCK requires exactly `PT0S`.
+///
+/// It is not only a test artefact. `WHERE n.created < datetime() AND
+/// n.expires > datetime()` should test one instant against both bounds, and a
+/// row arriving between the two reads is judged against a moving target.
+///
+/// A thread-local rather than a parameter because `eval_function` is reached
+/// from many operators and threading a clock through all of them would be a
+/// large change for a small need. Set by `QueryExecutor::execute` at the start
+/// of a statement and cleared by the guard on the way out, including on an
+/// early return, so a stale value cannot leak into the next statement (#793).
+pub(crate) mod statement_clock {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NOW: Cell<Option<i64>> = const { Cell::new(None) };
+    }
+
+    /// Fix "now" for this statement. The returned guard clears it on drop.
+    pub fn begin() -> Guard {
+        NOW.with(|c| c.set(Some(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))));
+        Guard
+    }
+
+    /// The statement's instant, or the wall clock when no statement is active
+    /// -- a direct `eval_function` call from a test, for instance.
+    pub fn now() -> chrono::DateTime<chrono::Utc> {
+        match NOW.with(|c| c.get()) {
+            Some(n) => chrono::DateTime::from_timestamp_nanos(n),
+            None => chrono::Utc::now(),
+        }
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NOW.with(|c| c.set(None));
+        }
+    }
+}
+
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
@@ -2158,7 +2204,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Float(val)))
         }
         "timestamp" => {
-            let ts = chrono::Utc::now().timestamp_millis();
+            let ts = statement_clock::now().timestamp_millis();
             Ok(Value::Property(PropertyValue::Integer(ts)))
         }
         // Type/meta functions
@@ -2395,7 +2441,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "date" => {
             use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let days = (chrono::Utc::now().timestamp() / 86_400) as i32;
+                let days = (statement_clock::now().timestamp() / 86_400) as i32;
                 return Ok(Value::Property(PropertyValue::Date(days)));
             }
             match &args[0] {
@@ -2428,7 +2474,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "localtime" => {
             use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let now = chrono::Utc::now();
+                let now = statement_clock::now();
                 let nanos = now.timestamp().rem_euclid(86_400) * 1_000_000_000
                     + now.timestamp_subsec_nanos() as i64;
                 return Ok(Value::Property(PropertyValue::LocalTime(nanos)));
@@ -2459,7 +2505,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "time" => {
             use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let now = chrono::Utc::now();
+                let now = statement_clock::now();
                 let nanos = now.timestamp().rem_euclid(86_400) * 1_000_000_000
                     + now.timestamp_subsec_nanos() as i64;
                 return Ok(Value::Property(PropertyValue::Time { nanos, offset_seconds: 0 }));
@@ -2502,7 +2548,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "localdatetime" => {
             if args.is_empty() {
-                let now = chrono::Utc::now();
+                let now = statement_clock::now();
                 return Ok(Value::Property(PropertyValue::LocalDateTime {
                     secs: now.timestamp(),
                     nanos: now.timestamp_subsec_nanos(),
@@ -2545,7 +2591,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "datetime" => {
             use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let now = chrono::Utc::now();
+                let now = statement_clock::now();
                 return Ok(Value::Property(PropertyValue::ZonedDateTime {
                     secs: now.timestamp(),
                     nanos: now.timestamp_subsec_nanos(),

@@ -310,6 +310,10 @@ impl<'a> QueryExecutor<'a> {
     }
 
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
+        // "now" is fixed for the whole statement, so two `datetime()` calls in
+        // one query return the same instant (#793). The guard clears it on the
+        // way out, including on an early return.
+        let _clock = crate::query::executor::operator::statement_clock::begin();
         // Substitute parameters if any
         let query = if !self.params.is_empty() || !query.params.is_empty() {
             let mut q = query.clone();
@@ -518,6 +522,8 @@ impl<'a> MutQueryExecutor<'a> {
     /// Execute a query (read or write) and return results
     /// For CREATE queries, nodes/edges are created in the graph store
     pub fn execute(&mut self, query: &Query) -> ExecutionResult<RecordBatch> {
+        // See the read-only executor above: one clock per statement (#793).
+        let _clock = crate::query::executor::operator::statement_clock::begin();
         // Substitute parameters if any
         let query = if !self.params.is_empty() || !query.params.is_empty() {
             let mut q = query.clone();
