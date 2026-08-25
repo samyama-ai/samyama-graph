@@ -2961,7 +2961,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             // Argument order is (from, to): `between(a, b)` is b - a.
             match (&args[0], &args[1]) {
                 (Value::Property(a), Value::Property(b)) => {
-                    Ok(Value::Property(temporal_difference(b, a).map_err(|_| {
+                    Ok(Value::Property(temporal_difference_calendar(b, a).map_err(|_| {
                         ExecutionError::TypeError(
                             "duration.between() requires two temporal arguments".to_string(),
                         )
@@ -3371,6 +3371,140 @@ fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyVal
 }
 
 /// `a - b` for two temporals: the duration between them.
+/// `a - b` for two temporals, in **calendar** components.
+///
+/// ```text
+/// duration.between(date('1984-10-11'), date('2015-06-24'))  ->  P30Y8M13D
+/// ```
+///
+/// Not `P11213D`. Cypher counts whole months first and leaves the remainder in
+/// days, because a month has no fixed length — the answer must be the one you
+/// get by *counting off* years and months on a calendar, not by dividing
+/// elapsed time.
+///
+/// The `-` operator on two temporals stays a plain elapsed difference
+/// (`temporal_difference` below); only `duration.between` is calendar-aware.
+/// That split is Cypher's, and collapsing the two would make the same
+/// subtraction disagree with itself depending on which spelling was used
+/// (#804).
+fn temporal_difference_calendar(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<PropertyValue, ExecutionError> {
+    use chrono::Datelike;
+
+    // A pure time-of-day pair has no calendar part, so it falls through to the
+    // plain difference — which is what `PT-0.4S` and the inSeconds family need.
+    let (Some(da), Some(db)) = (date_part_of(a), date_part_of(b)) else {
+        return temporal_difference(a, b);
+    };
+
+    // Within one month the calendar answer *is* the elapsed one, and the plain
+    // form gives it in the shape the TCK wants: `PT6H`, not `P0M0DT6H`. Going
+    // through the month arithmetic for these produced four regressions —
+    // correct values, wrong shape, which a diff reports as breakage.
+    //
+    // The threshold is a differing (year, month), not a day count: 31 Jan to
+    // 1 Feb is one day apart and *does* cross a month.
+    {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+        let same_month = |x: i32, y: i32| {
+            match (
+                epoch.checked_add_signed(chrono::Duration::days(x as i64)),
+                epoch.checked_add_signed(chrono::Duration::days(y as i64)),
+            ) {
+                (Some(p), Some(q)) => {
+                    use chrono::Datelike;
+                    p.year() == q.year() && p.month() == q.month()
+                }
+                _ => false,
+            }
+        };
+        if same_month(da, db) {
+            return temporal_difference(a, b);
+        }
+    }
+
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let to_date = |d: i32| {
+        epoch
+            .checked_add_signed(chrono::Duration::days(d as i64))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
+    };
+    let (start, end) = (to_date(db)?, to_date(da)?);
+    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+
+    // Whole months, then leftover days, then the clock. Borrowing works as it
+    // does on paper: if the clock difference is negative, one day is not yet
+    // complete; if the day count then goes negative, one month is not either.
+    let mut months = (end.year() as i64 - start.year() as i64) * 12
+        + (end.month() as i64 - start.month() as i64);
+    // The clock difference keeps its own sign; it is only borrowed into days
+    // when the *whole* result is positive. Borrowing unconditionally produced
+    // `P-28DT2H19M27.858S` where `P-27DT-21H-40M-32.142S` was expected — the
+    // same instant pair, with the components disagreeing in sign, which is the
+    // one thing a duration's components may not do (#775 again, one level up).
+    let nanos = ta - tb;
+    let forward = da > db || (da == db && nanos >= 0);
+    let (mut nanos, mut day_adjust) = if nanos < 0 && forward {
+        (nanos + 86_400 * 1_000_000_000, -1i64)
+    } else if nanos > 0 && !forward {
+        (nanos - 86_400 * 1_000_000_000, 1i64)
+    } else {
+        (nanos, 0i64)
+    };
+    let _ = &mut nanos;
+    let _ = &mut day_adjust;
+    let mut days = end
+        .signed_duration_since(shift_months_clamped(start, months)?)
+        .num_days()
+        + day_adjust;
+    // Borrow toward zero, not toward negative infinity. Going **backwards**, a
+    // partial month stays as days rather than becoming a whole negative month
+    // plus positive days: 2015-07-21 back to 2015-06-24 is `P-27D`, not
+    // `P-1M3D`. Both describe the same instant pair and only one is what
+    // Cypher writes.
+    if months > 0 && days < 0 {
+        months -= 1;
+        days = end
+            .signed_duration_since(shift_months_clamped(start, months)?)
+            .num_days()
+            + day_adjust;
+    } else if months < 0 && days > 0 {
+        months += 1;
+        days = end
+            .signed_duration_since(shift_months_clamped(start, months)?)
+            .num_days()
+            + day_adjust;
+    }
+
+    Ok(PropertyValue::Duration {
+        months,
+        days,
+        // Truncating, not Euclidean — the same trap #775 fixed in
+        // `temporal_difference` and that I reintroduced here. `div_euclid`
+        // floors toward negative infinity, so -78032.142s splits into
+        // (-78033s, +858ms) and renders `-33.858S` where `-32.142S` belongs.
+        // A duration's components must share a sign.
+        seconds: nanos / 1_000_000_000,
+        nanos: (nanos % 1_000_000_000) as i32,
+    })
+}
+
+/// Move a date by whole months, clamping the day into the target month —
+/// 31 January plus one month is 28 February.
+fn shift_months_clamped(
+    d: chrono::NaiveDate,
+    months: i64,
+) -> Result<chrono::NaiveDate, ExecutionError> {
+    use chrono::Datelike;
+    let total = d.year() as i64 * 12 + d.month0() as i64 + months;
+    let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
+    let last = days_in_month(y as i32, m0 as u32 + 1);
+    chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, d.day().min(last))
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
+}
+
 fn temporal_difference(
     a: &PropertyValue,
     b: &PropertyValue,
