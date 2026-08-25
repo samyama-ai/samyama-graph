@@ -1648,6 +1648,90 @@ fn date_part_of(v: &PropertyValue) -> Option<i32> {
     }
 }
 
+/// Apply a map's date components on top of an already-selected date.
+///
+/// `{date: other, day: 28}` keeps `other`'s year and month and replaces the
+/// day; `{date: other, ordinalDay: 28}` replaces the whole day-of-year, so it
+/// moves the month too. The four spellings do not mix — naming `ordinalDay`
+/// means the calendar fields are not consulted — which is why this dispatches
+/// on which keys are present rather than defaulting each field.
+fn apply_date_overrides(
+    base: i32,
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> Result<i32, ExecutionError> {
+    use chrono::Datelike;
+    const KEYS: &[&str] = &[
+        "year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter",
+    ];
+    if !KEYS.iter().any(|k| map.contains_key(*k)) {
+        return Ok(base);
+    }
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let cur = epoch
+        .checked_add_signed(chrono::Duration::days(base as i64))
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+    let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
+    let year = g("year").unwrap_or(cur.year() as i64) as i32;
+
+    let out = if let Some(ord) = g("ordinalDay") {
+        chrono::NaiveDate::from_yo_opt(year, ord as u32)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid ordinalDay {ord}")))?
+    } else if map.contains_key("week") || map.contains_key("dayOfWeek") {
+        let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
+        let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
+        chrono::NaiveDate::from_isoywd_opt(year, week, weekday_from_iso_num(dow))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {year}-W{week}-{dow}")))?
+    } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
+        let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
+        let d = g("dayOfQuarter").unwrap_or(1);
+        let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid quarter {q}")))?;
+        start
+            .checked_add_signed(chrono::Duration::days(d - 1))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid dayOfQuarter {d}")))?
+    } else {
+        let month = g("month").unwrap_or(cur.month() as i64) as u32;
+        let day = g("day").unwrap_or(cur.day() as i64) as u32;
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {year}-{month}-{day}")))?
+    };
+    Ok(out.signed_duration_since(epoch).num_days() as i32)
+}
+
+/// Apply a map's clock components on top of an already-selected time.
+///
+/// Replaces only the fields named: `{time: t, second: 42}` keeps the hour,
+/// minute and fraction from `t`. The three sub-second components are additive
+/// with each other and together replace the selected fraction only if any is
+/// given — the same rule `compose_date_and_time` uses, kept in one place so
+/// the two cannot drift (#802).
+fn apply_time_overrides(
+    base: i64,
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> i64 {
+    let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
+    let mut hour = base / 3_600_000_000_000;
+    let mut minute = base / 60_000_000_000 % 60;
+    let mut second = base / 1_000_000_000 % 60;
+    let mut sub = base % 1_000_000_000;
+    if let Some(v) = g("hour") { hour = v; }
+    if let Some(v) = g("minute") { minute = v; }
+    if let Some(v) = g("second") { second = v; }
+    if ["millisecond", "microsecond", "nanosecond"].iter().any(|k| map.contains_key(*k)) {
+        sub = g("millisecond").unwrap_or(0) * 1_000_000
+            + g("microsecond").unwrap_or(0) * 1_000
+            + g("nanosecond").unwrap_or(0);
+    }
+    (hour * 3600 + minute * 60 + second) * 1_000_000_000 + sub
+}
+
+
+fn weekday_from_iso_num(dow: u32) -> chrono::Weekday {
+    use chrono::Weekday::*;
+    match dow { 1 => Mon, 2 => Tue, 3 => Wed, 4 => Thu, 5 => Fri, 6 => Sat, _ => Sun }
+}
+
+
 /// Nanoseconds-since-midnight of any temporal value that has a time part.
 fn time_part_of(v: &PropertyValue) -> Option<i64> {
     match v {
@@ -2471,11 +2555,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
-                    // Selection: `date({date: d})` and `date({datetime: dt})`
-                    // take the date part of another temporal.
+                    // Selection: `date({date: d})` takes the date part of
+                    // another temporal — and any *other* component in the map
+                    // then overrides part of it. `{date: other, day: 28}` keeps
+                    // the year and month and replaces only the day.
+                    //
+                    // This returned the selected date unchanged, so every
+                    // override was silently discarded (#802). The composite
+                    // constructors already layer overrides this way; `date()`
+                    // has its own path and did not.
                     if let Some(src) = map.get("date").or_else(|| map.get("datetime")) {
-                        if let Some(d) = date_part_of(src) {
-                            return Ok(Value::Property(PropertyValue::Date(d)));
+                        if let Some(base) = date_part_of(src) {
+                            return Ok(Value::Property(PropertyValue::Date(
+                                apply_date_overrides(base, map)?,
+                            )));
                         }
                     }
                     Ok(Value::Property(PropertyValue::Date(tmp::date_days(map)?)))
@@ -2507,9 +2600,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    // A selected time, with any clock components in the map
+                    // layered on top — the same rule `date()` needs (#802).
                     if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
                         if let Some(n) = time_part_of(src) {
-                            return Ok(Value::Property(PropertyValue::LocalTime(n)));
+                            return Ok(Value::Property(PropertyValue::LocalTime(
+                                apply_time_overrides(n, map),
+                            )));
                         }
                     }
                     Ok(Value::Property(PropertyValue::LocalTime(tmp::time_of_day_nanos(map)?)))
@@ -2548,7 +2645,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
                         if let Some(n) = time_part_of(src) {
                             return Ok(Value::Property(PropertyValue::Time {
-                                nanos: n,
+                                nanos: apply_time_overrides(n, map),
                                 offset_seconds: offset,
                             }));
                         }
