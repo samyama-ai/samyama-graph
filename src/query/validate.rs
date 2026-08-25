@@ -35,6 +35,8 @@ pub enum ValidationError {
     MergeOnBoundVariable(String),
     MergeRelationshipWithNullProperty(String),
     VariableTypeConflict(String),
+    /// A boolean operator given an operand that cannot be a boolean.
+    NonBooleanOperand(&'static str),
     /// One variable bound to two different kinds of entity.
     VariableKindConflict {
         name: String,
@@ -81,6 +83,12 @@ impl std::fmt::Display for ValidationError {
                 "`{name}` is bound to {first} and then to {second} in the same scope. A \
                  variable names one entity, and an entity is a node, a relationship or a \
                  path -- not two of them. Rename one of the two."
+            ),
+            Self::NonBooleanOperand(what) => write!(
+                f,
+                "AND, OR and XOR need boolean operands, and this one is {what}. \
+                 A value whose type is only known at run time is fine here; a \
+                 literal of the wrong type is not."
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -832,7 +840,138 @@ fn check_order_by(
     Ok(())
 }
 
+
+/// `AND` / `OR` / `XOR` require boolean operands, and a literal that is not one
+/// is a compile-time error.
+///
+/// ```text
+/// RETURN 123 AND true      -> SyntaxError: InvalidArgumentType
+/// ```
+///
+/// 26 TCK scenarios across Boolean1, Boolean2 and Boolean4. We answered every
+/// one of them.
+///
+/// **Only statically-known operands are checked.** `n.prop AND true` is legal
+/// to *write* — the type is unknown until the row arrives, and Cypher reports
+/// a runtime error then, not a compile-time one. Checking anything whose type
+/// is not known from the text would reject valid queries, which this module
+/// opens by naming as the worse failure.
+///
+/// `null` is allowed: it is the unknown boolean, and `123.4 AND null` fails on
+/// the `123.4`.
+fn validate_boolean_operands(query: &Query) -> Result<(), ValidationError> {
+    fn statically_non_boolean(e: &Expression) -> Option<&'static str> {
+        match e {
+            Expression::Literal(p) => match p {
+                crate::graph::PropertyValue::Boolean(_) | crate::graph::PropertyValue::Null => None,
+                crate::graph::PropertyValue::Integer(_) => Some("an integer"),
+                crate::graph::PropertyValue::Float(_) => Some("a float"),
+                crate::graph::PropertyValue::String(_) => Some("a string"),
+                crate::graph::PropertyValue::Array(_) => Some("a list"),
+                crate::graph::PropertyValue::Map(_) => Some("a map"),
+                _ => None,
+            },
+            // A list or map *literal* is known to be a list or map whatever is
+            // inside it -- `[true]` is a list, not a boolean.
+            Expression::ListExpr(_) => Some("a list"),
+            Expression::MapExpr(_) => Some("a map"),
+            _ => None,
+        }
+    }
+
+    fn walk(e: &Expression) -> Result<(), ValidationError> {
+        if let Expression::Binary { left, op, right } = e {
+            if matches!(op, crate::query::ast::BinaryOp::And
+                          | crate::query::ast::BinaryOp::Or
+                          | crate::query::ast::BinaryOp::Xor)
+            {
+                for side in [left, right] {
+                    if let Some(what) = statically_non_boolean(side) {
+                        return Err(ValidationError::NonBooleanOperand(what));
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        walk(e)?;
+    }
+    Ok(())
+}
+
+/// The sub-expressions of an expression, for a generic walk.
+fn child_expressions(e: &Expression) -> Vec<&Expression> {
+    use Expression::*;
+    match e {
+        Binary { left, right, .. } => vec![left, right],
+        Unary { expr, .. } => vec![expr],
+        Function { args, .. } => args.iter().collect(),
+        Index { expr, index } => vec![expr, index],
+        Case { operand, when_clauses, else_result } => {
+            let mut v: Vec<&Expression> = Vec::new();
+            if let Some(o) = operand { v.push(o); }
+            for (w, t) in when_clauses { v.push(w); v.push(t); }
+            if let Some(x) = else_result { v.push(x); }
+            v
+        }
+        ListExpr(items) => items.iter().collect(),
+        MapExpr(entries) => entries.iter().map(|(_, v)| v).collect(),
+        ListSlice { expr, start, end } => {
+            let mut v = vec![expr.as_ref()];
+            if let Some(s) = start { v.push(s); }
+            if let Some(e) = end { v.push(e); }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every expression a query evaluates, for a generic walk.
+///
+/// Both AST shapes, because a query parsed into one leaves the other empty --
+/// the split that has now cost six separate fixes.
+fn all_expressions(query: &Query) -> Vec<&Expression> {
+    use crate::query::ast::Clause;
+    let mut out: Vec<&Expression> = Vec::new();
+    fn push_items<'a>(items: &'a [ReturnItem], out: &mut Vec<&'a Expression>) {
+        for i in items {
+            out.push(&i.expression);
+        }
+    }
+    if !query.clauses.is_empty() {
+        for c in &query.clauses {
+            match c {
+                Clause::Return(r) => push_items(&r.items, &mut out),
+                Clause::With(w) => push_items(&w.items, &mut out),
+                Clause::Where(w) => out.push(&w.predicate),
+                Clause::Unwind(u) => out.push(&u.expression),
+                _ => {}
+            }
+        }
+    }
+    if let Some(r) = &query.return_clause {
+        push_items(&r.items, &mut out);
+    }
+    if let Some(w) = &query.with_clause {
+        push_items(&w.items, &mut out);
+    }
+    for (w, _, _, _) in &query.extra_with_stages {
+        push_items(&w.items, &mut out);
+    }
+    if let Some(w) = &query.where_clause {
+        out.push(&w.predicate);
+    }
+    out
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_boolean_operands(query)?;
+
     validate_order_by_in_scope(query)?;
 
     validate_variable_kinds(query)?;
