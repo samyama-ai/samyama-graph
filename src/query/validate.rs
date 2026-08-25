@@ -1074,6 +1074,40 @@ fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError
     Ok(())
 }
 
+
+/// Whether a projection binds this name to something that **cannot** be a node,
+/// relationship or path — so using it as a pattern is a type conflict.
+///
+/// ```text
+/// WITH 123 AS n MATCH (n) RETURN n     -> SyntaxError: VariableTypeConflict
+/// ```
+///
+/// Was lists and maps only, which covered `WITH [n] AS users MATCH (users)`
+/// (#654) and missed every scalar — 16 TCK scenarios across Match1 [11]/[13]
+/// and Match6 [25], covering `true`, `123`, `123.4`, `'foo'` and `null` as
+/// node, relationship and path variables.
+///
+/// Literals only, and deliberately: `WITH n.prop AS x MATCH (x)` cannot be
+/// judged from the text, and `validate.rs` opens by naming over-rejection as
+/// the worse failure. Two copies of this test existed and both were narrow;
+/// they now share one function, because the next widening should not have to
+/// find both.
+fn not_an_entity(e: &Expression) -> bool {
+    matches!(
+        e,
+        Expression::ListExpr(_)
+            | Expression::MapExpr(_)
+            | Expression::Literal(
+                crate::graph::PropertyValue::Array(_)
+                    | crate::graph::PropertyValue::Map(_)
+                    | crate::graph::PropertyValue::Integer(_)
+                    | crate::graph::PropertyValue::Float(_)
+                    | crate::graph::PropertyValue::String(_)
+                    | crate::graph::PropertyValue::Boolean(_)
+            )
+    )
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_property_access_targets(query)?;
 
@@ -1325,13 +1359,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                 Clause::With(wc) => {
                     for item in &wc.items {
                         let Some(alias) = item.alias.as_ref() else { continue };
-                        let is_collection = matches!(
-                            &item.expression,
-                            Expression::ListExpr(_)
-                                | Expression::MapExpr(_)
-                                | Expression::Literal(crate::graph::PropertyValue::Array(_))
-                                | Expression::Literal(crate::graph::PropertyValue::Map(_))
-                        );
+                        let is_collection = not_an_entity(&item.expression);
                         // Re-aliasing something else to the same name clears it.
                         if is_collection {
                             collections.insert(alias.clone());
@@ -1350,6 +1378,10 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                             }
                             Ok(())
                         };
+                        // The *path* variable too: `WITH 123 AS p MATCH p = ()-[]-()`
+                        // is the same conflict and was walked past, because
+                        // this loop only visited the nodes and edges (#795).
+                        check(&path.path_variable)?;
                         check(&path.start.variable)?;
                         for seg in &path.segments {
                             check(&seg.node.variable)?;
@@ -1371,13 +1403,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         collections: &mut HashSet<String>| {
             for item in &wc.items {
                 let Some(alias) = item.alias.as_ref() else { continue };
-                let is_collection = matches!(
-                    &item.expression,
-                    Expression::ListExpr(_)
-                        | Expression::MapExpr(_)
-                        | Expression::Literal(crate::graph::PropertyValue::Array(_))
-                        | Expression::Literal(crate::graph::PropertyValue::Map(_))
-                );
+                let is_collection = not_an_entity(&item.expression);
                 if is_collection {
                     collections.insert(alias.clone());
                 } else {
@@ -1398,6 +1424,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         }
                         Ok(())
                     };
+                    check(&path.path_variable)?;
                     check(&path.start.variable)?;
                     for seg in &path.segments {
                         check(&seg.node.variable)?;
