@@ -5640,8 +5640,57 @@ impl QueryPlanner {
             })
             .unwrap_or_default();
 
-        let where_predicate = with_clause.where_clause.as_ref()
-            .map(|wc| wc.predicate.clone());
+        // A `WITH ... WHERE ...` may filter on variables the projection does not
+        // carry forward:
+        //
+        //     WITH types[i] AS lhs, types[j] AS rhs
+        //     WHERE i <> j
+        //
+        // Applied inside the barrier, after the projection has dropped them,
+        // `i` and `j` evaluate to null for every row and the query returns
+        // **zero rows instead of ninety** -- silently, since a filter that
+        // matches nothing is a legitimate outcome. Neo4j answers this scenario,
+        // so those names are still reachable there (#840).
+        //
+        // Split by conjunct rather than moving the clause wholesale: a
+        // predicate naming a projected alias still belongs after the barrier,
+        // and `WITH n.name AS name WHERE name STARTS WITH 'a'` must keep
+        // working. A conjunct moves ahead only when it names at least one
+        // variable and none of them is a projected alias -- so an aggregate's
+        // output can never be filtered before it is computed.
+        //
+        // This sits in `build_with_barrier` because **both** planner paths call
+        // it. The by-kind stage loop and the clause pipeline each construct
+        // their own WITH stages, and putting the split in one of them would
+        // have fixed the queries that happen to take that path (#797).
+        let aliases: HashSet<String> = with_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| item.column_name(idx))
+            .collect();
+        let mut input = input;
+        let mut where_predicate = with_clause.where_clause.as_ref().map(|wc| wc.predicate.clone());
+        if let Some(pred) = where_predicate.take() {
+            let (mut pre, mut post): (Vec<Expression>, Vec<Expression>) = (Vec::new(), Vec::new());
+            for conjunct in flatten_and_predicates(&pred) {
+                let mut vars = HashSet::new();
+                Self::collect_expression_variables(&conjunct, &mut vars);
+                let before = !vars.is_empty() && !vars.iter().any(|v| aliases.contains(v));
+                if before { pre.push(conjunct) } else { post.push(conjunct) }
+            }
+            let join = |v: Vec<Expression>| {
+                v.into_iter().reduce(|acc, p| Expression::Binary {
+                    left: Box::new(acc),
+                    op: BinaryOp::And,
+                    right: Box::new(p),
+                })
+            };
+            if let Some(expr) = join(pre) {
+                input = Box::new(FilterOperator::new(input, expr));
+            }
+            where_predicate = join(post);
+        }
 
         Ok(Box::new(WithBarrierOperator::new(
             input,

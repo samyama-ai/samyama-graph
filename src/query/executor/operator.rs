@@ -222,6 +222,25 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         }
     }
 
+    // Ordering an entity against anything is **null**, not an error.
+    //
+    // Cypher's rule is that comparing across types yields null except between
+    // numbers, and a node, relationship or path is just another type that does
+    // not order. Raising instead took down the whole query: `Comparison2`
+    // builds a list of one value per type and compares every pair, so a single
+    // `TypeError` on `node < ''` lost all 90 rows including the numeric pair
+    // the scenario is actually about (#840).
+    //
+    // Only the ordering operators. `=` and `<>` on two entities are identity
+    // and are handled above; arithmetic on an entity stays an error, because
+    // there `null` really would hide a mistake.
+    if matches!(op, BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
+        && (!matches!(left, Value::Property(_) | Value::Null)
+            || !matches!(right, Value::Property(_) | Value::Null))
+    {
+        return Ok(Value::Property(PropertyValue::Null));
+    }
+
     let left_prop = match left {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
