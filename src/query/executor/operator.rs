@@ -2964,15 +2964,25 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             // result carried the wrong sign -- and half the TCK rows expect a
             // negative answer, so it looked correct on exactly the half that
             // happened to be positive (#775).
-            let diff = temporal_difference(&b, &a)?;
-            let (days, seconds, nanos) = match diff {
-                PropertyValue::Duration { days, seconds, nanos, .. } => (days, seconds, nanos),
-                _ => (0, 0, 0),
+            // `inMonths` needs the **calendar** month count, so it uses the
+            // calendar difference; `inDays` and `inSeconds` want elapsed time
+            // and use the plain one. Dividing an elapsed day count by 30 gave
+            // `P11M29D...` where `P1Y` belongs — 12 months' worth of days that
+            // never became a year, because 365 / 30 is 12.16 and the truncation
+            // lands one month short (#812).
+            let diff = if lowered == "duration.inmonths" {
+                temporal_difference_calendar(&b, &a)?
+            } else {
+                temporal_difference(&b, &a)?
+            };
+            let (months, days, seconds, nanos) = match diff {
+                PropertyValue::Duration { months, days, seconds, nanos } => (months, days, seconds, nanos),
+                _ => (0, 0, 0, 0),
             };
             Ok(Value::Property(match lowered.as_str() {
-                // Seconds carries the whole difference in seconds plus the
-                // sub-second remainder; days and months carry only whole units,
-                // with the remainder discarded rather than rounded.
+                // Each truncates to its own unit and **discards** the
+                // remainder, rather than rounding it: `inDays` of 30 hours is
+                // one day, not one and a quarter.
                 "duration.inseconds" => PropertyValue::Duration {
                     months: 0, days: 0, seconds: days * 86_400 + seconds, nanos,
                 },
@@ -2980,7 +2990,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     months: 0, days: days + seconds / 86_400, seconds: 0, nanos: 0,
                 },
                 _ => PropertyValue::Duration {
-                    months: (days + seconds / 86_400) / 30, days: 0, seconds: 0, nanos: 0,
+                    months, days: 0, seconds: 0, nanos: 0,
                 },
             }))
         }
@@ -3522,7 +3532,26 @@ fn temporal_difference_calendar(
             .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
     };
     let (start, end) = (to_date(db)?, to_date(da)?);
-    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+    // The clock parts must be compared as **instants** when both sides carry an
+    // offset, exactly as in the time-only path (#807). `time_part_of` returns
+    // the local wall clock, which is right for rendering and wrong here:
+    // 21:40:36.143+0200 and 21:40:32.142+0100 read as 4ms apart locally and are
+    // really 59m55.999s apart, so the borrow fired and stole a month —
+    // `P11M` where `P1Y` belongs (#812).
+    let both_zoned = matches!(
+        (a, b),
+        (PropertyValue::ZonedDateTime { .. }, PropertyValue::ZonedDateTime { .. })
+    );
+    let clock = |v: &PropertyValue| -> i64 {
+        let local = time_part_of(v).unwrap_or(0);
+        match v {
+            PropertyValue::ZonedDateTime { offset_seconds, .. } if both_zoned => {
+                local - *offset_seconds as i64 * 1_000_000_000
+            }
+            _ => local,
+        }
+    };
+    let (ta, tb) = (clock(a), clock(b));
 
     // Whole months, then leftover days, then the clock. Borrowing works as it
     // does on paper: if the clock difference is negative, one day is not yet
