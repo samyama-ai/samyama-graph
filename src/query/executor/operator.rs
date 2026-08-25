@@ -1117,15 +1117,36 @@ fn eval_list_comprehension(
     // `as_list_items` rather than an `Array` match: an all-float list literal
     // parses as a `Vector`, and returning the empty list for it made a
     // comprehension over one silently produce nothing (#605).
-    let items = match list_val {
-        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
-        _ => return Ok(Value::Property(PropertyValue::Array(vec![]))),
+    // A list holding **entities** is a `Value::List`, not a `PropertyValue`
+    // list — a PropertyValue list cannot hold a node or relationship. So
+    // `[x IN [r, 1] | type(x)]` fell to the catch-all and returned `[]`:
+    // an empty list where a TypeError belongs, and indistinguishable from a
+    // comprehension that legitimately filtered everything out (#799).
+    let items: Vec<Value> = match list_val {
+        Value::Property(ref p) if p.as_list_items().is_some() => p
+            .as_list_items()
+            .unwrap()
+            .into_iter()
+            .map(Value::Property)
+            .collect(),
+        Value::List(items) => items,
+        // Null in, null out. Anything else is not a list at all, and saying so
+        // beats returning an empty one.
+        Value::Null | Value::Property(PropertyValue::Null) => {
+            return Ok(Value::Property(PropertyValue::Null))
+        }
+        other => {
+            return Err(ExecutionError::TypeError(format!(
+                "a list comprehension needs a list, not {}",
+                type_name_of(&other)
+            )))
+        }
     };
 
     let mut result = Vec::new();
     for item in items {
         let mut inner_record = record.clone();
-        inner_record.bind(variable.to_string(), Value::Property(item));
+        inner_record.bind(variable.to_string(), item);
 
         // Apply filter
         if let Some(f) = filter {
