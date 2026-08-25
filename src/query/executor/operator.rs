@@ -2796,10 +2796,45 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             tmp::resolve_offset(sp, d as i64, t)?,
                             tmp::zone_name(sp),
                         ),
-                        None => (0, None),
+                        // No target zone given: a **zoned source keeps its
+                        // own**. Defaulting to UTC re-labelled the value —
+                        // `datetime({datetime: s})` turned `12:00+02:00` into
+                        // `12:00Z`, the same wall clock two hours earlier.
+                        // Found by a test written for the re-zoning case, which
+                        // is the neighbouring behaviour (#809).
+                        None => match map.get("datetime").or_else(|| map.get("time")) {
+                            Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
+                                (*offset_seconds, zone.clone())
+                            }
+                            Some(PropertyValue::Time { offset_seconds, .. }) => (*offset_seconds, None),
+                            _ => (0, None),
+                        },
                     };
+                    // Selecting a **zoned** source into a different zone
+                    // converts the instant rather than copying the wall clock:
+                    // 12:00 in Europe/Stockholm (+01:00) is 11:00 UTC, which is
+                    // 01:00 in Pacific/Honolulu (-10:00) — not 12:00.
+                    //
+                    // The components are read as local time in the *target*
+                    // zone only when the source had no zone of its own. With a
+                    // zoned source the same reading is an instant, and treating
+                    // it as local time shifts every value by the difference
+                    // between the two offsets (#809).
+                    let source_offset = map
+                        .get("datetime")
+                        .or_else(|| map.get("time"))
+                        .and_then(|v| match v {
+                            PropertyValue::ZonedDateTime { offset_seconds, .. }
+                            | PropertyValue::Time { offset_seconds, .. } => Some(*offset_seconds),
+                            _ => None,
+                        });
                     // The components describe local time; store the instant.
-                    let utc = local - offset_seconds as i64 * 1_000_000_000;
+                    let utc = match source_offset {
+                        // A re-zoning: `local` is already the source's wall
+                        // clock, so undo *its* offset, not the target's.
+                        Some(src) if spec.is_some() => local - src as i64 * 1_000_000_000,
+                        _ => local - offset_seconds as i64 * 1_000_000_000,
+                    };
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
                         secs: utc.div_euclid(1_000_000_000),
                         nanos: utc.rem_euclid(1_000_000_000) as u32,

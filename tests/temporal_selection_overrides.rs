@@ -109,3 +109,55 @@ fn component_only_construction_still_works() {
     assert_eq!(rendered("RETURN localtime({hour: 12, minute: 31}) AS r"), "12:31");
     assert_eq!(rendered("RETURN date({year: 1984, ordinalDay: 202}) AS r"), "1984-07-20");
 }
+
+// ---------------------------------------------------------------------------
+// Re-zoning a selected value (#809).
+// ---------------------------------------------------------------------------
+
+/// Selecting a **zoned** source into a different zone converts the instant.
+///
+/// 12:00 in Europe/Stockholm (+01:00 in October) is 11:00 UTC, which is 01:00
+/// in Pacific/Honolulu (−10:00). Copying the wall clock gives 12:00 — the same
+/// numbers in a different zone, describing a moment eleven hours away.
+#[test]
+fn re_zoning_a_zoned_source_converts_the_instant() {
+    let src = "datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: 'Europe/Stockholm'})";
+    assert_eq!(
+        rendered(&format!(
+            "WITH {src} AS s RETURN datetime({{datetime: s, timezone: 'Pacific/Honolulu'}}) AS r"
+        )),
+        "1984-10-28T01:00-10:00[Pacific/Honolulu]"
+    );
+}
+
+/// **An unzoned source is read as local time in the target zone.**
+///
+/// This is the other half, and the two are easy to conflate: with no source
+/// zone there is no instant to convert *from*, so the components mean what
+/// they say in the zone being applied. Converting here instead would shift
+/// every plain construction by the target offset.
+#[test]
+fn an_unzoned_source_is_local_time_in_the_target_zone() {
+    let src = "localdatetime({year: 1984, month: 10, day: 28, hour: 12})";
+    assert_eq!(
+        rendered(&format!(
+            "WITH {src} AS s RETURN datetime({{datetime: s, timezone: 'Pacific/Honolulu'}}) AS r"
+        )),
+        "1984-10-28T12:00-10:00[Pacific/Honolulu]"
+    );
+    // And plain component construction is unaffected.
+    assert_eq!(
+        rendered("RETURN datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: '+02:00'}) AS r"),
+        "1984-10-28T12:00+02:00"
+    );
+}
+
+/// Selecting with no target zone keeps the source's own.
+#[test]
+fn selecting_without_a_target_zone_keeps_the_source_zone() {
+    let src = "datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: '+02:00'})";
+    assert_eq!(
+        rendered(&format!("WITH {src} AS s RETURN datetime({{datetime: s}}) AS r")),
+        "1984-10-28T12:00+02:00"
+    );
+}
