@@ -959,13 +959,25 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     let post_where = query.post_with_where_clause.take();
                     let prev_with = query.with_clause.take().unwrap();
                     // The UNWIND that belongs to the stage being closed is the
-                    // one written *after* its WITH, not the query's leading
-                    // one. Taking `unwind_clause` here moved the head UNWIND
-                    // into a later stage, which is the same position-losing
-                    // mistake as #785 pointing the other way; it survived only
-                    // because `unwind_leading` then suppressed the stage copy.
+                    // one written *after* its WITH. The query's leading UNWIND
+                    // belongs at the head and stays in `unwind_clause`.
+                    //
+                    // Taking `unwind_clause` here made this slot mean two
+                    // different things -- the stage's own unwind when it had
+                    // one, the query's leading unwind when it did not -- and
+                    // the planner cannot tell them apart. It read
+                    // `extra_with_stages[0].1` as the leading unwind and so
+                    // hoisted `UNWIND b AS c` to the head of
+                    //
+                    //   UNWIND [1,2] AS a WITH [1,2] AS b UNWIND b AS c ...
+                    //
+                    // where `b` does not exist yet: `VariableNotFound("b")`.
+                    // A second hack in the planner suppressed stage 0's unwind
+                    // to compensate, and the two cancelled out for every shape
+                    // with no unwind on the first stage -- which is why one
+                    // WITH+UNWIND worked and two did not (#785).
                     let prev_unwind = if query.post_with_unwind_clauses.is_empty() {
-                        query.unwind_clause.take()
+                        None
                     } else {
                         Some(query.post_with_unwind_clauses.remove(0))
                     };

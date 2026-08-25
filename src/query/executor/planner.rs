@@ -1504,16 +1504,14 @@ impl QueryPlanner {
         // it was seeded further down: the rest of the planner -- filters,
         // aggregation, ORDER BY, SKIP/LIMIT -- then applies unchanged.
         //
-        // Which slot holds it depends on how many WITH stages follow, which is
-        // a parser detail rather than a semantic one: with a single WITH the
-        // leading UNWIND is `query.unwind_clause`, and with two or more it is
-        // the *first* extra stage's unwind. Both mean the same query.
+        // The leading UNWIND is always `query.unwind_clause`. It used to be
+        // read from `extra_with_stages[0].1` when there were two or more
+        // stages, because the parser moved it there -- but that slot also
+        // holds a stage's *own* trailing unwind, and nothing distinguished the
+        // two. With both present the stage's unwind was hoisted to the head
+        // and read a variable its WITH had not projected yet (#785).
         let leading_unwind: Option<&UnwindClause> = if query.unwind_leading {
-            if query.extra_with_stages.is_empty() {
-                query.unwind_clause.as_ref()
-            } else {
-                query.extra_with_stages[0].1.as_ref()
-            }
+            query.unwind_clause.as_ref()
         } else {
             None
         };
@@ -1586,15 +1584,22 @@ impl QueryPlanner {
         let mut all_with_stages: Vec<(&WithClause, Option<&UnwindClause>, Vec<&MatchClause>, Option<&WhereClause>)> = Vec::new();
 
         for (idx, (wc, uw, mcs, wh)) in query.extra_with_stages.iter().enumerate() {
-            // Stage 0 holds the leading UNWIND when there is more than one WITH;
-            // it was applied before the barriers, above.
-            let stage_unwind = if idx == 0 && leading_unwind.is_some() { None } else { uw.as_ref() };
-            all_with_stages.push((wc, stage_unwind, mcs.iter().collect(), wh.as_ref()));
+            // Every stage keeps its own trailing UNWIND. Stage 0 used to be
+            // suppressed whenever the query had a leading UNWIND, to undo the
+            // parser storing that leading unwind here; now that it does not,
+            // suppressing stage 0 would simply drop a real clause (#785).
+            let _ = idx;
+            all_with_stages.push((wc, uw.as_ref(), mcs.iter().collect(), wh.as_ref()));
         }
         if let Some(wc) = &query.with_clause {
             // A *leading* UNWIND was applied before the barriers, above. Only a
             // trailing one belongs to this stage.
-            let stage_unwind = if query.unwind_leading && query.extra_with_stages.is_empty() {
+            // A *leading* UNWIND was applied at the head, whatever the stage
+            // count. The `extra_with_stages.is_empty()` guard existed only
+            // because the parser emptied `unwind_clause` when there were more
+            // stages; with that gone, keeping the guard re-applies the head
+            // unwind a second time (#785).
+            let stage_unwind = if query.unwind_leading {
                 None
             } else {
                 query.unwind_clause.as_ref()
