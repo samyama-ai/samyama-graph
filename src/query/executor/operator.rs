@@ -3401,6 +3401,21 @@ fn temporal_difference_calendar(
     // Treating the missing part as zero instead gave `P-5396DT-7H-30M`: the
     // date's midnight measured against a time of day, which is a real duration
     // between two instants that were never comparable (#807).
+    // A value with **no** temporal parts at all is not a temporal value, and
+    // is rejected before any of the shared-component logic below. That is
+    // different from a date having no clock: `duration.between("a", dt)` must
+    // fail, while `duration.between(date, localtime)` must not. Defaulting a
+    // missing part to zero conflated the two and made the string case answer
+    // (#807).
+    for v in [a, b] {
+        if date_part_of(v).is_none() && time_part_of(v).is_none() {
+            return Err(ExecutionError::TypeError(format!(
+                "duration.between() needs temporal values, not {}",
+                v.type_name()
+            )));
+        }
+    }
+
     let (da, db) = (date_part_of(a), date_part_of(b));
     if da.is_none() || db.is_none() {
         // Compare instants only when **both** sides carry an offset; otherwise
