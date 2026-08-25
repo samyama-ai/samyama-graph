@@ -1533,22 +1533,28 @@ fn compose_date_and_time(
 }
 
 /// Seconds/nanos of a naive date-time string, with no zone.
+///
+/// Delegates to the ISO parsers so every spelling the date and time parsers
+/// accept works here too — `20150721T21:40`, `2015-W30-2T214032.142`,
+/// `2015-202T21:40:32`. The previous list of `chrono` format strings covered
+/// four shapes out of the corpus's dozen (#775).
 fn parse_naive_date_time(s: &str) -> Result<(i64, u32), ExecutionError> {
+    use crate::query::executor::temporal as tmp;
     let t = s.trim();
-    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(t, fmt) {
-            return Ok((dt.and_utc().timestamp(), dt.and_utc().timestamp_subsec_nanos()));
-        }
-        if fmt == "%Y-%m-%d" {
-            if let Ok(d) = chrono::NaiveDate::parse_from_str(t, fmt) {
-                let dt = d.and_hms_opt(0, 0, 0).expect("midnight is a time");
-                return Ok((dt.and_utc().timestamp(), 0));
-            }
-        }
-    }
-    Err(ExecutionError::RuntimeError(format!(
-        "cannot parse date-time: {s}"
-    )))
+    let (date_part, time_part) = match t.split_once('T') {
+        Some((d, ti)) => (d, Some(ti)),
+        None => (t, None),
+    };
+    let days = tmp::parse_iso_date(date_part)? as i64;
+    let nanos = match time_part {
+        Some(ti) if !ti.is_empty() => tmp::parse_iso_time(ti)?,
+        _ => 0,
+    };
+    let total = days * 86_400 * 1_000_000_000 + nanos;
+    Ok((
+        total.div_euclid(1_000_000_000),
+        total.rem_euclid(1_000_000_000) as u32,
+    ))
 }
 
 /// The `PropertyValue` inside a `Value`, when there is one.
@@ -2404,20 +2410,43 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => {
-                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                        return Ok(Value::Property(PropertyValue::ZonedDateTime {
-                            secs: dt.timestamp(),
-                            nanos: dt.timestamp_subsec_nanos(),
-                            offset_seconds: dt.offset().local_minus_utc(),
-                            zone: None,
-                        }));
-                    }
-                    let (secs, nanos) = parse_naive_date_time(s)?;
+                    use crate::query::executor::temporal as tmp;
+                    // `2015-07-21T21:40:32.142+02:00[Europe/Stockholm]` carries
+                    // an offset *and* a zone, and they are not redundant: the
+                    // offset is what the value had when written, the zone is
+                    // the rule it follows. Either may also appear alone.
+                    let (body, zone_name) = tmp::split_zone_suffix(s);
+                    let (clock, explicit_offset) = match body.rsplit_once('T') {
+                        Some(_) | None => {
+                            // Reuse the offset splitter, which knows not to
+                            // mistake a date dash for an offset sign.
+                            let (c, o) = tmp::parse_datetime_offset(body)?;
+                            (c, o)
+                        }
+                    };
+                    let (secs_naive, nanos) = parse_naive_date_time(clock)?;
+                    let local_days = secs_naive.div_euclid(86_400);
+                    let local_nanos = secs_naive.rem_euclid(86_400) * 1_000_000_000 + nanos as i64;
+
+                    let (offset_seconds, zone) = match zone_name {
+                        Some(z) => {
+                            let spec = tmp::parse_timezone_spec(z)?;
+                            // A zone suffix wins over a written offset for the
+                            // *rule*, but the written offset is authoritative
+                            // for the instant it recorded -- keep it when given.
+                            let off = explicit_offset
+                                .map(Ok)
+                                .unwrap_or_else(|| tmp::resolve_offset(&spec, local_days, local_nanos))?;
+                            (off, tmp::zone_name(&spec))
+                        }
+                        None => (explicit_offset.unwrap_or(0), None),
+                    };
+                    let utc = secs_naive - offset_seconds as i64;
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
-                        secs,
+                        secs: utc,
                         nanos,
-                        offset_seconds: 0,
-                        zone: None,
+                        offset_seconds,
+                        zone,
                     }))
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
@@ -2575,7 +2604,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 (Value::Property(a), Value::Property(b)) => (a.clone(), b.clone()),
                 _ => return Err(ExecutionError::TypeError(format!("{lowered}() needs two temporal values"))),
             };
-            let diff = temporal_difference(&a, &b)?;
+            // `duration.inX(lhs, rhs)` is **rhs - lhs**, the same orientation
+            // as `duration.between`: the duration you would add to `lhs` to
+            // reach `rhs`. This had the operands the other way round, so every
+            // result carried the wrong sign -- and half the TCK rows expect a
+            // negative answer, so it looked correct on exactly the half that
+            // happened to be positive (#775).
+            let diff = temporal_difference(&b, &a)?;
             let (days, seconds, nanos) = match diff {
                 PropertyValue::Duration { days, seconds, nanos, .. } => (days, seconds, nanos),
                 _ => (0, 0, 0),
@@ -2948,12 +2983,17 @@ fn temporal_difference(
         _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
     };
     let diff = na - nb;
-    let secs_total = diff.div_euclid(1_000_000_000) as i64;
+    // Truncating division, not Euclidean. `div_euclid`/`rem_euclid` floor
+    // toward negative infinity, so a difference of -0.4s split into
+    // (seconds, nanos) becomes (-1, +600_000_000) and renders as `PT-1.6S`
+    // instead of `PT-0.4S`. The components of a duration must share a sign;
+    // `/` and `%` truncate toward zero and do (#775).
+    let secs_total = (diff / 1_000_000_000) as i64;
     Ok(PropertyValue::Duration {
         months: 0,
         days: secs_total / 86_400,
         seconds: secs_total % 86_400,
-        nanos: diff.rem_euclid(1_000_000_000) as i32,
+        nanos: (diff % 1_000_000_000) as i32,
     })
 }
 

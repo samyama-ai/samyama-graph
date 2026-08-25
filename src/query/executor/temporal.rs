@@ -223,50 +223,31 @@ pub fn parse_timezone(tz: &str) -> Result<(i32, Option<String>), ExecutionError>
     Ok((resolve_offset(&spec, 0, 0)?, zone_name(&spec)))
 }
 
-/// `PropertyValue::Date` from an ISO string: `2015-07-21`, `20150721`,
-/// `2015-W30-2`, `2015-201`.
+/// `PropertyValue::Date` from an ISO string, in any spelling.
 pub fn parse_date(s: &str) -> Result<PropertyValue, ExecutionError> {
-    use chrono::NaiveDate;
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is a date");
-    let t = s.trim();
-    let parsed = NaiveDate::parse_from_str(t, "%Y-%m-%d")
-        .or_else(|_| NaiveDate::parse_from_str(t, "%Y%m%d"))
-        .or_else(|_| NaiveDate::parse_from_str(t, "%Y-%j"))
-        .map_err(|_| err(format!("cannot parse date: {s}")))?;
-    Ok(PropertyValue::Date(
-        parsed.signed_duration_since(epoch).num_days() as i32,
-    ))
+    Ok(PropertyValue::Date(parse_iso_date(s)?))
 }
 
 /// Nanoseconds since midnight, and an offset if the string carried one.
 pub fn parse_time_parts(s: &str) -> Result<(i64, Option<i32>), ExecutionError> {
-    let t = s.trim();
-    // Split the offset off the end before parsing the clock, so `-05:00` is
-    // not mistaken for part of the time.
-    let (clock, offset) = split_offset(t)?;
-    let nt = chrono::NaiveTime::parse_from_str(clock, "%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveTime::parse_from_str(clock, "%H:%M:%S"))
-        .or_else(|_| chrono::NaiveTime::parse_from_str(clock, "%H:%M"))
-        .or_else(|_| chrono::NaiveTime::parse_from_str(clock, "%H"))
-        .map_err(|_| err(format!("cannot parse time: {s}")))?;
-    let nanos = nt
-        .signed_duration_since(chrono::NaiveTime::MIN)
-        .num_nanoseconds()
-        .ok_or_else(|| err(format!("time out of range: {s}")))?;
-    Ok((nanos, offset))
+    let (clock, offset) = split_offset(s.trim())?;
+    Ok((parse_iso_time(clock)?, offset))
 }
 
 /// Separate a trailing UTC offset from the clock part.
+///
+/// Care is needed with `-`: in `2015-07-21T21:40:32-04` the offset dash is the
+/// last one, but in `2015-07-21` every dash belongs to the date. The rule used
+/// here is that an offset dash must come after a `T` when one is present, and
+/// otherwise after the time has started.
 fn split_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
     if let Some(stripped) = t.strip_suffix('Z').or_else(|| t.strip_suffix('z')) {
         return Ok((stripped, Some(0)));
     }
-    // Scan from the right for a sign that begins an offset, not a date dash.
-    if let Some(pos) = t.rfind(['+', '-']) {
-        // A '-' inside the first 8 characters of a date-time belongs to the
-        // date, not to an offset.
-        let looks_like_offset = t[pos..].contains(':') || t[pos..].len() <= 5;
-        if looks_like_offset && pos > 0 {
+    let search_from = t.rfind('T').map(|i| i + 1).unwrap_or(0);
+    if let Some(rel) = t[search_from..].rfind(['+', '-']) {
+        let pos = search_from + rel;
+        if pos > 0 {
             let (clock, off) = t.split_at(pos);
             let (secs, _) = parse_timezone(off)?;
             return Ok((clock, Some(secs)));
@@ -470,4 +451,141 @@ fn build(
         }
         other => return Err(err(format!("cannot truncate to {other}"))),
     })
+}
+
+
+/// Split a trailing `[Area/City]` zone suffix off an ISO string.
+///
+/// `2015-07-21T21:40:32.142+02:00[Europe/Stockholm]` carries **both** an offset
+/// and a zone, and they are not redundant: the offset is what the value had
+/// when it was written, the zone is the rule it follows. Cypher keeps both, so
+/// the parser must not discard either.
+pub fn split_zone_suffix(s: &str) -> (&str, Option<&str>) {
+    let t = s.trim();
+    if let Some(open) = t.rfind('[') {
+        if t.ends_with(']') {
+            return (&t[..open], Some(&t[open + 1..t.len() - 1]));
+        }
+    }
+    (t, None)
+}
+
+/// A date in any ISO-8601 spelling the TCK uses, as days since the epoch.
+///
+/// Six forms, and the compact ones are not decoration — `20150721`,
+/// `2015W302` and `2015202` all appear:
+///
+/// ```text
+/// 2015-07-21   20150721     calendar, extended and compact
+/// 2015-W30-2   2015W302     ISO week date
+/// 2015-202     2015202      ordinal day
+/// ```
+///
+/// Years may also be signed and wider than four digits (`-999999999-01-01`),
+/// which is why the year is scanned rather than taken as a fixed slice.
+pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
+    use chrono::{Datelike, NaiveDate};
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let t = s.trim();
+    if t.is_empty() {
+        return Err(err("empty date"));
+    }
+
+    // Signed, variable-width year.
+    let (sign, rest) = match t.strip_prefix('-') {
+        Some(r) => (-1i64, r),
+        None => (1i64, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 4 {
+        return Err(err(format!("cannot parse date: {s}")));
+    }
+    // A compact form packs everything into one digit run; an extended form
+    // stops at four.
+    let (year_str, tail) = if digits.len() >= 8 && !rest[digits.len()..].starts_with('-') {
+        (&digits[..4], &rest[4..])
+    } else {
+        (&digits[..digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })], &rest[digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })..])
+    };
+    let year = sign * year_str.parse::<i64>().map_err(|_| err(format!("bad year in {s}")))?;
+    let year = i32::try_from(year).map_err(|_| err(format!("year out of range in {s}")))?;
+    let tail = tail.trim_start_matches('-');
+
+    let date = if tail.is_empty() {
+        NaiveDate::from_ymd_opt(year, 1, 1)
+    } else if let Some(w) = tail.strip_prefix('W').or_else(|| tail.strip_prefix('w')) {
+        let w = w.replace('-', "");
+        let week: u32 = w[..2].parse().map_err(|_| err(format!("bad week in {s}")))?;
+        let dow: u32 = if w.len() > 2 { w[2..3].parse().unwrap_or(1) } else { 1 };
+        NaiveDate::from_isoywd_opt(year, week, weekday_from_iso(dow))
+    } else {
+        let d = tail.replace('-', "");
+        match d.len() {
+            // Ordinal day: three digits.
+            3 => NaiveDate::from_yo_opt(year, d.parse().map_err(|_| err("bad ordinal"))?),
+            // Month only.
+            2 => NaiveDate::from_ymd_opt(year, d.parse().map_err(|_| err("bad month"))?, 1),
+            4 => NaiveDate::from_ymd_opt(
+                year,
+                d[..2].parse().map_err(|_| err("bad month"))?,
+                d[2..].parse().map_err(|_| err("bad day"))?,
+            ),
+            _ => return Err(err(format!("cannot parse date: {s}"))),
+        }
+    };
+    let date = date.ok_or_else(|| err(format!("invalid date: {s}")))?;
+    Ok(date.signed_duration_since(epoch).num_days() as i32)
+}
+
+/// A time of day in any ISO-8601 spelling, as nanoseconds since midnight.
+///
+/// `21:40:32.142`, `214032.142`, `2140`, `21`. The fraction may use a comma,
+/// which ISO-8601 permits and the TCK uses.
+pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
+    let t = s.trim().replace(',', ".");
+    if t.is_empty() {
+        return Err(err("empty time"));
+    }
+    let (clock, frac) = match t.split_once('.') {
+        Some((c, f)) => (c.to_string(), f.to_string()),
+        None => (t.clone(), String::new()),
+    };
+    let c = clock.replace(':', "");
+    if !c.chars().all(|ch| ch.is_ascii_digit()) || c.is_empty() {
+        return Err(err(format!("cannot parse time: {s}")));
+    }
+    let take = |a: usize, b: usize| -> i64 {
+        c.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(0)
+    };
+    let (h, m, sec) = match c.len() {
+        1 | 2 => (take(0, c.len()), 0, 0),
+        3 | 4 => (take(0, 2), take(2, c.len()), 0),
+        5 | 6 => (take(0, 2), take(2, 4), take(4, c.len())),
+        _ => return Err(err(format!("cannot parse time: {s}"))),
+    };
+    if h > 24 || m > 59 || sec > 59 {
+        return Err(err(format!("time out of range: {s}")));
+    }
+    // Pad or trim the fraction to exactly nine digits.
+    let nanos: i64 = if frac.is_empty() {
+        0
+    } else {
+        let mut f = frac.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+        f.truncate(9);
+        while f.len() < 9 {
+            f.push('0');
+        }
+        f.parse().unwrap_or(0)
+    };
+    Ok((h * 3600 + m * 60 + sec) * NANOS_PER_SEC + nanos)
+}
+
+
+/// Split a date-time string into its clock part and a written UTC offset.
+///
+/// Public because the `datetime()` string form needs the same dash rule the
+/// time parser uses: in `2015-07-21T21:40:32-04` the offset dash is the last
+/// one *after the `T`*, while in `2015-07-21` every dash belongs to the date.
+pub fn parse_datetime_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
+    split_offset(t)
 }
