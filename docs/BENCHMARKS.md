@@ -140,26 +140,26 @@ cargo run --release --example tck_runner -- --features <openCypher>/tck/features
 |---|---:|
 | scenarios in the TCK | 3,897 |
 | **evaluated** by the harness | **3,761** (96.5%) |
-| pass | 3,540 |
+| pass | 3,622 |
 | skipped | 136 |
-| **pass rate, of evaluated** | **94.1%** |
+| **pass rate, of evaluated** | **96.3%** |
 | gate `CH-TCK ≥ 85%` | **met** |
-| gate *≥ best competitor* | **met** — 14.5 points ahead |
-| wrong answers, of the 221 failures | 165 |
+| gate *≥ best competitor* | **met** — 16.6 points ahead |
+| wrong answers, of the 139 failures | 97 |
 
-Measured at `3dd1a65`; the CI floor is a **count**, currently `--min-pass 3540`,
+Measured at `6946261`; the CI floor is a **count**, currently `--min-pass 3622`,
 and rises with each merge that earns it.
 
 The last row is tracked separately from the pass rate because the two failure
 classes are not equally bad: an error reaches the caller, a wrong answer does
-not. It was 242 at the start of 2026-08-25's fourth cycle. The `CH-TCK`
+not. It was 242 at the start of 2026-08-25's fourth cycle and 286 the day before. The `CH-TCK`
 envelope's own status stays `fail` while it is above zero, which is why the
 scorecard shows a met requirement inside a failing envelope.
 
 ### The corpus tripled, and the old figure was measured on a third of it
 
 The table above replaces `1,244 evaluated / 81.9%`. Nothing regressed — the
-pass *count* went from 1,019 to 3,540. The harness had been skipping every
+pass *count* went from 1,019 to 3,622. The harness had been skipping every
 `Scenario Outline`: 274 of them, expanding to ~2,280 concrete cases, and the
 harder ones, because an outline is how the TCK enumerates a feature's edge
 cases once its happy path is established (#756).
@@ -176,12 +176,12 @@ executes and renders:
 
 | Engine | 1,249-scenario set (2026-08-19) | 3,766-scenario set |
 |---|---:|---:|
-| **Samyama** `3dd1a65` | 81.9% | **93.9%** |
+| **Samyama** `6946261` | 81.9% | **96.0%** |
 | Neo4j 5 | 98.9% | 79.4% |
 | Memgraph | 89.8% | 65.9% |
 | FalkorDB | 89.1% | 65.7% |
 
-The Samyama row reads **93.9%** where the table above reads 94.1%, and both are
+The Samyama row reads **96.0%** where the table above reads 96.3%, and both are
 right: the cross-engine comparison scores 3,766 scenarios through the judge
 path, the direct run evaluates 3,761. The judge scores five the direct run
 skips and passes five fewer, identically across measurements. The judge figure
