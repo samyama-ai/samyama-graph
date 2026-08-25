@@ -39,6 +39,8 @@ pub enum ValidationError {
     NonBooleanOperand(&'static str),
     /// Property access on a value that cannot carry properties.
     PropertyAccessOnNonMap { name: String, what: &'static str },
+    /// A pattern predicate naming a variable nothing has bound.
+    UnboundPatternVariable(String),
     /// One variable bound to two different kinds of entity.
     VariableKindConflict {
         name: String,
@@ -85,6 +87,12 @@ impl std::fmt::Display for ValidationError {
                 "`{name}` is bound to {first} and then to {second} in the same scope. A \
                  variable names one entity, and an entity is a node, a relationship or a \
                  path -- not two of them. Rename one of the two."
+            ),
+            Self::UnboundPatternVariable(name) => write!(
+                f,
+                "`{name}` is introduced by a pattern used as a predicate, which tests \
+                 whether a pattern exists rather than binding anything. Bind `{name}` \
+                 in a MATCH first, or use EXISTS {{ ... }}, which may introduce names."
             ),
             Self::PropertyAccessOnNonMap { name, what } => write!(
                 f,
@@ -1108,7 +1116,104 @@ fn not_an_entity(e: &Expression) -> bool {
     )
 }
 
+
+/// A pattern predicate in `WHERE` may not **introduce** variables (#798).
+///
+/// ```text
+/// MATCH (n) WHERE (n)-[r]->(a) RETURN n
+///   -> SyntaxError: UndefinedVariable      -- r and a are bound nowhere
+/// ```
+///
+/// The pattern is a *test*, not a match: it asks whether an edge exists, and
+/// `r` and `a` have no meaning outside it. openCypher requires them to be
+/// already bound; `EXISTS { ... }` is the form that may introduce names.
+///
+/// 15 scenarios in `Pattern1` [10]. We answered every one, silently binding
+/// variables that go nowhere.
+///
+/// Anonymous positions are fine — `(n)-[]->()` introduces nothing — which is
+/// why the check is on *named* variables rather than on pattern complexity.
+fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Names a pattern binds, ignoring anonymous positions.
+    fn pattern_named(pattern: &crate::query::ast::Pattern) -> HashSet<String> {
+        let mut out = HashSet::new();
+        pattern_vars(pattern, &mut out);
+        out
+    }
+
+    /// Walk an expression for pattern predicates, checking each against scope.
+    fn walk(
+        e: &Expression,
+        bound: &HashSet<String>,
+    ) -> Result<(), ValidationError> {
+        if let Expression::ExistsSubquery { pattern, .. } = e {
+            for name in pattern_named(pattern) {
+                if !bound.contains(&name) {
+                    return Err(ValidationError::UnboundPatternVariable(name));
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, bound)?;
+        }
+        Ok(())
+    }
+
+    // What the reading clauses have bound by the time the WHERE runs.
+    let mut bound: HashSet<String> = HashSet::new();
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => pattern_vars(&mc.pattern, &mut bound),
+                Clause::Create(cc) => pattern_vars(&cc.pattern, &mut bound),
+                Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut bound),
+                Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::With(w) => bound = projected_names(&w.items),
+                Clause::Where(w) => walk(&w.predicate, &bound)?,
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        pattern_vars(&mc.pattern, &mut bound);
+    }
+    if let Some(u) = &query.unwind_clause {
+        bound.insert(u.variable.clone());
+    }
+    for u in &query.extra_unwind_clauses {
+        bound.insert(u.variable.clone());
+    }
+    if let Some(w) = &query.where_clause {
+        walk(&w.predicate, &bound)?;
+    }
+    // Post-WITH stages get the projection's scope plus their own matches.
+    for (wc, uw, matches, wh) in &query.extra_with_stages {
+        bound = projected_names(&wc.items);
+        if let Some(u) = uw { bound.insert(u.variable.clone()); }
+        for mc in matches { pattern_vars(&mc.pattern, &mut bound); }
+        if let Some(w) = wh { walk(&w.predicate, &bound)?; }
+    }
+    if let Some(wc) = &query.with_clause {
+        bound = projected_names(&wc.items);
+        for mc in query.match_clauses.iter().skip(upto) {
+            pattern_vars(&mc.pattern, &mut bound);
+        }
+        if let Some(w) = &query.post_with_where_clause {
+            walk(&w.predicate, &bound)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_pattern_predicate_vars(query)?;
+
     validate_property_access_targets(query)?;
 
     validate_boolean_operands(query)?;
