@@ -3677,13 +3677,22 @@ fn shift_temporal(
     // to the same day — so this only showed up on subtraction and on
     // mixed-sign durations (#817).
     let drop_sub_day = matches!(v, PropertyValue::Date(_));
+    // A time of day has no calendar, so a duration's **date part is dropped**:
+    // months and days cannot move a clock. This is the mirror of the rule
+    // above, and it is why `localtime('12:31:14') + duration({months: 1,
+    // days: -14, hours: 16})` is a time sixteen hours later and not an error
+    // (#853).
+    let drop_date_part = matches!(v, PropertyValue::LocalTime(_) | PropertyValue::Time { .. });
     let exact = if drop_sub_day {
         days as i128 * 86_400 * 1_000_000_000
+    } else if drop_date_part {
+        seconds as i128 * 1_000_000_000 + nanos as i128
     } else {
         days as i128 * 86_400 * 1_000_000_000
             + seconds as i128 * 1_000_000_000
             + nanos as i128
     };
+    let months = if drop_date_part { 0 } else { months };
 
     // Calendar months first, on whatever date part the value has.
     let month_shift_nanos = if months == 0 {
@@ -4051,63 +4060,110 @@ fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64
 }
 
 /// Parse ISO 8601 duration string (e.g. "P1Y2M3DT4H5M6S")
+/// Parse an ISO-8601 duration, with **per-component signs** (#853).
+///
+/// `toString` renders a mixed-sign duration as `P1DT-0.001S`, and Cypher
+/// requires `duration(toString(d)) = d`. The old scanner accepted only digits
+/// and `.` into its number buffer, so a `-` was silently skipped and the value
+/// came back positive -- a round trip that returned a *different duration* and
+/// reported success.
+///
+/// It also computed the fraction as `(val - val.floor()) * 1e9` in `f64`, so
+/// `PT-2.001S` came back as `PT2.000999999S`: wrong sign and one nanosecond
+/// short. The fraction is now read from its digits, which is exact.
+///
+/// Time components are summed in nanoseconds and split once at the end, so the
+/// result's seconds and nanoseconds share the sign of their total (#806).
 fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
-    let s = s.trim();
-    if !s.starts_with('P') && !s.starts_with('p') {
+    let text = s.trim();
+    if !text.starts_with('P') && !text.starts_with('p') {
         return Err(ExecutionError::RuntimeError(format!("Invalid duration format: {}", s)));
     }
-    let rest = &s[1..];
-    let mut months: i64 = 0;
-    let mut days: i64 = 0;
-    let mut seconds: i64 = 0;
-    let mut nanos: i32 = 0;
-    let _ = nanos; // suppress warning
-
-    let (date_part, time_part) = if let Some(idx) = rest.find(|c: char| c == 'T' || c == 't') {
-        (&rest[..idx], &rest[idx + 1..])
-    } else {
-        (rest, "")
+    let rest = &text[1..];
+    let (date_part, time_part) = match rest.find(|c: char| c == 'T' || c == 't') {
+        Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+        None => (rest, ""),
     };
 
-    // Parse date part: Y, M, D
-    let mut num_buf = String::new();
-    for ch in date_part.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            num_buf.push(ch);
-        } else {
-            let val: f64 = num_buf.parse().unwrap_or(0.0);
-            num_buf.clear();
-            match ch {
-                'Y' | 'y' => months += (val * 12.0) as i64,
-                'M' | 'm' => months += val as i64,
-                'W' | 'w' => days += (val * 7.0) as i64,
-                'D' | 'd' => days += val as i64,
-                _ => {}
-            }
+    const NPS: i128 = 1_000_000_000;
+    // A mean Gregorian month is exactly 2,629,746 seconds (#829).
+    const MEAN_MONTH_NANOS: i128 = 2_629_746 * NPS;
+
+    let mut months: i128 = 0;
+    let mut days: i128 = 0;
+    let mut time_nanos: i128 = 0;
+
+    /// One component: an optional sign, digits, an optional fraction, a unit.
+    ///
+    /// Returns the value scaled to `unit_nanos`, exactly -- the fraction is
+    /// read from its digits rather than through a float, so `.001` is a
+    /// million nanoseconds and not 999,999.
+    fn scaled(sign: i128, int_digits: &str, frac_digits: &str, unit_nanos: i128) -> i128 {
+        let whole: i128 = int_digits.parse().unwrap_or(0);
+        let mut out = whole * unit_nanos;
+        if !frac_digits.is_empty() {
+            let num: i128 = frac_digits.parse().unwrap_or(0);
+            let denom = 10i128.checked_pow(frac_digits.len() as u32).unwrap_or(1);
+            out += num * unit_nanos / denom;
         }
+        sign * out
     }
 
-    // Parse time part: H, M, S
-    num_buf.clear();
-    for ch in time_part.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            num_buf.push(ch);
-        } else {
-            let val: f64 = num_buf.parse().unwrap_or(0.0);
-            num_buf.clear();
+    let mut scan = |section: &str, is_time: bool| -> Result<(), ExecutionError> {
+        let mut sign: i128 = 1;
+        let mut int_digits = String::new();
+        let mut frac_digits = String::new();
+        let mut in_fraction = false;
+        for ch in section.chars() {
             match ch {
-                'H' | 'h' => seconds += (val * 3600.0) as i64,
-                'M' | 'm' => seconds += (val * 60.0) as i64,
-                'S' | 's' => {
-                    seconds += val as i64;
-                    nanos = ((val - val.floor()) * 1_000_000_000.0) as i32;
+                '-' if int_digits.is_empty() && frac_digits.is_empty() => sign = -1,
+                '+' if int_digits.is_empty() && frac_digits.is_empty() => sign = 1,
+                '.' | ',' => in_fraction = true,
+                c if c.is_ascii_digit() => {
+                    if in_fraction { frac_digits.push(c) } else { int_digits.push(c) }
                 }
-                _ => {}
+                unit => {
+                    // Years, weeks and a fractional month or day contribute to
+                    // the next unit down, using the same constants the map
+                    // constructor derives (#829).
+                    match unit {
+                        'Y' | 'y' => months += scaled(sign, &int_digits, &frac_digits, 12),
+                        'W' | 'w' => days += scaled(sign, &int_digits, &frac_digits, 7),
+                        'D' | 'd' if !is_time => {
+                            let total = scaled(sign, &int_digits, &frac_digits, NPS * 86_400);
+                            days += total / (NPS * 86_400);
+                            time_nanos += total % (NPS * 86_400);
+                        }
+                        'M' | 'm' if !is_time => {
+                            let total = scaled(sign, &int_digits, &frac_digits, MEAN_MONTH_NANOS);
+                            months += total / MEAN_MONTH_NANOS;
+                            let rem = total % MEAN_MONTH_NANOS;
+                            days += rem / (NPS * 86_400);
+                            time_nanos += rem % (NPS * 86_400);
+                        }
+                        'H' | 'h' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 3600),
+                        'M' | 'm' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 60),
+                        'S' | 's' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS),
+                        _ => {}
+                    }
+                    sign = 1;
+                    int_digits.clear();
+                    frac_digits.clear();
+                    in_fraction = false;
+                }
             }
         }
-    }
+        Ok(())
+    };
+    scan(date_part, false)?;
+    scan(time_part, true)?;
 
-    Ok(Value::Property(PropertyValue::Duration { months, days, seconds, nanos }))
+    Ok(Value::Property(PropertyValue::Duration {
+        months: months as i64,
+        days: days as i64,
+        seconds: (time_nanos / NPS) as i64,
+        nanos: (time_nanos % NPS) as i32,
+    }))
 }
 
 /// Shared CASE expression evaluation
