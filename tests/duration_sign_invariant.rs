@@ -84,6 +84,25 @@ fn every_duration_path_is_sign_consistent() {
         "localdatetime('2018-01-01T12:00') - localdatetime('2018-01-02T10:00')",
         // and durations of each other
         "duration({days: 1}) - duration({days: 3, hours: 4})",
+        // **The constructor**, which this list did not reach until a mixed-sign
+        // duration escaped from it (#829). Every entry above is arithmetic, so
+        // the whole class of "built wrong in the first place" was uncovered --
+        // and the two cases below want *opposite* splits, which is what makes
+        // the constructor its own path rather than a caller of the others:
+        //
+        //   {seconds: 2, milliseconds: -1}  is +1.999s -> (1s, +999000000ns)
+        //   {nanoseconds: -1}               is -1ns    -> (0s, -1ns)
+        //
+        // A split chosen to satisfy either one alone violates the invariant on
+        // the other.
+        "duration({seconds: 2, milliseconds: -1})",
+        "duration({nanoseconds: -1})",
+        "duration({seconds: -2, milliseconds: 1})",
+        "duration({minutes: -1, seconds: 1})",
+        "duration({months: -0.75})",
+        "duration({days: -1.5})",
+        "duration({weeks: -2.5})",
+        "duration({hours: 1, minutes: -30, seconds: -1, nanoseconds: -1})",
     ];
     for e in exprs {
         assert_sign_consistent(e);

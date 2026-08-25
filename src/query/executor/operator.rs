@@ -2929,29 +2929,82 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     parse_iso_duration(s)
                 }
                 Value::Property(PropertyValue::Map(map)) => {
-                    let months = map.get("months").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let days = map.get("days").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let hours = map.get("hours").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let minutes = map.get("minutes").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let seconds = map.get("seconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let years = map.get("years").and_then(|v| v.as_integer()).unwrap_or(0);
-                    // The sub-second components, which were hardcoded to zero:
-                    // `duration({nanoseconds: 1})` silently lost the 1, so the
-                    // value was already wrong before any arithmetic touched it
-                    // (#787). Additive with each other, as everywhere else.
-                    let millis = map.get("milliseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let micros = map.get("microseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let nanos_in = map.get("nanoseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let weeks = map.get("weeks").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let total_months = years * 12 + months;
-                    let sub_nanos = millis * 1_000_000 + micros * 1_000 + nanos_in;
-                    let total_seconds = hours * 3600 + minutes * 60 + seconds
-                        + sub_nanos.div_euclid(1_000_000_000);
+                    // Every component may be **fractional**, and the fraction
+                    // carries into the next smaller unit (#829):
+                    //
+                    //     duration({months: 0.75})   ->  P22DT19H51M49.5S
+                    //     duration({weeks: 2.5})     ->  P17DT12H
+                    //     duration({months: 5, days: 1.5})  ->  P5M1DT12H
+                    //
+                    // `as_integer()` returns `None` for a float, so each of
+                    // these silently became zero: `duration({months: 0.75})`
+                    // was `PT0S`, a well-formed duration nothing downstream
+                    // could question. (#787 was the same shape, one component
+                    // over.)
+                    let num = |key: &str| -> f64 {
+                        map.get(key)
+                            .and_then(|v| v.as_integer().map(|i| i as f64).or_else(|| v.as_float()))
+                            .unwrap_or(0.0)
+                    };
+                    // A mean Gregorian month is 365.2425/12 days, which is
+                    // **exactly 2,629,746 seconds**. Carrying in seconds rather
+                    // than in days keeps the arithmetic on integers-as-floats:
+                    // 0.75 months is 1,972,309.5s exactly, where 0.75 x
+                    // 30.436875 days is not exactly representable and lands a
+                    // hundred nanoseconds short of the expected 49.5S.
+                    const SECS_PER_MEAN_MONTH: f64 = 2_629_746.0;
+
+                    let months_f = num("years") * 12.0 + num("months");
+                    let months = months_f.trunc();
+                    // A month's fraction becomes whole days first, then time --
+                    // 0.75 months is 22 days *and* 19:51:49.5, not 22.83 days.
+                    let month_carry_secs = (months_f - months) * SECS_PER_MEAN_MONTH;
+                    let carry_days = (month_carry_secs / 86_400.0).trunc();
+                    let month_rem_secs = month_carry_secs - carry_days * 86_400.0;
+
+                    let days_f = num("days") + num("weeks") * 7.0 + carry_days;
+                    let days = days_f.trunc();
+
+                    let secs_f = num("hours") * 3600.0
+                        + num("minutes") * 60.0
+                        + num("seconds")
+                        + (days_f - days) * 86_400.0
+                        + month_rem_secs;
+                    let secs = secs_f.trunc();
+
+                    // Sub-second components are additive with each other and
+                    // with whatever fell out of the seconds (#787).
+                    let nanos_f = num("milliseconds") * 1_000_000.0
+                        + num("microseconds") * 1_000.0
+                        + num("nanoseconds")
+                        + (secs_f - secs) * 1_000_000_000.0;
+                    // Ties to even: `.round()` goes half away from zero, which
+                    // biases an exact `...000.5` upward every time.
+                    let nanos_total = nanos_f.round_ties_even() as i64;
+
+                    // Combine seconds and nanoseconds into one total **before**
+                    // splitting, then split truncating toward zero. Neither
+                    // split alone is right, and each looks right on the cases
+                    // the other gets wrong:
+                    //
+                    //   {seconds: 2, milliseconds: -1}  is PT1.999S
+                    //     truncating in place: (2s, -1ms)   mixed signs
+                    //     Euclidean:           (1s, +999ms) correct
+                    //
+                    //   {nanoseconds: -1}               is PT-0.000000001S
+                    //     truncating in place: (0s, -1ns)   correct
+                    //     Euclidean:           (-1s, +999999999ns) mixed signs
+                    //
+                    // The invariant (#806) is that the components share the
+                    // sign of the **total**, so the total is what has to be
+                    // formed first. i128 because seconds can be large and the
+                    // nanosecond product overflows i64 past ~292 years (#814).
+                    let total_nanos = secs as i128 * 1_000_000_000 + nanos_total as i128;
                     Ok(Value::Property(PropertyValue::Duration {
-                        months: total_months,
-                        days: days + weeks * 7,
-                        seconds: total_seconds,
-                        nanos: sub_nanos.rem_euclid(1_000_000_000) as i32,
+                        months: months as i64,
+                        days: days as i64,
+                        seconds: (total_nanos / 1_000_000_000) as i64,
+                        nanos: (total_nanos % 1_000_000_000) as i32,
                     }))
                 }
                 _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
