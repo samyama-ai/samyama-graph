@@ -6847,6 +6847,7 @@ mod tests {
             match_clauses: vec![],
             where_clause: None,
             return_clause: None,
+            post_with_unwind_clauses: vec![],
             create_clause: None,
             order_by: None,
             limit: None,
