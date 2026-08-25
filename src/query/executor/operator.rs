@@ -301,6 +301,27 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("XOR requires boolean operands".to_string())),
         },
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            // **NaN orders as false, not null.** `partial_cmp` returns `None`
+            // for it, which this branch maps to null -- the same answer it
+            // gives for two values that cannot be compared at all. Cypher
+            // separates the two: incomparable is null, NaN is false, and all
+            // four operators are false including `>=` against itself (#855).
+            //
+            // Only against another **number**. `0.0/0.0 < 'a'` is still null,
+            // because comparing across types is null before NaN is considered
+            // -- returning false there says "I compared them and they did not
+            // order", which is a different claim. A blanket NaN rule cost one
+            // scenario exactly that way.
+            let is_nan = |p: &PropertyValue| matches!(p, PropertyValue::Float(f) if f.is_nan());
+            let numeric = |p: &PropertyValue| {
+                matches!(p, PropertyValue::Float(_) | PropertyValue::Integer(_))
+            };
+            if (is_nan(&left_prop) || is_nan(&right_prop))
+                && numeric(&left_prop)
+                && numeric(&right_prop)
+            {
+                return Ok(Value::Property(PropertyValue::Boolean(false)));
+            }
             let cmp = cypher_ordering(&left_prop, &right_prop);
             match (op, cmp) {
                 (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
@@ -1638,6 +1659,27 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
         // that had been passing went red, which is the duplicated-evaluator
         // shape this codebase keeps producing: patching the copy in front of
         // you fixes nothing.
+        // Lists order **lexicographically**, then by length: `[1, 0] >= [1]`
+        // is true because the shared prefix is equal and the left is longer.
+        // There was no arm for this at all, so every list comparison fell to
+        // `_ => None` and answered null (#855).
+        //
+        // A null at a position that has to be compared makes the answer
+        // undecidable, which is what `None` means here. It is not reached by a
+        // list that is merely *longer* than the other: `[1, null] >= [1]` is
+        // decided by the length, the null never compared.
+        (Array(l), Array(r)) => {
+            for (a, b) in l.iter().zip(r.iter()) {
+                if matches!(a, Null) || matches!(b, Null) {
+                    return None;
+                }
+                match cypher_ordering(a, b) {
+                    Some(std::cmp::Ordering::Equal) => continue,
+                    other => return other,
+                }
+            }
+            Some(l.len().cmp(&r.len()))
+        }
         (Date(l), Date(r)) => Some(l.cmp(r)),
         (LocalTime(l), LocalTime(r)) => Some(l.cmp(r)),
         (
