@@ -80,7 +80,16 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         // NOT sits between AND and the comparisons: `NOT a STARTS WITH b` negates the
         // comparison, while `NOT a AND b` still groups as `(NOT a) AND b`.
         .op(Op::prefix(Rule::not_op))
-        .op(Op::infix(Rule::in_op, Assoc::Left) | Op::infix(Rule::comparison_op, Assoc::Left))
+        .op(Op::infix(Rule::comparison_op, Assoc::Left))
+        // `IN` binds **tighter than every comparison operator**, so
+        // `a < b IN c` is `a < (b IN c)` and not `(a < b) IN c` (#833).
+        //
+        // Sharing a level with the comparisons made it group left, and the two
+        // readings agree whenever the list holds what the comparison would have
+        // produced -- which is most hand-written queries and every example
+        // anyone reaches for. The TCK settles it by enumerating all three
+        // truth values against six lists at once.
+        .op(Op::infix(Rule::in_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
         // Exponentiation binds tightest and associates to the *right*:
