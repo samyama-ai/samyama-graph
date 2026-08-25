@@ -107,3 +107,46 @@ fn time_only_pairs_use_the_plain_difference() {
         "PT-0.4S"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mixed-type pairs (#807): only the components the two values *share* are
+// compared.
+// ---------------------------------------------------------------------------
+
+/// A date and a time share only the clock.
+///
+/// `duration.between(date(...), localtime('16:30'))` is `PT16H30M` — the date
+/// contributes nothing, because a date has no time and a time has no date.
+/// Treating the missing part as zero gave `P-5396DT-7H-30M`: a real duration
+/// between two instants that were never comparable.
+#[test]
+fn a_date_and_a_time_compare_only_their_clocks() {
+    assert_eq!(rendered("duration.between(date('1984-10-11'), localtime('16:30'))"), "PT16H30M");
+    assert_eq!(rendered("duration.between(date('1984-10-11'), time('16:30+0100'))"), "PT16H30M");
+    assert_eq!(rendered("duration.between(localtime('14:30'), date('2015-06-24'))"), "PT-14H-30M");
+}
+
+/// **Offsets are applied only when both sides carry one.**
+///
+/// Two zoned times compare as instants: `time('16:30+0100')` is 15:30 UTC, so
+/// it is one hour after `time('14:30')`. But an *unzoned* time has no instant
+/// to convert to, so against `localtime('14:30')` the same value is compared as
+/// written — two hours.
+///
+/// Normalising unconditionally gets the first right and the second wrong;
+/// never normalising does the reverse. Both are asserted because either alone
+/// permits the other to regress.
+#[test]
+fn offsets_apply_only_when_both_sides_are_zoned() {
+    assert_eq!(rendered("duration.between(time('14:30'), time('16:30+0100'))"), "PT1H");
+    assert_eq!(rendered("duration.between(localtime('14:30'), time('16:30+0100'))"), "PT2H");
+}
+
+/// A local date-time against a zoned time also compares local readings.
+#[test]
+fn a_localdatetime_against_a_zoned_time_uses_local_readings() {
+    assert_eq!(
+        rendered("duration.between(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100'))"),
+        "PT-5H-10M-32.142S"
+    );
+}

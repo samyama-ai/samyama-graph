@@ -3393,9 +3393,49 @@ fn temporal_difference_calendar(
 ) -> Result<PropertyValue, ExecutionError> {
     use chrono::Datelike;
 
-    // A pure time-of-day pair has no calendar part, so it falls through to the
-    // plain difference — which is what `PT-0.4S` and the inSeconds family need.
-    let (Some(da), Some(db)) = (date_part_of(a), date_part_of(b)) else {
+    // Only the components the two values **share** are compared. A date has no
+    // time and a time has no date, so `duration.between(date(...),
+    // localtime('16:30'))` is `PT16H30M` — the clock difference alone, with the
+    // date side contributing nothing.
+    //
+    // Treating the missing part as zero instead gave `P-5396DT-7H-30M`: the
+    // date's midnight measured against a time of day, which is a real duration
+    // between two instants that were never comparable (#807).
+    let (da, db) = (date_part_of(a), date_part_of(b));
+    if da.is_none() || db.is_none() {
+        // Compare instants only when **both** sides carry an offset; otherwise
+        // compare the local readings.
+        //
+        // `time('14:30')` vs `time('16:30+0100')` is `PT1H` — both are zoned, so
+        // the second is 15:30 UTC. But `localtime('14:30')` vs
+        // `time('16:30+0100')` is `PT2H`: the unzoned side has no instant to
+        // convert to, so the offset is not applied to the other. Normalising
+        // unconditionally gets the first right and the second wrong; not
+        // normalising at all does the reverse.
+        let has_offset = |v: &PropertyValue| matches!(v, PropertyValue::Time { .. });
+        let both_zoned = has_offset(a) && has_offset(b);
+        let clock = |v: &PropertyValue| -> Option<i64> {
+            let local = time_part_of(v)?;
+            Some(match v {
+                PropertyValue::Time { offset_seconds, .. } if both_zoned => {
+                    local - *offset_seconds as i64 * 1_000_000_000
+                }
+                _ => local,
+            })
+        };
+        let (ta, tb) = (clock(a), clock(b));
+        // One side may have a date and no time — `duration.between(date(...),
+        // localtime(...))` compares the clocks, and a date's clock is midnight.
+        let (ta, tb) = (ta.unwrap_or(0), tb.unwrap_or(0));
+        let diff = ta - tb;
+        return Ok(PropertyValue::Duration {
+            months: 0,
+            days: 0,
+            seconds: diff / 1_000_000_000,
+            nanos: (diff % 1_000_000_000) as i32,
+        });
+    }
+    let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
     };
 
