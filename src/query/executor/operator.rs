@@ -107,6 +107,63 @@ fn node_id_of(v: &Value) -> Option<NodeId> {
     }
 }
 
+
+/// Cypher equality with three-valued logic, for values that may contain null.
+///
+/// `None` means *unknown*. The rule is not "any null makes it null": a
+/// definitive difference wins over an unknown one, because two lists that
+/// differ in length or in a known element are unequal whatever the nulls say.
+///
+/// ```text
+/// [1]        = [null]      -> null    (might be equal, cannot tell)
+/// [1, null]  = [1, 2]      -> null
+/// [1, null]  = [2, 3]      -> false   (the first pair settles it)
+/// [1]        = [1, null]   -> false   (lengths differ)
+/// [null]     = [null]      -> null
+/// ```
+///
+/// Scalar nulls are handled by the caller's existing three-valued guard; this
+/// is only reached for values that are not themselves null, which is why a
+/// bare `Null` here can only appear *inside* a list or map.
+fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
+    use PropertyValue::*;
+    match (a, b) {
+        (Null, _) | (_, Null) => None,
+        (Array(x), Array(y)) => {
+            // A length difference is definitive -- no element comparison can
+            // rescue it, so this is `false` and not `null`.
+            if x.len() != y.len() {
+                return Some(false);
+            }
+            let mut unknown = false;
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                match cypher_equals(xi, yi) {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            if unknown { None } else { Some(true) }
+        }
+        (Map(x), Map(y)) => {
+            // Differing key sets are definitive, for the same reason.
+            if x.len() != y.len() || !x.keys().all(|k| y.contains_key(k)) {
+                return Some(false);
+            }
+            let mut unknown = false;
+            for (k, xv) in x {
+                match cypher_equals(xv, &y[k]) {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            if unknown { None } else { Some(true) }
+        }
+        _ => Some(a == b),
+    }
+}
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
@@ -143,8 +200,18 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
     }
 
     let result = match op {
-        BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
-        BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+        // Three-valued, because a null *inside* a list makes the comparison
+        // unknown rather than false. The guard above only catches a null
+        // operand; `[1] = [null]` has no null operand and was answering
+        // `false` (#783).
+        BinaryOp::Eq => match cypher_equals(&left_prop, &right_prop) {
+            Some(v) => PropertyValue::Boolean(v),
+            None => PropertyValue::Null,
+        },
+        BinaryOp::Ne => match cypher_equals(&left_prop, &right_prop) {
+            Some(v) => PropertyValue::Boolean(!v),
+            None => PropertyValue::Null,
+        },
         BinaryOp::Pow => match (&left_prop, &right_prop) {
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => {
