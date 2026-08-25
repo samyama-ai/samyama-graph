@@ -3499,6 +3499,35 @@ fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, 
     ))
 }
 
+/// A `Value` as something a property can hold, or `None` if it cannot.
+///
+/// The distinction that matters is `Value::List` versus
+/// `PropertyValue::Array`. `eval_expression` produces the latter only when
+/// every element was already a literal, so `{xs: [date('1984-10-11')]}` --
+/// or `[1 + 1]`, or `[abs(-1)]` -- arrives as a `Value::List`.
+///
+/// Five write paths each tested for `Value::Property` separately and each got
+/// this wrong in its own way: two raised "refers to a variable that is not
+/// bound here" about a query with no variables in it, one raised "must be a
+/// scalar" about a list, and the relationship path **silently stored nothing**
+/// -- `CREATE ()-[:R {xs: [date(...)]}]->()` succeeded with `xs` null (#831).
+///
+/// `Value::Null` is deliberately not handled here: the paths disagree about
+/// whether an unbound variable is an error or a null property, and that
+/// disagreement is theirs to keep.
+fn storable_property(v: &Value) -> Option<PropertyValue> {
+    match v {
+        Value::Property(p) => Some(p.clone()),
+        Value::List(items) => items
+            .iter()
+            .map(storable_property)
+            .collect::<Option<Vec<_>>>()
+            .map(PropertyValue::Array),
+        // A property can hold neither an entity nor a map.
+        _ => None,
+    }
+}
+
 fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
     match v {
         PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
@@ -9612,11 +9641,11 @@ impl PhysicalOperator for CreateNodeOperator {
                 if let Some(exprs) = property_exprs {
                     let empty = Record::new();
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &empty, store) {
-                            Ok(Value::Property(p)) => {
+                        match eval_expression(expr, &empty, store).ok().as_ref().and_then(storable_property) {
+                            Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
-                            _ => {
+                            None => {
                                 let _ = store.delete_node(tenant_id, node_id);
                                 return Err(ExecutionError::RuntimeError(format!(
                                     "CREATE property `{key}` refers to a variable that is not bound here; bind it first with MATCH, WITH or UNWIND"
@@ -10539,7 +10568,7 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
         // Phase 1: Create all edges
         if self.phase == 1 {
-            for (source_var, target_var, edge_type, properties, edge_var, _exprs) in
+            for (source_var, target_var, edge_type, properties, edge_var, exprs) in
                 &self.edges_to_create
             {
                 let source_id = self.var_to_node_id.get(source_var)
@@ -10547,12 +10576,37 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 let target_id = self.var_to_node_id.get(target_var)
                     .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
 
+                // Non-literal property values, evaluated before the edge is
+                // created so the immutable borrow ends first.
+                //
+                // This operator discarded them (`_exprs`), and the literal map
+                // carries a `Null` placeholder for each -- so
+                // `CREATE ()-[:R {xs: [date('1984-10-11')]}]->()` reported
+                // success and stored `xs = null`. Silent data loss on the write
+                // path, which no read can distinguish from a property that was
+                // never set (#831).
+                let mut evaluated: Vec<(String, PropertyValue)> = Vec::new();
+                if let Some(exprs) = exprs {
+                    let empty = Record::new();
+                    for (key, expr) in exprs {
+                        if let Some(pv) =
+                            storable_property(&eval_expression(expr, &empty, store)?)
+                        {
+                            evaluated.push((key.clone(), pv));
+                        }
+                    }
+                }
+
                 let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
                     .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                // Set properties on edge via DS-07c sparse map
+                // Set properties on edge via DS-07c sparse map. The evaluated
+                // expressions go last so they overwrite the placeholders.
                 for (key, value) in properties {
                     store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
+                }
+                for (key, value) in evaluated {
+                    store.set_edge_property_sparse(edge_id, key, value);
                 }
 
                 // Always track created edges for persistence (even without variable names)
@@ -10694,13 +10748,15 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         for (key, expr) in exprs {
                             let value = eval_expression(expr, &record, store)?;
                             let pv = match value {
-                                Value::Property(p) => p,
                                 Value::Null => PropertyValue::Null,
-                                other => {
-                                    return Err(ExecutionError::TypeError(format!(
-                                        "property `{key}` must be a scalar, got {other:?}"
-                                    )))
-                                }
+                                other => match storable_property(&other) {
+                                    Some(p) => p,
+                                    None => {
+                                        return Err(ExecutionError::TypeError(format!(
+                                            "property `{key}` must be a scalar, got {other:?}"
+                                        )))
+                                    }
+                                },
                             };
                             evaluated.insert(key.clone(), pv);
                         }
@@ -10750,7 +10806,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     // defect the node side had in #467.
                     if let Some(exprs) = property_exprs {
                         for (key, expr) in exprs {
-                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                            if let Some(pv) =
+                                storable_property(&eval_expression(expr, &record, store)?)
+                            {
                                 store.set_edge_property_sparse(edge_id, key.clone(), pv);
                             }
                         }
@@ -10764,7 +10822,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     // defect the node side had in #467.
                     if let Some(exprs) = property_exprs {
                         for (key, expr) in exprs {
-                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                            if let Some(pv) =
+                                storable_property(&eval_expression(expr, &record, store)?)
+                            {
                                 store.set_edge_property_sparse(edge_id, key.clone(), pv);
                             }
                         }
@@ -12441,17 +12501,19 @@ impl MergeOperator {
         let mut out = literals.cloned().unwrap_or_default();
         for (key, expr) in exprs.into_iter().flatten() {
             match eval_expression(expr, record, store)? {
-                Value::Property(pv) => {
-                    out.insert(key.clone(), pv);
-                }
                 Value::Null => {
                     out.insert(key.clone(), PropertyValue::Null);
                 }
-                other => {
-                    return Err(ExecutionError::TypeError(format!(
-                        "MERGE property `{key}` must be a scalar value, got {other:?}"
-                    )));
-                }
+                other => match storable_property(&other) {
+                    Some(pv) => {
+                        out.insert(key.clone(), pv);
+                    }
+                    None => {
+                        return Err(ExecutionError::TypeError(format!(
+                            "MERGE property `{key}` must be a scalar value, got {other:?}"
+                        )));
+                    }
+                },
             }
         }
         Ok(Some(out))
@@ -12899,14 +12961,16 @@ impl PhysicalOperator for ForeachOperator {
                             for (k, expr) in prop_exprs {
                                 let val = eval_expression(expr, &inner_record, store)?;
                                 let prop_val = match val {
-                                    Value::Property(p) => p,
                                     Value::Null => PropertyValue::Null,
-                                    other => {
-                                        return Err(ExecutionError::TypeError(format!(
-                                            "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
+                                    other => match storable_property(&other) {
+                                        Some(p) => p,
+                                        None => {
+                                            return Err(ExecutionError::TypeError(format!(
+                                                "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
 which cannot be stored as a property value"
-                                        )))
-                                    }
+                                            )))
+                                        }
+                                    },
                                 };
                                 let _ = store.set_node_property(tenant_id, node_id, k.to_string(), prop_val);
                             }
