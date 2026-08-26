@@ -13157,6 +13157,20 @@ impl MergeOperator {
     /// nodes with the same labels and properties already exist -- openCypher's documented
     /// behaviour, and the reason the idiomatic way to add an edge between existing nodes is
     /// to bind them first (`MATCH (a),(b) MERGE (a)-[:R]->(b)`), which reuses them.
+    /// The node a MERGE pattern variable is already bound to, if any.
+    ///
+    /// A variable that the incoming row already binds is **not** a search: it
+    /// names one node, and MERGE neither looks for another nor makes one. Both
+    /// merge paths ignored the row entirely, so
+    /// `CREATE (a) WITH a MERGE (x) MERGE (y) MERGE (x)-[:T]->(y)` re-created
+    /// `x` and `y` and left three nodes where the pattern named one (#893).
+    fn bound_node(record: &Record, variable: Option<&String>) -> Option<NodeId> {
+        match record.get(variable?) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn merge_path(
         &self,
         path: &crate::query::ast::PathPattern,
@@ -13216,8 +13230,19 @@ impl MergeOperator {
             )?);
         }
 
+        // A variable the row already binds is the whole candidate set for its
+        // position -- one node, decided before the search rather than by it.
+        let bound: Vec<Option<NodeId>> = pattern_nodes
+            .iter()
+            .map(|np| Self::bound_node(&base, np.variable.as_ref()))
+            .collect();
+
         let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
         for (i, np) in pattern_nodes.iter().enumerate() {
+            if let Some(id) = bound[i] {
+                candidates.push(vec![id]);
+                continue;
+            }
             let mut ids = Vec::new();
             match np.labels.first() {
                 Some(first_label) => {
@@ -13269,6 +13294,12 @@ impl MergeOperator {
         // Create the entire pattern.
         let mut created: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
         for (i, np) in pattern_nodes.iter().enumerate() {
+            // A bound variable is reused, never re-created: creating the whole
+            // pattern means creating the parts of it that do not exist yet.
+            if let Some(id) = bound[i] {
+                created.push(id);
+                continue;
+            }
             // `MERGE ({...})` has no labels, and defaulting to "Node" gave the
             // node a label the query never wrote (#625).
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
@@ -13458,15 +13489,17 @@ impl PhysicalOperator for MergeOperator {
         // Through `Self::node_matches` rather than a third copy of the same
         // comparison: this was the second, and it drifted from the first by
         // exactly this gap.
-        let mut matched_node_id = None;
-        let candidates: Vec<&crate::graph::Node> = match labels.first() {
-            Some(first_label) => store.get_nodes_by_label(first_label),
-            None => store.all_nodes(),
-        };
-        for node in candidates {
-            if Self::node_matches(node, labels, props) {
-                matched_node_id = Some(node.id);
-                break;
+        let mut matched_node_id = Self::bound_node(&base, start.variable.as_ref());
+        if matched_node_id.is_none() {
+            let candidates: Vec<&crate::graph::Node> = match labels.first() {
+                Some(first_label) => store.get_nodes_by_label(first_label),
+                None => store.all_nodes(),
+            };
+            for node in candidates {
+                if Self::node_matches(node, labels, props) {
+                    matched_node_id = Some(node.id);
+                    break;
+                }
             }
         }
 
