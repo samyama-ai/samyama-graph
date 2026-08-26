@@ -9,6 +9,12 @@ repository = "https://github.com/samyama-ai/samyama-graph"
 keywords = ["gpu", "wgpu", "graph", "algorithms", "acceleration"]
 categories = ["algorithms", "science"]
 
+# Internal OSS-port scratch log — workstream doc references, per-machine
+# hardware notes, a CI setup TODO. Real content, but for the team, not for
+# someone reading the published crate's source. Stays in git/GitHub; just not
+# in what crates.io serves.
+exclude = ["PORT-STATUS.md"]
+
 [dependencies]
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
