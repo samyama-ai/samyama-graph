@@ -2403,8 +2403,18 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // failing the query. Erroring made `toInteger` unusable for the
                 // thing it is mostly used for -- checking whether input is a
                 // number at all (#606).
+                // A string holding a **float** converts too, truncating:
+                // `toInteger('2.9')` is 2, the same as `toInteger(2.9)`. Only
+                // `parse::<i64>()` was tried, so it answered null -- the same
+                // null it gives for `'foo'`, which is the answer that means
+                // "not a number at all" (#885).
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(
-                    s.parse::<i64>()
+                    s.trim()
+                        .parse::<i64>()
+                        .ok()
+                        .or_else(|| {
+                            s.trim().parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i64)
+                        })
                         .map(PropertyValue::Integer)
                         .unwrap_or(PropertyValue::Null),
                 )),
@@ -4256,7 +4266,16 @@ fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
                     // constructor derives (#829).
                     match unit {
                         'Y' | 'y' => months += scaled(sign, &int_digits, &frac_digits, 12),
-                        'W' | 'w' => days += scaled(sign, &int_digits, &frac_digits, 7),
+                        // A week's fraction carries into the day and then into
+                        // the clock, like a day's does: `P2.5W` is 17 days and
+                        // 12 hours, not 17 days. Scaling straight to whole days
+                        // truncated the half away (#885).
+                        'W' | 'w' => {
+                            let total =
+                                scaled(sign, &int_digits, &frac_digits, NPS * 86_400 * 7);
+                            days += total / (NPS * 86_400);
+                            time_nanos += total % (NPS * 86_400);
+                        }
                         'D' | 'd' if !is_time => {
                             let total = scaled(sign, &int_digits, &frac_digits, NPS * 86_400);
                             days += total / (NPS * 86_400);
