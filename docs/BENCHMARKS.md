@@ -140,14 +140,14 @@ cargo run --release --example tck_runner -- --features <openCypher>/tck/features
 |---|---:|
 | scenarios in the TCK | 3,897 |
 | **evaluated** by the harness | **3,762** (96.5%) |
-| pass | 3,650 |
+| pass | 3,659 |
 | skipped | 135 |
-| **pass rate, of evaluated** | **97.0%** |
+| **pass rate, of evaluated** | **97.3%** |
 | gate `CH-TCK ≥ 85%` | **met** |
-| gate *≥ best competitor* | **met** — 17.4 points ahead |
-| wrong answers, of the 112 failures | 86 |
+| gate *≥ best competitor* | **met** — 17.6 points ahead |
+| wrong answers, of the 103 failures | 79 |
 
-Measured at `a0343b7`; the CI floor is a **count**, currently `--min-pass 3650`,
+Measured at `7708d60`; the CI floor is a **count**, currently `--min-pass 3659`,
 and rises with each merge that earns it.
 
 The last row is tracked separately from the pass rate because the two failure
@@ -159,7 +159,7 @@ scorecard shows a met requirement inside a failing envelope.
 ### The corpus tripled, and the old figure was measured on a third of it
 
 The table above replaces `1,244 evaluated / 81.9%`. Nothing regressed — the
-pass *count* went from 1,019 to 3,650. The harness had been skipping every
+pass *count* went from 1,019 to 3,659. The harness had been skipping every
 `Scenario Outline`: 274 of them, expanding to ~2,280 concrete cases, and the
 harder ones, because an outline is how the TCK enumerates a feature's edge
 cases once its happy path is established (#756).
@@ -176,12 +176,12 @@ executes and renders:
 
 | Engine | 1,249-scenario set (2026-08-19) | 3,766-scenario set |
 |---|---:|---:|
-| **Samyama** `a0343b7` | 81.9% | **96.8%** |
+| **Samyama** `7708d60` | 81.9% | **97.0%** |
 | Neo4j 5 | 98.9% | 79.4% |
 | Memgraph | 89.8% | 65.9% |
 | FalkorDB | 89.1% | 65.7% |
 
-The Samyama row reads **96.8%** where the table above reads 97.0%, and both are
+The Samyama row reads **97.0%** where the table above reads 97.3%, and both are
 right: the cross-engine comparison scores 3,766 scenarios through the judge
 path, the direct run evaluates 3,762. The judge scores five the direct run
 skips and passes five fewer, identically across measurements. The judge figure
