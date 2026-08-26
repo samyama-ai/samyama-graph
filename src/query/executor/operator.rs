@@ -4424,6 +4424,37 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
 }
 
 /// Physical operator trait - all operators implement this
+/// Drain a pass-through operator's input **mutably**, once, and replace it with
+/// the rows it produced.
+///
+/// A pass-through operator's default `next_mut` delegates to `next`, which
+/// reads its input read-only -- so any write beneath it refuses outright with
+/// "requires mutable store access". That defect has now been fixed four times
+/// on different operators (#622 barriers, #624 joins, #649 SKIP and LIMIT, #866
+/// SORT and FILTER), each time for the ones a failing query happened to name.
+///
+/// This is the shared body for the rest. Draining first is not merely
+/// convenient: it lets each operator keep its single `next` implementation
+/// instead of growing a second, mutable copy of its own logic -- which is the
+/// duplication that produced most of this cycle's defects. It also matches
+/// Cypher, where a write is eager anyway; and `next_mut` is only reached when
+/// the query writes, so a read-only plan still streams (#870).
+fn drain_input_for_write(
+    input: &mut OperatorBox,
+    store: &mut GraphStore,
+    tenant_id: &str,
+) -> ExecutionResult<()> {
+    if input.is_materialized() {
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    while let Some(r) = input.next_mut(store, tenant_id)? {
+        rows.push(r);
+    }
+    *input = Box::new(MaterializedOperator::new(rows));
+    Ok(())
+}
+
 pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
@@ -4441,6 +4472,15 @@ pub trait PhysicalOperator: Send {
     /// Returns `true` if the hint was accepted somewhere in the subtree.
     /// The caller may still need to apply a `LimitOperator` on top — this
     /// hint is purely an optimization to avoid unnecessary work upstream.
+    /// Whether this operator replays an already-computed set of rows.
+    ///
+    /// Used by `drain_input_for_write` to tell "I have already drained my
+    /// input" from "I have not", without giving every pass-through operator a
+    /// bookkeeping field of its own (#870).
+    fn is_materialized(&self) -> bool {
+        false
+    }
+
     fn try_push_limit(&mut self, _n: usize) -> bool {
         false
     }
@@ -5980,6 +6020,15 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -6843,6 +6892,15 @@ fn reconstruct_path(
 }
 
 impl PhysicalOperator for VarLengthExpandOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -7100,6 +7158,13 @@ pub struct AggregateFunction {
     pub expr: Expression,
     pub alias: String,
     pub distinct: bool,
+    /// The percentile argument of `percentileCont` / `percentileDisc`.
+    ///
+    /// The struct held one expression, so the **second** argument was dropped
+    /// at extraction and the aggregator's `pct` stayed at its initial `0.5`:
+    /// every percentile call returned the median, whatever was asked for
+    /// (#871).
+    pub percentile: Option<Expression>,
 }
 
 /// Internal state for an aggregator
@@ -7238,6 +7303,37 @@ impl AggregatorState {
             (AggregateType::StDev, _) => AggregatorState::StDev { values: Vec::new(), population: false },
             (AggregateType::StDevP, _) => AggregatorState::StDev { values: Vec::new(), population: true },
         }
+    }
+
+    /// Set the percentile from the call's second argument.
+    ///
+    /// Cypher requires it in `[0, 1]` and raises otherwise. The finalizer used
+    /// to clamp the index with `.min(n - 1)` instead, so an out-of-range
+    /// percentile quietly returned the last element (#871).
+    fn set_percentile(&mut self, value: &Value) -> ExecutionResult<()> {
+        let AggregatorState::Percentile { pct, .. } = self else {
+            return Ok(());
+        };
+        let p = match value.as_property() {
+            Some(PropertyValue::Float(f)) => *f,
+            Some(PropertyValue::Integer(i)) => *i as f64,
+            // A null percentile leaves the aggregate undecidable; Cypher's own
+            // answer is null, which the finalizer already gives for no values.
+            Some(PropertyValue::Null) | None => return Ok(()),
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "percentile must be a number between 0 and 1, not {}",
+                    other.type_name()
+                )))
+            }
+        };
+        if !(0.0..=1.0).contains(&p) {
+            return Err(ExecutionError::RuntimeError(format!(
+                "percentile must be between 0.0 and 1.0 inclusive, got {p}"
+            )));
+        }
+        *pct = p;
+        Ok(())
     }
 
     fn update(&mut self, value: &Value) {
@@ -7869,6 +7965,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -7975,6 +8074,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -8030,6 +8132,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -8080,6 +8185,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -8388,6 +8496,15 @@ impl AdjacencyCountAggregateOperator {
 }
 
 impl PhysicalOperator for AdjacencyCountAggregateOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -11263,6 +11380,10 @@ impl MaterializedOperator {
 }
 
 impl PhysicalOperator for MaterializedOperator {
+    fn is_materialized(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.idx >= self.records.len() {
             Ok(None)
@@ -12554,6 +12675,15 @@ impl UnwindOperator {
 }
 
 impl PhysicalOperator for UnwindOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -13487,6 +13617,15 @@ impl ShortestPathOperator {
 }
 
 impl PhysicalOperator for ShortestPathOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -13926,6 +14065,15 @@ impl ExpandIntoOperator {
 }
 
 impl PhysicalOperator for ExpandIntoOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -14354,6 +14502,7 @@ mod tests {
                 expr: Expression::Variable("n".to_string()),
                 alias: "count".to_string(),
                 distinct: false,
+                percentile: None,
             }]
         );
 

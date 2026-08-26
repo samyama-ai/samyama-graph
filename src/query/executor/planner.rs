@@ -168,11 +168,25 @@ fn extract_agg_inner(
                         .unwrap_or(Expression::Literal(PropertyValue::Null))
                 };
 
+                // `percentileCont`/`percentileDisc` take the percentile as
+                // their **second** argument. It was dropped here, so the
+                // aggregator's `pct` never moved off its initial 0.5 and every
+                // percentile call returned the median (#871).
+                let percentile = if matches!(
+                    func,
+                    AggregateType::PercentileCont | AggregateType::PercentileDisc
+                ) {
+                    args.get(1).cloned()
+                } else {
+                    None
+                };
+
                 aggs.push(AggregateFunction {
                     func,
                     expr: arg_expr,
                     alias: alias.clone(),
                     distinct: *distinct,
+                    percentile,
                 });
 
                 Expression::Variable(alias)
@@ -606,6 +620,7 @@ impl QueryPlanner {
                             expr: Expression::Variable(fact_var),
                             alias: alias.clone(),
                             distinct,
+                            percentile: None,
                         },
                         alias,
                     ),
@@ -618,6 +633,7 @@ impl QueryPlanner {
                             },
                             alias: alias.clone(),
                             distinct: false,
+                            percentile: None,
                         },
                         alias,
                     ),
@@ -660,6 +676,7 @@ impl QueryPlanner {
                                 expr: Expression::Variable(var),
                                 alias: alias.clone(),
                                 distinct: false,
+                                percentile: None,
                             }],
                         )),
                         output_columns: vec![alias],
