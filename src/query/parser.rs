@@ -1706,6 +1706,22 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
     })
 }
 
+/// One bound of a variable-length pattern.
+///
+/// The `integer` grammar rule accepts a leading `-`, and the bounds are
+/// `usize`, so a negative bound could not be parsed. It was handled three
+/// different ways in three lines: `*..-2` **panicked the process** on
+/// `.unwrap()` of a `ParseIntError`, `*-2..` was silently read as `*1..` by
+/// `unwrap_or(1)` and returned rows, and `*-2` reached neither. Cypher requires
+/// a SyntaxError at compile time for all of them (#878).
+fn parse_length_bound(text: &str, what: &str) -> ParseResult<usize> {
+    text.parse::<usize>().map_err(|_| {
+        ParseError::SemanticError(format!(
+            "a variable-length {what} bound must be a non-negative integer, not `{text}`"
+        ))
+    })
+}
+
 fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<LengthPattern> {
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::range_pattern {
@@ -1715,18 +1731,18 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
             let min = if parts[0].is_empty() {
                 Some(1)
             } else {
-                Some(parts[0].parse().unwrap_or(1))
+                Some(parse_length_bound(parts[0].trim(), "lower")?)
             };
 
             let max = if parts.len() > 1 && !parts[1].is_empty() {
-                Some(parts[1].parse().unwrap())
+                Some(parse_length_bound(parts[1].trim(), "upper")?)
             } else {
                 None
             };
 
             return Ok(LengthPattern { min, max });
         } else if inner.as_rule() == Rule::integer {
-            let exact = inner.as_str().parse().unwrap();
+            let exact = parse_length_bound(inner.as_str().trim(), "exact")?;
             return Ok(LengthPattern {
                 min: Some(exact),
                 max: Some(exact),
