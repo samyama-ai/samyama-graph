@@ -56,6 +56,8 @@ pub enum ValidationError {
     InvalidDeleteTarget(String),
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
+    /// A name used in an expression that nothing in the query binds.
+    UnboundVariable(String),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
     AmbiguousAggregationExpression,
     /// An ORDER BY that aggregates when the projection does not.
@@ -65,6 +67,10 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnboundVariable(v) => write!(
+                f,
+                "`{v}` is not bound: nothing in this query defines it"
+            ),
             Self::OrderByUndefinedVariable(v) => write!(
                 f,
                 "`{v}` is not available to ORDER BY: the projection aggregates or is \
@@ -1509,7 +1515,358 @@ fn validate_delete_targets(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A name used in an expression must be bound by something in the query.
+///
+/// ```text
+/// MATCH () RETURN foo                          -> SyntaxError: UndefinedVariable
+/// MATCH (s) WHERE s.name = undefinedVariable   -> SyntaxError: UndefinedVariable
+/// MERGE (n) ON CREATE SET x.num = 1            -> SyntaxError: UndefinedVariable
+/// ```
+///
+/// Every one of these ran and returned zero rows, or set a property on
+/// nothing, and reported success. A typo in a variable name is the single most
+/// ordinary mistake there is, and the engine answered it with silence.
+///
+/// **Deliberately coarse**: the question asked is "does *anything* in this
+/// query bind this name", not "is it in scope *here*". Real scope analysis
+/// would also catch a name dropped by an intervening `WITH`, but it has to be
+/// exactly right about `WITH`, `FOREACH`, comprehension binders, `CALL …
+/// YIELD` and both `Query` representations before it can be trusted -- and
+/// `validate.rs` opens by naming over-rejection as the worse failure. A false
+/// `SyntaxError` breaks a working query; a missed one leaves today's
+/// behaviour. `validate_order_by_in_scope` already covers the narrowing case
+/// where it is cheap to be certain.
+///
+/// Anything that binds anywhere counts as binding everywhere here, which is
+/// why comprehension variables and `FOREACH` loop variables are collected up
+/// front rather than tracked positionally.
+fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::{Clause, RemoveItem, SetClause};
+
+    let mut bound: HashSet<String> = HashSet::new();
+
+    /// Like `pattern_variables`, plus the path variable.
+    ///
+    /// `pattern_variables` exists to answer "what may a later CREATE not
+    /// redeclare", and a path name is not that. Here it is: `MATCH p = (a)-->(b)
+    /// RETURN p` binds `p`, and borrowing the other collector rejected every
+    /// named-path query in the suite.
+    fn pattern_and_path_variables(
+        pattern: &crate::query::ast::Pattern,
+        out: &mut HashSet<String>,
+    ) {
+        pattern_variables(pattern, out);
+        for path in &pattern.paths {
+            if let Some(v) = &path.path_variable {
+                out.insert(v.clone());
+            }
+        }
+    }
+
+    /// Names any expression *introduces*, at any depth.
+    fn binders(e: &Expression, out: &mut HashSet<String>) {
+        match e {
+            Expression::ListComprehension { variable, .. }
+            | Expression::PredicateFunction { variable, .. } => {
+                out.insert(variable.clone());
+            }
+            Expression::Reduce { accumulator, variable, .. } => {
+                out.insert(accumulator.clone());
+                out.insert(variable.clone());
+            }
+            Expression::PatternComprehension { pattern, .. } => pattern_variables(pattern, out),
+            Expression::ExistsSubquery { pattern, .. } => pattern_variables(pattern, out),
+            _ => {}
+        }
+        for child in child_expressions(e) {
+            binders(child, out);
+        }
+    }
+
+    fn note_set(sc: &SetClause, bound: &mut HashSet<String>) {
+        for item in &sc.items {
+            binders(&item.value, bound);
+        }
+        for item in &sc.entity_items {
+            binders(&item.value, bound);
+        }
+    }
+
+    fn note_clause_binders(query: &Query, bound: &mut HashSet<String>) {
+        for mc in &query.match_clauses {
+            pattern_and_path_variables(&mc.pattern, bound);
+        }
+        if let Some(c) = &query.create_clause {
+            pattern_and_path_variables(&c.pattern, bound);
+        }
+        if let Some(m) = &query.merge_clause {
+            pattern_and_path_variables(&m.pattern, bound);
+        }
+        for u in query
+            .unwind_clause
+            .iter()
+            .chain(query.extra_unwind_clauses.iter())
+            .chain(query.post_with_unwind_clauses.iter())
+        {
+            bound.insert(u.variable.clone());
+            binders(&u.expression, bound);
+        }
+        if let Some(f) = &query.foreach_clause {
+            bound.insert(f.variable.clone());
+            for c in &f.create_clauses {
+                pattern_and_path_variables(&c.pattern, bound);
+            }
+            for sc in &f.set_clauses {
+                note_set(sc, bound);
+            }
+        }
+        if let Some(call) = &query.call_clause {
+            for y in &call.yield_items {
+                bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
+            }
+        }
+        for c in &query.clauses {
+            match c {
+                Clause::Match(mc) => pattern_and_path_variables(&mc.pattern, bound),
+                Clause::Create(cc) => pattern_and_path_variables(&cc.pattern, bound),
+                Clause::Merge(mc) => pattern_and_path_variables(&mc.pattern, bound),
+                Clause::Unwind(u) => {
+                    bound.insert(u.variable.clone());
+                    binders(&u.expression, bound);
+                }
+                Clause::Foreach(f) => {
+                    bound.insert(f.variable.clone());
+                    for cc in &f.create_clauses {
+                        pattern_and_path_variables(&cc.pattern, bound);
+                    }
+                    for sc in &f.set_clauses {
+                        note_set(sc, bound);
+                    }
+                }
+                Clause::Call(call) => {
+                    for y in &call.yield_items {
+                        bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
+                    }
+                }
+                Clause::Set(sc) => note_set(sc, bound),
+                _ => {}
+            }
+        }
+        for sc in &query.set_clauses {
+            note_set(sc, bound);
+        }
+    }
+
+    note_clause_binders(query, &mut bound);
+
+    // A `CALL { … }` subquery exports the columns its RETURN names, and binds
+    // everything it binds internally. Recursing rather than duplicating the
+    // walk: a subquery is a `Query`.
+    if let Some(sub) = &query.call_subquery {
+        note_clause_binders(sub, &mut bound);
+        for items in sub
+            .return_clause
+            .iter()
+            .map(|r| &r.items)
+            .chain(sub.with_clause.iter().map(|w| &w.items))
+        {
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+        for c in &sub.clauses {
+            let items = match c {
+                Clause::Return(r) => &r.items,
+                Clause::With(w) => &w.items,
+                _ => continue,
+            };
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+    }
+
+    // Projections bind their aliases -- and a bare `RETURN n` keeps `n`.
+    let mut note_items = |items: &[ReturnItem], bound: &mut HashSet<String>| {
+        for item in items {
+            if let Some(a) = &item.alias {
+                bound.insert(a.clone());
+            }
+            binders(&item.expression, bound);
+        }
+    };
+    if let Some(w) = &query.with_clause {
+        note_items(&w.items, &mut bound);
+    }
+    for (w, u, post_matches, post_where) in &query.extra_with_stages {
+        note_items(&w.items, &mut bound);
+        if let Some(u) = u {
+            bound.insert(u.variable.clone());
+            binders(&u.expression, &mut bound);
+        }
+        // A MATCH written after a WITH binds too. Skipping these rejected
+        // `MATCH (m) WITH m MATCH (a)-->(m) WITH m, count(a) AS cnt RETURN cnt`
+        // -- an ordinary two-stage aggregation, and one the TCK does not
+        // cover but the engine's own suite does.
+        for mc in post_matches {
+            pattern_and_path_variables(&mc.pattern, &mut bound);
+        }
+        if let Some(w) = post_where {
+            binders(&w.predicate, &mut bound);
+        }
+    }
+    if let Some(r) = &query.return_clause {
+        note_items(&r.items, &mut bound);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::With(w) => note_items(&w.items, &mut bound),
+            Clause::Return(r) => note_items(&r.items, &mut bound),
+            _ => {}
+        }
+    }
+    // Binders inside predicates and inline property expressions count too.
+    for e in all_expressions(query) {
+        binders(e, &mut bound);
+    }
+
+    // ---- everything referenced, checked against that set.
+    let mut used: Vec<String> = Vec::new();
+    let mut note_expr = |e: &Expression, used: &mut Vec<String>| collect_all_vars(e, used);
+
+    for e in all_expressions(query) {
+        note_expr(e, &mut used);
+    }
+    let mut note_set_use = |sc: &SetClause, used: &mut Vec<String>| {
+        for item in &sc.items {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in &sc.entity_items {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in &sc.label_items {
+            used.push(item.variable.clone());
+        }
+    };
+    for sc in &query.set_clauses {
+        note_set_use(sc, &mut used);
+    }
+    for rc in &query.remove_clauses {
+        for item in &rc.items {
+            match item {
+                RemoveItem::Property { variable, .. } => used.push(variable.clone()),
+                RemoveItem::Label { variable, .. } => used.push(variable.clone()),
+            }
+        }
+    }
+    let mut note_merge_use = |mc: &crate::query::ast::MergeClause, used: &mut Vec<String>| {
+        for item in mc.on_create_set.iter().chain(mc.on_match_set.iter()) {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in mc
+            .on_create_entity_set
+            .iter()
+            .chain(mc.on_match_entity_set.iter())
+        {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+    };
+    if let Some(mc) = &query.merge_clause {
+        note_merge_use(mc, &mut used);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Set(sc) => note_set_use(sc, &mut used),
+            Clause::Merge(mc) => note_merge_use(mc, &mut used),
+            Clause::Delete(dc) => {
+                for e in &dc.expressions {
+                    collect_all_vars(e, &mut used);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(dc) = &query.delete_clause {
+        for e in &dc.expressions {
+            collect_all_vars(e, &mut used);
+        }
+    }
+    // Inline property expressions in write patterns: `CREATE (b {name: missing})`.
+    for pattern in pattern_property_expressions(query) {
+        collect_all_vars(pattern, &mut used);
+    }
+
+    for name in used {
+        if !bound.contains(&name) {
+            return Err(ValidationError::UnboundVariable(name));
+        }
+    }
+    Ok(())
+}
+
+/// Every expression written inside a pattern's inline property map.
+///
+/// `CREATE (b {name: missing})` hides a reference to `missing` where no
+/// expression walker looks: it is a property map on a pattern node, not an
+/// expression of the clause.
+fn pattern_property_expressions(query: &Query) -> Vec<&Expression> {
+    use crate::query::ast::Clause;
+    let mut out: Vec<&Expression> = Vec::new();
+
+    fn from_pattern<'a>(pattern: &'a crate::query::ast::Pattern, out: &mut Vec<&'a Expression>) {
+        for path in &pattern.paths {
+            let mut nodes = vec![&path.start];
+            for seg in &path.segments {
+                nodes.push(&seg.node);
+                if let Some(pe) = &seg.edge.property_exprs {
+                    out.extend(pe.values());
+                }
+            }
+            for np in nodes {
+                if let Some(pe) = &np.property_exprs {
+                    out.extend(pe.values());
+                }
+            }
+        }
+    }
+
+    for mc in &query.match_clauses {
+        from_pattern(&mc.pattern, &mut out);
+    }
+    if let Some(c) = &query.create_clause {
+        from_pattern(&c.pattern, &mut out);
+    }
+    if let Some(m) = &query.merge_clause {
+        from_pattern(&m.pattern, &mut out);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Match(mc) => from_pattern(&mc.pattern, &mut out),
+            Clause::Create(cc) => from_pattern(&cc.pattern, &mut out),
+            Clause::Merge(mc) => from_pattern(&mc.pattern, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_variables_are_bound(query)?;
+
     validate_delete_targets(query)?;
 
     validate_pattern_projections(query)?;

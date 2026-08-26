@@ -198,8 +198,26 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) {
 /// Walks the query in execution order so that each star sees the scope that
 /// actually reaches it, including through `WITH` stages that narrow it.
 pub fn expand_stars(query: &mut Query) {
-    if query.needs_clause_pipeline {
+    // Both representations, always. The parser fills `clauses` even when the
+    // by-kind fields can express the query, and mirrors the RETURN into
+    // `return_clause` -- so expanding only one left a literal `*` in the other
+    // for whatever reads it next.
+    if !query.clauses.is_empty() {
         expand_stars_pipeline(&mut query.clauses);
+    }
+    if query.needs_clause_pipeline {
+        // The parser mirrors the pipeline's RETURN into `return_clause` before
+        // this pass runs, so expanding one leaves the other holding a literal
+        // `*`. Re-mirrored rather than expanded twice: one of them has to be
+        // the copy, and the pipeline is the original.
+        if let Some(Clause::Return(rc)) = query
+            .clauses
+            .iter()
+            .rev()
+            .find(|c| matches!(c, Clause::Return(_)))
+        {
+            query.return_clause = Some(rc.clone());
+        }
         return;
     }
 
