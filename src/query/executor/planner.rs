@@ -2183,10 +2183,11 @@ impl QueryPlanner {
 
         // Handle DELETE clause
         let is_write = if let Some(delete_clause) = &query.delete_clause {
-            let vars: Vec<String> = delete_clause.expressions.iter().filter_map(|e| {
-                if let Expression::Variable(v) = e { Some(v.clone()) } else { None }
-            }).collect();
-            operator = Box::new(DeleteOperator::new(operator, vars, delete_clause.detach));
+            operator = Box::new(DeleteOperator::new(
+                operator,
+                delete_clause.expressions.clone(),
+                delete_clause.detach,
+            ));
             true
         } else {
             is_write
@@ -5664,15 +5665,7 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Delete(dc) => {
-                    let vars: Vec<String> = dc
-                        .expressions
-                        .iter()
-                        .filter_map(|e| match e {
-                            Expression::Variable(v) => Some(v.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    operator = Box::new(DeleteOperator::new(operator, vars, dc.detach));
+                    operator = Box::new(DeleteOperator::new(operator, dc.expressions.clone(), dc.detach));
                 }
                 Clause::Where(w) => {
                     operator = Box::new(FilterOperator::new(operator, w.predicate.clone()));

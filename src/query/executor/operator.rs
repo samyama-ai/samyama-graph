@@ -12396,13 +12396,46 @@ impl PhysicalOperator for SkipOperator {
 /// Delete operator: DELETE n or DETACH DELETE n
 pub struct DeleteOperator {
     input: OperatorBox,
-    variables: Vec<String>,
+    /// The expressions written after `DELETE`, not the names among them.
+    ///
+    /// This held `Vec<String>` and the planner filtered the clause down to
+    /// `Expression::Variable`, so every other way of naming an entity --
+    /// a map field, a list element, a path -- was dropped on the floor and
+    /// the delete silently did nothing (#891).
+    targets: Vec<Expression>,
     detach: bool,
 }
 
 impl DeleteOperator {
-    pub fn new(input: OperatorBox, variables: Vec<String>, detach: bool) -> Self {
-        Self { input, variables, detach }
+    pub fn new(input: OperatorBox, targets: Vec<Expression>, detach: bool) -> Self {
+        Self { input, targets, detach }
+    }
+
+    /// Entities reachable from a `DELETE` target, in the order they are found.
+    ///
+    /// A path or a list is a container of entities, and Cypher deletes what is
+    /// inside it. Nested containers recurse; anything that is not an entity is
+    /// ignored here -- `validate_delete_targets` is what refuses those (#887).
+    fn collect_entities(value: &Value, nodes: &mut Vec<crate::graph::types::NodeId>, edges: &mut Vec<crate::graph::types::EdgeId>) {
+        match value {
+            Value::Node(id, _) | Value::NodeRef(id) => nodes.push(*id),
+            Value::Edge(id, _) | Value::EdgeRef(id, ..) => edges.push(*id),
+            Value::Path { nodes: path_nodes, edges: path_edges } => {
+                edges.extend(path_edges.iter().copied());
+                nodes.extend(path_nodes.iter().copied());
+            }
+            Value::List(items) => {
+                for item in items {
+                    Self::collect_entities(item, nodes, edges);
+                }
+            }
+            Value::Map(entries) => {
+                for item in entries.values() {
+                    Self::collect_entities(item, nodes, edges);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -12417,26 +12450,29 @@ impl PhysicalOperator for DeleteOperator {
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
-            for var in &self.variables {
-                if let Some(val) = record.get(var) {
-                    match val {
-                        Value::NodeRef(id) | Value::Node(id, _) => {
-                            let node_id = *id;
-                            if self.detach {
-                                let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
-                                let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
-                                for eid in out_edges.into_iter().chain(in_edges) {
-                                    let _ = store.delete_edge(eid);
-                                }
-                            }
-                            let _ = store.delete_node(tenant_id, node_id);
-                        }
-                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            let _ = store.delete_edge(*id);
-                        }
-                        _ => {}
+            let mut nodes: Vec<crate::graph::types::NodeId> = Vec::new();
+            let mut edges: Vec<crate::graph::types::EdgeId> = Vec::new();
+            for target in &self.targets {
+                // An unresolvable target is not a silent no-op here: it means
+                // the row never bound what the query named, and deleting the
+                // rest of the row while ignoring that is how #887 hid.
+                let value = eval_expression(target, &record, store)?;
+                Self::collect_entities(&value, &mut nodes, &mut edges);
+            }
+            // Edges first: deleting a node may take its edges with it, and an
+            // edge id that has already gone is not an error worth reporting.
+            for edge_id in edges {
+                let _ = store.delete_edge(edge_id);
+            }
+            for node_id in nodes {
+                if self.detach {
+                    let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
+                    let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
+                    for eid in out_edges.into_iter().chain(in_edges) {
+                        let _ = store.delete_edge(eid);
                     }
                 }
+                let _ = store.delete_node(tenant_id, node_id);
             }
             Ok(Some(record))
         } else {
@@ -12453,7 +12489,16 @@ impl PhysicalOperator for DeleteOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let vars = self.variables.join(", ");
+        let vars = self
+            .targets
+            .iter()
+            .map(|t| match t {
+                Expression::Variable(v) | Expression::PathVariable(v) => v.clone(),
+                Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                other => format!("{:?}", other),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         OperatorDescription {
             name: if self.detach { "DetachDelete" } else { "Delete" }.to_string(),
             details: vars,

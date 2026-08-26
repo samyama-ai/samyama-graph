@@ -87,3 +87,45 @@ fn a_map_field_may_be_deleted() {
 fn a_function_call_is_not_refused() {
     assert!(!refused("MATCH p = ()-->() DELETE head(nodes(p))"));
 }
+
+fn store_with(setup: &str) -> GraphStore {
+    let mut store = GraphStore::new();
+    run(&mut store, setup);
+    store
+}
+
+fn run(store: &mut GraphStore, cypher: &str) {
+    let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}` parses: {e:?}"));
+    MutQueryExecutor::new(store, "default".to_string())
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("`{cypher}` runs: {e:?}"));
+}
+
+fn count(store: &GraphStore, cypher: &str) -> usize {
+    let q = parse_query(cypher).expect("count query parses");
+    QueryExecutor::new(store)
+        .execute(&q)
+        .expect("count query runs")
+        .records
+        .len()
+}
+
+/// A path is a container of entities, and `DELETE p` deletes what is in it.
+///
+/// This deleted nothing: the planner kept only `Expression::Variable` targets,
+/// and a path variable is `Expression::PathVariable` (#891).
+#[test]
+fn a_path_may_be_deleted() {
+    let mut store = store_with("CREATE (:A)-[:R]->(:B)");
+    run(&mut store, "MATCH p = (:A)-[:R]->(:B) DETACH DELETE p");
+    assert_eq!(count(&store, "MATCH (n) RETURN n"), 0, "the path's nodes should be gone");
+    assert_eq!(count(&store, "MATCH ()-[r]->() RETURN r"), 0, "its relationship should be gone");
+}
+
+/// A list element names an entity the same way a variable does.
+#[test]
+fn a_list_element_may_be_deleted() {
+    let mut store = store_with("CREATE (:User), (:User)");
+    run(&mut store, "MATCH (u:User) WITH collect(u) AS users DELETE users[0]");
+    assert_eq!(count(&store, "MATCH (n) RETURN n"), 1, "exactly one user should be gone");
+}
