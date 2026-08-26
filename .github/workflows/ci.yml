@@ -133,7 +133,7 @@ jobs:
         # Raise the floor when it goes up; lowering it is allowed but must say
         # why in the same commit.
         #
-        # Lowered 3665 -> 3656 on 2026-08-26: the harness began **checking
+        # Lowered 3665 -> 3656 on 2026-08-26 (then 3658 with #890): the harness began **checking
         # declared side effects** (#888). Nothing regressed — 13 scenarios that
         # had been passing on an empty result while the write they exist to test
         # went unchecked now fail, including `MERGE (a)` creating a second node
@@ -141,7 +141,7 @@ jobs:
         # expansion in #756: the ruler got honest and the count fell.
         run: |
           git clone --depth 1 --branch 2024.3             https://github.com/opencypher/openCypher.git /tmp/openCypher
-          cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3656
+          cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3658
 
       - name: CH-DETERM-THREADS — the answer does not depend on the thread count
         # LANG-14 (#611). CH-DETERM varies the *process*, which catches a
