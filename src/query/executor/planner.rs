@@ -2183,6 +2183,15 @@ impl QueryPlanner {
 
         // Handle DELETE clause
         let is_write = if let Some(delete_clause) = &query.delete_clause {
+            // The read is fully materialised before the delete touches
+            // anything. `MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*)`
+            // counted 1: the first row's delete removed the edge, and the
+            // lazy expansion re-read adjacency to produce the second row and
+            // found nothing left. Cypher's rule is that a write does not
+            // un-produce rows the read had already matched (#899).
+            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+                operator, 0, None,
+            ));
             operator = Box::new(DeleteOperator::new(
                 operator,
                 delete_clause.expressions.clone(),
@@ -5685,6 +5694,10 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Delete(dc) => {
+                    // Materialised first -- see the by-kind path (#899).
+                    operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+                        operator, 0, None,
+                    ));
                     operator = Box::new(DeleteOperator::new(operator, dc.expressions.clone(), dc.detach));
                 }
                 Clause::Where(w) => {
