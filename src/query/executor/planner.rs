@@ -1092,13 +1092,27 @@ impl QueryPlanner {
                     .map(|l| (l.variable.clone(), l.labels.clone()))
                     .collect();
 
-                let mut operator: OperatorBox = Box::new(MergeOperator::new(
-                    merge_clause.pattern.clone(),
-                    on_create,
-                    on_match,
-                    on_create_labels,
-                    on_match_labels,
-                ));
+                // `ON CREATE SET n = {…}` / `n += {…}` (#874).
+                let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
+                    .on_create_entity_set
+                    .iter()
+                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                    .collect();
+                let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
+                    .on_match_entity_set
+                    .iter()
+                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                    .collect();
+                let mut operator: OperatorBox = Box::new(
+                    MergeOperator::new(
+                        merge_clause.pattern.clone(),
+                        on_create,
+                        on_match,
+                        on_create_labels,
+                        on_match_labels,
+                    )
+                    .with_entity_sets(on_create_entity, on_match_entity),
+                );
 
                 // A bare `SET` after MERGE applies on both branches, unlike ON CREATE /
                 // ON MATCH. It parsed but was dropped here, so `MERGE (m) SET m.x = 1`
@@ -2291,9 +2305,21 @@ impl QueryPlanner {
             if !edges_to_merge.is_empty() && !query.match_clauses.is_empty() {
                 // Edge MERGE: use MatchMergeEdgeOperator
                 use crate::query::executor::operator::MatchMergeEdgeOperator;
-                operator = Box::new(MatchMergeEdgeOperator::new(
-                    operator, edges_to_merge, on_create, on_match,
-                ));
+                // `ON CREATE SET n = {…}` / `n += {…}` (#874).
+                let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
+                    .on_create_entity_set
+                    .iter()
+                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                    .collect();
+                let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
+                    .on_match_entity_set
+                    .iter()
+                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                    .collect();
+                operator = Box::new(
+                    MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
+                        .with_entity_sets(on_create_entity, on_match_entity),
+                );
             } else {
                 // Node-only MERGE, or a whole-pattern MERGE with nothing bound
                 // to hang it off, running once per upstream row.
@@ -2321,6 +2347,18 @@ impl QueryPlanner {
                         on_match,
                         on_create_labels,
                         on_match_labels,
+                    )
+                    .with_entity_sets(
+                        merge_clause
+                            .on_create_entity_set
+                            .iter()
+                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                            .collect(),
+                        merge_clause
+                            .on_match_entity_set
+                            .iter()
+                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                            .collect(),
                     )
                     .with_input(operator),
                 );
@@ -5380,6 +5418,16 @@ impl QueryPlanner {
                             on_match,
                             on_create_labels,
                             on_match_labels,
+                        )
+                        .with_entity_sets(
+                            mc.on_create_entity_set
+                                .iter()
+                                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                                .collect(),
+                            mc.on_match_entity_set
+                                .iter()
+                                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                                .collect(),
                         )
                         .with_input(operator),
                     );

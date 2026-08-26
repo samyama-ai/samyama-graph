@@ -799,6 +799,15 @@ pub struct MergeClause {
     pub on_create_labels: Vec<SetLabelItem>,
     /// Labels added by `ON MATCH SET n:Label`.
     pub on_match_labels: Vec<SetLabelItem>,
+    /// Whole-entity assignment in `ON CREATE SET n = {…}` / `n += {…}`.
+    ///
+    /// The grammar has always parsed these -- `set_entry` includes
+    /// `set_entity_item` -- but `parse_merge_clause` matched only `set_item`
+    /// and `set_label_item`, so they fell through its `match` and the clause
+    /// the user wrote was **silently discarded** (#874).
+    pub on_create_entity_set: Vec<SetEntityItem>,
+    /// The same for `ON MATCH SET`.
+    pub on_match_entity_set: Vec<SetEntityItem>,
 }
 
 /// WITH clause

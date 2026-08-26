@@ -1198,6 +1198,34 @@ fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteC
     Ok(DeleteClause { expressions, detach })
 }
 
+/// `SET n = {…}` / `SET n += {…}`, in a `SET` clause or in `ON CREATE`/`ON MATCH`.
+///
+/// Extracted because `MERGE`'s arms need it too and had no implementation at
+/// all -- `parse_merge_clause` matched only `set_item` and `set_label_item`, so
+/// this form fell through and was silently discarded (#874).
+fn parse_set_entity_item(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<crate::query::ast::SetEntityItem> {
+    let mut variable = String::new();
+    let mut merge = false;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
+            Rule::set_entity_op => merge = part.as_str().trim() == "+=",
+            Rule::expression => value = Some(parse_expression(part)?),
+            _ => {}
+        }
+    }
+    Ok(crate::query::ast::SetEntityItem {
+        variable,
+        merge,
+        value: value.ok_or_else(|| {
+            ParseError::SemanticError("SET <entity> = missing a value".to_string())
+        })?,
+    })
+}
+
 /// `variable (":" label)+` — the label form of a SET item.
 ///
 /// Shared by `SET`, `ON CREATE SET` and `ON MATCH SET`. Kept as one function
@@ -1230,24 +1258,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
             continue;
         }
         if inner.as_rule() == Rule::set_entity_item {
-            let mut variable = String::new();
-            let mut merge = false;
-            let mut value = None;
-            for part in inner.into_inner() {
-                match part.as_rule() {
-                    Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
-                    Rule::set_entity_op => merge = part.as_str().trim() == "+=",
-                    Rule::expression => value = Some(parse_expression(part)?),
-                    _ => {}
-                }
-            }
-            entity_items.push(crate::query::ast::SetEntityItem {
-                variable,
-                merge,
-                value: value.ok_or_else(|| {
-                    ParseError::SemanticError("SET <entity> = missing a value".to_string())
-                })?,
-            });
+            entity_items.push(parse_set_entity_item(inner)?);
             continue;
         }
         if inner.as_rule() == Rule::set_item {
@@ -1351,6 +1362,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
     let mut on_match_set = Vec::new();
     let mut on_create_labels = Vec::new();
     let mut on_match_labels = Vec::new();
+    let mut on_create_entity_set = Vec::new();
+    let mut on_match_entity_set = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1359,6 +1372,7 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => on_create_entity_set.push(parse_set_entity_item(si)?),
                         Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1368,6 +1382,7 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => on_match_entity_set.push(parse_set_entity_item(si)?),
                         Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1396,6 +1411,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
         on_match_set,
         on_create_labels,
         on_match_labels,
+        on_create_entity_set,
+        on_match_entity_set,
     });
     Ok(())
 }
@@ -1406,6 +1423,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
     let mut on_match_set = Vec::new();
     let mut on_create_labels = Vec::new();
     let mut on_match_labels = Vec::new();
+    let mut on_create_entity_set = Vec::new();
+    let mut on_match_entity_set = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1414,6 +1433,9 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => {
+                            on_create_entity_set.push(parse_set_entity_item(si)?)
+                        }
                         Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1423,6 +1445,9 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => {
+                            on_match_entity_set.push(parse_set_entity_item(si)?)
+                        }
                         Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1441,6 +1466,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
         on_match_set,
         on_create_labels,
         on_match_labels,
+        on_create_entity_set,
+        on_match_entity_set,
     })
 }
 

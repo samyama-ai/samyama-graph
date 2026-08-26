@@ -11231,6 +11231,9 @@ pub struct MatchMergeEdgeOperator {
     edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     on_create_set: Vec<(String, String, Expression)>,
     on_match_set: Vec<(String, String, Expression)>,
+    /// Whole-entity `ON CREATE`/`ON MATCH SET`; see `MergeOperator` (#874).
+    on_create_entity_set: Vec<(String, bool, Expression)>,
+    on_match_entity_set: Vec<(String, bool, Expression)>,
     done: bool,
     results: Vec<Record>,
     result_index: usize,
@@ -11243,7 +11246,28 @@ impl MatchMergeEdgeOperator {
         on_create_set: Vec<(String, String, Expression)>,
         on_match_set: Vec<(String, String, Expression)>,
     ) -> Self {
-        Self { input, edges_to_merge, on_create_set, on_match_set, done: false, results: Vec::new(), result_index: 0 }
+        Self {
+            input,
+            edges_to_merge,
+            on_create_set,
+            on_match_set,
+            on_create_entity_set: Vec::new(),
+            on_match_entity_set: Vec::new(),
+            done: false,
+            results: Vec::new(),
+            result_index: 0,
+        }
+    }
+
+    /// Attach the whole-entity `ON CREATE`/`ON MATCH SET` items (#874).
+    pub fn with_entity_sets(
+        mut self,
+        on_create: Vec<(String, bool, Expression)>,
+        on_match: Vec<(String, bool, Expression)>,
+    ) -> Self {
+        self.on_create_entity_set = on_create;
+        self.on_match_entity_set = on_match;
+        self
     }
 }
 
@@ -11279,9 +11303,30 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         for (var, prop, expr) in &self.on_match_set {
                             if edge_var.as_deref() == Some(var) || var == "_edge" {
                                 let val = eval_expression(expr, &result_record, store)?;
-                                if let Value::Property(pv) = val {
-                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                // Setting null removes the property (#874).
+                                match val {
+                                    Value::Property(PropertyValue::Null) | Value::Null => {
+                                        store.remove_edge_property(edge_id, prop);
+                                    }
+                                    Value::Property(pv) => {
+                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                    }
+                                    _ => {}
                                 }
+                            }
+                        }
+                        let matched_target = Value::EdgeRef(
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type.clone(),
+                        );
+                        for (var, merge, expr) in &self.on_match_entity_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let value = eval_expression(expr, &result_record, store)?;
+                                apply_entity_assignment(
+                                    &matched_target, &value, *merge, store, tenant_id,
+                                )?;
                             }
                         }
                         if let Some(ref ev) = edge_var {
@@ -11301,9 +11346,30 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         for (var, prop, expr) in &self.on_create_set {
                             if edge_var.as_deref() == Some(var) || var == "_edge" {
                                 let val = eval_expression(expr, &result_record, store)?;
-                                if let Value::Property(pv) = val {
-                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                // Setting null removes the property (#874).
+                                match val {
+                                    Value::Property(PropertyValue::Null) | Value::Null => {
+                                        store.remove_edge_property(edge_id, prop);
+                                    }
+                                    Value::Property(pv) => {
+                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                    }
+                                    _ => {}
                                 }
+                            }
+                        }
+
+                        // `ON CREATE SET r = a` / `r += {…}` (#874).
+                        let target = Value::EdgeRef(
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type.clone(),
+                        );
+                        for (var, merge, expr) in &self.on_create_entity_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let value = eval_expression(expr, &result_record, store)?;
+                                apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
                             }
                         }
 
@@ -12304,6 +12370,63 @@ impl PhysicalOperator for DeleteOperator {
 }
 
 /// Set property operator: SET n.name = "Alice"
+/// Apply `SET x = <map|node>` or `SET x += <map|node>` to one entity.
+///
+/// Shared, because `SET` and `MERGE ... ON CREATE/ON MATCH SET` both need it
+/// and the second had **no implementation at all**: `parse_merge_clause`
+/// matched only `set_item` and `set_label_item`, so a `set_entity_item` fell
+/// through its `match` and the clause the user wrote was silently discarded
+/// (#874).
+///
+/// `=` replaces -- every property not in the incoming map goes away -- and `+=`
+/// merges. Removing the leftovers first keeps the two spellings from differing
+/// only in what they forgot to clear.
+fn apply_entity_assignment(
+    target: &Value,
+    value: &Value,
+    merge: bool,
+    store: &mut GraphStore,
+    tenant_id: &str,
+) -> ExecutionResult<()> {
+    let incoming = SetPropertyOperator::source_properties(value, store)?;
+    match target {
+        Value::NodeRef(id) | Value::Node(id, _) => {
+            let id = *id;
+            if !merge {
+                for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
+                    if !incoming.contains_key(&key) {
+                        store.remove_node_property(id, &key);
+                    }
+                }
+            }
+            for (k, v) in incoming {
+                store
+                    .set_node_property(tenant_id, id, k, v)
+                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            }
+        }
+        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+            let id = *id;
+            if !merge {
+                let existing: Vec<String> = store
+                    .get_edge(id)
+                    .map(|e| e.properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                for key in existing {
+                    if !incoming.contains_key(&key) {
+                        store.remove_edge_property(id, &key);
+                    }
+                }
+            }
+            for (k, v) in incoming {
+                let _ = store.set_edge_property(id, k, v);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub struct SetPropertyOperator {
     input: OperatorBox,
     items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
@@ -12331,7 +12454,7 @@ impl SetPropertyOperator {
     /// own properties, which is what makes `SET a = b` a copy. Anything else
     /// is a type error rather than a silent no-op — assigning a scalar to an
     /// entity has no sensible meaning and guessing one would hide the mistake.
-    fn source_properties(
+    pub(crate) fn source_properties(
         value: &Value,
         store: &GraphStore,
     ) -> ExecutionResult<HashMap<String, PropertyValue>> {
@@ -12418,13 +12541,27 @@ impl PhysicalOperator for SetPropertyOperator {
             for (var, prop, val) in &evaluated {
 
                 if let Some(node_val) = record.get(var) {
+                    // `SET n.prop = null` **removes** the property. Storing a
+                    // null instead left the key present, so `keys(n)` still
+                    // listed it and a later `n.prop IS NULL` could not tell an
+                    // explicitly-nulled property from a removed one -- which is
+                    // the whole distinction (#874).
+                    let remove = matches!(val, PropertyValue::Null);
                     match node_val {
                         Value::NodeRef(id) | Value::Node(id, _) => {
-                            store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
-                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                            if remove {
+                                store.remove_node_property(*id, prop);
+                            } else {
+                                store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
+                                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                            }
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            let _ = store.set_edge_property(*id, prop.clone(), val.clone());
+                            if remove {
+                                store.remove_edge_property(*id, prop);
+                            } else {
+                                let _ = store.set_edge_property(*id, prop.clone(), val.clone());
+                            }
                         }
                         _ => {}
                     }
@@ -12437,45 +12574,7 @@ impl PhysicalOperator for SetPropertyOperator {
             for (var, merge, expr) in &self.entity_items {
                 let Some(target) = record.get(var).cloned() else { continue };
                 let value = eval_expression(expr, &record, store)?;
-                let incoming = Self::source_properties(&value, store)?;
-
-                match target {
-                    Value::NodeRef(id) | Value::Node(id, _) => {
-                        if !merge {
-                            // `=` replaces: every property not in the incoming
-                            // map goes away. Removing them first, then writing,
-                            // keeps the two spellings from differing only in
-                            // leftovers.
-                            for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
-                                if !incoming.contains_key(&key) {
-                                    let _ = store.remove_node_property(id, &key);
-                                }
-                            }
-                        }
-                        for (k, v) in incoming {
-                            store
-                                .set_node_property(tenant_id, id, k, v)
-                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
-                        }
-                    }
-                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                        if !merge {
-                            let existing: Vec<String> = store
-                                .get_edge(id)
-                                .map(|e| e.properties.keys().cloned().collect())
-                                .unwrap_or_default();
-                            for key in existing {
-                                if !incoming.contains_key(&key) {
-                                    let _ = store.remove_edge_property(id, &key);
-                                }
-                            }
-                        }
-                        for (k, v) in incoming {
-                            let _ = store.set_edge_property(id, k, v);
-                        }
-                    }
-                    _ => {}
-                }
+                apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
             }
 
             Ok(Some(record))
@@ -12777,10 +12876,32 @@ pub struct MergeOperator {
     on_create_labels: Vec<(String, Vec<Label>)>,
     /// `(variable, labels)` from `ON MATCH SET n:Label`.
     on_match_labels: Vec<(String, Vec<Label>)>,
+    /// `(variable, is_merge, value)` from `ON CREATE SET n = {…}` / `n += {…}`.
+    ///
+    /// The grammar always parsed these; `parse_merge_clause` matched only
+    /// `set_item` and `set_label_item`, so they fell through and the clause was
+    /// silently discarded (#874).
+    on_create_entity_set: Vec<(String, bool, Expression)>,
+    /// The same for `ON MATCH SET`.
+    on_match_entity_set: Vec<(String, bool, Expression)>,
     executed: bool,
 }
 
 impl MergeOperator {
+    /// Attach the whole-entity `ON CREATE`/`ON MATCH SET` items.
+    ///
+    /// A builder rather than two more `new` parameters, so the existing call
+    /// sites keep compiling and the addition stays reviewable (#874).
+    pub fn with_entity_sets(
+        mut self,
+        on_create: Vec<(String, bool, Expression)>,
+        on_match: Vec<(String, bool, Expression)>,
+    ) -> Self {
+        self.on_create_entity_set = on_create;
+        self.on_match_entity_set = on_match;
+        self
+    }
+
     pub fn new(
         pattern: Pattern,
         on_create_set: Vec<(String, String, Expression)>,
@@ -12795,6 +12916,8 @@ impl MergeOperator {
             on_match_set,
             on_create_labels,
             on_match_labels,
+            on_create_entity_set: Vec::new(),
+            on_match_entity_set: Vec::new(),
             executed: false,
         }
     }
@@ -12980,6 +13103,8 @@ impl MergeOperator {
             }
             let sets = self.on_match_set.clone();
             self.apply_sets(&sets, &record, store, tenant_id)?;
+            let entity_sets = self.on_match_entity_set.clone();
+            self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             let labels = self.on_match_labels.clone();
             Self::apply_labels(&labels, &record, store, tenant_id);
             return Ok(Some(record));
@@ -13016,7 +13141,9 @@ impl MergeOperator {
         }
 
         let sets = self.on_create_set.clone();
-        self.apply_sets(&sets, &record, store, tenant_id)?;
+self.apply_sets(&sets, &record, store, tenant_id)?;
+        let entity_sets = self.on_create_entity_set.clone();
+        self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
         Ok(Some(record))
     }
 
@@ -13073,9 +13200,33 @@ impl MergeOperator {
                 continue;
             };
             let val = eval_expression(expr, record, store)?;
-            if let Value::Property(pv) = val {
-                let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+            // `SET n.prop = null` removes the property (#874), the same rule
+            // the plain `SET` clause follows.
+            match val {
+                Value::Property(PropertyValue::Null) | Value::Null => {
+                    store.remove_node_property(node_id, prop);
+                }
+                Value::Property(pv) => {
+                    let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                }
+                _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// `ON CREATE SET n = {…}` / `n += {…}` (#874).
+    fn apply_entity_sets(
+        &self,
+        sets: &[(String, bool, Expression)],
+        record: &Record,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<()> {
+        for (var, merge, expr) in sets {
+            let Some(target) = record.get(var).cloned() else { continue };
+            let value = eval_expression(expr, record, store)?;
+            apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
         }
         Ok(())
     }
@@ -13192,11 +13343,19 @@ impl PhysicalOperator for MergeOperator {
             for (var, prop, expr) in &self.on_create_set {
                 if var == &start_var {
                     let val = eval_expression(expr, &record, store)?;
-                    if let Value::Property(pv) = val {
-                        let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                    match val {
+                        Value::Property(PropertyValue::Null) | Value::Null => {
+                            store.remove_node_property(node_id, prop);
+                        }
+                        Value::Property(pv) => {
+                            let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                        }
+                        _ => {}
                     }
                 }
             }
+            let entity_sets = self.on_create_entity_set.clone();
+            self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             Self::apply_labels(&self.on_create_labels, &record, store, tenant_id);
         }
 
