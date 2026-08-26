@@ -50,6 +50,8 @@ pub enum ValidationError {
     PatternInSetValue,
     /// `size()` applied to a pattern or a path (#843).
     SizeOfNonCollection(&'static str),
+    /// A bare pattern used where a value is expected (#880).
+    PatternInProjection(&'static str),
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
@@ -111,6 +113,11 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "size() takes a list or a string, not {what}; \
                  use length() for a path"
+            ),
+            Self::PatternInProjection(where_) => write!(
+                f,
+                "a pattern is a predicate, not a value; it cannot be projected by {where_}. \
+                 Use `EXISTS {{ ... }}` for a boolean, or a pattern comprehension for a list"
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -1332,7 +1339,58 @@ fn validate_size_arguments(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A bare pattern cannot be **projected** (#880).
+///
+/// ```text
+/// MATCH (n) RETURN (n)-[]->()
+/// MATCH (n) WITH (n)-[]->() AS x RETURN x
+/// ```
+///
+/// Both must fail at compile time. A pattern in that position is a predicate
+/// written where a value belongs, and the engine happily evaluated it as one
+/// and projected the boolean -- an answer to a question nobody asked.
+///
+/// Only the **top level** of a projection item is checked, and only a *bare*
+/// pattern. `EXISTS { ... }` desugars to the same AST node and is legal
+/// anywhere (`bare_pattern` is what separates them, as #798 established); a
+/// pattern comprehension is a different node; and a bare pattern nested inside
+/// a list comprehension's own `WHERE` is a predicate in a predicate position.
+/// Walking the whole tree would reject all three, and over-rejecting a valid
+/// query is the worse failure.
+fn validate_pattern_projections(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn check(items: &[crate::query::ast::ReturnItem], what: &'static str) -> Result<(), ValidationError> {
+        for item in items {
+            if matches!(item.expression, Expression::ExistsSubquery { bare_pattern: true, .. }) {
+                return Err(ValidationError::PatternInProjection(what));
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(rc) = &query.return_clause {
+        check(&rc.items, "RETURN")?;
+    }
+    if let Some(wc) = &query.with_clause {
+        check(&wc.items, "WITH")?;
+    }
+    for (wc, _, _, _) in &query.extra_with_stages {
+        check(&wc.items, "WITH")?;
+    }
+    for clause in &query.clauses {
+        match clause {
+            Clause::Return(rc) => check(&rc.items, "RETURN")?,
+            Clause::With(wc) => check(&wc.items, "WITH")?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_pattern_projections(query)?;
+
     validate_size_arguments(query)?;
 
     validate_pattern_predicate_vars(query)?;
