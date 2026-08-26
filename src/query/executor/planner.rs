@@ -543,6 +543,54 @@ pub struct QueryPlanner {
     trail_enumeration: std::sync::atomic::AtomicBool,
 }
 
+/// Project a `RETURN` list, building an aggregation when any item aggregates.
+///
+/// The write paths projected their return items directly, with no aggregate
+/// handling at all, so `CREATE (a) RETURN count(*)` and `MERGE (a) RETURN
+/// count(*)` died on `Unknown function: count` -- an everyday query, failing
+/// because the *planner* never routed `count` to the operator that implements
+/// it. Adding `WITH a` in the middle made it work, which is the tell: the
+/// aggregation was there, only unreachable from this branch.
+///
+/// This is the small, shared version. The read path keeps its own assembly
+/// because it also chooses between O(1) shortcuts (label count, edge count)
+/// that need the MATCH to decide, and none of those apply after a write.
+fn plan_return_projection(
+    input: OperatorBox,
+    return_clause: &crate::query::ast::ReturnClause,
+) -> (OperatorBox, Vec<String>) {
+    let mut output_columns = Vec::new();
+    let mut aggregates = Vec::new();
+    let mut group_by: Vec<(Expression, String)> = Vec::new();
+    let mut projections: Vec<(Expression, String)> = Vec::new();
+    let mut post_projections: Vec<(Expression, String)> = Vec::new();
+    let mut has_aggregation = false;
+    let mut agg_counter = 0usize;
+
+    for (idx, item) in return_clause.items.iter().enumerate() {
+        let alias = item.column_name(idx);
+        output_columns.push(alias.clone());
+        let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
+        if extracted.is_empty() {
+            group_by.push((item.expression.clone(), alias.clone()));
+            projections.push((item.expression.clone(), alias.clone()));
+            post_projections.push((Expression::Variable(alias.clone()), alias.clone()));
+        } else {
+            has_aggregation = true;
+            aggregates.extend(extracted);
+            post_projections.push((rewritten, alias.clone()));
+        }
+    }
+
+    let operator: OperatorBox = if has_aggregation {
+        let aggregated = Box::new(AggregateOperator::new(input, group_by, aggregates));
+        Box::new(ProjectOperator::new(aggregated, post_projections))
+    } else {
+        Box::new(ProjectOperator::new(input, projections))
+    };
+    (operator, output_columns)
+}
+
 impl QueryPlanner {
     /// Create a new query planner
     pub fn new() -> Self {
@@ -1140,12 +1188,9 @@ impl QueryPlanner {
 
                 let mut output_columns = Vec::new();
                 if let Some(return_clause) = &query.return_clause {
-                    let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                        let alias = item.column_name(i);
-                        output_columns.push(alias.clone());
-                        (item.expression.clone(), alias)
-                    }).collect();
-                            operator = Box::new(ProjectOperator::new(operator, projections));
+                    let (projected, columns) = plan_return_projection(operator, return_clause);
+                    operator = projected;
+                    output_columns = columns;
                 }
 
                 return Ok(ExecutionPlan {
@@ -1170,14 +1215,9 @@ impl QueryPlanner {
                 let mut plan = self.plan_create_only(create_clause)?;
                 // CY-12: Wrap with ProjectOperator if RETURN clause is present
                 if let Some(return_clause) = &query.return_clause {
-                    let mut output_columns = Vec::new();
-                    let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
-                        let alias = item.column_name(i);
-                        output_columns.push(alias.clone());
-                        (item.expression.clone(), alias)
-                    }).collect();
-                    plan.root = Box::new(ProjectOperator::new(plan.root, projections));
-                    plan.output_columns = output_columns;
+                    let (projected, columns) = plan_return_projection(plan.root, return_clause);
+                    plan.root = projected;
+                    plan.output_columns = columns;
 
                     // `ORDER BY`, `SKIP` and `LIMIT` after a bare `CREATE`.
                     //

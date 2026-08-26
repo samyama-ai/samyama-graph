@@ -3494,7 +3494,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
                     "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
                     "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
-                    _ => Err(ExecutionError::TypeError(format!("Cannot convert '{}' to boolean", s))),
+                    // A string that is not a boolean converts to null, not to
+                    // an error: `toBoolean('')` is a *question* about the
+                    // string, and "no" is an answer. Erroring killed the whole
+                    // query -- `UNWIND [null, '', ' tru '] AS x RETURN
+                    // toBoolean(x)` returned nothing at all rather than three
+                    // nulls (#907).
+                    _ => Ok(Value::Property(PropertyValue::Null)),
                 },
                 Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Boolean(*i != 0))),
                 Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
