@@ -1263,14 +1263,36 @@ fn eval_list_comprehension(
         }
 
         // Apply map expression
-        let mapped = eval_expression(map_expr, &inner_record, store)?;
-        match mapped {
-            Value::Property(pv) => result.push(pv),
-            _ => result.push(PropertyValue::Null),
-        }
+        result.push(eval_expression(map_expr, &inner_record, store)?);
     }
 
-    Ok(Value::Property(PropertyValue::Array(result)))
+    // A projection that yields **entities** stays a `Value::List`.
+    //
+    // Every mapped value used to be forced into a `PropertyValue`, and anything
+    // that is not one -- a node, a relationship, a path, a nested entity list --
+    // became `Null`. So `[x IN collect(p) | head(nodes(x))]` answered
+    // `[null, null]` where two nodes belong: a list of the right length, full of
+    // nothing, which no caller can distinguish from a projection that
+    // legitimately produced nulls (#863).
+    //
+    // #800 fixed the *input* side of this same distinction -- a list holding
+    // entities is a `Value::List`, not a `PropertyValue` -- and left the output
+    // side converting them away.
+    //
+    // A list of plain property values still comes back as `PropertyValue::Array`,
+    // because that is what every existing caller of a comprehension expects and
+    // what the storage layer can hold.
+    if result.iter().all(|v| matches!(v, Value::Property(_))) {
+        let props = result
+            .into_iter()
+            .map(|v| match v {
+                Value::Property(p) => p,
+                _ => unreachable!("checked above"),
+            })
+            .collect();
+        return Ok(Value::Property(PropertyValue::Array(props)));
+    }
+    Ok(Value::List(result))
 }
 
 /// Evaluate predicate functions: all(x IN list WHERE pred), any(...), none(...), single(...)
@@ -1370,8 +1392,20 @@ fn eval_reduce(
     let list_val = eval_expression(list_expr, record, store)?;
     // See the note in `eval_list_comprehension`: an all-float list literal is a
     // `Vector`, and giving up here returned the seed unchanged (#605).
-    let items = match list_val {
-        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
+    //
+    // A list holding **entities** is a `Value::List`, and it fell into the same
+    // give-up arm: `reduce(acc = 0, x IN nodes(p) | acc + 1)` returned **0** for
+    // a two-node path. The seed is a legitimate answer for an empty list, so
+    // nothing distinguishes "nothing to fold" from "I did not recognise your
+    // list" (#863).
+    let items: Vec<Value> = match list_val {
+        Value::Property(ref p) if p.as_list_items().is_some() => p
+            .as_list_items()
+            .unwrap()
+            .into_iter()
+            .map(Value::Property)
+            .collect(),
+        Value::List(items) => items,
         _ => return Ok(init_val),
     };
 
@@ -1379,7 +1413,7 @@ fn eval_reduce(
     for item in items {
         let mut inner_record = record.clone();
         inner_record.bind(accumulator.to_string(), acc);
-        inner_record.bind(variable.to_string(), Value::Property(item));
+        inner_record.bind(variable.to_string(), item);
         acc = eval_expression(expression, &inner_record, store)?;
     }
     Ok(acc)
