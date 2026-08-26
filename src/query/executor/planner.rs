@@ -1138,6 +1138,45 @@ impl QueryPlanner {
                     }).collect();
                     plan.root = Box::new(ProjectOperator::new(plan.root, projections));
                     plan.output_columns = output_columns;
+
+                    // `ORDER BY`, `SKIP` and `LIMIT` after a bare `CREATE`.
+                    //
+                    // This path returned straight after projecting, so
+                    // `CREATE (n:N) RETURN n LIMIT 0` produced a row -- the one
+                    // shape where the clause was silently dropped. It works
+                    // wherever the create has input rows
+                    // (`UNWIND [1,2,3] AS x CREATE ... RETURN n LIMIT 2` is
+                    // correct), because that goes through a different planner
+                    // path which applies them.
+                    //
+                    // The side effects still happen: the nodes are created and
+                    // only the *result set* is trimmed, which is exactly what
+                    // `Create6` asserts (#866).
+                    if let Some(order_by) = &query.order_by {
+                        let sort_items: Vec<(Expression, bool)> = order_by
+                            .items
+                            .iter()
+                            .map(|i| (i.expression.clone(), i.ascending))
+                            .collect();
+                        plan.root = Box::new(SortOperator::new(plan.root, sort_items));
+                    }
+                    // `SKIP`/`LIMIT` go through an **eager** barrier that does
+                    // the trimming itself.
+                    //
+                    // A `LimitOperator(0)` returns without pulling, so a lazy
+                    // plan would never run the create beneath it: the query
+                    // reported success and changed nothing. Cypher trims the
+                    // result set and not the side effects -- `CREATE (n:N)
+                    // RETURN n LIMIT 0` still creates the node (#866).
+                    if query.skip.is_some() || query.limit.is_some() {
+                        plan.root = Box::new(
+                            crate::query::executor::operator::EagerOperator::new(
+                                plan.root,
+                                query.skip.unwrap_or(0),
+                                query.limit,
+                            ),
+                        );
+                    }
                 }
                 return Ok(plan);
             }

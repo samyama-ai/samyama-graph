@@ -5356,6 +5356,20 @@ impl PhysicalOperator for FilterOperator {
         Ok(None)
     }
 
+    // A pass-through operator's default `next_mut` delegates to `next`, which
+    // reads its input read-only -- so a write beneath a FILTER refused outright
+    // with "requires mutable store access". Same defect class as #649, which
+    // fixed it for SKIP and LIMIT and named them "the last two pass-through
+    // operators that still had it"; SORT and FILTER also had it (#866).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        while let Some(record) = self.input.next_mut(store, tenant_id)? {
+            if self.evaluate_predicate(&record, store)? {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         let mut filtered_records = Vec::new();
 
@@ -8465,6 +8479,100 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
 }
 
 /// Limit operator: LIMIT 10
+/// Drains its input completely on the first pull, then replays the rows.
+///
+/// Cypher's rule is that `SKIP` and `LIMIT` trim the **result set** and not the
+/// **side effects**: `CREATE (n:N) RETURN n LIMIT 0` still creates the node.
+/// Without this, `LimitOperator(0)` never pulls, so the create beneath it never
+/// runs and the write is silently skipped -- a query that reports success and
+/// changes nothing (#866).
+///
+/// It is the standard "eager" barrier, placed between a write and a row-count
+/// clause. Only there: making every `LIMIT` eager would undo the whole point of
+/// a limit on a read, which is to stop early.
+pub struct EagerOperator {
+    input: OperatorBox,
+    skip: usize,
+    limit: Option<usize>,
+    buffered: Vec<Record>,
+    idx: usize,
+    drained: bool,
+}
+
+impl EagerOperator {
+    /// Wrap `input` so it runs to completion, then replay it trimmed by `skip`
+    /// and `limit`.
+    ///
+    /// The trimming is **this operator's job** rather than a `Skip`/`Limit`
+    /// above it, because `LimitOperator(0)` returns without pulling at all --
+    /// so a lazy barrier beneath it is never reached and the write never runs.
+    /// Being outermost is what makes the write happen.
+    pub fn new(input: OperatorBox, skip: usize, limit: Option<usize>) -> Self {
+        Self { input, skip, limit, buffered: Vec::new(), idx: 0, drained: false }
+    }
+
+    fn emit(&mut self) -> Option<Record> {
+        let start = self.skip;
+        let end = match self.limit {
+            Some(l) => (start + l).min(self.buffered.len()),
+            None => self.buffered.len(),
+        };
+        let pos = start + self.idx;
+        if pos >= end {
+            return None;
+        }
+        self.idx += 1;
+        Some(self.buffered[pos].clone())
+    }
+}
+
+impl PhysicalOperator for EagerOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.drained {
+            while let Some(r) = self.input.next(store)? {
+                self.buffered.push(r);
+            }
+            self.drained = true;
+        }
+        Ok(self.emit())
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.drained {
+            while let Some(r) = self.input.next_mut(store, tenant_id)? {
+                self.buffered.push(r);
+            }
+            self.drained = true;
+        }
+        Ok(self.emit())
+    }
+
+    /// **Refuses a pushed-down limit.** Accepting one would let the limit reach
+    /// the write again, which is the defect this operator exists to prevent.
+    fn try_push_limit(&mut self, _n: usize) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.buffered.clear();
+        self.idx = 0;
+        self.drained = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Eager".to_string(),
+            details: String::new(),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct LimitOperator {
     /// Input operator
     input: OperatorBox,
@@ -8780,6 +8888,34 @@ impl PhysicalOperator for SortOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
+            self.execute_all(store)?;
+        }
+
+        if self.current >= self.records.len() {
+            return Ok(None);
+        }
+
+        let record = self.records[self.current].clone();
+        self.current += 1;
+        Ok(Some(record))
+    }
+
+    // Same as the FILTER above: a write beneath a SORT refused with "requires
+    // mutable store access", which is what `CREATE (n) RETURN n ORDER BY n.x`
+    // hit (#866).
+    //
+    // The input is drained **mutably first** and replaced with the rows it
+    // produced, so the ordinary `execute_all` does the sorting. Duplicating the
+    // decorate-sort-undecorate path -- with its limit hint and its amortised
+    // trimming -- would be a second implementation of the one thing this
+    // operator does.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            let mut rows = Vec::new();
+            while let Some(r) = self.input.next_mut(store, tenant_id)? {
+                rows.push(r);
+            }
+            self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
         }
 
