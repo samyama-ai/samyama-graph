@@ -62,6 +62,8 @@ pub enum ValidationError {
     UnaliasedWithItem,
     /// An aggregate where aggregation is not allowed.
     AggregateNotAllowed(&'static str),
+    /// A function applied to the wrong kind of entity: (function, wanted, got).
+    FunctionArgumentKind(&'static str, &'static str, &'static str),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
     AmbiguousAggregationExpression,
     /// An ORDER BY that aggregates when the projection does not.
@@ -79,6 +81,10 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "every WITH item that is not a bare variable needs an alias: nothing \
                  downstream can name the column otherwise"
+            ),
+            Self::FunctionArgumentKind(func, wanted, got) => write!(
+                f,
+                "`{func}()` takes {wanted}, and was given {got}"
             ),
             Self::AggregateNotAllowed(where_) => write!(
                 f,
@@ -1983,12 +1989,112 @@ fn validate_aggregate_placement(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A function applied to the wrong kind of entity (#901).
+///
+/// ```text
+/// MATCH (r) RETURN type(r)     -> SyntaxError: InvalidArgumentType
+/// MATCH (n) RETURN length(n)   -> SyntaxError: InvalidArgumentType
+/// ```
+///
+/// We returned a null column. `type()` asks a relationship for its type and a
+/// node does not have one; `length()` asks a path how long it is. The TCK wants
+/// these **at compile time**, which is only possible because the pattern says
+/// what kind each variable is -- the same `EntityKind` map that
+/// `validate_variable_kinds` builds.
+///
+/// Only a variable whose kind the pattern fixes is checked. An expression, a
+/// parameter, or a name a `WITH` recomputed has no kind here and is left alone:
+/// rejecting a valid query is the worse failure, and `carry_kinds_through_with`
+/// already refuses to guess for exactly that reason.
+fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Functions whose single argument must be one kind of entity.
+    const FIXED: &[(&str, EntityKind)] = &[
+        ("type", EntityKind::Relationship),
+        ("startnode", EntityKind::Relationship),
+        ("endnode", EntityKind::Relationship),
+        ("labels", EntityKind::Node),
+        ("length", EntityKind::Path),
+        ("nodes", EntityKind::Path),
+        ("relationships", EntityKind::Path),
+    ];
+
+    fn walk(
+        e: &Expression,
+        kinds: &std::collections::HashMap<String, EntityKind>,
+    ) -> Result<(), ValidationError> {
+        if let Expression::Function { name, args, .. } = e {
+            let lowered = name.to_lowercase();
+            if let Some((func, wanted)) = FIXED.iter().find(|(n, _)| *n == lowered) {
+                if let Some(Expression::Variable(v) | Expression::PathVariable(v)) = args.first() {
+                    if let Some(got) = kinds.get(v) {
+                        if got != wanted {
+                            return Err(ValidationError::FunctionArgumentKind(
+                                func,
+                                wanted.noun(),
+                                got.noun(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, kinds)?;
+        }
+        Ok(())
+    }
+
+    // The kinds every pattern in the query fixes. Scope narrowing is not
+    // modelled here: a name a WITH drops is simply absent from a later
+    // pattern's map too, and a name it carries keeps its kind. The coarse
+    // version cannot produce a *wrong* kind, only miss one.
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
+    let mut note = |pattern: &crate::query::ast::Pattern,
+                    kinds: &mut std::collections::HashMap<String, EntityKind>| {
+        // Kind *clashes* are `validate_variable_kinds`'s job; ignored here so
+        // one rule reports them.
+        let _ = note_pattern_kinds(kinds, pattern);
+    };
+    for mc in &query.match_clauses {
+        note(&mc.pattern, &mut kinds);
+    }
+    if let Some(cc) = &query.create_clause {
+        note(&cc.pattern, &mut kinds);
+    }
+    if let Some(mc) = &query.merge_clause {
+        note(&mc.pattern, &mut kinds);
+    }
+    for (_, _, matches, _) in &query.extra_with_stages {
+        for mc in matches {
+            note(&mc.pattern, &mut kinds);
+        }
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Match(mc) => note(&mc.pattern, &mut kinds),
+            Clause::Create(cc) => note(&cc.pattern, &mut kinds),
+            Clause::Merge(mc) => note(&mc.pattern, &mut kinds),
+            _ => {}
+        }
+    }
+
+    for e in all_expressions(query) {
+        walk(e, &kinds)?;
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_variables_are_bound(query)?;
 
     validate_with_items_aliased(query)?;
 
     validate_aggregate_placement(query)?;
+
+    validate_function_argument_kinds(query)?;
 
     validate_delete_targets(query)?;
 
