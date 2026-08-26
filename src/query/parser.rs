@@ -1623,7 +1623,13 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
     let mut direction = Direction::Both;
     let edge_str = pair.as_str();
 
-    if edge_str.starts_with("<-") {
+    // Arrows on **both** ends mean either direction, the same as no arrows at
+    // all. Testing `starts_with("<-")` first would call `<-->` incoming, which
+    // is the opposite of what it asks for and would silently halve the matches
+    // rather than fail (#868).
+    if edge_str.starts_with("<-") && edge_str.ends_with("->") {
+        direction = Direction::Both;
+    } else if edge_str.starts_with("<-") {
         direction = Direction::Incoming;
     } else if edge_str.ends_with("->") {
         direction = Direction::Outgoing;

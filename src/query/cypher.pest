@@ -180,7 +180,11 @@ label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 //
 // Alternative order matters and is not arbitrary: `-` `->` must be tried
 // before `-` `-`, or `-->` matches the undirected form and leaves a stray `>`.
+// `<-->` is "an edge in either direction", the same as `--`. It has to be tried
+// **first**: `<-` otherwise matches the incoming form and leaves a stray `>`,
+// which is a parse error on `MATCH (n)<-->(k)` (#868).
 edge_pattern = {
+    ("<-" ~ edge_detail? ~ "->") |
     ("<-" ~ edge_detail? ~ "-") |
     ("-" ~ edge_detail? ~ "->") |
     ("-" ~ edge_detail? ~ "-")
