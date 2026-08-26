@@ -13282,6 +13282,31 @@ impl MergeOperator {
                     record.bind(var.clone(), Value::NodeRef(assignment[i]));
                 }
             }
+            // The relationships the search accepted, bound under the names the
+            // pattern gave them. Only the nodes were bound, so `MERGE
+            // (a)-[r:R]->(b) RETURN r` failed with VariableNotFound and a named
+            // path had nothing to build from (#903).
+            let mut matched_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+            for (from, to, ty, props, var) in &pattern_rels {
+                let Some(edge_id) =
+                    Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                else {
+                    continue;
+                };
+                matched_edges.push(edge_id);
+                if let Some(var) = var {
+                    record.bind(
+                        var.clone(),
+                        Value::EdgeRef(edge_id, assignment[*from], assignment[*to], ty.clone()),
+                    );
+                }
+            }
+            if let Some(path_var) = &path.path_variable {
+                record.bind(
+                    path_var.clone(),
+                    Value::Path { nodes: assignment.clone(), edges: matched_edges },
+                );
+            }
             let sets = self.on_match_set.clone();
             self.apply_sets(&sets, &record, store, tenant_id)?;
             let entity_sets = self.on_match_entity_set.clone();
@@ -13318,13 +13343,27 @@ impl MergeOperator {
             }
             created.push(node_id);
         }
-        for (from, to, edge_type, props, _var) in &pattern_rels {
+        let mut created_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+        for (from, to, edge_type, props, var) in &pattern_rels {
             let edge_id = store
                 .create_edge(created[*from], created[*to], edge_type.clone())
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             for (k, v) in props {
                 store.set_edge_property_sparse(edge_id, k.clone(), v.clone());
             }
+            created_edges.push(edge_id);
+            if let Some(var) = var {
+                record.bind(
+                    var.clone(),
+                    Value::EdgeRef(edge_id, created[*from], created[*to], edge_type.clone()),
+                );
+            }
+        }
+        if let Some(path_var) = &path.path_variable {
+            record.bind(
+                path_var.clone(),
+                Value::Path { nodes: created.clone(), edges: created_edges },
+            );
         }
 
         let sets = self.on_create_set.clone();
@@ -13336,6 +13375,42 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
 
     /// Assign candidate nodes position by position, keeping only assignments whose
     /// relationships all exist in the store.
+    /// The edge from `src` to `dst` that satisfies a MERGE pattern segment.
+    ///
+    /// One implementation, used by the search *and* by the binding that follows
+    /// it, so a relationship variable cannot be bound to an edge the search did
+    /// not accept.
+    ///
+    /// The properties are part of the question. The search compared type and
+    /// endpoints only, so `MERGE (a)-[:R {k: 1}]->(b)` matched a bare `:R`
+    /// edge, bound nothing, and left the graph without the property the query
+    /// asked for (#903).
+    fn merge_edge_match(
+        store: &GraphStore,
+        src: NodeId,
+        dst: NodeId,
+        ty: &EdgeType,
+        props: &HashMap<String, PropertyValue>,
+    ) -> Option<crate::graph::types::EdgeId> {
+        store
+            .get_outgoing_edge_targets(src)
+            .iter()
+            .find(|(eid, _s, t, et)| {
+                if *t != dst || et != ty {
+                    return false;
+                }
+                if props.is_empty() {
+                    return true;
+                }
+                store.get_edge(*eid).is_some_and(|edge| {
+                    props
+                        .iter()
+                        .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
+                })
+            })
+            .map(|(eid, ..)| *eid)
+    }
+
     fn search(
         candidates: &[Vec<NodeId>],
         rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)],
@@ -13353,16 +13428,12 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
             }
             assignment.push(cand);
             // Check every relationship whose endpoints are now both assigned.
-            let ok = rels.iter().all(|(from, to, ty, _p, _v)| {
+            let ok = rels.iter().all(|(from, to, ty, props, _v)| {
                 if *from > i || *to > i {
                     return true;
                 }
-                let src = assignment[*from];
-                let dst = assignment[*to];
-                store
-                    .get_outgoing_edge_targets(src)
-                    .iter()
-                    .any(|(_eid, _s, t, et)| *t == dst && et == ty)
+                Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                    .is_some()
             });
             if ok {
                 if let Some(found) = Self::search(candidates, rels, store, assignment) {
