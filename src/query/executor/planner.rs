@@ -2340,7 +2340,27 @@ impl QueryPlanner {
             // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
             // silently created no nodes and no edges. That case is a
             // whole-pattern merge, which `MergeOperator` already does (#642).
-            if !edges_to_merge.is_empty() && !query.match_clauses.is_empty() {
+            // `MatchMergeEdgeOperator` wires an edge between endpoints that are
+            // **already bound** -- that is its whole contract, and it is better
+            // at that job than the general path: it binds the relationship
+            // variable, matches an undirected pattern both ways, and runs
+            // ON CREATE / ON MATCH against the relationship.
+            //
+            // The guard was `a MATCH exists`, not `the endpoints are bound`, so
+            // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
+            // nothing -- wired an edge between one endpoint and no other, and
+            // the whole MERGE became a silent no-op returning zero rows (#894).
+            let bound_by_match = {
+                let mut scope: Vec<String> = Vec::new();
+                crate::query::star::bind_match(&mut scope, &query.match_clauses);
+                scope
+            };
+            let all_endpoints_bound = edges_to_merge
+                .iter()
+                .all(|(src, tgt, ..)| {
+                    bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
+                });
+            if !edges_to_merge.is_empty() && all_endpoints_bound {
                 // Edge MERGE: use MatchMergeEdgeOperator
                 use crate::query::executor::operator::MatchMergeEdgeOperator;
                 // `ON CREATE SET n = {…}` / `n += {…}` (#874).

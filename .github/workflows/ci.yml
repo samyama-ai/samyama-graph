@@ -141,7 +141,7 @@ jobs:
         # expansion in #756: the ruler got honest and the count fell.
         run: |
           git clone --depth 1 --branch 2024.3             https://github.com/opencypher/openCypher.git /tmp/openCypher
-          cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3664
+          cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3673
 
       - name: CH-DETERM-THREADS — the answer does not depend on the thread count
         # LANG-14 (#611). CH-DETERM varies the *process*, which catches a
