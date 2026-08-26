@@ -8690,6 +8690,82 @@ impl PhysicalOperator for EagerOperator {
     }
 }
 
+/// Binds `p` for a **named path on a write pattern**: `CREATE p = (a)-[:R]->(b)`.
+///
+/// The parser has always captured `path_variable` on a `CREATE`/`MERGE`
+/// pattern, and the write operators never bound it, so `RETURN p` failed with
+/// `VariableNotFound("p")` — a query that parses and then cannot name what it
+/// just made (#876).
+///
+/// It reads the node and relationship variables the write already bound and
+/// assembles the path from them, rather than teaching every write operator to
+/// build one. Anonymous positions get a synthetic handle from the planner for
+/// the same reason edges do: something has to be nameable for the path to
+/// reference it.
+pub struct BindPathOperator {
+    input: OperatorBox,
+    /// `(path variable, node handles in order, relationship handles in order)`.
+    paths: Vec<(String, Vec<String>, Vec<String>)>,
+}
+
+impl BindPathOperator {
+    /// Wrap `input`, binding each named path from the handles listed.
+    pub fn new(input: OperatorBox, paths: Vec<(String, Vec<String>, Vec<String>)>) -> Self {
+        Self { input, paths }
+    }
+
+    fn bind(&self, mut record: Record) -> Record {
+        for (path_var, node_vars, edge_vars) in &self.paths {
+            let nodes: Vec<NodeId> =
+                node_vars.iter().filter_map(|v| record.get(v).and_then(|x| x.node_id())).collect();
+            // A path whose nodes are not all bound is not a path; leaving the
+            // variable unbound gives the caller the same "not found" it had
+            // before, rather than a plausible shorter path.
+            if nodes.len() != node_vars.len() {
+                continue;
+            }
+            let edges: Vec<crate::graph::types::EdgeId> = edge_vars
+                .iter()
+                .filter_map(|v| match record.get(v) {
+                    Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if edges.len() != edge_vars.len() {
+                continue;
+            }
+            record.bind(path_var.clone(), Value::Path { nodes, edges });
+        }
+        record
+    }
+}
+
+impl PhysicalOperator for BindPathOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Ok(self.input.next(store)?.map(|r| self.bind(r)))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        Ok(self.input.next_mut(store, tenant_id)?.map(|r| self.bind(r)))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "BindPath".to_string(),
+            details: self.paths.iter().map(|(p, _, _)| p.clone()).collect::<Vec<_>>().join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct LimitOperator {
     /// Input operator
     input: OperatorBox,

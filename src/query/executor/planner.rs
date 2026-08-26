@@ -1114,6 +1114,15 @@ impl QueryPlanner {
                     .with_entity_sets(on_create_entity, on_match_entity),
                 );
 
+                // `MERGE p = (...)` binds `p` (#876).
+                let merge_paths = named_path_handles(&merge_clause.pattern);
+                if !merge_paths.is_empty() {
+                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                        operator,
+                        merge_paths,
+                    ));
+                }
+
                 // A bare `SET` after MERGE applies on both branches, unlike ON CREATE /
                 // ON MATCH. It parsed but was dropped here, so `MERGE (m) SET m.x = 1`
                 // silently left the property unset.
@@ -2278,20 +2287,48 @@ impl QueryPlanner {
 
             // Extract edge patterns from MERGE clause
             let mut edges_to_merge = Vec::new();
+            // `MERGE p = (a)-[:R]->(b)` binds `p` (#876). An anonymous
+            // relationship inside a named path is given a synthetic handle, for
+            // the same reason `CREATE` gives one to an anonymous node: the path
+            // has to reference it afterwards.
+            let mut merge_named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+            let mut anon_seq = 0usize;
             for path in &merge_clause.pattern.paths {
                 let mut current_var = path.start.variable.clone();
+                let mut path_nodes: Vec<String> = current_var.iter().cloned().collect();
+                let mut path_edges: Vec<String> = Vec::new();
+                let mut complete = current_var.is_some();
                 for segment in &path.segments {
                     let edge = &segment.edge;
                     let edge_type = edge.types.first().cloned()
                         .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
                     let edge_props = edge.properties.clone().unwrap_or_default();
-                    let edge_var = edge.variable.clone();
+                    let edge_var = match (&edge.variable, &path.path_variable) {
+                        (None, Some(_)) => {
+                            anon_seq += 1;
+                            Some(format!("__merge_path_edge_{anon_seq}"))
+                        }
+                        (other, _) => other.clone(),
+                    };
                     let target_var = segment.node.variable.clone();
+
+                    match (&target_var, &edge_var) {
+                        (Some(t), Some(e)) => {
+                            path_nodes.push(t.clone());
+                            path_edges.push(e.clone());
+                        }
+                        _ => complete = false,
+                    }
 
                     if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
                         edges_to_merge.push((src.clone(), tgt.clone(), edge_type, edge_props, edge_var));
                     }
                     current_var = target_var;
+                }
+                // A path with an unnameable position is left unbound rather
+                // than bound to a shorter path that looks plausible.
+                if let (Some(pv), true) = (&path.path_variable, complete) {
+                    merge_named_paths.push((pv.clone(), path_nodes, path_edges));
                 }
             }
 
@@ -2320,6 +2357,12 @@ impl QueryPlanner {
                     MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
                         .with_entity_sets(on_create_entity, on_match_entity),
                 );
+                if !merge_named_paths.is_empty() {
+                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                        operator,
+                        merge_named_paths.clone(),
+                    ));
+                }
             } else {
                 // Node-only MERGE, or a whole-pattern MERGE with nothing bound
                 // to hang it off, running once per upstream row.
@@ -2362,6 +2405,12 @@ impl QueryPlanner {
                     )
                     .with_input(operator),
                 );
+                if !merge_named_paths.is_empty() {
+                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                        operator,
+                        merge_named_paths.clone(),
+                    ));
+                }
             }
             true
         } else {
@@ -4461,6 +4510,16 @@ impl QueryPlanner {
         // TCK fixture and most of our own loaders are written in.
         let mut created_vars: HashSet<String> = HashSet::new();
 
+        // `CREATE p = (a)-[:R]->(b)` binds `p`. The parser has always captured
+        // `path_variable`; nothing bound it, so `RETURN p` failed with
+        // `VariableNotFound("p")` -- a query that parses and then cannot name
+        // what it just made (#876).
+        //
+        // Handles are collected here, where the synthetic names for anonymous
+        // positions are already being minted for edge wiring, and a
+        // `BindPathOperator` assembles the path from them afterwards.
+        let mut named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+
         for path in &pattern.paths {
             // Add start node
             let start = &path.start;
@@ -4497,6 +4556,9 @@ impl QueryPlanner {
                     start.property_exprs.clone(),
                 ));
             }
+
+            let mut path_nodes: Vec<String> = vec![start_handle.clone()];
+            let mut path_edges: Vec<String> = Vec::new();
 
             // Track current source variable for edge creation
             let mut current_source_var = Some(start_handle);
@@ -4550,6 +4612,18 @@ impl QueryPlanner {
                 // `<-` segment points at the *earlier* node. This was previously ignored
                 // entirely, so `CREATE (a)<-[:R]-(b)` stored a->b -- an edge pointing the
                 // opposite way to what was written, with nothing to indicate it.
+                // An anonymous relationship inside a **named** path still needs
+                // a handle, for the same reason an anonymous node does: the
+                // path has to be able to reference it afterwards.
+                let edge_variable = match (&edge_variable, &path.path_variable) {
+                    (None, Some(_)) => Some(next_anon(&declared)),
+                    (other, _) => other.clone(),
+                };
+                if let Some(v) = &edge_variable {
+                    path_edges.push(v.clone());
+                }
+                path_nodes.push(node_handle.clone());
+
                 if let Some(source_var) = &current_source_var {
                     let (from, to) = match segment.edge.direction {
                         Direction::Incoming => (node_handle.clone(), source_var.clone()),
@@ -4572,6 +4646,11 @@ impl QueryPlanner {
                 // Update source variable for next segment
                 current_source_var = Some(node_handle);
             }
+
+            if let Some(pv) = &path.path_variable {
+                output_columns.push(pv.clone());
+                named_paths.push((pv.clone(), path_nodes, path_edges));
+            }
         }
 
         // Build the operator chain
@@ -4587,6 +4666,16 @@ impl QueryPlanner {
             Box::new(CreateNodesAndEdgesOperator::new(node_operator, edges_to_create))
         };
 
+        // Bind any named paths from the handles collected above (#876).
+        let final_operator: OperatorBox = if named_paths.is_empty() {
+            final_operator
+        } else {
+            Box::new(crate::query::executor::operator::BindPathOperator::new(
+                final_operator,
+                named_paths,
+            ))
+        };
+
         // Return execution plan with is_write: true (this mutates the graph)
         Ok(ExecutionPlan {
             root: final_operator,
@@ -4594,6 +4683,48 @@ impl QueryPlanner {
             is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
         })
     }
+}
+
+/// The node and relationship handles a named path on a write pattern needs.
+///
+/// Returns `None` when any position is anonymous and therefore cannot be
+/// referenced afterwards — the path is then left unbound rather than bound to a
+/// shorter one that looks plausible (#876).
+///
+/// An anonymous *relationship* in a named path is given a synthetic handle by
+/// the caller, the way `CREATE` already does for anonymous nodes; an anonymous
+/// *node* cannot be, on the MERGE paths, so those return `None`.
+fn named_path_handles(
+    pattern: &crate::query::ast::Pattern,
+) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut anon = 0usize;
+    for path in &pattern.paths {
+        let Some(pv) = &path.path_variable else { continue };
+        let Some(start) = &path.start.variable else { continue };
+        let mut nodes = vec![start.clone()];
+        let mut edges = Vec::new();
+        let mut complete = true;
+        for segment in &path.segments {
+            let Some(node) = &segment.node.variable else {
+                complete = false;
+                break;
+            };
+            let edge = match &segment.edge.variable {
+                Some(v) => v.clone(),
+                None => {
+                    anon += 1;
+                    format!("__merge_path_edge_{anon}")
+                }
+            };
+            nodes.push(node.clone());
+            edges.push(edge);
+        }
+        if complete {
+            out.push((pv.clone(), nodes, edges));
+        }
+    }
+    out
 }
 
 impl Default for QueryPlanner {
@@ -5431,6 +5562,18 @@ impl QueryPlanner {
                         )
                         .with_input(operator),
                     );
+                    // `MERGE p = (...)` binds `p` (#876).
+                    let merge_paths = named_path_handles(&mc.pattern);
+                    if !merge_paths.is_empty() {
+                        for (pv, _, _) in &merge_paths {
+                            bound.insert(pv.clone());
+                        }
+                        operator =
+                            Box::new(crate::query::executor::operator::BindPathOperator::new(
+                                operator,
+                                merge_paths,
+                            ));
+                    }
                     for path in &mc.pattern.paths {
                         if let Some(v) = &path.start.variable {
                             bound.insert(v.clone());
