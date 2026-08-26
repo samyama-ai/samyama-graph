@@ -58,6 +58,10 @@ pub enum ValidationError {
     OrderByUndefinedVariable(String),
     /// A name used in an expression that nothing in the query binds.
     UnboundVariable(String),
+    /// A `WITH` item that is not a bare variable and has no alias.
+    UnaliasedWithItem,
+    /// An aggregate where aggregation is not allowed.
+    AggregateNotAllowed(&'static str),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
     AmbiguousAggregationExpression,
     /// An ORDER BY that aggregates when the projection does not.
@@ -70,6 +74,15 @@ impl std::fmt::Display for ValidationError {
             Self::UnboundVariable(v) => write!(
                 f,
                 "`{v}` is not bound: nothing in this query defines it"
+            ),
+            Self::UnaliasedWithItem => write!(
+                f,
+                "every WITH item that is not a bare variable needs an alias: nothing \
+                 downstream can name the column otherwise"
+            ),
+            Self::AggregateNotAllowed(where_) => write!(
+                f,
+                "an aggregate function is not allowed {where_}"
             ),
             Self::OrderByUndefinedVariable(v) => write!(
                 f,
@@ -347,17 +360,13 @@ fn is_aggregate_call(expr: &Expression) -> bool {
 }
 
 /// Does this expression contain an aggregate anywhere inside it?
+///
+/// *Anywhere*, which it did not do: `walk_children` applies its closure to the
+/// **immediate** children only, so this saw one level. `count(a) > 10` was
+/// found and `a.n > 1 AND count(a) > 10` was not -- the same aggregate, one
+/// conjunction deeper.
 fn contains_aggregate(expr: &Expression) -> bool {
-    if is_aggregate_call(expr) {
-        return true;
-    }
-    let mut found = false;
-    walk_children(expr, &mut |e| {
-        if is_aggregate_call(e) {
-            found = true;
-        }
-    });
-    found
+    is_aggregate_call(expr) || child_expressions(expr).into_iter().any(contains_aggregate)
 }
 
 /// Variables named outside any aggregate call within `expr`.
@@ -1864,8 +1873,122 @@ fn pattern_property_expressions(query: &Query) -> Vec<&Expression> {
     out
 }
 
+/// A `WITH` item that is not a bare variable must be aliased (#897).
+///
+/// ```text
+/// MATCH (a) WITH a, count(*) RETURN a     -> SyntaxError: NoExpressionAlias
+/// ```
+///
+/// `WITH` re-scopes: what it projects is all that exists downstream, and a
+/// column nobody can name is a column nobody can use. `RETURN` is different --
+/// it is the end of the query, and `RETURN count(*)` names its column after
+/// the text the user wrote.
+fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn check(items: &[ReturnItem]) -> Result<(), ValidationError> {
+        for item in items {
+            if item.alias.is_none() && !matches!(item.expression, Expression::Variable(_)) {
+                return Err(ValidationError::UnaliasedWithItem);
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(w) = &query.with_clause {
+        check(&w.items)?;
+    }
+    for (w, ..) in &query.extra_with_stages {
+        check(&w.items)?;
+    }
+    for c in &query.clauses {
+        if let Clause::With(w) = c {
+            check(&w.items)?;
+        }
+    }
+    Ok(())
+}
+
+/// Aggregation is not allowed in a `WHERE`, nor inside a comprehension (#897).
+///
+/// ```text
+/// MATCH (a) WHERE count(a) > 10 RETURN a         -> SyntaxError
+/// MATCH (n) RETURN [x IN [1, 2] | count(*)]      -> SyntaxError
+/// ```
+///
+/// An aggregate is computed over a group of rows, and a `WHERE` runs on one
+/// row at a time -- the filter would have to consume the rows it is filtering.
+/// The `HAVING` shape Cypher does have is `WITH … count(*) AS c … WHERE c > 1`,
+/// which filters on the *alias*, not on the aggregate, and is untouched here.
+///
+/// A comprehension is the same argument one level down: its body runs per list
+/// element, and `count(*)` over a list element has no group to count.
+fn validate_aggregate_placement(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn inside_comprehension(e: &Expression) -> Result<(), ValidationError> {
+        let body: Vec<&Expression> = match e {
+            Expression::ListComprehension { map_expr, filter, .. } => {
+                let mut v: Vec<&Expression> = vec![map_expr.as_ref()];
+                v.extend(filter.iter().map(|b| b.as_ref()));
+                v
+            }
+            Expression::PatternComprehension { projection, filter, .. } => {
+                let mut v: Vec<&Expression> = vec![projection.as_ref()];
+                v.extend(filter.iter().map(|b| b.as_ref()));
+                v
+            }
+            _ => Vec::new(),
+        };
+        for b in body {
+            if contains_aggregate(b) {
+                return Err(ValidationError::AggregateNotAllowed(
+                    "inside a comprehension: its body runs once per element, \
+                     which is not a group",
+                ));
+            }
+        }
+        for child in child_expressions(e) {
+            inside_comprehension(child)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        inside_comprehension(e)?;
+    }
+
+    let mut where_predicates: Vec<&Expression> = Vec::new();
+    if let Some(w) = &query.where_clause {
+        where_predicates.push(&w.predicate);
+    }
+    for (_, _, _, post_where) in &query.extra_with_stages {
+        if let Some(w) = post_where {
+            where_predicates.push(&w.predicate);
+        }
+    }
+    for c in &query.clauses {
+        if let Clause::Where(w) = c {
+            where_predicates.push(&w.predicate);
+        }
+    }
+    for p in where_predicates {
+        if contains_aggregate(p) {
+            return Err(ValidationError::AggregateNotAllowed(
+                "in WHERE: it filters one row at a time, and an aggregate needs \
+                 the group. Aggregate in a WITH and filter on the alias",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_variables_are_bound(query)?;
+
+    validate_with_items_aliased(query)?;
+
+    validate_aggregate_placement(query)?;
 
     validate_delete_targets(query)?;
 
