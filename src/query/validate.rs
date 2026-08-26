@@ -52,6 +52,8 @@ pub enum ValidationError {
     SizeOfNonCollection(&'static str),
     /// A bare pattern used where a value is expected (#880).
     PatternInProjection(&'static str),
+    /// `DELETE` applied to something that is not an entity (#887).
+    InvalidDeleteTarget(String),
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
@@ -118,6 +120,10 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "a pattern is a predicate, not a value; it cannot be projected by {where_}. \
                  Use `EXISTS {{ ... }}` for a boolean, or a pattern comprehension for a list"
+            ),
+            Self::InvalidDeleteTarget(what) => write!(
+                f,
+                "DELETE takes a node, relationship or path; {what}"
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -1388,7 +1394,124 @@ fn validate_pattern_projections(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// `DELETE` takes a node, a relationship or a path (#887).
+///
+/// ```text
+/// MATCH (n) DELETE n:Person     -- a boolean predicate
+/// MATCH (a) DELETE x            -- nothing named x
+/// MATCH () DELETE 1 + 1         -- a number
+/// MATCH (n) DELETE n.prop       -- a property, not the node
+/// ```
+///
+/// All four ran and deleted nothing, reporting success. Deleting nothing is a
+/// legitimate outcome — `MATCH (n:Nope) DELETE n` deletes nothing too — so a
+/// caller cannot tell "there was nothing to delete" from "I did not understand
+/// what you asked me to delete".
+///
+/// Only the shapes that **cannot** be an entity are refused: a literal,
+/// arithmetic, a property access, a label predicate (`n:Label` parses to
+/// `hasLabels`), and a variable nothing binds. A function call is left alone,
+/// because Cypher does allow an expression that resolves to an entity and
+/// deciding that statically is a different job — over-rejecting a valid
+/// `DELETE` is much worse than under-rejecting an invalid one.
+fn validate_delete_targets(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Names anything in the query binds, from either AST representation.
+    fn bound_names(query: &Query) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut note = |p: &crate::query::ast::Pattern| pattern_vars(p, &mut out);
+        for mc in &query.match_clauses {
+            note(&mc.pattern);
+        }
+        if let Some(cc) = &query.create_clause {
+            note(&cc.pattern);
+        }
+        if let Some(mc) = &query.merge_clause {
+            note(&mc.pattern);
+        }
+        if let Some(u) = &query.unwind_clause {
+            out.insert(u.variable.clone());
+        }
+        for u in &query.extra_unwind_clauses {
+            out.insert(u.variable.clone());
+        }
+        for u in &query.post_with_unwind_clauses {
+            out.insert(u.variable.clone());
+        }
+        if let Some(wc) = &query.with_clause {
+            out.extend(projected_names(&wc.items));
+        }
+        for (wc, uw, mcs, _) in &query.extra_with_stages {
+            out.extend(projected_names(&wc.items));
+            if let Some(u) = uw {
+                out.insert(u.variable.clone());
+            }
+            for mc in mcs {
+                pattern_vars(&mc.pattern, &mut out);
+            }
+        }
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => pattern_vars(&mc.pattern, &mut out),
+                Clause::Create(cc) => pattern_vars(&cc.pattern, &mut out),
+                Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut out),
+                Clause::Unwind(u) => {
+                    out.insert(u.variable.clone());
+                }
+                Clause::With(w) => out.extend(projected_names(&w.items)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    let mut targets: Vec<&Expression> = Vec::new();
+    if let Some(dc) = &query.delete_clause {
+        targets.extend(dc.expressions.iter());
+    }
+    for clause in &query.clauses {
+        if let Clause::Delete(dc) = clause {
+            targets.extend(dc.expressions.iter());
+        }
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let bound = bound_names(query);
+    for expr in targets {
+        let complaint = match expr {
+            Expression::Variable(v) if !bound.contains(v) => {
+                Some(format!("nothing in this query binds `{v}`"))
+            }
+            Expression::Variable(_) => None,
+            Expression::Literal(_) => Some("a literal is not one".to_string()),
+            Expression::Binary { .. } | Expression::Unary { .. } => {
+                Some("an arithmetic or boolean expression is not one".to_string())
+            }
+            // **Not** a property access. `WITH {key: u} AS nodes DELETE nodes.key`
+            // is valid Cypher -- a map field can hold an entity -- and
+            // rejecting it cost two scenarios that had been passing. Whether a
+            // property access yields an entity is a runtime question, and
+            // guessing it statically is the over-rejection this check is
+            // scoped to avoid.
+            // `n:Label` parses to a `hasLabels` call, and is a *predicate*.
+            Expression::Function { name, .. } if name.eq_ignore_ascii_case("hasLabels") => {
+                Some("`n:Label` is a label test; use REMOVE to drop a label".to_string())
+            }
+            _ => None,
+        };
+        if let Some(what) = complaint {
+            return Err(ValidationError::InvalidDeleteTarget(what));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_delete_targets(query)?;
+
     validate_pattern_projections(query)?;
 
     validate_size_arguments(query)?;
