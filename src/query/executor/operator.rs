@@ -13147,9 +13147,16 @@ impl MergeOperator {
             pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone()));
         }
 
-        // Candidate node ids per pattern position. A pattern node with no label has no
-        // cheap candidate set, so it cannot participate in a match and the pattern is
-        // treated as absent (i.e. created).
+        // Candidate node ids per pattern position.
+        //
+        // An unlabelled pattern node used to yield an **empty** candidate set,
+        // so the pattern was treated as absent and created. That made
+        // `MERGE (a)` add a node to a graph that already had one -- the most
+        // basic MERGE there is, matching nothing and creating always (#889).
+        //
+        // A node with no label is a full scan by definition; there is no index
+        // to narrow it, and every engine pays that for an unlabelled MERGE. The
+        // shortcut bought a scan and sold the semantics.
         //
         // Resolved once per pattern node, before the search, because the same
         // values decide both what is matched and what would be created.
@@ -13167,10 +13174,19 @@ impl MergeOperator {
         let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
         for (i, np) in pattern_nodes.iter().enumerate() {
             let mut ids = Vec::new();
-            if let Some(first_label) = np.labels.first() {
-                for node in store.get_nodes_by_label(first_label) {
-                    if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
-                        ids.push(node.id);
+            match np.labels.first() {
+                Some(first_label) => {
+                    for node in store.get_nodes_by_label(first_label) {
+                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
+                    }
+                }
+                None => {
+                    for node in store.all_nodes() {
+                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
                     }
                 }
             }
@@ -13383,21 +13399,27 @@ impl PhysicalOperator for MergeOperator {
         )?;
         let props = resolved.as_ref();
 
-        // Search for existing nodes matching labels + properties
+        // Search for an existing node matching the labels and properties.
+        //
+        // An **unlabelled** pattern searched nothing at all, so `MERGE (a)`
+        // added a node to a graph that already had one, and `MERGE (a {p: 1})`
+        // added a second alongside the node it should have matched. The most
+        // basic MERGE there is, matching never and creating always (#889).
+        //
+        // A node with no label is a full scan by definition -- there is no
+        // index to narrow it, and every engine pays that for an unlabelled
+        // MERGE. The shortcut bought a scan and sold the semantics.
+        //
+        // Through `Self::node_matches` rather than a third copy of the same
+        // comparison: this was the second, and it drifted from the first by
+        // exactly this gap.
         let mut matched_node_id = None;
-        if let Some(first_label) = labels.first() {
-            let candidates = store.get_nodes_by_label(first_label);
-            for node in candidates {
-                let has_all_labels = labels.iter().all(|l| node.labels.contains(l));
-                if !has_all_labels { continue; }
-
-                if let Some(required_props) = props {
-                    let props_match = required_props.iter().all(|(k, v)| {
-                        node.properties.get(k).map_or(false, |pv| pv == v)
-                    });
-                    if !props_match { continue; }
-                }
-
+        let candidates: Vec<&crate::graph::Node> = match labels.first() {
+            Some(first_label) => store.get_nodes_by_label(first_label),
+            None => store.all_nodes(),
+        };
+        for node in candidates {
+            if Self::node_matches(node, labels, props) {
                 matched_node_id = Some(node.id);
                 break;
             }
