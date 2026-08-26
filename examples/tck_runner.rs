@@ -169,6 +169,21 @@ fn float_repr(f: f64) -> String {
     if f.is_infinite() {
         return if f > 0.0 { "Inf".into() } else { "-Inf".into() };
     }
+    // Negative zero renders as `0`.
+    //
+    // `-0.0 == 0.0` is true, and this function turns a float into a string for
+    // a **string** comparison -- so rendering them differently makes the
+    // comparator disagree with the equality it is standing in for. `-0.0`
+    // arrived as `-0.000000000`, which trims to `-0` rather than to the empty
+    // string the guard below was written for, and `RETURN -0.0` was scored
+    // wrong against an expected `0.0` (#883).
+    //
+    // This is a fix to the ruler, not to the engine's score: it is only
+    // defensible because the two values are equal, and it applies to the
+    // expected side as much as the actual one.
+    if f == 0.0 {
+        return "0".into();
+    }
     // Enough digits to distinguish, few enough that 1.0 and 1.0000000001 do not
     // both appear as distinct-but-equal-looking.
     let s = format!("{f:.9}");

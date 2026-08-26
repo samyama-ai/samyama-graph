@@ -1839,12 +1839,22 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Integer(parse_integer_literal(inner.as_str())?));
             }
             Rule::float => {
-                let val = inner.as_str().trim().parse().map_err(|_| {
-                    ParseError::SemanticError(format!(
-                        "float literal out of range: `{}`",
-                        inner.as_str()
-                    ))
+                let text = inner.as_str().trim();
+                let val: f64 = text.parse().map_err(|_| {
+                    ParseError::SemanticError(format!("float literal out of range: `{text}`"))
                 })?;
+                // Rust's `parse` returns `Ok(inf)` on overflow rather than an
+                // error, so `1.34E999` became a perfectly usable infinity.
+                // Cypher rejects an over-large *literal* at compile time.
+                //
+                // Only a literal: an infinity that a computation produces --
+                // `1.0 / 0.0` -- is a legitimate value and is untouched (#883).
+                if !val.is_finite() {
+                    return Err(ParseError::SemanticError(format!(
+                        "float literal `{text}` overflows to {}; the largest finite double is about 1.8e308",
+                        if val.is_sign_negative() { "-infinity" } else { "infinity" }
+                    )));
+                }
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
