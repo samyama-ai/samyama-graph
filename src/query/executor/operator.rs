@@ -763,6 +763,20 @@ fn read_property(
     if let Value::Map(entries) = val {
         return Ok(entries.get(property).cloned().unwrap_or(Value::Null));
     }
+    // A property read of something the query has already deleted is an error,
+    // not a null. `resolve_property` answers `null` for a missing entity, which
+    // is also the honest answer for a property nobody set -- so `MATCH (n)
+    // DELETE n RETURN n.num` was indistinguishable from reading an unset
+    // property, and reported success (#905).
+    match val {
+        Value::NodeRef(id) | Value::Node(id, _) if store.get_node(*id).is_none() => {
+            return Err(ExecutionError::EntityNotFound(format!("node {}", id.as_u64())));
+        }
+        Value::EdgeRef(id, ..) | Value::Edge(id, _) if store.get_edge(*id).is_none() => {
+            return Err(ExecutionError::EntityNotFound(format!("relationship {}", id.as_u64())));
+        }
+        _ => {}
+    }
     Ok(Value::Property(val.resolve_property(property, store)))
 }
 
@@ -7001,17 +7015,22 @@ impl ProjectOperator {
                     .cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))?;
                 // Materialize refs at projection time (RETURN n)
+                // A reference the store can no longer resolve is kept as a
+                // reference rather than refused. It still carries the
+                // structural data it was built with, which is what survives a
+                // delete: `MATCH ()-[r]->() DELETE r RETURN type(r)` is a
+                // legal query, and materialising `r` first turned it into
+                // "Edge not found" (#905). A *property* read of the same
+                // reference does fail -- see `read_property`.
                 match val {
-                    Value::NodeRef(id) => {
-                        let node = store.get_node(id)
-                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", id)))?;
-                        Ok(Value::Node(id, Box::new(node.clone())))
-                    }
-                    Value::EdgeRef(id, ..) => {
-                        let edge = store.get_edge(id)
-                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {:?} not found", id)))?;
-                        Ok(Value::Edge(id, Box::new(edge.clone())))
-                    }
+                    Value::NodeRef(id) => Ok(match store.get_node(id) {
+                        Some(node) => Value::Node(id, Box::new(node.clone())),
+                        None => Value::NodeRef(id),
+                    }),
+                    Value::EdgeRef(id, src, dst, ref ty) => Ok(match store.get_edge(id) {
+                        Some(edge) => Value::Edge(id, Box::new(edge.clone())),
+                        None => Value::EdgeRef(id, src, dst, ty.clone()),
+                    }),
                     other => Ok(other),
                 }
             }

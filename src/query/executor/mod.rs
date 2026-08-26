@@ -124,6 +124,15 @@ pub enum ExecutionError {
     /// Variable not found
     #[error("Variable not found: {0}")]
     VariableNotFound(String),
+
+    /// A read of an entity that is no longer in the graph.
+    ///
+    /// Distinct from `RuntimeError` because the *caller* can tell these apart
+    /// and a null cannot: an unset property and a deleted node both answered
+    /// `null`, so a query that read a node it had already deleted looked
+    /// exactly like a query reading a property nobody set.
+    #[error("{0} was deleted in this query and cannot be read")]
+    EntityNotFound(String),
 }
 
 pub type ExecutionResult<T> = Result<T, ExecutionError>;
