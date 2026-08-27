@@ -198,18 +198,10 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                 query.order_by = Some(parse_order_by_clause(c)?);
                             }
                             Rule::skip_clause => {
-                                for i in c.into_inner() {
-                                    if i.as_rule() == Rule::integer {
-                                        query.skip = i.as_str().parse().ok();
-                                    }
-                                }
+                                query.skip = parse_row_count(c)?;
                             }
                             Rule::limit_clause => {
-                                for i in c.into_inner() {
-                                    if i.as_rule() == Rule::integer {
-                                        query.limit = i.as_str().parse().ok();
-                                    }
-                                }
+                                query.limit = parse_row_count(c)?;
                             }
                             // Anything this builder cannot lower has to be an
                             // error. Falling through silently was the worse
@@ -298,6 +290,58 @@ fn parse_count_literal(text: &str) -> ParseResult<usize> {
     let value = parse_integer_literal(text)?;
     usize::try_from(value)
         .map_err(|_| ParseError::SemanticError(format!("SKIP/LIMIT must not be negative: `{text}`")))
+}
+
+/// The row count a `SKIP` or `LIMIT` names.
+///
+/// `LIMIT toInteger(ceil(1.7))` is legal Cypher, and the grammar took only an
+/// integer literal, so the whole query failed to parse (#912).
+///
+/// Cypher requires the expression not to depend on variables, which is exactly
+/// what makes folding it here correct: it is evaluated **once**, against no
+/// row, and the rest of the engine goes on receiving the `usize` it already
+/// expects. `LIMIT toInteger(rand() * 9)` therefore picks one number for the
+/// whole query rather than a different one per row -- which is the specified
+/// behaviour, not a shortcut.
+///
+/// Four parse sites did this inline, each testing for `Rule::integer` and
+/// silently ignoring anything else. One implementation now, because "silently
+/// ignoring anything else" is how a LIMIT goes missing.
+fn parse_row_count(pair: pest::iterators::Pair<Rule>) -> ParseResult<Option<usize>> {
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            // Through `parse_count_literal`, so `LIMIT -1` keeps saying what is
+            // wrong with it rather than becoming a silent `None`.
+            Rule::integer => return parse_count_literal(inner.as_str()).map(Some),
+            Rule::expression => {
+                let text = inner.as_str().to_string();
+                let expr = parse_expression(inner)?;
+                let store = crate::graph::GraphStore::new();
+                let record = crate::query::executor::Record::new();
+                let value =
+                    crate::query::executor::operator::eval_expression(&expr, &record, &store)
+                        .map_err(|e| {
+                            ParseError::SemanticError(format!(
+                                "SKIP/LIMIT must not depend on the rows it is trimming: \
+                                 `{text}` could not be evaluated on its own ({e})"
+                            ))
+                        })?;
+                return match value {
+                    crate::query::executor::Value::Property(
+                        crate::graph::PropertyValue::Integer(n),
+                    ) if n >= 0 => Ok(Some(n as usize)),
+                    crate::query::executor::Value::Property(
+                        crate::graph::PropertyValue::Float(f),
+                    ) if f >= 0.0 && f.fract() == 0.0 => Ok(Some(f as usize)),
+                    other => Err(ParseError::SemanticError(format!(
+                        "SKIP/LIMIT takes a non-negative whole number; `{text}` is {other:?}"
+                    ))),
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 pub fn parse_query(input: &str) -> ParseResult<Query> {
@@ -458,18 +502,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            for skip_inner in child.into_inner() {
-                                if skip_inner.as_rule() == Rule::integer {
-                                    query.skip = skip_inner.as_str().parse::<usize>().ok();
-                                }
-                            }
+                            query.skip = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            for limit_inner in child.into_inner() {
-                                if limit_inner.as_rule() == Rule::integer {
-                                    query.limit = limit_inner.as_str().parse::<usize>().ok();
-                                }
-                            }
+                            query.limit = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -485,18 +521,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            for skip_inner in child.into_inner() {
-                                if skip_inner.as_rule() == Rule::integer {
-                                    query.skip = skip_inner.as_str().parse::<usize>().ok();
-                                }
-                            }
+                            query.skip = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            for limit_inner in child.into_inner() {
-                                if limit_inner.as_rule() == Rule::integer {
-                                    query.limit = limit_inner.as_str().parse::<usize>().ok();
-                                }
-                            }
+                            query.limit = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -783,18 +811,10 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                for i in inner.into_inner() {
-                    if i.as_rule() == Rule::integer {
-                        query.skip = i.as_str().parse::<usize>().ok();
-                    }
-                }
+                query.skip = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                for i in inner.into_inner() {
-                    if i.as_rule() == Rule::integer {
-                        query.limit = i.as_str().parse::<usize>().ok();
-                    }
-                }
+                query.limit = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1072,18 +1092,10 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                for skip_inner in inner.into_inner() {
-                    if skip_inner.as_rule() == Rule::integer {
-                        query.skip = Some(parse_count_literal(skip_inner.as_str())?);
-                    }
-                }
+                query.skip = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                for limit_inner in inner.into_inner() {
-                    if limit_inner.as_rule() == Rule::integer {
-                        query.limit = Some(parse_count_literal(limit_inner.as_str())?);
-                    }
-                }
+                query.limit = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1119,18 +1131,10 @@ fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) 
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                for i in inner.into_inner() {
-                    if i.as_rule() == Rule::integer {
-                        query.skip = i.as_str().parse::<usize>().ok();
-                    }
-                }
+                query.skip = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                for i in inner.into_inner() {
-                    if i.as_rule() == Rule::integer {
-                        query.limit = i.as_str().parse::<usize>().ok();
-                    }
-                }
+                query.limit = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1164,18 +1168,10 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
                 order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                for skip_inner in inner.into_inner() {
-                    if skip_inner.as_rule() == Rule::integer {
-                        skip = Some(parse_count_literal(skip_inner.as_str())?);
-                    }
-                }
+                skip = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                for limit_inner in inner.into_inner() {
-                    if limit_inner.as_rule() == Rule::integer {
-                        limit = Some(parse_count_literal(limit_inner.as_str())?);
-                    }
-                }
+                limit = parse_row_count(inner)?;
             }
             _ => {}
         }

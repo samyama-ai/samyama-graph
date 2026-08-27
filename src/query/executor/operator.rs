@@ -781,7 +781,7 @@ fn read_property(
 }
 
 /// Standalone expression evaluator usable from any operator
-fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
     match expr {
         Expression::Variable(var) => {
             record.get(var).cloned()

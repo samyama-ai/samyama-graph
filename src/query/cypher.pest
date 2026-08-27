@@ -145,8 +145,18 @@ remove_item = { property_access | variable ~ (":" ~ label)+ }
 return_clause = { ^"RETURN" ~ distinct? ~ return_items }
 distinct = { ^"DISTINCT" }
 order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
-skip_clause = { ^"SKIP" ~ integer }
-limit_clause = { ^"LIMIT" ~ integer }
+// `SKIP`/`LIMIT` take an expression, not only a literal: `LIMIT
+// toInteger(ceil(1.7))` is legal Cypher. The grammar accepted `integer`
+// alone, so those queries failed to parse at all (#912). The expression may
+// not depend on variables -- Cypher's own rule -- which is what lets the
+// parser fold it to a number once, where the rest of the engine already
+// expects one.
+// `expression` first, not `integer`: pest's choice is ordered, so `integer`
+// matched the `1` of `LIMIT 1 + 1` and left `+ 1` unconsumed, failing the whole
+// parse. A bare integer is a valid expression, so nothing is lost by trying the
+// wider rule first.
+skip_clause = { ^"SKIP" ~ (expression | integer) }
+limit_clause = { ^"LIMIT" ~ (expression | integer) }
 
 // Standalone CREATE clause
 // Adjacent `CREATE` clauses are one create: `CREATE (a) CREATE (b)` and
