@@ -84,7 +84,43 @@ pub enum PropertyValue {
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    DateTime(i64), // Unix timestamp in milliseconds
+    /// **Legacy.** A Unix timestamp in milliseconds, with no type identity and
+    /// no sub-millisecond precision.
+    ///
+    /// Kept so that snapshots written before the five real temporal types
+    /// existed still deserialize. Nothing new should produce it: read it as a
+    /// UTC `ZonedDateTime`, which is lossless because milliseconds fit
+    /// exactly. See `into_zoned` (#689).
+    DateTime(i64),
+    /// A calendar date: days since 1970-01-01, no time and no zone.
+    ///
+    /// `i32` days spans roughly ±5.8 million years, which is far past what
+    /// `chrono::NaiveDate` accepts, so the representation is not the limit.
+    Date(i32),
+    /// A time of day with nanosecond precision and no zone: nanoseconds since
+    /// midnight, `0..86_400_000_000_000`.
+    ///
+    /// Nanoseconds, not milliseconds, because the TCK's own values require it
+    /// — `12:31:14.645876123` cannot be represented in millis at all, and the
+    /// value is destroyed at construction rather than merely displayed wrongly.
+    LocalTime(i64),
+    /// A time of day with a UTC offset. `nanos` is the *local* time of day.
+    Time { nanos: i64, offset_seconds: i32 },
+    /// A date and time with no zone: seconds since 1970-01-01T00:00:00 read as
+    /// a wall clock, plus nanoseconds `0..1_000_000_000`.
+    LocalDateTime { secs: i64, nanos: u32 },
+    /// A date and time with a zone. `secs`/`nanos` are the instant in UTC;
+    /// `offset_seconds` and the optional IANA `zone` say how to render it.
+    ///
+    /// Both are carried because Cypher distinguishes them: an offset alone
+    /// cannot survive a DST boundary, and a named zone alone cannot represent
+    /// `+05:30` with no zone attached. Dropping either loses a TCK scenario.
+    ZonedDateTime {
+        secs: i64,
+        nanos: u32,
+        offset_seconds: i32,
+        zone: Option<String>,
+    },
     Array(Vec<PropertyValue>),
     Map(HashMap<String, PropertyValue>),
     Vector(Vec<f32>),
@@ -134,6 +170,11 @@ pub fn cypher_order(a: &PropertyValue, b: &PropertyValue) -> Ordering {
             String(_) => 2,
             Boolean(_) => 3,
             Integer(_) | Float(_) | DateTime(_) | Duration { .. } => 4,
+            Date(_)
+            | LocalTime(_)
+            | Time { .. }
+            | LocalDateTime { .. }
+            | ZonedDateTime { .. } => 4,
             Null => 5,
         }
     }
@@ -207,11 +248,20 @@ impl Ord for PropertyValue {
                 Integer(_) | Float(_) => 1,
                 String(_) => 2,
                 DateTime(_) => 3,
-                Array(_) => 4,
-                Map(_) => 5,
-                Vector(_) => 6,
-                Duration { .. } => 7,
-                Null => 8,
+                // Each temporal type is its own bucket: a Date is not a
+                // LocalTime, and the index must not collapse them. They sit
+                // beside the legacy DateTime so an index built before #689
+                // keeps its shape for every non-temporal key.
+                Date(_) => 4,
+                LocalTime(_) => 5,
+                Time { .. } => 6,
+                LocalDateTime { .. } => 7,
+                ZonedDateTime { .. } => 8,
+                Array(_) => 9,
+                Map(_) => 10,
+                Vector(_) => 11,
+                Duration { .. } => 12,
+                Null => 13,
             }
         }
 
@@ -231,6 +281,32 @@ impl Ord for PropertyValue {
             (Boolean(a), Boolean(b)) => a.cmp(b),
             (String(a), String(b)) => a.cmp(b),
             (DateTime(a), DateTime(b)) => a.cmp(b),
+            (Date(a), Date(b)) => a.cmp(b),
+            (LocalTime(a), LocalTime(b)) => a.cmp(b),
+            // A zoned time compares on the instant it denotes, so 12:00+01:00
+            // sorts before 12:00Z. Comparing the local reading would order two
+            // times by how they are written rather than by when they are.
+            (
+                Time { nanos: n1, offset_seconds: o1 },
+                Time { nanos: n2, offset_seconds: o2 },
+            ) => (n1 - (*o1 as i64) * 1_000_000_000).cmp(&(n2 - (*o2 as i64) * 1_000_000_000)),
+            (
+                LocalDateTime { secs: s1, nanos: n1 },
+                LocalDateTime { secs: s2, nanos: n2 },
+            ) => s1.cmp(s2).then(n1.cmp(n2)),
+            // `secs`/`nanos` are already the UTC instant, so the offset and
+            // zone do not participate: two ways of writing the same moment
+            // compare equal on time and are then split by offset and zone so
+            // the order stays strict (`Ord`/`Eq` contract -- `PartialEq` is
+            // derived and would call them different).
+            (
+                ZonedDateTime { secs: s1, nanos: n1, offset_seconds: o1, zone: z1 },
+                ZonedDateTime { secs: s2, nanos: n2, offset_seconds: o2, zone: z2 },
+            ) => s1
+                .cmp(s2)
+                .then(n1.cmp(n2))
+                .then(o1.cmp(o2))
+                .then(z1.cmp(z2)),
             (Array(a), Array(b)) => a.cmp(b),
             (Vector(a), Vector(b)) => a
                 .iter()
@@ -295,6 +371,20 @@ impl Ord for PropertyValue {
 impl std::hash::Hash for PropertyValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
+            // Discriminants 10.. so the pre-#689 variants keep their tags and
+            // an existing hash index is not silently reshuffled.
+            PropertyValue::Date(d) => { 10.hash(state); d.hash(state); }
+            PropertyValue::LocalTime(n) => { 11.hash(state); n.hash(state); }
+            PropertyValue::Time { nanos, offset_seconds } => {
+                12.hash(state); nanos.hash(state); offset_seconds.hash(state);
+            }
+            PropertyValue::LocalDateTime { secs, nanos } => {
+                13.hash(state); secs.hash(state); nanos.hash(state);
+            }
+            PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+                14.hash(state); secs.hash(state); nanos.hash(state);
+                offset_seconds.hash(state); zone.hash(state);
+            }
             PropertyValue::String(s) => {
                 0.hash(state);
                 s.hash(state);
@@ -475,6 +565,11 @@ impl PropertyValue {
     /// Get type name as string
     pub fn type_name(&self) -> &'static str {
         match self {
+            PropertyValue::Date(_) => "Date",
+            PropertyValue::LocalTime(_) => "LocalTime",
+            PropertyValue::Time { .. } => "Time",
+            PropertyValue::LocalDateTime { .. } => "LocalDateTime",
+            PropertyValue::ZonedDateTime { .. } => "DateTime",
             PropertyValue::String(_) => "String",
             PropertyValue::Integer(_) => "Integer",
             PropertyValue::Float(_) => "Float",
@@ -492,6 +587,14 @@ impl PropertyValue {
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
+            // The rendered ISO-8601 string, not the internal components: a
+            // client asking for a property wants `"2015-07-21"`, and JSON has
+            // no temporal type to carry the structure into anyway.
+            PropertyValue::Date(_)
+            | PropertyValue::LocalTime(_)
+            | PropertyValue::Time { .. }
+            | PropertyValue::LocalDateTime { .. }
+            | PropertyValue::ZonedDateTime { .. } => json!(self.to_cypher_string()),
             PropertyValue::String(s) => json!(s),
             PropertyValue::Integer(i) => json!(i),
             PropertyValue::Float(f) => json!(f),
@@ -526,9 +629,182 @@ impl PropertyValue {
     }
 }
 
+
+/// A time of day as openCypher renders it: `10:35`, `12:31:14`,
+/// `12:31:14.645876123`.
+///
+/// Trailing components are dropped when they are zero, which is the rule the
+/// TCK checks — `localtime({hour: 10, minute: 35})` is `'10:35'`, not
+/// `'10:35:00.000000000'`. The fraction keeps only as many digits as it needs,
+/// so `.142` and `.645876123` both round-trip.
+pub(crate) fn fmt_time_of_day(total_nanos: i64) -> String {
+    let secs_of_day = total_nanos.div_euclid(1_000_000_000);
+    let nanos = total_nanos.rem_euclid(1_000_000_000) as u32;
+    let (h, m, sec) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let mut out = format!("{h:02}:{m:02}");
+    if sec != 0 || nanos != 0 {
+        out.push_str(&format!(":{sec:02}"));
+    }
+    if nanos != 0 {
+        let frac = format!("{nanos:09}");
+        out.push('.');
+        out.push_str(frac.trim_end_matches('0'));
+    }
+    out
+}
+
+/// A UTC offset as `Z`, `+01:00`, `+05:30`, or `+00:53:28`.
+///
+/// Seconds are rendered when the offset has them. That is not a curiosity:
+/// pre-standardisation local mean times carry them, and the TCK uses one —
+/// Stockholm before 1879 is `+00:53:28`. Truncating to hours and minutes turns
+/// that into `+00:53` and loses 28 seconds of a real instant.
+pub fn fmt_offset(offset_seconds: i32) -> String {
+    if offset_seconds == 0 {
+        return "Z".to_string();
+    }
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let a = offset_seconds.abs();
+    let (h, m, sec) = (a / 3600, (a % 3600) / 60, a % 60);
+    if sec == 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}:{m:02}:{sec:02}")
+    }
+}
+
+/// A date as `2015-07-21`, from days since the Unix epoch.
+pub(crate) fn fmt_date(days: i32) -> String {
+    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1).and_then(|d| d.checked_add_signed(chrono::Duration::days(days as i64))) {
+        Some(d) => d.format("%Y-%m-%d").to_string(),
+        // Outside chrono's range. Reported rather than silently clamped: a
+        // wrong date that looks like a date is worse than an obvious marker.
+        None => format!("<date out of range: {days} days>"),
+    }
+}
+
+/// A naive date-time as `2015-07-21T21:40:32.142`.
+pub(crate) fn fmt_local_date_time(secs: i64, nanos: u32) -> String {
+    match chrono::DateTime::from_timestamp(secs, nanos) {
+        Some(dt) => {
+            let d = dt.naive_utc();
+            let day = d.format("%Y-%m-%d").to_string();
+            let tod = fmt_time_of_day(
+                (d.time().signed_duration_since(chrono::NaiveTime::MIN))
+                    .num_nanoseconds()
+                    .unwrap_or(0),
+            );
+            format!("{day}T{tod}")
+        }
+        None => format!("<datetime out of range: {secs}s {nanos}ns>"),
+    }
+}
+
+
+
+/// A duration as openCypher writes it: `PT6H`, `P1Y2M3DT4H5M6.5S`, `PT0S`.
+///
+/// Zero components are omitted, and an all-zero duration is `PT0S` rather than
+/// the empty `P`. Components keep their own sign — Cypher does not normalise
+/// `PT-1H30M` into a single signed quantity, because months and days have no
+/// fixed length and so cannot be carried into each other.
+pub(crate) fn fmt_duration(months: i64, days: i64, seconds: i64, nanos: i32) -> String {
+    let (years, rem_months) = (months / 12, months % 12);
+    let (hours, rem) = (seconds / 3600, seconds % 3600);
+    let (minutes, secs) = (rem / 60, rem % 60);
+
+    let mut out = String::from("P");
+    if years != 0 { out.push_str(&format!("{years}Y")); }
+    if rem_months != 0 { out.push_str(&format!("{rem_months}M")); }
+    if days != 0 { out.push_str(&format!("{days}D")); }
+
+    let has_time = hours != 0 || minutes != 0 || secs != 0 || nanos != 0;
+    if has_time {
+        out.push('T');
+        if hours != 0 { out.push_str(&format!("{hours}H")); }
+        if minutes != 0 { out.push_str(&format!("{minutes}M")); }
+        if secs != 0 || nanos != 0 {
+            if nanos == 0 {
+                out.push_str(&format!("{secs}S"));
+            } else {
+                // The fraction belongs to the seconds and carries the sign with
+                // them: -1.5s is `-1.5S`, not `-1.-5S`.
+                let sign = if secs < 0 || (secs == 0 && nanos < 0) { "-" } else { "" };
+                let frac = format!("{:09}", nanos.abs());
+                out.push_str(&format!("{sign}{}.{}S", secs.abs(), frac.trim_end_matches('0')));
+            }
+        }
+    }
+    if out == "P" { out.push_str("T0S"); }
+    out
+}
+
+impl PropertyValue {
+    /// How openCypher writes this value — the string `toString()` returns and
+    /// the TCK compares against.
+    ///
+    /// One function rather than one per call site, because the previous
+    /// arrangement rendered temporal values through `Debug` in at least two
+    /// places and produced `DateTime(-1882656000000)` where a TCK literal
+    /// belonged. That is what fed samyama-graph#761 an input its parser could
+    /// not consume.
+    pub fn to_cypher_string(&self) -> String {
+        match self {
+            PropertyValue::Date(d) => fmt_date(*d),
+            PropertyValue::LocalTime(n) => fmt_time_of_day(*n),
+            PropertyValue::Time { nanos, offset_seconds } => {
+                format!("{}{}", fmt_time_of_day(*nanos), fmt_offset(*offset_seconds))
+            }
+            PropertyValue::LocalDateTime { secs, nanos } => fmt_local_date_time(*secs, *nanos),
+            PropertyValue::Duration { months, days, seconds, nanos } => {
+                fmt_duration(*months, *days, *seconds, *nanos)
+            }
+            PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+                // `secs` is the UTC instant; render it in the stored offset.
+                let local = fmt_local_date_time(secs + *offset_seconds as i64, *nanos);
+                let base = format!("{local}{}", fmt_offset(*offset_seconds));
+                match zone {
+                    Some(z) => format!("{base}[{z}]"),
+                    None => base,
+                }
+            }
+            other => other.to_string(),
+        }
+    }
+
+    /// Read any temporal value as the UTC instant it denotes, for the legacy
+    /// millisecond API and for snapshot migration.
+    ///
+    /// A `Date` is midnight UTC and a `LocalTime` has no date, so this is lossy
+    /// by construction — it exists to keep old callers working, not as a
+    /// conversion anything new should reach for.
+    pub fn as_epoch_millis(&self) -> Option<i64> {
+        match self {
+            PropertyValue::DateTime(ms) => Some(*ms),
+            PropertyValue::Date(d) => Some(*d as i64 * 86_400_000),
+            PropertyValue::LocalTime(n) => Some(n / 1_000_000),
+            PropertyValue::Time { nanos, offset_seconds } => {
+                Some((nanos - (*offset_seconds as i64) * 1_000_000_000) / 1_000_000)
+            }
+            PropertyValue::LocalDateTime { secs, nanos } => {
+                Some(secs * 1000 + (*nanos as i64) / 1_000_000)
+            }
+            PropertyValue::ZonedDateTime { secs, nanos, .. } => {
+                Some(secs * 1000 + (*nanos as i64) / 1_000_000)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for PropertyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            PropertyValue::Date(_)
+            | PropertyValue::LocalTime(_)
+            | PropertyValue::Time { .. }
+            | PropertyValue::LocalDateTime { .. }
+            | PropertyValue::ZonedDateTime { .. } => write!(f, "{}", self.to_cypher_string()),
             PropertyValue::String(s) => write!(f, "\"{}\"", s),
             PropertyValue::Integer(i) => write!(f, "{}", i),
             PropertyValue::Float(fl) => write!(f, "{}", fl),

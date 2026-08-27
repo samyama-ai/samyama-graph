@@ -16,6 +16,10 @@
 //!     --hd-data ~/kg-data/health-determinants \
 //!     --hs-data ~/kg-data/health-systems \
 //!     --queries ~/samyama
+//!
+//! `--queries` takes a directory (every `.csv` in it) or a single `.csv`, and
+//! may be repeated. Every file considered is reported, including the ones that
+//! yielded nothing and why.
 
 use std::collections::HashMap;
 use std::fs;
@@ -105,54 +109,204 @@ mod surveillance_common;
 
 type Error = Box<dyn std::error::Error>;
 
-fn parse_csv_queries(path: &std::path::Path) -> Vec<(String, String, String, String)> {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return vec![],
-    };
-    let reader = BufReader::new(file);
-    let mut queries = Vec::new();
-    let mut num_columns = 0;
+/// What one CSV file contributed to the suite — including what it did *not*.
+///
+/// A benchmark that silently runs a subset reports a denominator that does not
+/// exist (#683). An 81-query suite reported as 56 because one file was not on a
+/// hardcoded list, and as 76 because rows split across physical lines by CSV
+/// quoting failed a content sniff. Every path that drops input now names it.
+#[derive(Debug, Default, PartialEq)]
+struct LoadReport {
+    loaded: usize,
+    /// Records whose Cypher column held nothing that looks like a query.
+    skipped_no_cypher: usize,
+    /// Records with fewer fields than the header.
+    skipped_short: usize,
+    /// Set when the file could not be read or held no header.
+    unreadable: Option<String>,
+}
 
-    for (i, line) in reader.lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if i == 0 {
-            num_columns = line.split(',').count();
-            continue;
+impl LoadReport {
+    /// One line per file *considered*, never silence.
+    fn describe(&self, filename: &str) -> String {
+        if let Some(why) = &self.unreadable {
+            return format!("  {filename}: not read ({why})");
         }
-        let cypher = if let Some(pos) = line.rfind(",\"") {
-            let raw = &line[pos + 1..];
-            raw.trim_matches('"').to_string()
-        } else {
-            let skip = if num_columns >= 6 { 5 } else { 4 };
-            let parts: Vec<&str> = line.splitn(skip + 1, ',').collect();
-            if parts.len() > skip {
-                parts[skip].to_string()
-            } else {
-                continue;
+        let mut line = format!("  {filename}: {} queries", self.loaded);
+        let mut skips = Vec::new();
+        if self.skipped_no_cypher > 0 {
+            skips.push(format!("{} rows skipped: no MATCH/RETURN", self.skipped_no_cypher));
+        }
+        if self.skipped_short > 0 {
+            skips.push(format!("{} rows skipped: fewer fields than the header", self.skipped_short));
+        }
+        if !skips.is_empty() {
+            line.push_str(&format!(" ({})", skips.join(", ")));
+        }
+        line
+    }
+}
+
+/// Split CSV text into records, honouring quoted fields.
+///
+/// The previous parser worked line by line, so a field containing a newline —
+/// which is how a multi-line Cypher query is written in CSV — became two
+/// malformed rows and vanished. A quoted `"` is written `""`.
+fn csv_rows(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
             }
-        };
-        let parts: Vec<&str> = line.splitn(4, ',').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let id = parts[0].to_string();
-        let name = parts[1].to_string();
-        let category = parts[2].to_string();
-        if cypher.contains("MATCH") || cypher.contains("RETURN") {
-            queries.push((id, name, category, cypher));
+            '"' if field.is_empty() => in_quotes = true,
+            ',' if !in_quotes => row.push(std::mem::take(&mut field)),
+            '\n' if !in_quotes => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            '\r' if !in_quotes => {}
+            other => field.push(other),
         }
     }
-    queries
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
+}
+
+/// Index of the first header field named by `names`, else `fallback`.
+fn column_index(header: &[String], names: &[&str], fallback: usize) -> usize {
+    header
+        .iter()
+        .position(|h| names.contains(&h.trim().trim_matches('"').to_ascii_lowercase().as_str()))
+        .unwrap_or(fallback)
+}
+
+fn parse_csv_queries(path: &std::path::Path) -> (Vec<(String, String, String, String)>, LoadReport) {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                vec![],
+                LoadReport { unreadable: Some(e.to_string()), ..Default::default() },
+            )
+        }
+    };
+    let mut records = csv_rows(&text).into_iter();
+    let header = match records.next() {
+        Some(h) => h,
+        None => {
+            return (
+                vec![],
+                LoadReport { unreadable: Some("empty file".into()), ..Default::default() },
+            )
+        }
+    };
+
+    let id_col = column_index(&header, &["id", "query_id"], 0);
+    let name_col = column_index(&header, &["name", "title"], 1);
+    let cat_col = column_index(&header, &["category", "kg", "suite"], 2);
+    // Every suite we ship names the column. An unnamed one has always been last.
+    let cypher_col = column_index(
+        &header,
+        &["cypher", "query", "query_text", "statement"],
+        header.len().saturating_sub(1),
+    );
+    let widest = [id_col, name_col, cat_col, cypher_col].into_iter().max().unwrap_or(0);
+
+    let mut queries = Vec::new();
+    let mut report = LoadReport::default();
+    for record in records {
+        if record.iter().all(|f| f.trim().is_empty()) {
+            continue;
+        }
+        if record.len() <= widest {
+            report.skipped_short += 1;
+            continue;
+        }
+        let cypher = record[cypher_col].trim().to_string();
+        if !(cypher.contains("MATCH") || cypher.contains("RETURN")) {
+            report.skipped_no_cypher += 1;
+            continue;
+        }
+        queries.push((
+            record[id_col].trim().to_string(),
+            record[name_col].trim().to_string(),
+            record[cat_col].trim().to_string(),
+            cypher,
+        ));
+    }
+    report.loaded = queries.len();
+    (queries, report)
+}
+
+/// Every `.csv` in `dir`, sorted — plus `dir` itself if it names one file.
+///
+/// The list used to be hardcoded, so a query file that was present but unnamed
+/// was skipped without a word (#683).
+fn query_files(dir: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    if dir.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")) {
+        return Ok(vec![dir.to_path_buf()]);
+    }
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// The value following `flag`, or an error naming the flag.
+///
+/// `args[p + 1]` was unchecked, so a value-taking flag passed last panicked with
+/// `index out of bounds` instead of saying which flag was short of a value.
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a String>, String> {
+    let Some(pos) = args.iter().position(|a| a == flag) else {
+        return Ok(None);
+    };
+    match args.get(pos + 1) {
+        Some(v) if !v.starts_with("--") => Ok(Some(v)),
+        _ => Err(format!("{flag} needs a value")),
+    }
+}
+
+/// Every value given for `flag`, in command-line order.
+///
+/// `--queries` may name a directory or a single `.csv`, and may be repeated —
+/// a suite whose files live in more than one directory is one suite, and the
+/// count it reports has to be the count it ran (#683).
+fn arg_values<'a>(args: &'a [String], flag: &str) -> Result<Vec<&'a String>, String> {
+    let mut out = Vec::new();
+    for (pos, _) in args.iter().enumerate().filter(|(_, a)| *a == flag) {
+        match args.get(pos + 1) {
+            Some(v) if !v.starts_with("--") => out.push(v),
+            _ => return Err(format!("{flag} needs a value")),
+        }
+    }
+    Ok(out)
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<PathBuf> {
-    args.iter()
-        .position(|a| a == flag)
-        .map(|p| PathBuf::from(&args[p + 1]))
+    match arg_value(args, flag) {
+        Ok(v) => v.map(PathBuf::from),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    }
 }
 
 #[tokio::main]
@@ -192,9 +346,18 @@ async fn main() -> Result<(), Error> {
     let hd_data = get_arg(&args, "--hd-data");
     let hs_data = get_arg(&args, "--hs-data");
     let study_refs = get_arg(&args, "--study-refs");
-    let queries_dir = get_arg(&args, "--queries").unwrap_or_else(|| PathBuf::from("."));
-    let oracle_path = get_arg(&args, "--oracle")
-        .unwrap_or_else(|| queries_dir.join("expected_rows.yaml"));
+    let query_paths: Vec<PathBuf> = match arg_values(&args, "--queries") {
+        Ok(v) if v.is_empty() => vec![PathBuf::from(".")],
+        Ok(v) => v.into_iter().map(PathBuf::from).collect(),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let oracle_path = get_arg(&args, "--oracle").unwrap_or_else(|| {
+        let first = &query_paths[0];
+        if first.is_dir() { first.join("expected_rows.yaml") } else { PathBuf::from("expected_rows.yaml") }
+    });
     let oracle = load_oracle(&oracle_path);
 
     let client = EmbeddedClient::new();
@@ -518,31 +681,39 @@ async fn main() -> Result<(), Error> {
 
     // ── Phase 4: Load and run queries ──
     let mut all_queries = Vec::new();
-    for filename in &[
-        "pubmed-queries.csv",
-        "clinical-trials-queries.csv",
-        "pathways-queries.csv",
-        "drug-interactions-queries.csv",
-        "cross-kg-queries.csv",
-        "health-determinants-queries.csv",
-        "health-systems-queries.csv",
-        "public-health-cross-kg-queries.csv",
-        "expanded-queries.csv",
-        "uniprot-queries.csv",
-        "faers-queries.csv",
-        "omop-queries.csv",
-        "mega-benchmark-queries.csv",
-        "public-health-complex-queries.csv",
-        "omics-complex-queries.csv",
-        "emr-clinical-complex-queries.csv",
-    ] {
-        let path = queries_dir.join(filename);
-        let queries = parse_csv_queries(&path);
-        if !queries.is_empty() {
-            eprintln!("Loaded {} queries from {}", queries.len(), filename);
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in &query_paths {
+        match query_files(dir) {
+            Ok(f) => {
+                if f.is_empty() {
+                    eprintln!("No .csv query files in {}", dir.display());
+                }
+                files.extend(f);
+            }
+            Err(e) => {
+                eprintln!("error: --queries {e}");
+                std::process::exit(2);
+            }
         }
+    }
+    if !files.is_empty() {
+        eprintln!("Query files considered:");
+    }
+    let mut skipped_rows = 0usize;
+    for path in &files {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let (queries, report) = parse_csv_queries(path);
+        eprintln!("{}", report.describe(&filename));
+        skipped_rows += report.skipped_no_cypher + report.skipped_short;
         all_queries.extend(queries);
     }
+    eprintln!(
+        "{} file{} considered, {} queries loaded, {} rows skipped",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        all_queries.len(),
+        skipped_rows
+    );
 
     eprintln!("\nRunning {} queries...\n", all_queries.len());
     println!("id,name,category,time_ms,rows,status,sample_result");
@@ -627,4 +798,136 @@ async fn main() -> Result<(), Error> {
     eprintln!("========================================");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        (dir, path)
+    }
+
+    /// A Cypher query written across several physical lines is one CSV record.
+    ///
+    /// The old parser read line by line, so the continuation lines failed the
+    /// `contains("MATCH")` sniff and the row disappeared without a word — this
+    /// is how an 81-row suite reported as 76 (#683).
+    #[test]
+    fn a_query_split_across_lines_is_one_query_not_zero() {
+        let (_d, path) = write(
+            "q.csv",
+            "id,name,category,cypher\n\
+             Q1,Split,cross,\"MATCH (a:Person)\n-[:KNOWS]->(b)\nRETURN a, b\"\n",
+        );
+        let (queries, report) = parse_csv_queries(&path);
+        assert_eq!(report.loaded, 1);
+        assert_eq!(report.skipped_no_cypher, 0);
+        assert!(queries[0].3.contains("KNOWS"), "{:?}", queries[0].3);
+        assert!(queries[0].3.contains("RETURN a, b"), "{:?}", queries[0].3);
+    }
+
+    /// A comma inside a quoted field does not end the field.
+    #[test]
+    fn a_quoted_comma_does_not_split_a_field() {
+        let (_d, path) = write(
+            "q.csv",
+            "id,name,category,cypher\nQ1,N,c,\"MATCH (a) RETURN a.x, a.y\"\n",
+        );
+        let (queries, _) = parse_csv_queries(&path);
+        assert_eq!(queries[0].3, "MATCH (a) RETURN a.x, a.y");
+    }
+
+    /// Dropping a row is allowed. Dropping it quietly is not.
+    #[test]
+    fn a_row_that_is_not_a_query_is_counted_and_named() {
+        let (_d, path) = write(
+            "q.csv",
+            "id,name,category,cypher\n\
+             Q1,Good,c,\"MATCH (a) RETURN a\"\n\
+             Q2,Prose,c,\"see the design note\"\n",
+        );
+        let (queries, report) = parse_csv_queries(&path);
+        assert_eq!((report.loaded, report.skipped_no_cypher), (1, 1));
+        assert_eq!(queries.len(), 1);
+        assert!(
+            report.describe("q.csv").contains("1 rows skipped: no MATCH/RETURN"),
+            "{}",
+            report.describe("q.csv")
+        );
+    }
+
+    /// The Cypher column is found by name, not by counting commas.
+    #[test]
+    fn the_cypher_column_is_located_by_header_name() {
+        let (_d, path) = write(
+            "q.csv",
+            "id,name,category,cypher,notes,owner\n\
+             Q1,N,c,\"MATCH (a) RETURN a\",slow,ml\n",
+        );
+        let (queries, report) = parse_csv_queries(&path);
+        assert_eq!(report.loaded, 1);
+        assert_eq!(queries[0].3, "MATCH (a) RETURN a");
+    }
+
+    /// A file that cannot be read is reported, not treated as empty.
+    #[test]
+    fn an_unreadable_file_says_so() {
+        let report = parse_csv_queries(std::path::Path::new("/nonexistent/q.csv")).1;
+        assert!(report.unreadable.is_some());
+        assert!(report.describe("q.csv").contains("not read"), "{}", report.describe("q.csv"));
+    }
+
+    /// Every `.csv` in the directory is considered — the list is not hardcoded.
+    #[test]
+    fn every_csv_in_the_directory_is_considered() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["b-queries.csv", "a-queries.csv", "notes.md"] {
+            fs::write(dir.path().join(n), "id,name,category,cypher\n").unwrap();
+        }
+        let files = query_files(dir.path()).unwrap();
+        let names: Vec<String> =
+            files.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(names, vec!["a-queries.csv", "b-queries.csv"]);
+    }
+
+    /// `--queries` may also name a single file.
+    #[test]
+    fn a_single_csv_path_is_accepted() {
+        let (_d, path) = write("q.csv", "id,name,category,cypher\n");
+        assert_eq!(query_files(&path).unwrap(), vec![path]);
+    }
+
+    /// `--queries` may be repeated: one suite, several directories.
+    #[test]
+    fn queries_may_be_given_more_than_once() {
+        let args: Vec<String> = ["prog", "--queries", "a", "--queries", "b/x.csv"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(arg_values(&args, "--queries").unwrap(), vec!["a", "b/x.csv"]);
+        assert!(arg_values(&args, "--absent").unwrap().is_empty());
+
+        let short: Vec<String> =
+            ["prog", "--queries", "a", "--queries"].iter().map(|s| s.to_string()).collect();
+        assert!(arg_values(&short, "--queries").is_err());
+    }
+
+    /// A value-taking flag passed last used to panic with `index out of bounds`.
+    #[test]
+    fn a_flag_without_a_value_is_an_error_not_a_panic() {
+        let args: Vec<String> = ["prog", "--study-refs"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(arg_value(&args, "--study-refs"), Err("--study-refs needs a value".into()));
+
+        let args: Vec<String> =
+            ["prog", "--study-refs", "--queries", "d"].iter().map(|s| s.to_string()).collect();
+        assert!(arg_value(&args, "--study-refs").is_err());
+        assert_eq!(arg_value(&args, "--queries").unwrap().unwrap(), "d");
+        assert_eq!(arg_value(&args, "--absent").unwrap(), None);
+    }
 }

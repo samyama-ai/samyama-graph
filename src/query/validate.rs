@@ -35,6 +35,18 @@ pub enum ValidationError {
     MergeOnBoundVariable(String),
     MergeRelationshipWithNullProperty(String),
     VariableTypeConflict(String),
+    /// A boolean operator given an operand that cannot be a boolean.
+    NonBooleanOperand(&'static str),
+    /// Property access on a value that cannot carry properties.
+    PropertyAccessOnNonMap { name: String, what: &'static str },
+    /// A pattern predicate naming a variable nothing has bound.
+    UnboundPatternVariable(String),
+    /// One variable bound to two different kinds of entity.
+    VariableKindConflict {
+        name: String,
+        first: &'static str,
+        second: &'static str,
+    },
     PatternInSetValue,
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
@@ -69,6 +81,29 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "a relationship pattern cannot be used as a value on the right of SET; \
                  patterns belong in MATCH, WHERE or a pattern comprehension"
+            ),
+            Self::VariableKindConflict { name, first, second } => write!(
+                f,
+                "`{name}` is bound to {first} and then to {second} in the same scope. A \
+                 variable names one entity, and an entity is a node, a relationship or a \
+                 path -- not two of them. Rename one of the two."
+            ),
+            Self::UnboundPatternVariable(name) => write!(
+                f,
+                "`{name}` is introduced by a pattern used as a predicate, which tests \
+                 whether a pattern exists rather than binding anything. Bind `{name}` \
+                 in a MATCH first, or use EXISTS {{ ... }}, which may introduce names."
+            ),
+            Self::PropertyAccessOnNonMap { name, what } => write!(
+                f,
+                "`{name}` is {what}, so it has no properties to read. Only a map, \
+                 a node or a relationship does."
+            ),
+            Self::NonBooleanOperand(what) => write!(
+                f,
+                "AND, OR and XOR need boolean operands, and this one is {what}. \
+                 A value whose type is only known at run time is fine here; a \
+                 literal of the wrong type is not."
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -500,7 +535,697 @@ fn column_name_at(item: &ReturnItem, _idx: usize) -> Option<String> {
     })
 }
 
+
+/// What a pattern binds a variable to. A variable may be exactly one of these
+/// for as long as it stays in scope.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EntityKind {
+    Node,
+    Relationship,
+    Path,
+}
+
+impl EntityKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Node => "a node",
+            Self::Relationship => "a relationship",
+            Self::Path => "a path",
+        }
+    }
+}
+
+/// Record `name` as binding `kind`, or report the clash.
+fn note_kind(
+    seen: &mut std::collections::HashMap<String, EntityKind>,
+    name: &Option<String>,
+    kind: EntityKind,
+) -> Result<(), ValidationError> {
+    let Some(name) = name else { return Ok(()) };
+    match seen.get(name) {
+        Some(prev) if *prev != kind => Err(ValidationError::VariableKindConflict {
+            name: name.clone(),
+            first: prev.noun(),
+            second: kind.noun(),
+        }),
+        _ => {
+            seen.insert(name.clone(), kind);
+            Ok(())
+        }
+    }
+}
+
+/// Collect the kinds one pattern binds.
+fn note_pattern_kinds(
+    seen: &mut std::collections::HashMap<String, EntityKind>,
+    pattern: &crate::query::ast::Pattern,
+) -> Result<(), ValidationError> {
+    for path in &pattern.paths {
+        note_kind(seen, &path.path_variable, EntityKind::Path)?;
+        note_kind(seen, &path.start.variable, EntityKind::Node)?;
+        for seg in &path.segments {
+            note_kind(seen, &seg.edge.variable, EntityKind::Relationship)?;
+            note_kind(seen, &seg.node.variable, EntityKind::Node)?;
+        }
+    }
+    Ok(())
+}
+
+/// A `WITH` opens a new scope. Variables it passes through *by name* keep the
+/// kind they had; anything it computes is a fresh value whose kind this check
+/// no longer claims to know, so it is dropped rather than guessed.
+fn carry_kinds_through_with(
+    seen: &std::collections::HashMap<String, EntityKind>,
+    wc: &crate::query::ast::WithClause,
+) -> std::collections::HashMap<String, EntityKind> {
+    let mut next = std::collections::HashMap::new();
+    for item in &wc.items {
+        if let Expression::Variable(v) = &item.expression {
+            if let Some(kind) = seen.get(v) {
+                // `WITH r AS x` carries the relationship under a new name.
+                next.insert(item.alias.clone().unwrap_or_else(|| v.clone()), *kind);
+            }
+        }
+    }
+    next
+}
+
+/// One variable may not be a node here and a relationship there.
+///
+/// openCypher binds a variable to an entity, and the entity has a kind: a node,
+/// a relationship, or a path. `MATCH (r), ()-[r]-()` asks for `r` to be both,
+/// which has no answer, and the TCK asserts a failure for every arrangement of
+/// it — same pattern, same clause, preceding clause, all three kinds against
+/// each other. **227 scenarios**, all of this one rule, and we returned rows
+/// for every one of them.
+///
+/// Rows, not an error: the second binding simply overwrote the first, so the
+/// query "succeeded" with an answer to a question that was never well-formed.
+///
+/// Only pattern bindings are examined. A `WITH` that recomputes a name is left
+/// alone -- see `carry_kinds_through_with` -- because the cost of being wrong
+/// here is rejecting a valid query, which is worse than accepting an invalid
+/// one (the rule this module opens with).
+fn validate_variable_kinds(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let mut seen: std::collections::HashMap<String, EntityKind> = std::collections::HashMap::new();
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => note_pattern_kinds(&mut seen, &mc.pattern)?,
+                Clause::Create(cc) => note_pattern_kinds(&mut seen, &cc.pattern)?,
+                Clause::Merge(mc) => note_pattern_kinds(&mut seen, &mc.pattern)?,
+                Clause::With(wc) => seen = carry_kinds_through_with(&seen, wc),
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // The by-kind representation. A query parsed into these fields has an empty
+    // `clauses`, so both shapes have to be walked or the rule holds for half
+    // the queries -- the same split that cost #710 a day.
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        note_pattern_kinds(&mut seen, &mc.pattern)?;
+    }
+    if let Some(wc) = &query.with_clause {
+        seen = carry_kinds_through_with(&seen, wc);
+        for mc in query.match_clauses.iter().skip(upto) {
+            note_pattern_kinds(&mut seen, &mc.pattern)?;
+        }
+    }
+    for (wc, _, matches, _) in &query.extra_with_stages {
+        seen = carry_kinds_through_with(&seen, wc);
+        for mc in matches {
+            note_pattern_kinds(&mut seen, &mc.pattern)?;
+        }
+    }
+    // CREATE and MERGE come *after* the WITH stages, so their kinds must be
+    // noted after the scope resets -- walking them first reads them against a
+    // scope they never see. `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` is legal:
+    // `r` is not carried through the WITH, so it is unbound and the CREATE
+    // makes a fresh node. Checked in the old order, that is Relationship vs
+    // Node and a **valid query gets rejected** -- the failure this module's
+    // opening comment warns is the worse one. Caught in review, not by a test,
+    // so `a_write_after_with_may_reuse_a_dropped_name` now pins it.
+    if let Some(cc) = &query.create_clause {
+        note_pattern_kinds(&mut seen, &cc.pattern)?;
+    }
+    if let Some(mc) = &query.merge_clause {
+        note_pattern_kinds(&mut seen, &mc.pattern)?;
+    }
+    Ok(())
+}
+
+
+/// Variables a pattern binds.
+fn pattern_vars(pattern: &crate::query::ast::Pattern, out: &mut HashSet<String>) {
+    for path in &pattern.paths {
+        if let Some(v) = &path.path_variable { out.insert(v.clone()); }
+        if let Some(v) = &path.start.variable { out.insert(v.clone()); }
+        for seg in &path.segments {
+            if let Some(v) = &seg.edge.variable { out.insert(v.clone()); }
+            if let Some(v) = &seg.node.variable { out.insert(v.clone()); }
+        }
+    }
+}
+
+/// The names a projection makes available downstream.
+fn projected_names(items: &[ReturnItem]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for item in items {
+        if let Some(a) = &item.alias {
+            out.insert(a.clone());
+        } else if let Expression::Variable(v) = &item.expression {
+            out.insert(v.clone());
+        }
+    }
+    out
+}
+
+/// Every variable an expression reads.
+fn expression_vars(e: &Expression, out: &mut HashSet<String>) {
+    use Expression::*;
+    match e {
+        Variable(v) => { out.insert(v.clone()); }
+        Property { variable, .. } => { out.insert(variable.clone()); }
+        Binary { left, right, .. } => { expression_vars(left, out); expression_vars(right, out); }
+        Unary { expr, .. } => expression_vars(expr, out),
+        Function { args, .. } => for a in args { expression_vars(a, out) },
+        Index { expr, index } => { expression_vars(expr, out); expression_vars(index, out); }
+        Case { operand, when_clauses, else_result } => {
+            if let Some(o) = operand { expression_vars(o, out); }
+            for (w, t) in when_clauses { expression_vars(w, out); expression_vars(t, out); }
+            if let Some(e) = else_result { expression_vars(e, out); }
+        }
+        _ => {}
+    }
+}
+
+/// `ORDER BY` may not name a variable that is not in scope.
+///
+/// ```text
+/// MATCH (a:A), (b:B), (c:C)
+/// WITH a, b
+/// WITH a ORDER BY c        <-- c was dropped two clauses ago
+/// RETURN a
+/// ```
+///
+/// 40 TCK scenarios across WithOrderBy1 and WithOrderBy3 assert a
+/// `SyntaxError` here and we answered them, sorting by a column that does not
+/// exist.
+///
+/// **Deliberately conservative**, because this module opens by saying scope
+/// analysis is absent precisely so that valid queries are not rejected. Two
+/// choices keep it safe:
+///
+/// * the allowed set is the projection **plus the scope that preceded it**, not
+///   the projection alone. `MATCH (n) RETURN n.name ORDER BY n.age` is legal —
+///   `n` is in scope even though the projected column is `n.name` — and a
+///   stricter rule would reject it.
+/// * anything the walk cannot account for leaves the scope *empty*, and an
+///   empty scope checks nothing. A query shape this does not model is passed
+///   through rather than guessed at.
+fn validate_order_by_in_scope(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let mut scope: HashSet<String> = HashSet::new();
+    let mut seen_any_binding = false;
+
+    // The by-kind shape. A multi-WITH query parses into `with_clause` plus
+    // `extra_with_stages` and leaves `clauses` empty, so declining it here
+    // would leave the rule checking nothing at all -- which is exactly what
+    // the first version of this did, and it measured +0. The two-representation
+    // split has now cost four separate fixes; assume neither shape.
+    if query.clauses.is_empty() {
+        // The by-kind shape, and its WITH order is **not** the obvious one:
+        // `extra_with_stages` holds the *earlier* WITHs in order and
+        // `with_clause` holds the **last** one. Walking `with_clause` first --
+        // which is what it looks like it should be -- checks the final ORDER BY
+        // against the scope of the first clause and silently finds nothing.
+        // Verified against a three-WITH query rather than assumed.
+        let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+        for mc in query.match_clauses.iter().take(upto) {
+            pattern_vars(&mc.pattern, &mut scope);
+            seen_any_binding = true;
+        }
+        for (wc, _, matches, _) in &query.extra_with_stages {
+            let projected = projected_names(&wc.items);
+            if let Some(ob) = &wc.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+            scope = projected;
+            // A WITH projection *is* exact scope knowledge -- more exact than a
+            // pattern, in fact -- so it satisfies the guard. Requiring a
+            // pattern binding first silently skipped every query of the form
+            // `WITH 1 AS a ... ORDER BY c`, which is 30 of the 40 scenarios
+            // this rule exists for.
+            seen_any_binding = true;
+            for mc in matches {
+                pattern_vars(&mc.pattern, &mut scope);
+            }
+        }
+        if let Some(wc) = &query.with_clause {
+            let projected = projected_names(&wc.items);
+            if let Some(ob) = &wc.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+            scope = projected;
+            for mc in query.match_clauses.iter().skip(upto) {
+                pattern_vars(&mc.pattern, &mut scope);
+            }
+        }
+        if let Some(rc) = &query.return_clause {
+            let projected = projected_names(&rc.items);
+            if let Some(ob) = &query.order_by {
+                check_order_by(ob, &projected, &scope, seen_any_binding)?;
+            }
+        }
+        return Ok(());
+    }
+
+    for clause in &query.clauses {
+        match clause {
+            Clause::Match(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Create(cc) => { pattern_vars(&cc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Merge(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Unwind(u) => { scope.insert(u.variable.clone()); seen_any_binding = true; }
+            Clause::With(wc) => {
+                let projected = projected_names(&wc.items);
+                if let Some(ob) = &wc.order_by {
+                    check_order_by(ob, &projected, &scope, seen_any_binding)?;
+                }
+                scope = projected;
+                seen_any_binding = true;
+            }
+            Clause::Return(rc) => {
+                let projected = projected_names(&rc.items);
+                if let Some(ob) = &query.order_by {
+                    check_order_by(ob, &projected, &scope, seen_any_binding)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_order_by(
+    ob: &OrderByClause,
+    projected: &HashSet<String>,
+    scope: &HashSet<String>,
+    seen_any_binding: bool,
+) -> Result<(), ValidationError> {
+    // Nothing was bound anywhere the walk could see, so there is no scope to
+    // check against. Saying "undefined" here would reject `RETURN 1 ORDER BY 1`
+    // and anything else this walk does not model.
+    if !seen_any_binding {
+        return Ok(());
+    }
+    for item in &ob.items {
+        let mut used = HashSet::new();
+        expression_vars(&item.expression, &mut used);
+        for v in used {
+            if !projected.contains(&v) && !scope.contains(&v) {
+                return Err(ValidationError::OrderByUndefinedVariable(v));
+            }
+        }
+    }
+    Ok(())
+}
+
+
+/// `AND` / `OR` / `XOR` require boolean operands, and a literal that is not one
+/// is a compile-time error.
+///
+/// ```text
+/// RETURN 123 AND true      -> SyntaxError: InvalidArgumentType
+/// ```
+///
+/// 26 TCK scenarios across Boolean1, Boolean2 and Boolean4. We answered every
+/// one of them.
+///
+/// **Only statically-known operands are checked.** `n.prop AND true` is legal
+/// to *write* — the type is unknown until the row arrives, and Cypher reports
+/// a runtime error then, not a compile-time one. Checking anything whose type
+/// is not known from the text would reject valid queries, which this module
+/// opens by naming as the worse failure.
+///
+/// `null` is allowed: it is the unknown boolean, and `123.4 AND null` fails on
+/// the `123.4`.
+fn validate_boolean_operands(query: &Query) -> Result<(), ValidationError> {
+    fn statically_non_boolean(e: &Expression) -> Option<&'static str> {
+        match e {
+            Expression::Literal(p) => match p {
+                crate::graph::PropertyValue::Boolean(_) | crate::graph::PropertyValue::Null => None,
+                crate::graph::PropertyValue::Integer(_) => Some("an integer"),
+                crate::graph::PropertyValue::Float(_) => Some("a float"),
+                crate::graph::PropertyValue::String(_) => Some("a string"),
+                crate::graph::PropertyValue::Array(_) => Some("a list"),
+                crate::graph::PropertyValue::Map(_) => Some("a map"),
+                _ => None,
+            },
+            // A list or map *literal* is known to be a list or map whatever is
+            // inside it -- `[true]` is a list, not a boolean.
+            Expression::ListExpr(_) => Some("a list"),
+            Expression::MapExpr(_) => Some("a map"),
+            _ => None,
+        }
+    }
+
+    fn walk(e: &Expression) -> Result<(), ValidationError> {
+        if let Expression::Binary { left, op, right } = e {
+            if matches!(op, crate::query::ast::BinaryOp::And
+                          | crate::query::ast::BinaryOp::Or
+                          | crate::query::ast::BinaryOp::Xor)
+            {
+                for side in [left, right] {
+                    if let Some(what) = statically_non_boolean(side) {
+                        return Err(ValidationError::NonBooleanOperand(what));
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        walk(e)?;
+    }
+    Ok(())
+}
+
+/// The sub-expressions of an expression, for a generic walk.
+fn child_expressions(e: &Expression) -> Vec<&Expression> {
+    use Expression::*;
+    match e {
+        Binary { left, right, .. } => vec![left, right],
+        Unary { expr, .. } => vec![expr],
+        Function { args, .. } => args.iter().collect(),
+        Index { expr, index } => vec![expr, index],
+        Case { operand, when_clauses, else_result } => {
+            let mut v: Vec<&Expression> = Vec::new();
+            if let Some(o) = operand { v.push(o); }
+            for (w, t) in when_clauses { v.push(w); v.push(t); }
+            if let Some(x) = else_result { v.push(x); }
+            v
+        }
+        ListExpr(items) => items.iter().collect(),
+        MapExpr(entries) => entries.iter().map(|(_, v)| v).collect(),
+        ListSlice { expr, start, end } => {
+            let mut v = vec![expr.as_ref()];
+            if let Some(s) = start { v.push(s); }
+            if let Some(e) = end { v.push(e); }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every expression a query evaluates, for a generic walk.
+///
+/// Both AST shapes, because a query parsed into one leaves the other empty --
+/// the split that has now cost six separate fixes.
+fn all_expressions(query: &Query) -> Vec<&Expression> {
+    use crate::query::ast::Clause;
+    let mut out: Vec<&Expression> = Vec::new();
+    fn push_items<'a>(items: &'a [ReturnItem], out: &mut Vec<&'a Expression>) {
+        for i in items {
+            out.push(&i.expression);
+        }
+    }
+    if !query.clauses.is_empty() {
+        for c in &query.clauses {
+            match c {
+                Clause::Return(r) => push_items(&r.items, &mut out),
+                Clause::With(w) => push_items(&w.items, &mut out),
+                Clause::Where(w) => out.push(&w.predicate),
+                Clause::Unwind(u) => out.push(&u.expression),
+                _ => {}
+            }
+        }
+    }
+    if let Some(r) = &query.return_clause {
+        push_items(&r.items, &mut out);
+    }
+    if let Some(w) = &query.with_clause {
+        push_items(&w.items, &mut out);
+    }
+    for (w, _, _, _) in &query.extra_with_stages {
+        push_items(&w.items, &mut out);
+    }
+    if let Some(w) = &query.where_clause {
+        out.push(&w.predicate);
+    }
+    out
+}
+
+
+/// Property access on something that cannot have properties (#791).
+///
+/// ```text
+/// WITH 123 AS nonMap RETURN nonMap.num     -> TypeError: InvalidArgumentType
+/// ```
+///
+/// The TCK asks for this **at compile time**, which bounds what can be
+/// checked: only a variable whose value is a literal of a non-map type, taken
+/// from the projection that introduced it. `n.name` where `n` is a node, or a
+/// map, or anything read from the graph, is untouched — the type is not known
+/// from the text, and rejecting it would break every ordinary query.
+///
+/// So this fires on `WITH <literal> AS x ... x.prop` and nothing else. Narrow
+/// on purpose: `validate.rs` opens by naming over-rejection as the worse
+/// failure, and property access is the single most common expression in Cypher.
+fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Literal types that cannot carry properties. A map can; a node,
+    /// relationship or anything read at run time is not visible here.
+    fn non_map_literal(e: &Expression) -> Option<&'static str> {
+        match e {
+            Expression::Literal(p) => match p {
+                crate::graph::PropertyValue::Integer(_) => Some("an integer"),
+                crate::graph::PropertyValue::Float(_) => Some("a float"),
+                crate::graph::PropertyValue::String(_) => Some("a string"),
+                crate::graph::PropertyValue::Boolean(_) => Some("a boolean"),
+                crate::graph::PropertyValue::Array(_) => Some("a list"),
+                _ => None,
+            },
+            Expression::ListExpr(_) => Some("a list"),
+            _ => None,
+        }
+    }
+
+    // Names a projection binds to a literal of a non-map type.
+    let mut bad: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+    let mut note = |items: &[ReturnItem], bad: &mut std::collections::HashMap<String, &'static str>| {
+        for item in items {
+            let Some(alias) = &item.alias else { continue };
+            match non_map_literal(&item.expression) {
+                Some(what) => { bad.insert(alias.clone(), what); }
+                // Re-binding the name to anything else clears it.
+                None => { bad.remove(alias); }
+            }
+        }
+    };
+
+    let mut check = |e: &Expression, bad: &std::collections::HashMap<String, &'static str>|
+        -> Result<(), ValidationError> {
+        if let Expression::Property { variable, .. } = e {
+            if let Some(what) = bad.get(variable) {
+                return Err(ValidationError::PropertyAccessOnNonMap {
+                    name: variable.clone(),
+                    what,
+                });
+            }
+        }
+        Ok(())
+    };
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::With(w) => {
+                    for item in &w.items { check(&item.expression, &bad)?; }
+                    note(&w.items, &mut bad);
+                }
+                Clause::Return(r) => {
+                    for item in &r.items { check(&item.expression, &bad)?; }
+                }
+                Clause::Where(w) => check(&w.predicate, &bad)?,
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // The by-kind shape: earlier WITHs first, then the last, then RETURN.
+    for (wc, _, _, _) in &query.extra_with_stages {
+        for item in &wc.items { check(&item.expression, &bad)?; }
+        note(&wc.items, &mut bad);
+    }
+    if let Some(wc) = &query.with_clause {
+        for item in &wc.items { check(&item.expression, &bad)?; }
+        note(&wc.items, &mut bad);
+    }
+    if let Some(w) = &query.where_clause {
+        check(&w.predicate, &bad)?;
+    }
+    if let Some(rc) = &query.return_clause {
+        for item in &rc.items { check(&item.expression, &bad)?; }
+    }
+    Ok(())
+}
+
+
+/// Whether a projection binds this name to something that **cannot** be a node,
+/// relationship or path — so using it as a pattern is a type conflict.
+///
+/// ```text
+/// WITH 123 AS n MATCH (n) RETURN n     -> SyntaxError: VariableTypeConflict
+/// ```
+///
+/// Was lists and maps only, which covered `WITH [n] AS users MATCH (users)`
+/// (#654) and missed every scalar — 16 TCK scenarios across Match1 [11]/[13]
+/// and Match6 [25], covering `true`, `123`, `123.4`, `'foo'` and `null` as
+/// node, relationship and path variables.
+///
+/// Literals only, and deliberately: `WITH n.prop AS x MATCH (x)` cannot be
+/// judged from the text, and `validate.rs` opens by naming over-rejection as
+/// the worse failure. Two copies of this test existed and both were narrow;
+/// they now share one function, because the next widening should not have to
+/// find both.
+fn not_an_entity(e: &Expression) -> bool {
+    matches!(
+        e,
+        Expression::ListExpr(_)
+            | Expression::MapExpr(_)
+            | Expression::Literal(
+                crate::graph::PropertyValue::Array(_)
+                    | crate::graph::PropertyValue::Map(_)
+                    | crate::graph::PropertyValue::Integer(_)
+                    | crate::graph::PropertyValue::Float(_)
+                    | crate::graph::PropertyValue::String(_)
+                    | crate::graph::PropertyValue::Boolean(_)
+            )
+    )
+}
+
+
+/// A pattern predicate in `WHERE` may not **introduce** variables (#798).
+///
+/// ```text
+/// MATCH (n) WHERE (n)-[r]->(a) RETURN n
+///   -> SyntaxError: UndefinedVariable      -- r and a are bound nowhere
+/// ```
+///
+/// The pattern is a *test*, not a match: it asks whether an edge exists, and
+/// `r` and `a` have no meaning outside it. openCypher requires them to be
+/// already bound; `EXISTS { ... }` is the form that may introduce names.
+///
+/// 15 scenarios in `Pattern1` [10]. We answered every one, silently binding
+/// variables that go nowhere.
+///
+/// Anonymous positions are fine — `(n)-[]->()` introduces nothing — which is
+/// why the check is on *named* variables rather than on pattern complexity.
+fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Names a pattern binds, ignoring anonymous positions.
+    fn pattern_named(pattern: &crate::query::ast::Pattern) -> HashSet<String> {
+        let mut out = HashSet::new();
+        pattern_vars(pattern, &mut out);
+        out
+    }
+
+    /// Walk an expression for pattern predicates, checking each against scope.
+    fn walk(
+        e: &Expression,
+        bound: &HashSet<String>,
+    ) -> Result<(), ValidationError> {
+        // Only a *bare* pattern predicate is restricted. `EXISTS { ... }`
+        // desugars to the same node and may introduce names -- that is the
+        // whole difference between the two spellings, and checking both
+        // rejects every `EXISTS { MATCH (n)-->(m) }` (#798).
+        if let Expression::ExistsSubquery { pattern, bare_pattern: true, .. } = e {
+            for name in pattern_named(pattern) {
+                if !bound.contains(&name) {
+                    return Err(ValidationError::UnboundPatternVariable(name));
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, bound)?;
+        }
+        Ok(())
+    }
+
+    // What the reading clauses have bound by the time the WHERE runs.
+    let mut bound: HashSet<String> = HashSet::new();
+
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => pattern_vars(&mc.pattern, &mut bound),
+                Clause::Create(cc) => pattern_vars(&cc.pattern, &mut bound),
+                Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut bound),
+                Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::With(w) => bound = projected_names(&w.items),
+                Clause::Where(w) => walk(&w.predicate, &bound)?,
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        pattern_vars(&mc.pattern, &mut bound);
+    }
+    if let Some(u) = &query.unwind_clause {
+        bound.insert(u.variable.clone());
+    }
+    for u in &query.extra_unwind_clauses {
+        bound.insert(u.variable.clone());
+    }
+    if let Some(w) = &query.where_clause {
+        walk(&w.predicate, &bound)?;
+    }
+    // Post-WITH stages get the projection's scope plus their own matches.
+    for (wc, uw, matches, wh) in &query.extra_with_stages {
+        bound = projected_names(&wc.items);
+        if let Some(u) = uw { bound.insert(u.variable.clone()); }
+        for mc in matches { pattern_vars(&mc.pattern, &mut bound); }
+        if let Some(w) = wh { walk(&w.predicate, &bound)?; }
+    }
+    if let Some(wc) = &query.with_clause {
+        bound = projected_names(&wc.items);
+        for mc in query.match_clauses.iter().skip(upto) {
+            pattern_vars(&mc.pattern, &mut bound);
+        }
+        if let Some(w) = &query.post_with_where_clause {
+            walk(&w.predicate, &bound)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_pattern_predicate_vars(query)?;
+
+    validate_property_access_targets(query)?;
+
+    validate_boolean_operands(query)?;
+
+    validate_order_by_in_scope(query)?;
+
+    validate_variable_kinds(query)?;
+
     // ---- ORDER BY scope after an aggregating or DISTINCT projection.
     if let Some(rc) = &query.return_clause {
         validate_order_by_scope(&rc.items, rc.distinct, query.order_by.as_ref())?;
@@ -743,13 +1468,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                 Clause::With(wc) => {
                     for item in &wc.items {
                         let Some(alias) = item.alias.as_ref() else { continue };
-                        let is_collection = matches!(
-                            &item.expression,
-                            Expression::ListExpr(_)
-                                | Expression::MapExpr(_)
-                                | Expression::Literal(crate::graph::PropertyValue::Array(_))
-                                | Expression::Literal(crate::graph::PropertyValue::Map(_))
-                        );
+                        let is_collection = not_an_entity(&item.expression);
                         // Re-aliasing something else to the same name clears it.
                         if is_collection {
                             collections.insert(alias.clone());
@@ -768,6 +1487,10 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                             }
                             Ok(())
                         };
+                        // The *path* variable too: `WITH 123 AS p MATCH p = ()-[]-()`
+                        // is the same conflict and was walked past, because
+                        // this loop only visited the nodes and edges (#795).
+                        check(&path.path_variable)?;
                         check(&path.start.variable)?;
                         for seg in &path.segments {
                             check(&seg.node.variable)?;
@@ -789,13 +1512,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         collections: &mut HashSet<String>| {
             for item in &wc.items {
                 let Some(alias) = item.alias.as_ref() else { continue };
-                let is_collection = matches!(
-                    &item.expression,
-                    Expression::ListExpr(_)
-                        | Expression::MapExpr(_)
-                        | Expression::Literal(crate::graph::PropertyValue::Array(_))
-                        | Expression::Literal(crate::graph::PropertyValue::Map(_))
-                );
+                let is_collection = not_an_entity(&item.expression);
                 if is_collection {
                     collections.insert(alias.clone());
                 } else {
@@ -816,6 +1533,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         }
                         Ok(())
                     };
+                    check(&path.path_variable)?;
                     check(&path.start.variable)?;
                     for seg in &path.segments {
                         check(&seg.node.variable)?;

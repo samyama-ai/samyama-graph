@@ -107,6 +107,109 @@ fn node_id_of(v: &Value) -> Option<NodeId> {
     }
 }
 
+
+/// Cypher equality with three-valued logic, for values that may contain null.
+///
+/// `None` means *unknown*. The rule is not "any null makes it null": a
+/// definitive difference wins over an unknown one, because two lists that
+/// differ in length or in a known element are unequal whatever the nulls say.
+///
+/// ```text
+/// [1]        = [null]      -> null    (might be equal, cannot tell)
+/// [1, null]  = [1, 2]      -> null
+/// [1, null]  = [2, 3]      -> false   (the first pair settles it)
+/// [1]        = [1, null]   -> false   (lengths differ)
+/// [null]     = [null]      -> null
+/// ```
+///
+/// Scalar nulls are handled by the caller's existing three-valued guard; this
+/// is only reached for values that are not themselves null, which is why a
+/// bare `Null` here can only appear *inside* a list or map.
+fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
+    use PropertyValue::*;
+    match (a, b) {
+        (Null, _) | (_, Null) => None,
+        (Array(x), Array(y)) => {
+            // A length difference is definitive -- no element comparison can
+            // rescue it, so this is `false` and not `null`.
+            if x.len() != y.len() {
+                return Some(false);
+            }
+            let mut unknown = false;
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                match cypher_equals(xi, yi) {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            if unknown { None } else { Some(true) }
+        }
+        (Map(x), Map(y)) => {
+            // Differing key sets are definitive, for the same reason.
+            if x.len() != y.len() || !x.keys().all(|k| y.contains_key(k)) {
+                return Some(false);
+            }
+            let mut unknown = false;
+            for (k, xv) in x {
+                match cypher_equals(xv, &y[k]) {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            if unknown { None } else { Some(true) }
+        }
+        _ => Some(a == b),
+    }
+}
+
+/// The instant "now" means for the duration of one statement.
+///
+/// Cypher fixes the clock **once per query**, not once per call. Without that,
+/// `duration.inSeconds(datetime(), datetime())` returns `PT0.00000016S` -- the
+/// two calls land microseconds apart -- where the TCK requires exactly `PT0S`.
+///
+/// It is not only a test artefact. `WHERE n.created < datetime() AND
+/// n.expires > datetime()` should test one instant against both bounds, and a
+/// row arriving between the two reads is judged against a moving target.
+///
+/// A thread-local rather than a parameter because `eval_function` is reached
+/// from many operators and threading a clock through all of them would be a
+/// large change for a small need. Set by `QueryExecutor::execute` at the start
+/// of a statement and cleared by the guard on the way out, including on an
+/// early return, so a stale value cannot leak into the next statement (#793).
+pub(crate) mod statement_clock {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NOW: Cell<Option<i64>> = const { Cell::new(None) };
+    }
+
+    /// Fix "now" for this statement. The returned guard clears it on drop.
+    pub fn begin() -> Guard {
+        NOW.with(|c| c.set(Some(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))));
+        Guard
+    }
+
+    /// The statement's instant, or the wall clock when no statement is active
+    /// -- a direct `eval_function` call from a test, for instance.
+    pub fn now() -> chrono::DateTime<chrono::Utc> {
+        match NOW.with(|c| c.get()) {
+            Some(n) => chrono::DateTime::from_timestamp_nanos(n),
+            None => chrono::Utc::now(),
+        }
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            NOW.with(|c| c.set(None));
+        }
+    }
+}
+
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
@@ -143,8 +246,18 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
     }
 
     let result = match op {
-        BinaryOp::Eq => PropertyValue::Boolean(left_prop == right_prop),
-        BinaryOp::Ne => PropertyValue::Boolean(left_prop != right_prop),
+        // Three-valued, because a null *inside* a list makes the comparison
+        // unknown rather than false. The guard above only catches a null
+        // operand; `[1] = [null]` has no null operand and was answering
+        // `false` (#783).
+        BinaryOp::Eq => match cypher_equals(&left_prop, &right_prop) {
+            Some(v) => PropertyValue::Boolean(v),
+            None => PropertyValue::Null,
+        },
+        BinaryOp::Ne => match cypher_equals(&left_prop, &right_prop) {
+            Some(v) => PropertyValue::Boolean(!v),
+            None => PropertyValue::Null,
+        },
         BinaryOp::Pow => match (&left_prop, &right_prop) {
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => {
@@ -225,6 +338,24 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Duration { months, days, seconds, .. }, PropertyValue::DateTime(dt)) => {
                 add_duration_to_datetime(*dt, *months, *days, *seconds)
             }
+            // Any of the five temporal types + Duration (#689). Without these
+            // arms, teaching the constructors to produce real types would have
+            // silently removed `datetime(...) + duration(...)`, which Cypher
+            // requires and which the suite already covered.
+            (t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             PropertyValue::Duration { months, days, seconds, nanos })
+            | (PropertyValue::Duration { months, days, seconds, nanos },
+               t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. })) => {
+                shift_temporal(t, *months, *days, *seconds, *nanos as i64)?
+            }
             // Duration + Duration
             (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
@@ -247,6 +378,25 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) => {
                 add_duration_to_datetime(*dt, -*months, -*days, -*seconds)
             }
+            (t @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             PropertyValue::Duration { months, days, seconds, nanos }) => {
+                shift_temporal(t, -*months, -*days, -*seconds, -(*nanos as i64))?
+            }
+            // Two temporals of the same kind subtract to a Duration.
+            (a @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. }),
+             b @ (PropertyValue::Date(_)
+                | PropertyValue::LocalTime(_)
+                | PropertyValue::Time { .. }
+                | PropertyValue::LocalDateTime { .. }
+                | PropertyValue::ZonedDateTime { .. })) => temporal_difference(a, b)?,
             // DateTime - DateTime = Duration
             (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => {
                 let diff_ms = a - b;
@@ -262,6 +412,18 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
         },
         BinaryOp::Mul => match (&left_prop, &right_prop) {
+            // duration * number, either way round (#787).
+            (PropertyValue::Duration { months, days, seconds, nanos }, n)
+            | (n, PropertyValue::Duration { months, days, seconds, nanos })
+                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
+            {
+                let f = match n {
+                    PropertyValue::Integer(i) => *i as f64,
+                    PropertyValue::Float(f) => *f,
+                    _ => unreachable!("guarded above"),
+                };
+                scale_duration(*months, *days, *seconds, *nanos, f)?
+            }
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
@@ -270,6 +432,22 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Mul requires numeric operands".to_string())),
         },
         BinaryOp::Div => match (&left_prop, &right_prop) {
+            // duration / number. Not commutative, so only this order.
+            (PropertyValue::Duration { months, days, seconds, nanos }, n)
+                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
+            {
+                let f = match n {
+                    PropertyValue::Integer(i) => *i as f64,
+                    PropertyValue::Float(f) => *f,
+                    _ => unreachable!("guarded above"),
+                };
+                if f == 0.0 {
+                    return Err(ExecutionError::RuntimeError(
+                        "cannot divide a duration by zero".to_string(),
+                    ));
+                }
+                scale_duration(*months, *days, *seconds, *nanos, 1.0 / f)?
+            }
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
@@ -373,7 +551,57 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
          Value::Property(PropertyValue::String(key))) => {
             Ok(Value::Property(collection.resolve_property(key, store)))
         }
-        _ => Ok(Value::Null),
+
+        // Null in, null out — an unknown collection or index has an unknown
+        // element, which is Cypher's answer and not an error.
+        (Value::Null | Value::Property(PropertyValue::Null), _)
+        | (_, Value::Null | Value::Property(PropertyValue::Null)) => Ok(Value::Null),
+
+        // Everything else is a **type error**, not null (#789).
+        //
+        // The catch-all here used to answer null for every unhandled pair, so
+        // `true[0]` and `[1,2]['x']` returned a value where Cypher raises. That
+        // is the failure mode this codebase keeps producing: a wrong answer
+        // that looks like a legitimate "no such element".
+        //
+        // The two cases are distinguished because the TCK does: indexing a
+        // *non-list* is one error, indexing a list with a *non-integer* is
+        // another, and reporting one for the other sends the reader to the
+        // wrong operand.
+        (Value::Property(p), _) if p.as_list_items().is_some() => {
+            Err(ExecutionError::TypeError(format!(
+                "a list index must be an integer, not {}",
+                type_name_of(&index)
+            )))
+        }
+        (Value::List(_), _) => Err(ExecutionError::TypeError(format!(
+            "a list index must be an integer, not {}",
+            type_name_of(&index)
+        ))),
+        (Value::Property(PropertyValue::Map(_)) | Value::Map(_), _) => {
+            Err(ExecutionError::TypeError(format!(
+                "a map key must be a string, not {}",
+                type_name_of(&index)
+            )))
+        }
+        _ => Err(ExecutionError::TypeError(format!(
+            "cannot index {}: it is not a list or a map",
+            type_name_of(&collection)
+        ))),
+    }
+}
+
+/// A value's type, for an error message that names the operand rather than
+/// saying something went wrong somewhere.
+fn type_name_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Property(p) => p.type_name(),
+        Value::Node(..) | Value::NodeRef(_) => "Node",
+        Value::Edge(..) | Value::EdgeRef(..) => "Relationship",
+        Value::Path { .. } => "Path",
+        Value::List(_) => "List",
+        Value::Map(_) => "Map",
     }
 }
 
@@ -486,7 +714,7 @@ fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> Ex
             let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause } => {
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
             eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -532,6 +760,36 @@ const EXISTS_UNBOUNDED_MAX_HOPS: usize = 15;
 ///
 /// Returns true as soon as one complete path matches and the inner WHERE holds
 /// with every subquery variable bound.
+/// Refuse a hierarchy function when there is no hierarchy to consult.
+///
+/// `subsumes()` used to answer **false** whenever no index covered its
+/// arguments, on the stated reasoning that two nodes in no declared hierarchy
+/// are not in a subsumption relation. That is right when hierarchies exist and
+/// these nodes are outside them. It is a guess when *nothing* is declared, or
+/// when every index is stale — and it is a guess shaped exactly like an answer:
+/// on `c-[:BROADER]->b-[:BROADER]->a` the index and a plain traversal both say
+/// three nodes are subsumed by `a`, and with no index `subsumes` said zero,
+/// silently (#721).
+///
+/// There is no traversal fallback to offer, because without a declaration
+/// there is no relationship type to walk — the hierarchy *is* the declaration.
+/// So the honest answer is an error naming what is missing.
+fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
+    if store.hierarchy_index.any_usable() {
+        return Ok(());
+    }
+    let detail = if store.hierarchy_index.is_empty() {
+        "no hierarchy index is declared"
+    } else {
+        "every declared hierarchy index is stale or was declined"
+    };
+    Err(ExecutionError::RuntimeError(format!(
+        "{func}(): {detail}. Declare one with `CREATE HIERARCHY INDEX <name> ON \
+         ()-[:TYPE]->() ...`, REBUILD a stale one, or write the test as a \
+         variable-length traversal."
+    )))
+}
+
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
@@ -603,44 +861,106 @@ fn exists_node_matches(
     true
 }
 
-/// Neighbours of `node` reachable by an edge matching `edge_pat`, honouring the
-/// pattern's direction. Returns each matching edge with the node at its far end.
-fn exists_neighbors(
+/// Visit the neighbours of `node` reachable by an edge matching `edge_pat`.
+///
+/// This used to build a `Vec<(Edge, NodeId)>`: it fetched **every** edge
+/// incident to the node in the pattern's direction — all types, both
+/// directions for `-[:R]-` — cloned each one whole (an owned `Edge` carries its
+/// type string and its whole property map), and only then filtered by type and
+/// applied the pinned-target check.
+///
+/// For LDBC IS7 that is `EXISTS { MATCH (op)-[:KNOWS]-(author) }` evaluated per
+/// output row, where `op` is a Person with a few hundred incident edges of
+/// which ~20 are `:KNOWS`, and exactly one can satisfy the pinned `author`. It
+/// cost 95% of IS7 — 0.56 ms of 0.59 at SF1, and IS7 is 26.8 ms at SF10 against
+/// FalkorDB's 0.66 on the same host (#618).
+///
+/// `ExpandOperator` has walked adjacency this way since #520; the `EXISTS`
+/// evaluator simply never inherited it. Type ids are resolved once, the pin and
+/// the isomorphism check run inside the walk, and the `Edge` is materialised
+/// only for a survivor whose pattern actually needs it — an edge variable to
+/// bind or an edge property to test.
+///
+/// `visit` returns `Ok(true)` to stop the walk; the return value says whether
+/// it did.
+fn exists_for_each_neighbor(
     store: &GraphStore,
     node: NodeId,
     edge_pat: &crate::query::ast::EdgePattern,
-) -> Vec<(crate::graph::Edge, NodeId)> {
-    let types: Vec<&str> = edge_pat.types.iter().map(|t| t.as_str()).collect();
-    let edge_matches = |e: &crate::graph::Edge| -> bool {
-        if !types.is_empty() && !types.contains(&e.edge_type.as_str()) {
-            return false;
-        }
-        match &edge_pat.properties {
-            Some(props) => props
+    pinned_target: Option<NodeId>,
+    visited_edges: &[crate::graph::EdgeId],
+    mut visit: impl FnMut(crate::graph::EdgeId, NodeId) -> ExecutionResult<bool>,
+) -> ExecutionResult<bool> {
+    // `None` means "no type filter". A named type the graph has never seen
+    // contributes no id, so the resolved set is empty and matches nothing --
+    // which is correct, and is why the two cases are kept apart (#520).
+    let type_ids: Option<Vec<u16>> = if edge_pat.types.is_empty() {
+        None
+    } else {
+        Some(
+            edge_pat
+                .types
                 .iter()
-                .all(|(k, v)| e.properties.get(k).map_or(false, |pv| pv == v)),
-            None => true,
+                .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
+                .collect(),
+        )
+    };
+    let type_filter = type_ids.as_deref();
+
+    // Only a pattern that names edge properties needs the edge itself here.
+    let edge_props = edge_pat.properties.as_ref();
+
+    let mut stop = false;
+    let mut err: Option<ExecutionError> = None;
+    let mut keep = |eid: crate::graph::EdgeId, other: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
+        if *stop || err.is_some() {
+            return;
+        }
+        if let Some(target) = pinned_target {
+            if other != target {
+                return;
+            }
+        }
+        if visited_edges.contains(&eid) {
+            return;
+        }
+        if let Some(props) = edge_props {
+            match store.get_edge(eid) {
+                Some(e) => {
+                    if !props.iter().all(|(k, v)| e.properties.get(k).is_some_and(|pv| pv == v)) {
+                        return;
+                    }
+                }
+                None => return,
+            }
+        }
+        match visit(eid, other) {
+            Ok(true) => *stop = true,
+            Ok(false) => {}
+            Err(e) => *err = Some(e),
         }
     };
 
-    let mut out = Vec::new();
     if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
-        for e in store.get_outgoing_edges(node) {
-            if edge_matches(&e) {
-                let other = e.target;
-                out.push((e, other));
-            }
-        }
+        store.for_each_outgoing_neighbor(node, type_filter, |target, eid| {
+            keep(eid, target, &mut stop, &mut err);
+        });
     }
     if matches!(edge_pat.direction, Direction::Incoming | Direction::Both) {
-        for e in store.get_incoming_edges(node) {
-            if edge_matches(&e) {
-                let other = e.source;
-                out.push((e, other));
+        store.for_each_incoming_neighbor(node, type_filter, |source, eid| {
+            // A self-relationship is incident to its node twice. Undirected
+            // matching traverses each relationship once, so the outgoing walk
+            // above has already taken it (#640).
+            if matches!(edge_pat.direction, Direction::Both) && source == node {
+                return;
             }
-        }
+            keep(eid, source, &mut stop, &mut err);
+        });
     }
-    out
+    match err {
+        Some(e) => Err(e),
+        None => Ok(stop),
+    }
 }
 
 /// Match `path.segments[seg_idx..]` starting from `current`. Once every segment
@@ -743,46 +1063,44 @@ fn exists_expand_hops(
         None
     };
 
-    for (edge, neighbor) in exists_neighbors(store, current, &segment.edge) {
-        // The pin cannot be satisfied by any other neighbour, so skip before
-        // the record clone below rather than after the recursion.
-        if let Some(target) = pinned_target {
-            if neighbor != target {
-                continue;
+    // The pin and the isomorphism check happen inside the walk, before any
+    // allocation: a neighbour that cannot close the segment costs a comparison
+    // rather than an `Edge` clone and a record clone.
+    exists_for_each_neighbor(
+        store,
+        current,
+        &segment.edge,
+        pinned_target,
+        visited_edges,
+        |eid, neighbor| {
+            let mut next_visited = visited_edges.to_vec();
+            next_visited.push(eid);
+
+            let mut next = bindings.clone();
+            if let Some(var) = segment.edge.variable.as_deref() {
+                // Only a pattern that binds the edge needs it materialised.
+                if let Some(edge) = store.get_edge(eid) {
+                    next.bind(
+                        var.to_string(),
+                        Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
+                    );
+                }
             }
-        }
-        // Relationship isomorphism: an edge may not repeat within one path.
-        if visited_edges.contains(&edge.id) {
-            continue;
-        }
-        let mut next_visited = visited_edges.to_vec();
-        next_visited.push(edge.id);
 
-        let mut next = bindings.clone();
-        if let Some(var) = segment.edge.variable.as_deref() {
-            next.bind(
-                var.to_string(),
-                Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
-            );
-        }
-
-        if exists_expand_hops(
-            path,
-            seg_idx,
-            neighbor,
-            depth + 1,
-            min_hops,
-            max_hops,
-            &next,
-            &next_visited,
-            where_clause,
-            store,
-        )? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+            exists_expand_hops(
+                path,
+                seg_idx,
+                neighbor,
+                depth + 1,
+                min_hops,
+                max_hops,
+                &next,
+                &next_visited,
+                where_clause,
+                store,
+            )
+        },
+    )
 }
 
 /// Evaluate list comprehension: [x IN list WHERE cond | expr]
@@ -799,15 +1117,36 @@ fn eval_list_comprehension(
     // `as_list_items` rather than an `Array` match: an all-float list literal
     // parses as a `Vector`, and returning the empty list for it made a
     // comprehension over one silently produce nothing (#605).
-    let items = match list_val {
-        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
-        _ => return Ok(Value::Property(PropertyValue::Array(vec![]))),
+    // A list holding **entities** is a `Value::List`, not a `PropertyValue`
+    // list — a PropertyValue list cannot hold a node or relationship. So
+    // `[x IN [r, 1] | type(x)]` fell to the catch-all and returned `[]`:
+    // an empty list where a TypeError belongs, and indistinguishable from a
+    // comprehension that legitimately filtered everything out (#799).
+    let items: Vec<Value> = match list_val {
+        Value::Property(ref p) if p.as_list_items().is_some() => p
+            .as_list_items()
+            .unwrap()
+            .into_iter()
+            .map(Value::Property)
+            .collect(),
+        Value::List(items) => items,
+        // Null in, null out. Anything else is not a list at all, and saying so
+        // beats returning an empty one.
+        Value::Null | Value::Property(PropertyValue::Null) => {
+            return Ok(Value::Property(PropertyValue::Null))
+        }
+        other => {
+            return Err(ExecutionError::TypeError(format!(
+                "a list comprehension needs a list, not {}",
+                type_name_of(&other)
+            )))
+        }
     };
 
     let mut result = Vec::new();
     for item in items {
         let mut inner_record = record.clone();
-        inner_record.bind(variable.to_string(), Value::Property(item));
+        inner_record.bind(variable.to_string(), item);
 
         // Apply filter
         if let Some(f) = filter {
@@ -1219,6 +1558,36 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
             Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
             Duration { months: m2, days: d2, seconds: s2, nanos: n2 },
         ) => Some(m1.cmp(m2).then(d1.cmp(d2)).then(s1.cmp(s2)).then(n1.cmp(n2))),
+
+        // The five temporal types compare within their own kind (#689).
+        //
+        // This function is a *second* comparison path -- `cypher_order` in
+        // `graph::property` is the other -- and its `_ => None` fallthrough
+        // meant every new temporal type silently compared as null the moment
+        // the constructors started producing them. Nine `Temporal7` scenarios
+        // that had been passing went red, which is the duplicated-evaluator
+        // shape this codebase keeps producing: patching the copy in front of
+        // you fixes nothing.
+        (Date(l), Date(r)) => Some(l.cmp(r)),
+        (LocalTime(l), LocalTime(r)) => Some(l.cmp(r)),
+        (
+            Time { nanos: n1, offset_seconds: o1 },
+            Time { nanos: n2, offset_seconds: o2 },
+        ) => Some(
+            (n1 - (*o1 as i64) * 1_000_000_000).cmp(&(n2 - (*o2 as i64) * 1_000_000_000)),
+        ),
+        (LocalDateTime { secs: s1, nanos: n1 }, LocalDateTime { secs: s2, nanos: n2 }) => {
+            Some(s1.cmp(s2).then(n1.cmp(n2)))
+        }
+        (
+            ZonedDateTime { secs: s1, nanos: n1, .. },
+            ZonedDateTime { secs: s2, nanos: n2, .. },
+        ) => Some(s1.cmp(s2).then(n1.cmp(n2))),
+
+        // Cross-kind temporal comparison is null in Cypher, not an ordering:
+        // "is this date greater than that time" has no answer. Falls through
+        // to `None` below, which is that null -- spelled out here because the
+        // wildcard is exactly what hid the bug above.
         _ => None,
     }
 }
@@ -1232,6 +1601,266 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
 ///
 /// This exists because the comparison was implemented twice and both copies
 /// had independently settled on raising instead. Both now call here.
+
+/// The map a temporal constructor was handed, whichever shape it arrived in.
+///
+/// A map *literal* containing variables evaluates to `Value::Map`, not
+/// `Value::Property(PropertyValue::Map)` — so `datetime({date: d, time: t})`
+/// never matched the map arm and fell through to "requires a string or map
+/// argument". That is 174 `Temporal3` scenarios: the selection form was
+/// implemented and unreachable through the shape the executor actually
+/// produces (#772).
+fn temporal_arg_map(v: &Value) -> Option<std::collections::HashMap<String, PropertyValue>> {
+    match v {
+        Value::Property(PropertyValue::Map(m)) => Some(m.clone()),
+        Value::Map(entries) => {
+            let mut out = std::collections::HashMap::new();
+            for (k, val) in entries {
+                match val {
+                    Value::Property(p) => { out.insert(k.clone(), p.clone()); }
+                    Value::Null => { out.insert(k.clone(), PropertyValue::Null); }
+                    // A node or a path inside a temporal map is not something
+                    // to coerce; leave it out so the component reader reports
+                    // the missing field rather than inventing a value.
+                    _ => {}
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Days-since-epoch of any temporal value that has a date part.
+///
+/// `None` for `LocalTime`/`Time`, which genuinely have no date — the caller
+/// turns that into a type error rather than substituting the epoch, because a
+/// substituted 1970-01-01 reads as a real answer (#689).
+fn date_part_of(v: &PropertyValue) -> Option<i32> {
+    match v {
+        PropertyValue::Date(d) => Some(*d),
+        PropertyValue::LocalDateTime { secs, .. } => Some(secs.div_euclid(86_400) as i32),
+        PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
+            Some((secs + *offset_seconds as i64).div_euclid(86_400) as i32)
+        }
+        PropertyValue::DateTime(ms) => Some(ms.div_euclid(86_400_000) as i32),
+        _ => None,
+    }
+}
+
+/// Apply a map's date components on top of an already-selected date.
+///
+/// `{date: other, day: 28}` keeps `other`'s year and month and replaces the
+/// day; `{date: other, ordinalDay: 28}` replaces the whole day-of-year, so it
+/// moves the month too. The four spellings do not mix — naming `ordinalDay`
+/// means the calendar fields are not consulted — which is why this dispatches
+/// on which keys are present rather than defaulting each field.
+fn apply_date_overrides(
+    base: i32,
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> Result<i32, ExecutionError> {
+    use chrono::Datelike;
+    const KEYS: &[&str] = &[
+        "year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter",
+    ];
+    if !KEYS.iter().any(|k| map.contains_key(*k)) {
+        return Ok(base);
+    }
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let cur = epoch
+        .checked_add_signed(chrono::Duration::days(base as i64))
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+    let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
+    let year = g("year").unwrap_or(cur.year() as i64) as i32;
+
+    let out = if let Some(ord) = g("ordinalDay") {
+        chrono::NaiveDate::from_yo_opt(year, ord as u32)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid ordinalDay {ord}")))?
+    } else if map.contains_key("week") || map.contains_key("dayOfWeek") {
+        let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
+        let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
+        chrono::NaiveDate::from_isoywd_opt(year, week, weekday_from_iso_num(dow))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {year}-W{week}-{dow}")))?
+    } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
+        let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
+        let d = g("dayOfQuarter").unwrap_or(1);
+        let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid quarter {q}")))?;
+        start
+            .checked_add_signed(chrono::Duration::days(d - 1))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid dayOfQuarter {d}")))?
+    } else {
+        let month = g("month").unwrap_or(cur.month() as i64) as u32;
+        let day = g("day").unwrap_or(cur.day() as i64) as u32;
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {year}-{month}-{day}")))?
+    };
+    Ok(out.signed_duration_since(epoch).num_days() as i32)
+}
+
+/// Apply a map's clock components on top of an already-selected time.
+///
+/// Replaces only the fields named: `{time: t, second: 42}` keeps the hour,
+/// minute and fraction from `t`. The three sub-second components are additive
+/// with each other and together replace the selected fraction only if any is
+/// given — the same rule `compose_date_and_time` uses, kept in one place so
+/// the two cannot drift (#802).
+fn apply_time_overrides(
+    base: i64,
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> i64 {
+    let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
+    let mut hour = base / 3_600_000_000_000;
+    let mut minute = base / 60_000_000_000 % 60;
+    let mut second = base / 1_000_000_000 % 60;
+    let mut sub = base % 1_000_000_000;
+    if let Some(v) = g("hour") { hour = v; }
+    if let Some(v) = g("minute") { minute = v; }
+    if let Some(v) = g("second") { second = v; }
+    if ["millisecond", "microsecond", "nanosecond"].iter().any(|k| map.contains_key(*k)) {
+        sub = g("millisecond").unwrap_or(0) * 1_000_000
+            + g("microsecond").unwrap_or(0) * 1_000
+            + g("nanosecond").unwrap_or(0);
+    }
+    (hour * 3600 + minute * 60 + second) * 1_000_000_000 + sub
+}
+
+
+fn weekday_from_iso_num(dow: u32) -> chrono::Weekday {
+    use chrono::Weekday::*;
+    match dow { 1 => Mon, 2 => Tue, 3 => Wed, 4 => Thu, 5 => Fri, 6 => Sat, _ => Sun }
+}
+
+
+/// Nanoseconds-since-midnight of any temporal value that has a time part.
+fn time_part_of(v: &PropertyValue) -> Option<i64> {
+    match v {
+        PropertyValue::LocalTime(n) => Some(*n),
+        PropertyValue::Time { nanos, .. } => Some(*nanos),
+        PropertyValue::LocalDateTime { secs, nanos } => {
+            Some(secs.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64)
+        }
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, .. } => {
+            let local = secs + *offset_seconds as i64;
+            Some(local.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64)
+        }
+        PropertyValue::DateTime(ms) => Some(ms.rem_euclid(86_400_000) * 1_000_000),
+        _ => None,
+    }
+}
+
+/// The date and time a composite constructor's map describes.
+///
+/// Handles both the component form (`{year, month, day, hour, ...}`) and the
+/// *selection* form (`{date: d, time: t}`), which Cypher allows and which the
+/// TCK's Temporal3 exercises heavily. A map may mix them: `{date: d, hour: 9}`
+/// takes the date from `d` and the clock from the components.
+fn compose_date_and_time(
+    map: &std::collections::HashMap<String, PropertyValue>,
+) -> Result<(i32, i64), ExecutionError> {
+    use crate::query::executor::temporal as tmp;
+    use chrono::Datelike;
+
+    // A selected value is the *base*; individual components then override
+    // parts of it. `{date: d, time: t, second: 42}` keeps 12:31 from `t` and
+    // replaces only the second -- reading the components as a whole clock
+    // instead gives 00:00:42, which is a plausible-looking wrong answer.
+    let base_date = map.get("date").or_else(|| map.get("datetime")).and_then(date_part_of);
+    let base_time = map.get("time").or_else(|| map.get("datetime")).and_then(time_part_of);
+
+    let mut days = match base_date {
+        Some(d) => d,
+        None if map.contains_key("year") => tmp::date_days(map)?,
+        None => {
+            return Err(ExecutionError::RuntimeError(
+                "a date-time needs a date: give `year` or `date`".to_string(),
+            ))
+        }
+    };
+
+    // Date overrides on top of a selected date.
+    if base_date.is_some()
+        && ["year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter"]
+            .iter()
+            .any(|k| map.contains_key(*k))
+    {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+        let cur = epoch
+            .checked_add_signed(chrono::Duration::days(days as i64))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let y = map.get("year").and_then(|v| v.as_integer()).unwrap_or(cur.year() as i64) as i32;
+        let mo = map.get("month").and_then(|v| v.as_integer()).unwrap_or(cur.month() as i64) as u32;
+        let d = map.get("day").and_then(|v| v.as_integer()).unwrap_or(cur.day() as i64) as u32;
+        days = chrono::NaiveDate::from_ymd_opt(y, mo, d)
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {y}-{mo}-{d}")))?
+            .signed_duration_since(epoch)
+            .num_days() as i32;
+    }
+
+    let clock_keys = ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
+    let has_clock = clock_keys.iter().any(|k| map.contains_key(*k));
+    let nanos = match (base_time, has_clock) {
+        // Nothing selected: read the components as a whole clock.
+        (None, _) => {
+            if has_clock { tmp::time_of_day_nanos(map)? } else { 0 }
+        }
+        (Some(t), false) => t,
+        // Selected *and* overridden: replace only the fields named.
+        (Some(t), true) => {
+            let mut hour = t / 3_600_000_000_000;
+            let mut minute = t / 60_000_000_000 % 60;
+            let mut second = t / 1_000_000_000 % 60;
+            let mut sub = t % 1_000_000_000;
+            if let Some(v) = map.get("hour").and_then(|v| v.as_integer()) { hour = v; }
+            if let Some(v) = map.get("minute").and_then(|v| v.as_integer()) { minute = v; }
+            if let Some(v) = map.get("second").and_then(|v| v.as_integer()) { second = v; }
+            // The three sub-second fields are additive with each other, and
+            // together replace the selected fraction only if any is given.
+            if ["millisecond", "microsecond", "nanosecond"].iter().any(|k| map.contains_key(*k)) {
+                let ms = map.get("millisecond").and_then(|v| v.as_integer()).unwrap_or(0);
+                let us = map.get("microsecond").and_then(|v| v.as_integer()).unwrap_or(0);
+                let ns = map.get("nanosecond").and_then(|v| v.as_integer()).unwrap_or(0);
+                sub = ms * 1_000_000 + us * 1_000 + ns;
+            }
+            (hour * 3600 + minute * 60 + second) * 1_000_000_000 + sub
+        }
+    };
+    Ok((days, nanos))
+}
+
+/// Seconds/nanos of a naive date-time string, with no zone.
+///
+/// Delegates to the ISO parsers so every spelling the date and time parsers
+/// accept works here too — `20150721T21:40`, `2015-W30-2T214032.142`,
+/// `2015-202T21:40:32`. The previous list of `chrono` format strings covered
+/// four shapes out of the corpus's dozen (#775).
+fn parse_naive_date_time(s: &str) -> Result<(i64, u32), ExecutionError> {
+    use crate::query::executor::temporal as tmp;
+    let t = s.trim();
+    let (date_part, time_part) = match t.split_once('T') {
+        Some((d, ti)) => (d, Some(ti)),
+        None => (t, None),
+    };
+    let days = tmp::parse_iso_date(date_part)? as i64;
+    let nanos = match time_part {
+        Some(ti) if !ti.is_empty() => tmp::parse_iso_time(ti)?,
+        _ => 0,
+    };
+    let total = days * 86_400 * 1_000_000_000 + nanos;
+    Ok((
+        total.div_euclid(1_000_000_000),
+        total.rem_euclid(1_000_000_000) as u32,
+    ))
+}
+
+/// The `PropertyValue` inside a `Value`, when there is one.
+fn value_as_property(v: &Value) -> Option<PropertyValue> {
+    match v {
+        Value::Property(p) => Some(p.clone()),
+        _ => None,
+    }
+}
+
 fn string_position_op(
     op: StringPositionOp,
     left: &PropertyValue,
@@ -1310,8 +1939,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 None => match store.hierarchy_index.usable_containing(&[x, y]) {
                     Some(e) => e,
                     // Both nodes outside every hierarchy: they are not in a subsumption
-                    // relation anyone declared, which is FALSE rather than an error.
-                    None => return Ok(Value::Property(PropertyValue::Boolean(false))),
+                    // relation anyone declared, which is FALSE rather than an error --
+                    // but only once there is a hierarchy to be outside of (#721).
+                    None => {
+                        require_a_hierarchy(store, "subsumes")?;
+                        return Ok(Value::Property(PropertyValue::Boolean(false)));
+                    }
                 },
             };
             let guard = entry.read().unwrap();
@@ -1346,7 +1979,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 None => match store.hierarchy_index.usable_containing(&[root]) {
                     Some(e) => e,
-                    None => return Ok(Value::Property(PropertyValue::Null)),
+                    // Null for a root outside every hierarchy; an error when
+                    // there is no hierarchy at all (#721).
+                    None => {
+                        require_a_hierarchy(store, "hierarchy_rollup")?;
+                        return Ok(Value::Property(PropertyValue::Null));
+                    }
                 },
             };
             let guard = entry.read().unwrap();
@@ -1380,7 +2018,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 None => match store.hierarchy_index.usable_containing(&[a, b]) {
                     Some(e) => e,
-                    None => return Ok(Value::Property(PropertyValue::Array(Vec::new()))),
+                    // No common ancestor for two nodes outside every hierarchy;
+                    // an error when there is no hierarchy at all (#721).
+                    None => {
+                        require_a_hierarchy(store, "hierarchy_lca")?;
+                        return Ok(Value::Property(PropertyValue::Array(Vec::new())));
+                    }
                 },
             };
             let guard = entry.read().unwrap();
@@ -1502,9 +2145,18 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_else(|| format!("DateTime({})", millis))
                 }
-                Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
-                    format!("P{}M{}DT{}S", months, days, seconds)
-                }
+                // Through the one function that owns the format (#769). The old
+                // `P{}M{}DT{}S` emitted `P0M0DT0S` for a zero duration where
+                // Cypher writes `PT0S`, and dropped nanoseconds entirely.
+                Value::Property(p @ PropertyValue::Duration { .. }) => p.to_cypher_string(),
+                // The five temporal types render through the one function that
+                // owns the format, so `toString()` and the TCK harness cannot
+                // disagree about what a value looks like (#689).
+                Value::Property(p @ PropertyValue::Date(_))
+                | Value::Property(p @ PropertyValue::LocalTime(_))
+                | Value::Property(p @ PropertyValue::Time { .. })
+                | Value::Property(p @ PropertyValue::LocalDateTime { .. })
+                | Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => p.to_cypher_string(),
                 Value::Null | Value::Property(PropertyValue::Null) => "null".to_string(),
                 _ => return Err(ExecutionError::TypeError("Cannot convert to string".to_string())),
             };
@@ -1657,7 +2309,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Float(val)))
         }
         "timestamp" => {
-            let ts = chrono::Utc::now().timestamp_millis();
+            let ts = statement_clock::now().timestamp_millis();
             Ok(Value::Property(PropertyValue::Integer(ts)))
         }
         // Type/meta functions
@@ -1887,204 +2539,336 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Array(result)))
         }
         // date/datetime/duration constructors
+        // The five temporal constructors (#689). Each produces its own type
+        // now; before this they all produced `PropertyValue::DateTime(millis)`,
+        // so `date()`, `time()` and `localdatetime()` were indistinguishable
+        // once evaluated and nanoseconds were destroyed at construction.
         "date" => {
+            use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                // date() — current date as DateTime
-                let now = chrono::Utc::now().timestamp_millis();
-                Ok(Value::Property(PropertyValue::DateTime(now)))
-            } else {
-                match &args[0] {
-                    Value::Property(PropertyValue::String(s)) => {
-                        // Parse ISO date string
-                        if let Ok(dt) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                            let millis = dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                            Ok(Value::Property(PropertyValue::DateTime(millis)))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Cannot parse date: {}", s)))
-                        }
-                    }
-                    Value::Property(PropertyValue::Map(map)) => {
-                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
-                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        if let Some(dt) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-                            let millis = dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                            Ok(Value::Property(PropertyValue::DateTime(millis)))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Invalid date: {}-{}-{}", year, month, day)))
-                        }
-                    }
-                    _ => Err(ExecutionError::TypeError("date() requires string or map argument".to_string())),
+                let days = (statement_clock::now().timestamp() / 86_400) as i32;
+                return Ok(Value::Property(PropertyValue::Date(days)));
+            }
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    Ok(Value::Property(tmp::parse_date(s)?))
                 }
+                Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
+                    let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    // Selection: `date({date: d})` takes the date part of
+                    // another temporal — and any *other* component in the map
+                    // then overrides part of it. `{date: other, day: 28}` keeps
+                    // the year and month and replaces only the day.
+                    //
+                    // This returned the selected date unchanged, so every
+                    // override was silently discarded (#802). The composite
+                    // constructors already layer overrides this way; `date()`
+                    // has its own path and did not.
+                    if let Some(src) = map.get("date").or_else(|| map.get("datetime")) {
+                        if let Some(base) = date_part_of(src) {
+                            return Ok(Value::Property(PropertyValue::Date(
+                                apply_date_overrides(base, map)?,
+                            )));
+                        }
+                    }
+                    Ok(Value::Property(PropertyValue::Date(tmp::date_days(map)?)))
+                }
+                Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
+                Value::Property(PropertyValue::Date(d)) => {
+                    Ok(Value::Property(PropertyValue::Date(*d)))
+                }
+                other => match value_as_property(other).and_then(|p| date_part_of(&p)) {
+                    Some(d) => Ok(Value::Property(PropertyValue::Date(d))),
+                    None => Err(ExecutionError::TypeError(
+                        "date() requires a string, a map, or a temporal value".to_string(),
+                    )),
+                },
+            }
+        }
+        "localtime" => {
+            use crate::query::executor::temporal as tmp;
+            if args.is_empty() {
+                let now = statement_clock::now();
+                let nanos = now.timestamp().rem_euclid(86_400) * 1_000_000_000
+                    + now.timestamp_subsec_nanos() as i64;
+                return Ok(Value::Property(PropertyValue::LocalTime(nanos)));
+            }
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    let (nanos, _) = tmp::parse_time_parts(s)?;
+                    Ok(Value::Property(PropertyValue::LocalTime(nanos)))
+                }
+                Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
+                    let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    // A selected time, with any clock components in the map
+                    // layered on top — the same rule `date()` needs (#802).
+                    if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
+                        if let Some(n) = time_part_of(src) {
+                            return Ok(Value::Property(PropertyValue::LocalTime(
+                                apply_time_overrides(n, map),
+                            )));
+                        }
+                    }
+                    Ok(Value::Property(PropertyValue::LocalTime(tmp::time_of_day_nanos(map)?)))
+                }
+                Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
+                other => match value_as_property(other).and_then(|p| time_part_of(&p)) {
+                    Some(n) => Ok(Value::Property(PropertyValue::LocalTime(n))),
+                    None => Err(ExecutionError::TypeError(
+                        "localtime() requires a string, a map, or a temporal value".to_string(),
+                    )),
+                },
+            }
+        }
+        "time" => {
+            use crate::query::executor::temporal as tmp;
+            if args.is_empty() {
+                let now = statement_clock::now();
+                let nanos = now.timestamp().rem_euclid(86_400) * 1_000_000_000
+                    + now.timestamp_subsec_nanos() as i64;
+                return Ok(Value::Property(PropertyValue::Time { nanos, offset_seconds: 0 }));
+            }
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    let (nanos, off) = tmp::parse_time_parts(s)?;
+                    Ok(Value::Property(PropertyValue::Time {
+                        nanos,
+                        offset_seconds: off.unwrap_or(0),
+                    }))
+                }
+                Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
+                    let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    let offset = match map.get("timezone").and_then(|v| v.as_string()) {
+                        Some(tz) => tmp::parse_timezone(&tz)?.0,
+                        None => 0,
+                    };
+                    if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
+                        if let Some(n) = time_part_of(src) {
+                            return Ok(Value::Property(PropertyValue::Time {
+                                nanos: apply_time_overrides(n, map),
+                                offset_seconds: offset,
+                            }));
+                        }
+                    }
+                    Ok(Value::Property(PropertyValue::Time {
+                        nanos: tmp::time_of_day_nanos(map)?,
+                        offset_seconds: offset,
+                    }))
+                }
+                Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
+                other => match value_as_property(other).and_then(|p| time_part_of(&p)) {
+                    Some(n) => Ok(Value::Property(PropertyValue::Time { nanos: n, offset_seconds: 0 })),
+                    None => Err(ExecutionError::TypeError(
+                        "time() requires a string, a map, or a temporal value".to_string(),
+                    )),
+                },
+            }
+        }
+        "localdatetime" => {
+            if args.is_empty() {
+                let now = statement_clock::now();
+                return Ok(Value::Property(PropertyValue::LocalDateTime {
+                    secs: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos(),
+                }));
+            }
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    let (secs, nanos) = parse_naive_date_time(s)?;
+                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
+                }
+                Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
+                    let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    crate::query::executor::temporal::reject_unknown_map(map)?;
+                    let (d, t) = compose_date_and_time(map)?;
+                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
+                    Ok(Value::Property(PropertyValue::LocalDateTime {
+                        secs: total.div_euclid(1_000_000_000),
+                        nanos: total.rem_euclid(1_000_000_000) as u32,
+                    }))
+                }
+                Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
+                // A bare temporal value: take its date and time parts.
+                // `date()` and `time()` already accepted this; the composite
+                // constructors did not, so `localdatetime(other)` was a type
+                // error for every `other` the TCK hands it (#772).
+                Value::Property(p) if date_part_of(p).is_some() => {
+                    let d = date_part_of(p).unwrap_or(0);
+                    let t = time_part_of(p).unwrap_or(0);
+                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
+                    Ok(Value::Property(PropertyValue::LocalDateTime {
+                        secs: total.div_euclid(1_000_000_000),
+                        nanos: total.rem_euclid(1_000_000_000) as u32,
+                    }))
+                }
+                _ => Err(ExecutionError::TypeError(
+                    "localdatetime() requires a string, a map, or a temporal value".to_string(),
+                )),
             }
         }
         "datetime" => {
+            use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let now = chrono::Utc::now().timestamp_millis();
-                Ok(Value::Property(PropertyValue::DateTime(now)))
-            } else {
-                match &args[0] {
-                    Value::Property(PropertyValue::String(s)) => {
-                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
-                        } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Cannot parse datetime: {}", s)))
-                        }
-                    }
-                    Value::Property(PropertyValue::Map(map)) => {
-                        use chrono::TimeZone;
-
-                        // An epoch, which is what a machine caller has (Axiom 4).
-                        // Handled before the calendar components because it is a
-                        // complete specification on its own -- and because
-                        // without it the map fell through to the defaults below
-                        // and returned 1970-01-01 *silently*, which reads as a
-                        // plausible date rather than a failure (#595).
-                        if let Some(millis) = map.get("epochMillis").and_then(|v| v.as_integer()) {
-                            return Ok(Value::Property(PropertyValue::DateTime(millis)));
-                        }
-                        if let Some(seconds) = map.get("epochSeconds").and_then(|v| v.as_integer()) {
-                            return Ok(Value::Property(PropertyValue::DateTime(seconds * 1000)));
-                        }
-
-                        // A map naming none of the understood keys is a mistake,
-                        // not a request for the epoch. Answering 1970-01-01 for
-                        // it is how the missing `epochMillis` arm stayed
-                        // invisible.
-                        const KNOWN: [&str; 8] = [
-                            "year", "month", "day", "hour", "minute", "second",
-                            "epochMillis", "epochSeconds",
-                        ];
-                        if !map.keys().any(|k| KNOWN.contains(&k.as_str())) {
-                            let mut given: Vec<String> = map.keys().cloned().collect();
-                            given.sort();
-                            return Err(ExecutionError::RuntimeError(format!(
-                                "datetime() understands none of the keys given ({}); expected one of {}",
-                                given.join(", "),
-                                KNOWN.join(", ")
-                            )));
-                        }
-
-                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
-                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        if let Some(dt) = chrono::Utc.with_ymd_and_hms(year, month, day, hour, minute, second).single() {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!(
-                                "Invalid datetime components: year={}, month={}, day={}, hour={}, minute={}, second={}",
-                                year, month, day, hour, minute, second
-                            )))
-                        }
-                    }
-                    _ => Err(ExecutionError::TypeError("datetime() requires string or map argument".to_string())),
-                }
+                let now = statement_clock::now();
+                return Ok(Value::Property(PropertyValue::ZonedDateTime {
+                    secs: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos(),
+                    offset_seconds: 0,
+                    zone: None,
+                }));
             }
-        }
-        // CY-28: time() — time of day, stored as millis from epoch midnight
-        "time" => {
-            if args.is_empty() {
-                use chrono::Timelike;
-                let now = chrono::Utc::now();
-                let millis = (now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64) * 1000
-                    + now.timestamp_subsec_millis() as i64;
-                Ok(Value::Property(PropertyValue::DateTime(millis)))
-            } else {
-                match &args[0] {
-                    Value::Property(PropertyValue::String(s)) => {
-                        // Parse HH:MM:SS or HH:MM:SS.sss (ignore timezone for storage)
-                        let time_str = s.split('+').next().unwrap_or(s).split('-').next().unwrap_or(s);
-                        if let Ok(t) = chrono::NaiveTime::parse_from_str(time_str, "%H:%M:%S") {
-                            use chrono::Timelike;
-                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000;
-                            Ok(Value::Property(PropertyValue::DateTime(millis)))
-                        } else if let Ok(t) = chrono::NaiveTime::parse_from_str(time_str, "%H:%M:%S%.f") {
-                            use chrono::Timelike;
-                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000
-                                + (t.nanosecond() / 1_000_000) as i64;
-                            Ok(Value::Property(PropertyValue::DateTime(millis)))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Cannot parse time: {}. Expected HH:MM:SS", s)))
+            match &args[0] {
+                Value::Property(PropertyValue::String(s)) => {
+                    use crate::query::executor::temporal as tmp;
+                    // `2015-07-21T21:40:32.142+02:00[Europe/Stockholm]` carries
+                    // an offset *and* a zone, and they are not redundant: the
+                    // offset is what the value had when written, the zone is
+                    // the rule it follows. Either may also appear alone.
+                    let (body, zone_name) = tmp::split_zone_suffix(s);
+                    let (clock, explicit_offset) = match body.rsplit_once('T') {
+                        Some(_) | None => {
+                            // Reuse the offset splitter, which knows not to
+                            // mistake a date dash for an offset sign.
+                            let (c, o) = tmp::parse_datetime_offset(body)?;
+                            (c, o)
                         }
-                    }
-                    Value::Property(PropertyValue::Map(map)) => {
-                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let millis = (hour * 3600 + minute * 60 + second) * 1000;
-                        Ok(Value::Property(PropertyValue::DateTime(millis)))
-                    }
-                    _ => Err(ExecutionError::TypeError("time() requires string or map argument".to_string())),
+                    };
+                    let (secs_naive, nanos) = parse_naive_date_time(clock)?;
+                    let local_days = secs_naive.div_euclid(86_400);
+                    let local_nanos = secs_naive.rem_euclid(86_400) * 1_000_000_000 + nanos as i64;
+
+                    let (offset_seconds, zone) = match zone_name {
+                        Some(z) => {
+                            let spec = tmp::parse_timezone_spec(z)?;
+                            // A zone suffix wins over a written offset for the
+                            // *rule*, but the written offset is authoritative
+                            // for the instant it recorded -- keep it when given.
+                            let off = explicit_offset
+                                .map(Ok)
+                                .unwrap_or_else(|| tmp::resolve_offset(&spec, local_days, local_nanos))?;
+                            (off, tmp::zone_name(&spec))
+                        }
+                        None => (explicit_offset.unwrap_or(0), None),
+                    };
+                    let utc = secs_naive - offset_seconds as i64;
+                    Ok(Value::Property(PropertyValue::ZonedDateTime {
+                        secs: utc,
+                        nanos,
+                        offset_seconds,
+                        zone,
+                    }))
                 }
-            }
-        }
-        // CY-28: localtime() — same as time() but explicitly no timezone
-        "localtime" => {
-            if args.is_empty() {
-                use chrono::Timelike;
-                let now = chrono::Utc::now();
-                let millis = (now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64) * 1000
-                    + now.timestamp_subsec_millis() as i64;
-                Ok(Value::Property(PropertyValue::DateTime(millis)))
-            } else {
-                match &args[0] {
-                    Value::Property(PropertyValue::String(s)) => {
-                        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
-                            use chrono::Timelike;
-                            let millis = (t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64) * 1000;
-                            Ok(Value::Property(PropertyValue::DateTime(millis)))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Cannot parse localtime: {}. Expected HH:MM:SS", s)))
-                        }
+                Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
+                    let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
+                    crate::query::executor::temporal::reject_unknown_map(map)?;
+                    // An epoch is a complete specification on its own, and is
+                    // handled first: without this the map fell through to the
+                    // component defaults and returned 1970-01-01 *silently*,
+                    // which reads as a plausible date rather than a failure
+                    // (#595).
+                    if let Some(millis) = map.get("epochMillis").and_then(|v| v.as_integer()) {
+                        return Ok(Value::Property(PropertyValue::ZonedDateTime {
+                            secs: millis.div_euclid(1000),
+                            nanos: (millis.rem_euclid(1000) * 1_000_000) as u32,
+                            offset_seconds: 0,
+                            zone: None,
+                        }));
                     }
-                    Value::Property(PropertyValue::Map(map)) => {
-                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0);
-                        let millis = (hour * 3600 + minute * 60 + second) * 1000;
-                        Ok(Value::Property(PropertyValue::DateTime(millis)))
+                    if let Some(secs) = map.get("epochSeconds").and_then(|v| v.as_integer()) {
+                        return Ok(Value::Property(PropertyValue::ZonedDateTime {
+                            secs,
+                            nanos: 0,
+                            offset_seconds: 0,
+                            zone: None,
+                        }));
                     }
-                    _ => Err(ExecutionError::TypeError("localtime() requires string or map argument".to_string())),
+                    let spec = match map.get("timezone").and_then(|v| v.as_string()) {
+                        Some(tz) => Some(tmp::parse_timezone_spec(&tz)?),
+                        None => None,
+                    };
+                    let (d, t) = compose_date_and_time(map)?;
+                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
+                    // A named zone has no single offset -- Europe/Stockholm is
+                    // +01:00 in October and +02:00 in July -- so it is resolved
+                    // against *this* local date, not at parse time (#767).
+                    let (offset_seconds, zone) = match &spec {
+                        Some(sp) => (
+                            tmp::resolve_offset(sp, d as i64, t)?,
+                            tmp::zone_name(sp),
+                        ),
+                        // No target zone given: a **zoned source keeps its
+                        // own**. Defaulting to UTC re-labelled the value —
+                        // `datetime({datetime: s})` turned `12:00+02:00` into
+                        // `12:00Z`, the same wall clock two hours earlier.
+                        // Found by a test written for the re-zoning case, which
+                        // is the neighbouring behaviour (#809).
+                        None => match map.get("datetime").or_else(|| map.get("time")) {
+                            Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
+                                (*offset_seconds, zone.clone())
+                            }
+                            Some(PropertyValue::Time { offset_seconds, .. }) => (*offset_seconds, None),
+                            _ => (0, None),
+                        },
+                    };
+                    // Selecting a **zoned** source into a different zone
+                    // converts the instant rather than copying the wall clock:
+                    // 12:00 in Europe/Stockholm (+01:00) is 11:00 UTC, which is
+                    // 01:00 in Pacific/Honolulu (-10:00) — not 12:00.
+                    //
+                    // The components are read as local time in the *target*
+                    // zone only when the source had no zone of its own. With a
+                    // zoned source the same reading is an instant, and treating
+                    // it as local time shifts every value by the difference
+                    // between the two offsets (#809).
+                    let source_offset = map
+                        .get("datetime")
+                        .or_else(|| map.get("time"))
+                        .and_then(|v| match v {
+                            PropertyValue::ZonedDateTime { offset_seconds, .. }
+                            | PropertyValue::Time { offset_seconds, .. } => Some(*offset_seconds),
+                            _ => None,
+                        });
+                    // The components describe local time; store the instant.
+                    let utc = match source_offset {
+                        // A re-zoning: `local` is already the source's wall
+                        // clock, so undo *its* offset, not the target's.
+                        Some(src) if spec.is_some() => local - src as i64 * 1_000_000_000,
+                        _ => local - offset_seconds as i64 * 1_000_000_000,
+                    };
+                    Ok(Value::Property(PropertyValue::ZonedDateTime {
+                        secs: utc.div_euclid(1_000_000_000),
+                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        offset_seconds,
+                        zone,
+                    }))
                 }
-            }
-        }
-        // CY-28: localdatetime() — datetime without timezone
-        "localdatetime" => {
-            if args.is_empty() {
-                let now = chrono::Utc::now().timestamp_millis();
-                Ok(Value::Property(PropertyValue::DateTime(now)))
-            } else {
-                match &args[0] {
-                    Value::Property(PropertyValue::String(s)) => {
-                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
-                        } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.and_utc().timestamp_millis())))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Cannot parse localdatetime: {}. Expected YYYY-MM-DDTHH:MM:SS", s)))
-                        }
-                    }
-                    Value::Property(PropertyValue::Map(map)) => {
-                        use chrono::TimeZone;
-                        let year = map.get("year").and_then(|v| v.as_integer()).unwrap_or(1970) as i32;
-                        let month = map.get("month").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        let day = map.get("day").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-                        let hour = map.get("hour").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        let minute = map.get("minute").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        let second = map.get("second").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                        if let Some(dt) = chrono::Utc.with_ymd_and_hms(year, month, day, hour, minute, second).single() {
-                            Ok(Value::Property(PropertyValue::DateTime(dt.timestamp_millis())))
-                        } else {
-                            Err(ExecutionError::RuntimeError(format!("Invalid localdatetime components")))
-                        }
-                    }
-                    _ => Err(ExecutionError::TypeError("localdatetime() requires string or map argument".to_string())),
+                Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
+                // A bare temporal value. A value with no zone of its own is
+                // read as UTC, which is what Cypher specifies for widening a
+                // local value into a zoned one.
+                Value::Property(p) if date_part_of(p).is_some() => {
+                    let off = match p {
+                        PropertyValue::ZonedDateTime { offset_seconds, .. } => *offset_seconds,
+                        _ => 0,
+                    };
+                    let zone = match p {
+                        PropertyValue::ZonedDateTime { zone, .. } => zone.clone(),
+                        _ => None,
+                    };
+                    let d = date_part_of(p).unwrap_or(0);
+                    let t = time_part_of(p).unwrap_or(0);
+                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
+                    let utc = local - off as i64 * 1_000_000_000;
+                    Ok(Value::Property(PropertyValue::ZonedDateTime {
+                        secs: utc.div_euclid(1_000_000_000),
+                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        offset_seconds: off,
+                        zone,
+                    }))
                 }
+                _ => Err(ExecutionError::TypeError(
+                    "datetime() requires a string, a map, or a temporal value".to_string(),
+                )),
             }
         }
         "duration" => {
@@ -2102,34 +2886,123 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let minutes = map.get("minutes").and_then(|v| v.as_integer()).unwrap_or(0);
                     let seconds = map.get("seconds").and_then(|v| v.as_integer()).unwrap_or(0);
                     let years = map.get("years").and_then(|v| v.as_integer()).unwrap_or(0);
+                    // The sub-second components, which were hardcoded to zero:
+                    // `duration({nanoseconds: 1})` silently lost the 1, so the
+                    // value was already wrong before any arithmetic touched it
+                    // (#787). Additive with each other, as everywhere else.
+                    let millis = map.get("milliseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let micros = map.get("microseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let nanos_in = map.get("nanoseconds").and_then(|v| v.as_integer()).unwrap_or(0);
+                    let weeks = map.get("weeks").and_then(|v| v.as_integer()).unwrap_or(0);
                     let total_months = years * 12 + months;
-                    let total_seconds = hours * 3600 + minutes * 60 + seconds;
+                    let sub_nanos = millis * 1_000_000 + micros * 1_000 + nanos_in;
+                    let total_seconds = hours * 3600 + minutes * 60 + seconds
+                        + sub_nanos.div_euclid(1_000_000_000);
                     Ok(Value::Property(PropertyValue::Duration {
                         months: total_months,
-                        days,
+                        days: days + weeks * 7,
                         seconds: total_seconds,
-                        nanos: 0,
+                        nanos: sub_nanos.rem_euclid(1_000_000_000) as i32,
                     }))
                 }
                 _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
             }
         }
         // duration component accessors
+        // `<type>.truncate(unit, value, map)` for all five namespaces (#769).
+        // The namespace names the *result* type, so `date.truncate` over a
+        // datetime returns a Date.
+        "date.truncate" | "time.truncate" | "localtime.truncate"
+        | "localdatetime.truncate" | "datetime.truncate" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires a unit and a temporal value")));
+            }
+            let unit = match &args[0] {
+                Value::Property(PropertyValue::String(u)) => u.clone(),
+                _ => return Err(ExecutionError::TypeError(
+                    "the first argument of truncate() is the unit, as a string".to_string(),
+                )),
+            };
+            let value = match &args[1] {
+                Value::Property(PropertyValue::Null) | Value::Null => {
+                    return Ok(Value::Property(PropertyValue::Null))
+                }
+                Value::Property(p) => p.clone(),
+                _ => return Err(ExecutionError::TypeError(
+                    "truncate() needs a temporal value".to_string(),
+                )),
+            };
+            let empty = std::collections::HashMap::new();
+            let overrides = match args.get(2) {
+                Some(Value::Property(PropertyValue::Map(m))) => m.clone(),
+                _ => empty,
+            };
+            let target = lowered.split('.').next().unwrap_or("date");
+            Ok(Value::Property(crate::query::executor::temporal::truncate(
+                target, &unit, &value, &overrides,
+            )?))
+        }
+        // `duration.inSeconds/inDays/inMonths(a, b)` — the difference between
+        // two temporals, expressed in one unit. `duration.between` was already
+        // implemented; these three were not, and all four were unreachable from
+        // Cypher until the grammar learned to parse a dotted name.
+        "duration.inseconds" | "duration.indays" | "duration.inmonths" => {
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires 2 arguments")));
+            }
+            let (a, b) = match (&args[0], &args[1]) {
+                (Value::Property(PropertyValue::Null), _) | (_, Value::Property(PropertyValue::Null))
+                | (Value::Null, _) | (_, Value::Null) => {
+                    return Ok(Value::Property(PropertyValue::Null))
+                }
+                (Value::Property(a), Value::Property(b)) => (a.clone(), b.clone()),
+                _ => return Err(ExecutionError::TypeError(format!("{lowered}() needs two temporal values"))),
+            };
+            // `duration.inX(lhs, rhs)` is **rhs - lhs**, the same orientation
+            // as `duration.between`: the duration you would add to `lhs` to
+            // reach `rhs`. This had the operands the other way round, so every
+            // result carried the wrong sign -- and half the TCK rows expect a
+            // negative answer, so it looked correct on exactly the half that
+            // happened to be positive (#775).
+            let diff = temporal_difference(&b, &a)?;
+            let (days, seconds, nanos) = match diff {
+                PropertyValue::Duration { days, seconds, nanos, .. } => (days, seconds, nanos),
+                _ => (0, 0, 0),
+            };
+            Ok(Value::Property(match lowered.as_str() {
+                // Seconds carries the whole difference in seconds plus the
+                // sub-second remainder; days and months carry only whole units,
+                // with the remainder discarded rather than rounded.
+                "duration.inseconds" => PropertyValue::Duration {
+                    months: 0, days: 0, seconds: days * 86_400 + seconds, nanos,
+                },
+                "duration.indays" => PropertyValue::Duration {
+                    months: 0, days: days + seconds / 86_400, seconds: 0, nanos: 0,
+                },
+                _ => PropertyValue::Duration {
+                    months: (days + seconds / 86_400) / 30, days: 0, seconds: 0, nanos: 0,
+                },
+            }))
+        }
         "duration_between" | "duration.between" => {
             if args.len() < 2 { return Err(ExecutionError::RuntimeError("duration.between() requires 2 arguments".to_string())); }
+            // Accepts any two temporals, not only the legacy millisecond
+            // `DateTime`. It matched that one variant alone, so the moment the
+            // constructors started returning real types (#689) every
+            // `duration.between(date(...), date(...))` became a type error --
+            // and the grammar fix (#769) that finally made this function
+            // reachable from Cypher exposed exactly that on 20 scenarios.
+            //
+            // Argument order is (from, to): `between(a, b)` is b - a.
             match (&args[0], &args[1]) {
-                (Value::Property(PropertyValue::DateTime(a)), Value::Property(PropertyValue::DateTime(b))) => {
-                    let diff_ms = b - a;
-                    let total_seconds = diff_ms / 1000;
-                    let remaining_days = total_seconds / 86400;
-                    Ok(Value::Property(PropertyValue::Duration {
-                        months: 0,
-                        days: remaining_days,
-                        seconds: total_seconds % 86400,
-                        nanos: ((diff_ms % 1000) * 1_000_000) as i32,
-                    }))
+                (Value::Property(a), Value::Property(b)) => {
+                    Ok(Value::Property(temporal_difference_calendar(b, a).map_err(|_| {
+                        ExecutionError::TypeError(
+                            "duration.between() requires two temporal arguments".to_string(),
+                        )
+                    })?))
                 }
-                _ => Err(ExecutionError::TypeError("duration.between() requires two datetime arguments".to_string())),
+                _ => Err(ExecutionError::TypeError("duration.between() requires two temporal arguments".to_string())),
             }
         }
         // CY-20: properties() — return all properties as a map
@@ -2339,6 +3212,412 @@ fn extract_float(val: &Value) -> ExecutionResult<f64> {
 }
 
 /// Add duration components to a DateTime (millis timestamp)
+
+/// `duration * number` and `duration / number`.
+///
+/// Scaling a duration is not scaling three independent numbers. The TCK pins
+/// the rule:
+///
+/// ```text
+/// P12Y5M14DT16H13M10.000000001S * 0.5  ->  P6Y2M22DT13H21M8S
+/// ```
+///
+/// 149 months halved is 74.5, and the half **carries into days at 30 days per
+/// month** — 14 days becomes 22. Hours do *not* carry into days: the input's
+/// 16h doubles to `32H` and stays there, because a day is not always 24 hours
+/// once zones are involved and Cypher declines to assume it is.
+///
+/// So months and the days-and-below part scale separately, with one carry
+/// between them and none below.
+fn scale_duration(
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanos: i32,
+    factor: f64,
+) -> Result<PropertyValue, ExecutionError> {
+    if !factor.is_finite() {
+        return Err(ExecutionError::RuntimeError(
+            "cannot scale a duration by a non-finite number".to_string(),
+        ));
+    }
+    // The mean Gregorian month: 365.2425 / 12. **Not 30.**
+    //
+    // Derived from the TCK rather than assumed. `P12Y5M14DT16H13M10S * 0.5`
+    // is `P6Y2M22DT13H21M8S`, and reaching 13:21:08 from a half-month carry
+    // requires 30.4369 days per month; 30 gives 08:06:35, which is a
+    // plausible-looking wrong answer.
+    const DAYS_PER_MONTH: f64 = 365.2425 / 12.0;
+
+    let scaled_months = months as f64 * factor;
+    let whole_months = scaled_months.trunc();
+    let carry_days = (scaled_months - whole_months) * DAYS_PER_MONTH;
+
+    // Days and the sub-day part scale separately: a day is not always 24 hours
+    // once zones are involved, so Cypher does not carry hours into days.
+    // Doubling 14D16H gives `28DT32H`, not `29DT8H` -- normalising looks
+    // tidier and is wrong.
+    let scaled_days = days as f64 * factor + carry_days;
+    let whole_days = scaled_days.trunc();
+    let day_remainder_nanos = (scaled_days - whole_days) * 86_400.0 * 1e9;
+
+    // The sub-second part in integers where it can be. A float round-trip of
+    // (seconds * 1e9 + nanos) loses the last nanosecond at these magnitudes --
+    // it rendered `8.000000001S` where the TCK expects `8S`.
+    let sub_day_exact = (seconds as i128) * 1_000_000_000 + nanos as i128;
+    // Each part is rounded **before** they are added, not after. Adding first
+    // then rounding turns 29195000000000.5 + 18873000000000.027 into one extra
+    // nanosecond, and the TCK's halving case expects exactly `8S`. Two roundings
+    // of well-conditioned quantities beat one rounding of their sum here,
+    // because the .5 and the .027 are independent artefacts.
+    let scaled_sub = if factor == factor.trunc() && factor.abs() < 1e15 {
+        // An integral factor multiplies exactly, with no float involved.
+        sub_day_exact * (factor as i128)
+    } else {
+        // Ties to **even**, not away from zero. `58390000000001 * 0.5` is
+        // exactly `...000.5`, and `.round()` takes it up to `...001` where the
+        // TCK expects `8S` with no fraction. Half-away-from-zero also biases
+        // every exact tie upward, which accumulates; banker's rounding does
+        // not, and is what the reference agrees with.
+        (sub_day_exact as f64 * factor).round_ties_even() as i128
+    };
+    let sub_day = scaled_sub + day_remainder_nanos.round_ties_even() as i128;
+
+    Ok(PropertyValue::Duration {
+        months: whole_months as i64,
+        days: whole_days as i64,
+        seconds: (sub_day / 1_000_000_000) as i64,
+        nanos: (sub_day % 1_000_000_000) as i32,
+    })
+}
+
+/// Nanoseconds since the epoch that a temporal value denotes, and a way back.
+///
+/// `Date` is midnight and `LocalTime`/`Time` have no date, so these are the
+/// only two functions that decide what "the same value, shifted" means. Keeping
+/// that decision in one place is the point: the shift used to be written inline
+/// per operator, which is how `+` and `-` came to disagree about whether months
+/// were calendar months.
+fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
+    match v {
+        PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
+        PropertyValue::LocalTime(n) => Some(*n as i128),
+        PropertyValue::Time { nanos, offset_seconds } => {
+            Some(*nanos as i128 - *offset_seconds as i128 * 1_000_000_000)
+        }
+        PropertyValue::LocalDateTime { secs, nanos } => {
+            Some(*secs as i128 * 1_000_000_000 + *nanos as i128)
+        }
+        PropertyValue::ZonedDateTime { secs, nanos, .. } => {
+            Some(*secs as i128 * 1_000_000_000 + *nanos as i128)
+        }
+        PropertyValue::DateTime(ms) => Some(*ms as i128 * 1_000_000),
+        _ => None,
+    }
+}
+
+/// Shift a temporal value by a duration, keeping its own type.
+///
+/// Months are calendar months, so they are applied to the date rather than as
+/// a fixed number of seconds -- adding one month to 31 January is 28 February,
+/// not 3 March. Days and below are exact.
+fn shift_temporal(
+    v: &PropertyValue,
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanos: i64,
+) -> Result<PropertyValue, ExecutionError> {
+    use chrono::Datelike;
+    let exact = days as i128 * 86_400 * 1_000_000_000
+        + seconds as i128 * 1_000_000_000
+        + nanos as i128;
+
+    // Calendar months first, on whatever date part the value has.
+    let month_shift_nanos = if months == 0 {
+        0i128
+    } else {
+        let day0 = match v {
+            PropertyValue::Date(d) => *d as i64,
+            PropertyValue::LocalDateTime { secs, .. } => secs.div_euclid(86_400),
+            PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
+                (secs + *offset_seconds as i64).div_euclid(86_400)
+            }
+            // A time of day has no calendar to move.
+            _ => return Err(ExecutionError::TypeError(
+                "cannot add months to a value with no date part".to_string(),
+            )),
+        };
+        let base = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            .and_then(|e| e.checked_add_signed(chrono::Duration::days(day0)))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let total = base.year() as i64 * 12 + (base.month0() as i64) + months;
+        let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
+        // Clamp the day into the target month, which is what a calendar month
+        // shift means: 31 Jan + 1 month is 28/29 Feb.
+        let last = days_in_month(y as i32, m0 as u32 + 1);
+        let shifted = chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, base.day().min(last))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
+    };
+
+    let total = temporal_epoch_nanos(v)
+        .ok_or_else(|| ExecutionError::TypeError("not a temporal value".to_string()))?
+        + month_shift_nanos
+        + exact;
+    Ok(rebuild_temporal_like(v, total))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    let next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1);
+    match (first, next) {
+        (Some(a), Some(b)) => b.signed_duration_since(a).num_days() as u32,
+        _ => 31,
+    }
+}
+
+/// Put an epoch-nanosecond total back into the same type it came from, so a
+/// `Date` plus a duration is still a `Date`.
+fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyValue {
+    const DAY: i128 = 86_400 * 1_000_000_000;
+    match like {
+        PropertyValue::Date(_) => PropertyValue::Date(total_nanos.div_euclid(DAY) as i32),
+        PropertyValue::LocalTime(_) => {
+            PropertyValue::LocalTime(total_nanos.rem_euclid(DAY) as i64)
+        }
+        PropertyValue::Time { offset_seconds, .. } => PropertyValue::Time {
+            nanos: (total_nanos + *offset_seconds as i128 * 1_000_000_000).rem_euclid(DAY) as i64,
+            offset_seconds: *offset_seconds,
+        },
+        PropertyValue::LocalDateTime { .. } => PropertyValue::LocalDateTime {
+            secs: total_nanos.div_euclid(1_000_000_000) as i64,
+            nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
+        },
+        PropertyValue::ZonedDateTime { offset_seconds, zone, .. } => PropertyValue::ZonedDateTime {
+            secs: total_nanos.div_euclid(1_000_000_000) as i64,
+            nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
+            offset_seconds: *offset_seconds,
+            zone: zone.clone(),
+        },
+        _ => PropertyValue::DateTime((total_nanos / 1_000_000) as i64),
+    }
+}
+
+/// `a - b` for two temporals: the duration between them.
+/// `a - b` for two temporals, in **calendar** components.
+///
+/// ```text
+/// duration.between(date('1984-10-11'), date('2015-06-24'))  ->  P30Y8M13D
+/// ```
+///
+/// Not `P11213D`. Cypher counts whole months first and leaves the remainder in
+/// days, because a month has no fixed length — the answer must be the one you
+/// get by *counting off* years and months on a calendar, not by dividing
+/// elapsed time.
+///
+/// The `-` operator on two temporals stays a plain elapsed difference
+/// (`temporal_difference` below); only `duration.between` is calendar-aware.
+/// That split is Cypher's, and collapsing the two would make the same
+/// subtraction disagree with itself depending on which spelling was used
+/// (#804).
+fn temporal_difference_calendar(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<PropertyValue, ExecutionError> {
+    use chrono::Datelike;
+
+    // Only the components the two values **share** are compared. A date has no
+    // time and a time has no date, so `duration.between(date(...),
+    // localtime('16:30'))` is `PT16H30M` — the clock difference alone, with the
+    // date side contributing nothing.
+    //
+    // Treating the missing part as zero instead gave `P-5396DT-7H-30M`: the
+    // date's midnight measured against a time of day, which is a real duration
+    // between two instants that were never comparable (#807).
+    // A value with **no** temporal parts at all is not a temporal value, and
+    // is rejected before any of the shared-component logic below. That is
+    // different from a date having no clock: `duration.between("a", dt)` must
+    // fail, while `duration.between(date, localtime)` must not. Defaulting a
+    // missing part to zero conflated the two and made the string case answer
+    // (#807).
+    for v in [a, b] {
+        if date_part_of(v).is_none() && time_part_of(v).is_none() {
+            return Err(ExecutionError::TypeError(format!(
+                "duration.between() needs temporal values, not {}",
+                v.type_name()
+            )));
+        }
+    }
+
+    let (da, db) = (date_part_of(a), date_part_of(b));
+    if da.is_none() || db.is_none() {
+        // Compare instants only when **both** sides carry an offset; otherwise
+        // compare the local readings.
+        //
+        // `time('14:30')` vs `time('16:30+0100')` is `PT1H` — both are zoned, so
+        // the second is 15:30 UTC. But `localtime('14:30')` vs
+        // `time('16:30+0100')` is `PT2H`: the unzoned side has no instant to
+        // convert to, so the offset is not applied to the other. Normalising
+        // unconditionally gets the first right and the second wrong; not
+        // normalising at all does the reverse.
+        let has_offset = |v: &PropertyValue| matches!(v, PropertyValue::Time { .. });
+        let both_zoned = has_offset(a) && has_offset(b);
+        let clock = |v: &PropertyValue| -> Option<i64> {
+            let local = time_part_of(v)?;
+            Some(match v {
+                PropertyValue::Time { offset_seconds, .. } if both_zoned => {
+                    local - *offset_seconds as i64 * 1_000_000_000
+                }
+                _ => local,
+            })
+        };
+        let (ta, tb) = (clock(a), clock(b));
+        // One side may have a date and no time — `duration.between(date(...),
+        // localtime(...))` compares the clocks, and a date's clock is midnight.
+        let (ta, tb) = (ta.unwrap_or(0), tb.unwrap_or(0));
+        let diff = ta - tb;
+        return Ok(PropertyValue::Duration {
+            months: 0,
+            days: 0,
+            seconds: diff / 1_000_000_000,
+            nanos: (diff % 1_000_000_000) as i32,
+        });
+    }
+    let (Some(da), Some(db)) = (da, db) else {
+        return temporal_difference(a, b);
+    };
+
+    // Within one month the calendar answer *is* the elapsed one, and the plain
+    // form gives it in the shape the TCK wants: `PT6H`, not `P0M0DT6H`. Going
+    // through the month arithmetic for these produced four regressions —
+    // correct values, wrong shape, which a diff reports as breakage.
+    //
+    // The threshold is a differing (year, month), not a day count: 31 Jan to
+    // 1 Feb is one day apart and *does* cross a month.
+    {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+        let same_month = |x: i32, y: i32| {
+            match (
+                epoch.checked_add_signed(chrono::Duration::days(x as i64)),
+                epoch.checked_add_signed(chrono::Duration::days(y as i64)),
+            ) {
+                (Some(p), Some(q)) => {
+                    use chrono::Datelike;
+                    p.year() == q.year() && p.month() == q.month()
+                }
+                _ => false,
+            }
+        };
+        if same_month(da, db) {
+            return temporal_difference(a, b);
+        }
+    }
+
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let to_date = |d: i32| {
+        epoch
+            .checked_add_signed(chrono::Duration::days(d as i64))
+            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
+    };
+    let (start, end) = (to_date(db)?, to_date(da)?);
+    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+
+    // Whole months, then leftover days, then the clock. Borrowing works as it
+    // does on paper: if the clock difference is negative, one day is not yet
+    // complete; if the day count then goes negative, one month is not either.
+    let mut months = (end.year() as i64 - start.year() as i64) * 12
+        + (end.month() as i64 - start.month() as i64);
+    // The clock difference keeps its own sign; it is only borrowed into days
+    // when the *whole* result is positive. Borrowing unconditionally produced
+    // `P-28DT2H19M27.858S` where `P-27DT-21H-40M-32.142S` was expected — the
+    // same instant pair, with the components disagreeing in sign, which is the
+    // one thing a duration's components may not do (#775 again, one level up).
+    let nanos = ta - tb;
+    let forward = da > db || (da == db && nanos >= 0);
+    let (mut nanos, mut day_adjust) = if nanos < 0 && forward {
+        (nanos + 86_400 * 1_000_000_000, -1i64)
+    } else if nanos > 0 && !forward {
+        (nanos - 86_400 * 1_000_000_000, 1i64)
+    } else {
+        (nanos, 0i64)
+    };
+    let _ = &mut nanos;
+    let _ = &mut day_adjust;
+    let mut days = end
+        .signed_duration_since(shift_months_clamped(start, months)?)
+        .num_days()
+        + day_adjust;
+    // Borrow toward zero, not toward negative infinity. Going **backwards**, a
+    // partial month stays as days rather than becoming a whole negative month
+    // plus positive days: 2015-07-21 back to 2015-06-24 is `P-27D`, not
+    // `P-1M3D`. Both describe the same instant pair and only one is what
+    // Cypher writes.
+    if months > 0 && days < 0 {
+        months -= 1;
+        days = end
+            .signed_duration_since(shift_months_clamped(start, months)?)
+            .num_days()
+            + day_adjust;
+    } else if months < 0 && days > 0 {
+        months += 1;
+        days = end
+            .signed_duration_since(shift_months_clamped(start, months)?)
+            .num_days()
+            + day_adjust;
+    }
+
+    Ok(PropertyValue::Duration {
+        months,
+        days,
+        // Truncating, not Euclidean — the same trap #775 fixed in
+        // `temporal_difference` and that I reintroduced here. `div_euclid`
+        // floors toward negative infinity, so -78032.142s splits into
+        // (-78033s, +858ms) and renders `-33.858S` where `-32.142S` belongs.
+        // A duration's components must share a sign.
+        seconds: nanos / 1_000_000_000,
+        nanos: (nanos % 1_000_000_000) as i32,
+    })
+}
+
+/// Move a date by whole months, clamping the day into the target month —
+/// 31 January plus one month is 28 February.
+fn shift_months_clamped(
+    d: chrono::NaiveDate,
+    months: i64,
+) -> Result<chrono::NaiveDate, ExecutionError> {
+    use chrono::Datelike;
+    let total = d.year() as i64 * 12 + d.month0() as i64 + months;
+    let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
+    let last = days_in_month(y as i32, m0 as u32 + 1);
+    chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, d.day().min(last))
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
+}
+
+fn temporal_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<PropertyValue, ExecutionError> {
+    let (na, nb) = match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+    };
+    let diff = na - nb;
+    // Truncating division, not Euclidean. `div_euclid`/`rem_euclid` floor
+    // toward negative infinity, so a difference of -0.4s split into
+    // (seconds, nanos) becomes (-1, +600_000_000) and renders as `PT-1.6S`
+    // instead of `PT-0.4S`. The components of a duration must share a sign;
+    // `/` and `%` truncate toward zero and do (#775).
+    let secs_total = (diff / 1_000_000_000) as i64;
+    Ok(PropertyValue::Duration {
+        months: 0,
+        days: secs_total / 86_400,
+        seconds: secs_total % 86_400,
+        nanos: (diff % 1_000_000_000) as i32,
+    })
+}
+
 fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64) -> PropertyValue {
     use chrono::{Datelike, Months, Duration, TimeZone};
     let dt = chrono::Utc.timestamp_millis_opt(dt_millis).single();
@@ -3411,7 +4690,7 @@ impl FilterOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -3787,6 +5066,16 @@ fn extend_path(
     }
 }
 
+/// Per-direction type indexes for one expand: `(outgoing, incoming)`.
+///
+/// `None` = not yet asked. `Some(None)` = asked and declined, so the walk
+/// stands and is not re-asked per row.
+type TypeIndexPair = (
+    Option<std::sync::Arc<crate::graph::TypeAdjacency>>,
+    Option<std::sync::Arc<crate::graph::TypeAdjacency>>,
+);
+type TypeIndexSlot = Option<Option<TypeIndexPair>>;
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -3816,6 +5105,19 @@ pub struct ExpandOperator {
     /// the PERF-01 target. Applied here, a non-matching employer never
     /// becomes a row (#656).
     target_props: Vec<(String, PropertyValue)>,
+    /// The variables to bind to null when a source record matches nothing.
+    ///
+    /// `Some` marks this expand as an `OPTIONAL MATCH`: a source row that finds
+    /// no edge still produces a row, with the variables the clause introduces
+    /// set to null. `None` is an ordinary expand, where such a row disappears.
+    ///
+    /// Only the variables the clause *introduces* are listed. In
+    /// `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with both endpoints already
+    /// bound, that is `k` alone — nulling `author` would erase a binding the
+    /// row already had (#726).
+    optional_null_vars: Option<Vec<String>>,
+    /// Whether the current source record has emitted anything yet.
+    emitted_for_current: bool,
     /// The exact set of nodes the target may be, resolved once at plan time.
     ///
     /// `target_props` above still costs a `get_node` and a property compare per
@@ -3825,6 +5127,18 @@ pub struct ExpandOperator {
     /// matching Organisation once, and testing membership here, replaces that
     /// with a hash lookup (#665).
     target_ids: Option<std::collections::HashSet<NodeId>>,
+    /// Source records this expand has processed, for amortising the type index.
+    ///
+    /// `GraphStore::type_adjacency` costs one pass over the adjacency to build.
+    /// That is a large loss for a query touching a handful of rows and a large
+    /// win for one touching thousands, and the operator is the only place that
+    /// knows which it is — so it counts, and asks only once the walk it would
+    /// replace has clearly become the dominant cost (#738).
+    rows_seen: usize,
+    /// The type index for this expand's single edge type, once requested.
+    /// `Some(None)` means asked and declined, so it is not asked again.
+    #[allow(clippy::type_complexity)]
+    type_index: TypeIndexSlot,
     /// Direction
     direction: Direction,
     /// Current input record
@@ -3888,6 +5202,10 @@ impl ExpandOperator {
             target_labels: Vec::new(),
             target_props: Vec::new(),
             target_ids: None,
+            rows_seen: 0,
+            type_index: None,
+            optional_null_vars: None,
+            emitted_for_current: false,
             track_edges: false,
             starts_clause: false,
             target_bound_var: None,
@@ -3929,6 +5247,12 @@ impl ExpandOperator {
         self
     }
 
+    /// Rows after which the type index is worth its build.
+    ///
+    /// Below this the walk is cheaper than one pass over the adjacency; above
+    /// it, decisively not. IC11 feeds this expand 13,306 rows.
+    const TYPE_INDEX_AFTER_ROWS: usize = 512;
+
     /// Enforce relationship isomorphism for this expand.
     ///
     /// `starts_clause` marks the first expand of a MATCH clause, which drops
@@ -3936,6 +5260,13 @@ impl ExpandOperator {
     pub fn with_edge_isolation(mut self, starts_clause: bool) -> Self {
         self.track_edges = true;
         self.starts_clause = starts_clause;
+        self
+    }
+
+    /// Make this expand an `OPTIONAL MATCH`: a source row that matches nothing
+    /// still emits, with `null_vars` bound to null.
+    pub fn with_optional(mut self, null_vars: Vec<String>) -> Self {
+        self.optional_null_vars = Some(null_vars);
         self
     }
 
@@ -3960,6 +5291,25 @@ impl ExpandOperator {
             .filter_map(|t| store.edge_type_id(&EdgeType::new(t.as_str())))
             .collect();
         self.type_ids = Some(ids);
+    }
+
+    /// The null-filled row an `OPTIONAL MATCH` owes a source record that
+    /// matched nothing, or `None` if it owes nothing.
+    ///
+    /// Consumes `current_record`, so it fires at most once per source row; the
+    /// caller then falls through to pulling the next input.
+    fn take_unmatched_optional_row(&mut self) -> Option<Record> {
+        let null_vars = self.optional_null_vars.as_ref()?;
+        if self.emitted_for_current {
+            return None;
+        }
+        let base = self.current_record.take()?;
+        let mut rec = base.clone_with_capacity(null_vars.len());
+        for v in null_vars {
+            rec.bind(v.clone(), Value::Null);
+        }
+        self.emitted_for_current = true;
+        Some(rec)
     }
 
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
@@ -4016,14 +5366,19 @@ impl ExpandOperator {
         // A label no node carries yields `None`, which matches nothing -- so
         // the whole expansion is empty, which is correct and is why the empty
         // case is distinguished from "no labels required".
-        let label_sets: Option<Vec<&std::collections::HashSet<NodeId>>> =
+        // ...and by a bit rather than a hash, since #592's `HashSet<NodeId>`
+        // probe is itself a random access into a structure the size of the
+        // label. Measured, that grows 10.2 -> 36.7 ns per candidate edge as the
+        // label goes from 300k to 1.2M nodes — 35% of the whole traversal —
+        // while the storage walk under it stays flat (#730).
+        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> =
             if self.target_labels.is_empty() {
                 None
             } else {
                 Some(
                     self.target_labels
                         .iter()
-                        .map(|l| store.nodes_with_label(l))
+                        .map(|l| store.label_bitset(l))
                         .collect::<Option<Vec<_>>>()
                         .unwrap_or_default(),
                 )
@@ -4033,8 +5388,27 @@ impl ExpandOperator {
         // Relationship isomorphism (#684): an edge this pattern already walked
         // is not a candidate. Checked here, during the adjacency walk, so a
         // rejected edge never becomes a record.
+        //
+        // Filtered to the edges this expand could actually walk. An edge of a
+        // type outside `type_filter` is not a candidate for re-traversal, so
+        // keeping it only lengthens a `contains` that runs **per candidate
+        // edge**. On LDBC IC6 the clause walks `HAS_TAG`, `HAS_CREATOR` and
+        // `KNOWS`, so each expand inherits edges it could never take; the same
+        // reasoning applied to `VarLengthExpandOperator` is what took IC6 from
+        // forty minutes back to 309 ms (#734).
+        let used_owned: Vec<crate::graph::EdgeId>;
         let used_edges: &[crate::graph::EdgeId] = if self.track_edges && !self.starts_clause {
-            record.used_edge_slice()
+            let inherited = record.used_edge_slice();
+            if inherited.is_empty() {
+                &[]
+            } else {
+                used_owned = inherited
+                    .iter()
+                    .copied()
+                    .filter(|&e| store.edge_traversable_by(e, type_filter))
+                    .collect();
+                &used_owned
+            }
         } else {
             &[]
         };
@@ -4069,7 +5443,9 @@ impl ExpandOperator {
                 None => true,
                 // `Some(empty)` means a required label exists on no node.
                 Some(sets) if sets.len() < self.target_labels.len() => false,
-                Some(sets) => sets.iter().all(|s| s.contains(&target)),
+                Some(sets) => sets
+                    .iter()
+                    .all(|s| GraphStore::bitset_contains(s, target)),
             };
             if !label_ok {
                 return false;
@@ -4085,20 +5461,98 @@ impl ExpandOperator {
             }
         };
 
+        // A selective type against a high-degree node is the case #738 is
+        // about: IC11 visits ~6.6M edges to use ~29,000, because an LDBC
+        // `Person` has ~495 outgoing edges of which 2.2 are `WORK_AT`. Once
+        // enough rows have gone through to pay for it, ask the store for an
+        // index of just this type and walk that instead.
+        //
+        // Only for a single type: with two, the union would have to be merged
+        // and the saving no longer obviously beats the walk.
+        let single_type = match type_filter {
+            Some([t]) => Some(*t),
+            _ => None,
+        };
+        self.rows_seen += 1;
+        if self.type_index.is_none() && self.rows_seen > Self::TYPE_INDEX_AFTER_ROWS {
+            if let Some(t) = single_type {
+                // An undirected pattern walks both sides, so it needs both
+                // indexes or neither — half an index would mean half the walk
+                // takes the fast path and the accounting for self-loops below
+                // stops lining up.
+                let out = store.type_adjacency(t, true);
+                let inc = match self.direction {
+                    Direction::Outgoing => None,
+                    _ => store.type_adjacency(t, false),
+                };
+                let usable = match self.direction {
+                    Direction::Outgoing => out.is_some(),
+                    Direction::Incoming => inc.is_some(),
+                    Direction::Both => out.is_some() && inc.is_some(),
+                };
+                self.type_index = Some(if usable { Some((out, inc)) } else { None });
+            }
+        }
+        let typed = match (&self.type_index, single_type) {
+            (Some(Some(pair)), Some(_)) => Some(pair.clone()),
+            _ => None,
+        };
+        let empty: [(NodeId, crate::graph::EdgeId); 0] = [];
+        let out_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
+            match p { Some((Some(i), _)) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
+        };
+        let in_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
+            match p { Some((_, Some(i))) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
+        };
+
         match self.direction {
             Direction::Outgoing => {
-                store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                if typed.is_some() {
+                    for (target, eid) in out_of(&typed, node_id) {
+                        if keeps(target, eid) {
+                            collected.push((eid, node_id, target));
+                        }
+                    }
+                } else {
+                    store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
+                        if keeps(target, eid) {
+                            collected.push((eid, node_id, target));
+                        }
+                    });
+                }
+            }
+            Direction::Incoming => {
+                if typed.is_some() {
+                    for (source, eid) in in_of(&typed, node_id) {
+                        if keeps(source, eid) {
+                            collected.push((eid, source, node_id));
+                        }
+                    }
+                } else {
+                    store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                        if keeps(source, eid) {
+                            collected.push((eid, source, node_id));
+                        }
+                    });
+                }
+            }
+            Direction::Both if typed.is_some() => {
+                for (target, eid) in out_of(&typed, node_id) {
                     if keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
-                });
-            }
-            Direction::Incoming => {
-                store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
+                }
+                for (source, eid) in in_of(&typed, node_id) {
+                    // Same self-loop rule as the walk below: an edge incident
+                    // to its own node appears in both indexes and must be
+                    // taken once (#640).
+                    if source == node_id {
+                        continue;
+                    }
                     if keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
-                });
+                }
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
@@ -4196,12 +5650,20 @@ impl PhysicalOperator for ExpandOperator {
                     new_record.mark_edge_used(edge_id);
                 }
 
+                self.emitted_for_current = true;
                 return Ok(Some(new_record));
+            }
+
+            // An OPTIONAL MATCH source row that matched nothing still emits,
+            // once, with the variables this clause introduces set to null.
+            if let Some(row) = self.take_unmatched_optional_row() {
+                return Ok(Some(row));
             }
 
             // Need new input record
             if let Some(record) = self.input.next(store)? {
                 self.current_record = Some(record.clone());
+                self.emitted_for_current = false;
                 self.load_edges(&record, store)?;
             } else {
                 return Ok(None);
@@ -4268,10 +5730,20 @@ impl PhysicalOperator for ExpandOperator {
                     expanded_records.push(new_record);
                 }
                 self.edge_index += take;
+                self.emitted_for_current = true;
             } else {
+                // Same rule as the single-row path: an OPTIONAL MATCH source
+                // row that matched nothing still emits once. Missing it here
+                // would make the answer depend on whether the plan happened to
+                // run batched, which is the shape of #684.
+                if let Some(row) = self.take_unmatched_optional_row() {
+                    expanded_records.push(row);
+                    continue;
+                }
                 // Need new input record
                 if let Some(record) = self.input.next(store)? {
                     self.current_record = Some(record.clone());
+                    self.emitted_for_current = false;
                     self.load_edges(&record, store)?;
                 } else {
                     break;
@@ -4294,6 +5766,9 @@ impl PhysicalOperator for ExpandOperator {
         self.current_record = None;
         self.current_edges.clear();
         self.edge_index = 0;
+        // Without this, a re-run would think the first source record had
+        // already emitted and would swallow its null row (#726).
+        self.emitted_for_current = false;
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -4363,6 +5838,35 @@ pub struct VarLengthExpandOperator {
     /// was in it. At SF10 that is the difference between finishing and hitting
     /// the query timeout.
     target_reach: Option<std::collections::HashSet<NodeId>>,
+    /// Enumerate trails even when `min_hops < 2`, because the query can see
+    /// how many times a node is reached.
+    ///
+    /// The BFS marks a node visited at the depth it is first reached, so
+    /// `(a)-[:R*1..2]-(x)` over a triangle answers `b, c` where openCypher
+    /// answers `b, b, c, c` — `b` is reached directly and again via `c`. That
+    /// is a wrong answer, and the only correct walk is to enumerate trails.
+    ///
+    /// It is not the default because enumeration is not affordable where
+    /// nothing can observe the difference: LDBC IC1's `KNOWS*1..3` reaches
+    /// ~4,900 nodes and every LDBC var-length query dedups its result. The
+    /// planner sets this when the multiplicity is observable and leaves the
+    /// BFS in place when a `DISTINCT` absorbs it (#710).
+    enumerate_trails: bool,
+    /// Enforce relationship isomorphism across the clause, not just within
+    /// this segment.
+    ///
+    /// The BFS already cannot repeat an edge *inside* one walk — a node-visited
+    /// set makes every emitted path simple — but it never knew what the rest of
+    /// the clause had walked. `MATCH (a)-[:R]-(y)-[:R*1..1]-(z)` over a single
+    /// edge therefore answered one row where openCypher answers none: the
+    /// segment took the same edge back (#710).
+    ///
+    /// `ExpandOperator` has carried this since #684; the var-length operator is
+    /// the path that did not inherit it.
+    track_edges: bool,
+    /// Marks the first expand of a MATCH clause, which starts with a clean
+    /// history rather than inheriting one from an earlier clause.
+    starts_clause: bool,
 }
 
 impl VarLengthExpandOperator {
@@ -4393,6 +5897,9 @@ impl VarLengthExpandOperator {
             type_ids: None,
             pinned_target: None,
             target_reach: None,
+            enumerate_trails: false,
+            track_edges: false,
+            starts_clause: false,
         }
     }
 
@@ -4492,14 +5999,29 @@ impl VarLengthExpandOperator {
         }
     }
 
-    /// BFS from the source bound in `record`, buffering one output record per
-    /// distinct reachable target in `[min_hops, max_hops]`.
     /// Pin the target to a single node the planner resolved at plan time.
     ///
     /// Only valid when the destination really is that one node; the operator
     /// then answers "can this source reach it" rather than enumerating.
     pub fn with_pinned_target(mut self, target: NodeId) -> Self {
         self.pinned_target = Some(target);
+        self
+    }
+
+    /// Enumerate trails rather than walking shortest paths, because the query
+    /// can observe how many times a node is reached. See `enumerate_trails`.
+    pub fn with_trail_enumeration(mut self) -> Self {
+        self.enumerate_trails = true;
+        self
+    }
+
+    /// Enforce relationship isomorphism for this segment against the whole
+    /// clause, not just within the segment. Same contract as
+    /// `ExpandOperator::with_edge_isolation`: `starts_clause` marks the first
+    /// expand of a MATCH, which begins with a clean history.
+    pub fn with_edge_isolation(mut self, starts_clause: bool) -> Self {
+        self.track_edges = true;
+        self.starts_clause = starts_clause;
         self
     }
 
@@ -4563,6 +6085,133 @@ impl VarLengthExpandOperator {
         self.target_reach.as_ref().is_some_and(|r| r.contains(&source))
     }
 
+    /// Enumerate every path from `source` of length `min_hops..=max_hops`
+    /// whose relationships are distinct, and emit its far end.
+    ///
+    /// Used only when `min_hops >= 2`, where the shortest-path walk in
+    /// `expand_from` returns an empty result rather than a smaller one (#710).
+    /// Nodes may repeat along the path; relationships may not — that is
+    /// openCypher's rule, and the same one #684 established for fixed-length
+    /// patterns.
+    ///
+    /// Depth-first with an explicit stack, so the working set is one path
+    /// rather than one frontier. An unbounded upper bound is still bounded in
+    /// practice by edge-distinctness, but the number of trails is not, so
+    /// `MAX_TRAILS` caps the walk and the cap is reported rather than
+    /// silently truncating: a benchmark that quietly runs a subset reports a
+    /// denominator that does not exist (#683), and the same is true of a
+    /// query.
+    fn expand_trails(
+        &mut self,
+        record: &Record,
+        source_id: NodeId,
+        store: &GraphStore,
+    ) -> ExecutionResult<()> {
+        /// Enough for any pattern a person writes by hand, small enough that a
+        /// runaway `*2..` cannot hang the query.
+        const MAX_TRAILS: usize = 1_000_000;
+
+        // An empty interval matches nothing. `*1..0` and `*..0` (which parses
+        // as `*1..0`) are legal and must return no rows — TCK Match5 [12] and
+        // [13].
+        //
+        // The emit test below is `depth >= min_hops`, checked *before* the
+        // `depth < max_hops` that decides whether to descend, so without this
+        // a `*1..0` emits every neighbour at depth 1 and then stops. The bug
+        // was latent while this path was reachable only for `min_hops >= 2`:
+        // `*2..1` walks to depth 1, never reaches depth 2, and emits nothing by
+        // accident. `*1..0` has no such accident to save it.
+        if self.min_hops > self.max_hops {
+            return Ok(());
+        }
+
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
+        let type_filter = type_ids.as_deref();
+
+        // The path so far, as (node, edge-that-reached-it). `edges` is what
+        // enforces relationship uniqueness.
+        let mut path: Vec<(NodeId, crate::graph::EdgeId)> = Vec::new();
+        // Seeded with what the clause has already walked, so a trail cannot
+        // retake an edge an earlier segment used (#710) — filtered to the edges
+        // this segment could actually walk, for the reason in `expand_from`.
+        let mut edges: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
+            record
+                .used_edge_slice()
+                .iter()
+                .copied()
+                .filter(|&e| store.edge_traversable_by(e, type_filter))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let inherited_len = edges.len();
+        // Frontier per depth: the neighbours still to try at each level.
+        let mut stack: Vec<Vec<(NodeId, crate::graph::EdgeId)>> = Vec::new();
+
+        // Not a closure over `self`: `buffer` below needs `&mut self`, and a
+        // captured `&self` would still be alive.
+        macro_rules! collect {
+            ($cur:expr, $used:expr) => {{
+                let mut out = Vec::new();
+                self.for_each_neighbor($cur, type_filter, store, |nb, eid| {
+                    if !$used.contains(&eid) {
+                        out.push((nb, eid));
+                    }
+                });
+                out
+            }};
+        }
+
+        stack.push(collect!(source_id, edges));
+        let mut trails = 0usize;
+
+        while let Some(frontier) = stack.last_mut() {
+            let Some((nb, eid)) = frontier.pop() else {
+                stack.pop();
+                path.pop();
+                if edges.len() > inherited_len {
+                    edges.pop();
+                }
+                continue;
+            };
+            path.push((nb, eid));
+            edges.push(eid);
+            let depth = path.len();
+
+            if depth >= self.min_hops && self.emit_ok(nb, store) {
+                trails += 1;
+                if trails > MAX_TRAILS {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "variable-length pattern produced more than {MAX_TRAILS} paths; \
+                         bound it with an upper hop limit or a more selective start"
+                    )));
+                }
+                // `parent` reconstructs the path for a bound path or
+                // relationship variable. Built from the current stack, so it
+                // describes *this* trail rather than a shortest route.
+                let mut parent: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
+                    std::collections::HashMap::new();
+                let mut prev = source_id;
+                for (n, e) in &path {
+                    parent.insert(*n, (prev, *e));
+                    prev = *n;
+                }
+                self.buffer(record, nb, &parent, source_id, store);
+            }
+
+            if depth < self.max_hops {
+                stack.push(collect!(nb, edges));
+            } else {
+                path.pop();
+                edges.pop();
+            }
+        }
+        Ok(())
+    }
+
+    /// BFS from the source bound in `record`, buffering one output record per
+    /// distinct reachable target in `[min_hops, max_hops]`.
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record
             .get(&self.source_var)
@@ -4577,16 +6226,84 @@ impl VarLengthExpandOperator {
             ExecutionError::TypeError(format!("{} is not a node", self.source_var))
         })?;
 
+        // Edges an earlier segment of this clause already walked. This segment
+        // may not retake them (#710). Empty for the first segment of a clause
+        // and for any single-segment pattern.
+        //
+        // **Filtered by this segment's own type filter**, which is not a
+        // refinement but the difference between IC6 taking 226 ms and taking
+        // over forty minutes. The planner reverses IC6 to anchor on its
+        // selective `:Tag`, so the var-length segment runs *last*:
+        //
+        //   VarLengthExpand ((friend)-[:KNOWS*1..2]-(p) [target pinned])
+        //
+        // The edges it inherits are `HAS_TAG` and `HAS_CREATOR`; the segment
+        // walks `:KNOWS`. They can never collide, so isolation has nothing to
+        // do here — but a non-empty `inherited` disabled the pinned-target
+        // shortcut below and turned one membership test per row into a whole
+        // BFS per row (#734).
+        //
+        // An edge of a type this segment cannot traverse is not a candidate for
+        // re-traversal, so dropping it changes no answer. An untyped segment
+        // filters nothing, which is correct: it can walk anything.
+        let inherited: Vec<crate::graph::EdgeId> = if self.track_edges && !self.starts_clause {
+            self.ensure_type_ids(store);
+            let types = self.type_ids.clone();
+            record
+                .used_edge_slice()
+                .iter()
+                .copied()
+                .filter(|&e| store.edge_traversable_by(e, types.as_deref()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Pinned target: one membership test instead of a BFS per row. The
         // planner only sets this when the destination resolves to a single
         // node, there is no path variable, and `min_hops <= 1`.
-        if let Some(target) = self.pinned_target {
+        //
+        // Skipped when the clause has already walked edges: the reachability
+        // set is built once, before any row, so it cannot know which edges this
+        // row is forbidden. Falling through to the BFS below answers the same
+        // question with the ban applied.
+        //
+        // The shortcut still does not *record* what it walked — it answers
+        // "reachable" without knowing by which route — so a later segment of
+        // the same clause may retake one of those edges. That is the behaviour
+        // this operator had everywhere before isolation existed, so it is a
+        // remaining gap and not a regression; closing it means either
+        // reconstructing the route (which is what the shortcut exists to avoid)
+        // or knowing at plan time that no segment follows. #710.
+        if let (true, Some(target)) = (inherited.is_empty(), self.pinned_target) {
             if self.target_reaches(source_id, store) && self.emit_ok(target, store) {
                 let empty: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
                     std::collections::HashMap::new();
                 self.buffer(record, target, &empty, source_id, store);
             }
             return Ok(());
+        }
+
+        // A lower bound above one cannot be answered by a shortest-path walk.
+        //
+        // The BFS below marks a node visited at the depth it is first reached
+        // and never reconsiders it, so `*2..2` over a triangle finds `b` and
+        // `c` at depth 1, declines to emit them (depth < min_hops), and then
+        // has nothing left at depth 2 — **zero rows, no error**, where
+        // openCypher matches `a-b-c` and `a-c-b`. Nodes may repeat in a
+        // variable-length match; only relationships may not.
+        //
+        // Enumerating trails is the general answer and is not affordable on
+        // the shapes that matter (#710): LDBC IC1's `KNOWS*1..3` reaches ~4,900
+        // nodes, and IC6 needs the pinned-target walk to stay cheap. Both have
+        // `min_hops == 1`, as does every LDBC pattern, so the enumeration is
+        // taken only where the BFS is not merely lossy but wrong.
+        // `min_hops == 0` stays on the BFS: `expand_trails` walks outward from
+        // the source and has no way to emit the source itself, so routing
+        // `*0..n` into it silently drops the zero-length match — caught by
+        // `zero_hops_includes_the_target_itself`.
+        if self.min_hops >= 2 || (self.enumerate_trails && self.min_hops >= 1) {
+            return self.expand_trails(record, source_id, store);
         }
 
         // parent[node] = (predecessor, edge used) for path reconstruction.
@@ -4618,6 +6335,11 @@ impl VarLengthExpandOperator {
                 // separated. The emission order is unchanged: `next` is filled
                 // in exactly the order the old code emitted in.
                 self.for_each_neighbor(cur, type_filter, store, |nb, eid| {
+                    // An edge an earlier segment of this clause already walked
+                    // is not available to this one (#710).
+                    if inherited.contains(&eid) {
+                        return;
+                    }
                     if visited.insert(nb) {
                         parent.insert(nb, (cur, eid));
                         next.push(nb);
@@ -4658,6 +6380,20 @@ impl VarLengthExpandOperator {
     ) {
         let mut rec = base.clone();
         rec.bind(self.target_var.clone(), Value::NodeRef(target));
+
+        // Record what this segment walked, so a later segment of the same
+        // clause cannot retake it (#710). Reconstructed from `parent` rather
+        // than from the path variable, because isolation applies whether or not
+        // the pattern names the path.
+        if self.track_edges {
+            if self.starts_clause {
+                rec.clear_used_edges();
+            }
+            let (_, walked) = reconstruct_path(parent, source, target);
+            for e in walked {
+                rec.mark_edge_used(e);
+            }
+        }
         if self.path_variable.is_some() || self.rel_variable.is_some() {
             let (nodes, edges) = reconstruct_path(parent, source, target);
             if let Some(ref rv) = self.rel_variable {
@@ -4846,7 +6582,7 @@ impl ProjectOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -5425,7 +7161,7 @@ impl AggregateOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -6616,7 +8352,7 @@ impl SortOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -11352,7 +13088,7 @@ impl WithBarrierOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
@@ -12119,10 +13855,13 @@ mod tests {
 
     #[test]
     fn test_eval_function_date_no_args() {
+        // `date()` returns a Date, not a timestamp (#689). Asserting the
+        // *type* is the point: before, every temporal constructor returned the
+        // same `DateTime(millis)` and this test passed for `time()` too.
         let result = eval_function("date", &[], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => assert!(ts > 0),
-            _ => panic!("Expected DateTime"),
+            Value::Property(PropertyValue::Date(days)) => assert!(days > 0),
+            other => panic!("Expected Date, got {other:?}"),
         }
     }
 
@@ -12130,13 +13869,10 @@ mod tests {
     fn test_eval_function_date_string() {
         let result = eval_function("date", &[Value::Property(PropertyValue::String("2024-01-15".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                // 2024-01-15 00:00:00 UTC
-                let expected = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
-                    .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::Date(_)) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15");
             }
-            _ => panic!("Expected DateTime"),
+            other => panic!("Expected Date, got {other:?}"),
         }
     }
 
@@ -12148,10 +13884,8 @@ mod tests {
         map.insert("day".to_string(), PropertyValue::Integer(15));
         let result = eval_function("date", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                let expected = chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()
-                    .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::Date(_)) => {
+                assert_eq!(p.to_cypher_string(), "2024-06-15");
             }
             _ => panic!("Expected DateTime"),
         }
@@ -12183,8 +13917,8 @@ mod tests {
     fn test_eval_function_datetime_no_args() {
         let result = eval_function("datetime", &[], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => assert!(ts > 0),
-            _ => panic!("Expected DateTime"),
+            Value::Property(PropertyValue::ZonedDateTime { secs, .. }) => assert!(secs > 0),
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12192,11 +13926,10 @@ mod tests {
     fn test_eval_function_datetime_rfc3339() {
         let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00Z".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
-                let expected = chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap().timestamp_millis();
-                assert_eq!(ts, expected);
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
             }
-            _ => panic!("Expected DateTime"),
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12204,8 +13937,10 @@ mod tests {
     fn test_eval_function_datetime_naive() {
         let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00".to_string()))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(_ts)) => {} // valid
-            _ => panic!("Expected DateTime"),
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
@@ -12220,9 +13955,11 @@ mod tests {
         map.insert("second".to_string(), PropertyValue::Integer(45));
         let result = eval_function("datetime", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::DateTime(ts)) => {
+            Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
+                assert_eq!(p.to_cypher_string(), "2024-03-15T10:30:45Z");
                 use chrono::TimeZone;
                 let expected = chrono::Utc.with_ymd_and_hms(2024, 3, 15, 10, 30, 45).unwrap().timestamp_millis();
+                let ts = p.as_epoch_millis().unwrap();
                 assert_eq!(ts, expected);
             }
             _ => panic!("Expected DateTime"),
@@ -13795,14 +15532,29 @@ mod tests {
         assert_eq!(result, Value::Null);
     }
 
+    /// Indexing a non-collection is a **type error**, not null (#789).
+    ///
+    /// This asserted `Value::Null`, which was the behaviour and is not
+    /// Cypher's: `List1 [6]` expects `TypeError: InvalidArgumentType` for
+    /// `true[0]`, `123[0]`, `4.7[0]` and `'1'[0]`. The test encoded the defect,
+    /// checked against the TCK rather than against the new code.
+    ///
+    /// The distinction it destroyed is the useful one: a list with no element
+    /// 5 is a different thing from a value that was never a list. The
+    /// neighbouring `test_eval_index_map_missing_key` still asserts null, and
+    /// still passes, because a missing key genuinely is null.
     #[test]
     fn test_eval_index_non_collection() {
-        let result = eval_index(
+        let err = eval_index(
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Integer(0)),
             &GraphStore::new(),
-        ).unwrap();
-        assert_eq!(result, Value::Null);
+        )
+        .expect_err("indexing an integer is a type error");
+        assert!(
+            format!("{err:?}").contains("not a list or a map"),
+            "the message should name the problem: {err:?}"
+        );
     }
 
     #[test]

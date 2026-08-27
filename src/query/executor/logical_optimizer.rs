@@ -343,7 +343,7 @@ fn collect_vars_recursive(expr: &crate::query::ast::Expression, vars: &mut HashS
             collect_vars_recursive(inner, vars);
             collect_vars_recursive(index, vars);
         }
-        Expression::ExistsSubquery { pattern, where_clause } => {
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
             // Variables the subquery shares with the outer query are genuine
             // dependencies of this predicate — the filter must not be pushed
             // below the operator that binds them, or the subquery is evaluated

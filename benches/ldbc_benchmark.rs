@@ -214,12 +214,21 @@ RETURN f.id, f.title, mod.id, mod.firstName, mod.lastName",
             id: "IS7",
             name: "Replies to Post",
             category: "short",
-            // LDBC IS7: replies with isKnows check — uses EXISTS subquery (equivalent to OPTIONAL MATCH + CASE)
-            // Note: OPTIONAL MATCH version is semantically correct but triggers full Post scan in planner
+            // LDBC IS7: replies, with an isKnows check on the original poster.
+            //
+            // This is the `OPTIONAL MATCH` form the competitor corpus uses,
+            // character for character. It used to be an `EXISTS` subquery here
+            // and the comment said why: "OPTIONAL MATCH version is
+            // semantically correct but triggers full Post scan in planner".
+            // That was true and it made the cross-engine ratio meaningless —
+            // Samyama was answering an easier question than Neo4j and
+            // FalkorDB, by 21,000x on the same data (#725). #726 removed the
+            // reason, so the corpus can be one query again.
             cypher: "\
 MATCH (m:Post {id: {{postId}}})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(author:Person)
 MATCH (m)-[:HAS_CREATOR]->(op:Person)
-RETURN c.id, c.content, c.creationDate, author.id, author.firstName, author.lastName, EXISTS { MATCH (op)-[:KNOWS]-(author) } AS isKnows
+OPTIONAL MATCH (op)-[k:KNOWS]-(author)
+RETURN c.id, c.content, c.creationDate, author.id, author.firstName, author.lastName, (k IS NOT NULL) AS isKnows
 ORDER BY c.creationDate DESC
 LIMIT 20",
         },
@@ -361,8 +370,8 @@ LIMIT 20",
             category: "complex",
             // Full LDBC IC10: friends-of-friends NOT already friends, ranked by shared interests
             cypher: "\
-MATCH (p:Person {id: {{personId}}})-[:KNOWS*2]-(stranger:Person)
-WHERE stranger.id <> {{personId}} AND NOT EXISTS { MATCH (p)-[:KNOWS]-(stranger) }
+MATCH (p:Person {id: {{personId}}})-[:KNOWS*2..2]-(stranger:Person)
+WHERE stranger.id <> {{personId}} AND NOT (p)-[:KNOWS]-(stranger)
 WITH DISTINCT stranger
 MATCH (stranger)-[:HAS_INTEREST]->(tag:Tag)
 RETURN stranger.id, stranger.firstName, stranger.lastName, count(tag) AS commonInterests
@@ -569,6 +578,7 @@ DELETE k",
 // BENCHMARK RUNNER
 // ============================================================================
 
+#[derive(Clone)]
 struct BenchResult {
     id: &'static str,
     name: &'static str,
@@ -576,6 +586,18 @@ struct BenchResult {
     min: Duration,
     median: Duration,
     max: Duration,
+    /// Every timing, **in the order it was run**.
+    ///
+    /// Min/median/max cannot distinguish a warm-up artefact (run 1 slow, the
+    /// rest tight) from genuine per-execution variance (all n scattered), and
+    /// those want opposite fixes. Both were measured here and only three
+    /// numbers kept, which is how two claims in the adjacency-tier comparison
+    /// survived long enough to be published and then fail to reproduce
+    /// (#736, #746).
+    ///
+    /// Execution order, not sorted, because "the first one is the outlier" is
+    /// the thing being looked for.
+    series: Vec<Duration>,
     error: Option<String>,
 }
 
@@ -597,15 +619,32 @@ async fn run_benchmark(
     query: &LdbcQuery,
     cypher: &str,
     runs: usize,
+    warmup_runs: usize,
 ) -> BenchResult {
     let is_update = query.category == "update" || query.category == "delete";
-    // Warm-up: 1 run, discard (skip for updates — they mutate state)
-    let warmup = if is_update {
-        client.query("default", cypher).await
-    } else {
-        client.query_readonly("default", cypher).await
-    };
-    if let Err(e) = &warmup {
+    // Warm-up runs, discarded. Skipped entirely for updates, which mutate
+    // state and cannot be repeated.
+    //
+    // One is not always enough. Measured at SF10 with 21 runs and the series
+    // printed (#749), the first *timed* run is the slowest in ~15 of 21
+    // queries and IC4 takes **three** runs to settle — 27.7, 22.5, 19.9
+    // against a steady ~19.3. With `--runs 3` the reported median is then the
+    // middle of three warming runs, biased high by up to 17% and unevenly
+    // across queries, which distorts ratios (#752).
+    let passes = if is_update { 1 } else { warmup_runs.max(1) };
+    let mut warmup_err: Option<String> = None;
+    for _ in 0..passes {
+        let r = if is_update {
+            client.query("default", cypher).await
+        } else {
+            client.query_readonly("default", cypher).await
+        };
+        if let Err(e) = r {
+            warmup_err = Some(e.to_string());
+            break;
+        }
+    }
+    if let Some(e) = &warmup_err {
         return BenchResult {
             id: query.id,
             name: query.name,
@@ -614,6 +653,7 @@ async fn run_benchmark(
             min: Duration::ZERO,
             median: Duration::ZERO,
             max: Duration::ZERO,
+            series: Vec::new(),
             error: Some(e.to_string()),
         };
     }
@@ -643,12 +683,14 @@ async fn run_benchmark(
                     min: Duration::ZERO,
                     median: Duration::ZERO,
                     max: Duration::ZERO,
+                    series: Vec::new(),
                     error: Some(e.to_string()),
                 };
             }
         }
     }
 
+    let series = timings.clone();
     timings.sort();
 
     BenchResult {
@@ -658,6 +700,7 @@ async fn run_benchmark(
         min: timings[0],
         median: timings[timings.len() / 2],
         max: timings[timings.len() - 1],
+        series,
         error: None,
     }
 }
@@ -687,7 +730,7 @@ async fn main() -> Result<(), Error> {
     // output said so (#660).
     const KNOWN: &[&str] = &[
         "--data-dir", "--deletes", "--derive-params", "--explain", "--params-file",
-        "--profile", "--query", "--runs", "--updates", "--write-params",
+        "--print-runs", "--profile", "--query", "--runs", "--updates", "--warmup", "--write-params",
         // cargo passes this to bench targets.
         "--bench", "--nocapture", "--test-threads", "--color", "--format",
     ];
@@ -699,6 +742,20 @@ async fn main() -> Result<(), Error> {
         eprintln!("unknown option(s): {}", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
         eprintln!("known options: {}", KNOWN[..10].join(" "));
         eprintln!("\nRefusing to run: an ignored flag produces a number measured under\nsettings nobody chose, and the output cannot tell you that happened.");
+        std::process::exit(64);
+    }
+
+    // A *known* flag given twice is the same defect as an unknown one, and the
+    // refusal above did not cover it: every option is read with `position`,
+    // which finds the first and drops the rest (#733).
+    let repeated = ldbc_common::cli::repeated_single_valued(&args);
+    if !repeated.is_empty() {
+        eprintln!("option(s) given more than once: {}", repeated.join(" "));
+        eprintln!(
+            "\nRefusing to run: only the first is read and the rest are dropped, so the\n\
+             run would use a setting you did not choose and the output could not say so.\n\
+             (`--query` may repeat; these may not.)"
+        );
         std::process::exit(64);
     }
 
@@ -716,17 +773,59 @@ async fn main() -> Result<(), Error> {
         5
     };
 
-    let filter_query: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--query") {
-        Some(args.get(pos + 1).expect("--query requires a query ID (e.g. IS1, IC3)").to_uppercase())
-    } else {
-        None
-    };
+    // Repeatable: `--query IC2 --query IC12` names two queries. It used to run
+    // IC2 and drop IC12 without a word (#733).
+    let filter_queries: Vec<String> = ldbc_common::cli::selected_query_ids(&args);
+
+    // A named query that does not exist is a refusal, not a silent omission:
+    // `--query IC2 --query IC99` would otherwise run IC2 and say nothing about
+    // IC99, which is the same defect one level down (#733).
+    //
+    // Checked here rather than beside the query list below, because the list
+    // is built after the dataset is loaded — a typo would otherwise cost a full
+    // SF10 load before anything said so. The id set is a pure function of the
+    // corpus and the two flags that extend it.
+    {
+        let mut known: Vec<&str> = ldbc_queries().iter().map(|q| q.id).collect();
+        known.extend(ldbc_updates().iter().map(|q| q.id));
+        known.extend(ldbc_deletes().iter().map(|q| q.id));
+        let missing: Vec<&str> = filter_queries
+            .iter()
+            .filter(|f| !known.contains(&f.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+        if !missing.is_empty() {
+            eprintln!("ERROR: no such query: {}", missing.join(" "));
+            eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)");
+            std::process::exit(1);
+        }
+    }
 
     // `--profile` runs each selected query once under PROFILE and prints the
     // per-operator breakdown instead of a timing table. This is the
     // `CH-PROFILE-01` deliverable: the gate is "at least 90% of wall-clock
     // attributed" for IC1/IC6/IC9, and a total by itself attributes nothing.
     let profile_mode = args.iter().any(|a| a == "--profile");
+    // Print every timing, in execution order, after the table.
+    //
+    // Off by default: the table is the headline and `ch_bench_ldbc.py` parses
+    // it with a regex, so this is an extra block rather than a changed one.
+    let print_runs = args.iter().any(|a| a == "--print-runs");
+    // Warm-up runs before timing, discarded.
+    //
+    // Default 1, which is what every published number was taken with. It is
+    // **not** enough — IC4 needs three (#752) — but raising the default shifts
+    // every figure in the series downwards, so that is a decision to make and
+    // re-run against, not one to slip in with the flag that makes it
+    // measurable.
+    let warmup_runs: usize = if let Some(pos) = args.iter().position(|a| a == "--warmup") {
+        args.get(pos + 1)
+            .expect("--warmup requires a count")
+            .parse()
+            .expect("--warmup must be a non-negative integer")
+    } else {
+        1
+    };
     // `--explain` prints the plan **without running the query**. `--profile`
     // executes, which is useless for exactly the queries most worth looking at:
     // IC6 times out at SF10, so the one plan you most want to see is the one
@@ -852,7 +951,7 @@ async fn main() -> Result<(), Error> {
         format_duration(idx_start.elapsed())
     );
 
-    eprintln!("Runs per query: {}", runs);
+    eprintln!("Runs per query: {} ({} warm-up, discarded)", runs, warmup_runs);
     eprintln!(
         "Params: personId={} person2Id={} postId={} messageId={} firstName=\"{}\" tagName=\"{}\"",
         params.person_id, params.person2_id, params.post_id, params.message_id,
@@ -883,14 +982,16 @@ async fn main() -> Result<(), Error> {
         }
         all_queries.extend(ldbc_deletes());
     }
-    let queries: Vec<&LdbcQuery> = if let Some(ref filter) = filter_query {
-        all_queries.iter().filter(|q| q.id == filter.as_str()).collect()
-    } else {
+    // Corpus order, not command-line order, so two runs asking for the same set
+    // print the same table.
+    let queries: Vec<&LdbcQuery> = if filter_queries.is_empty() {
         all_queries.iter().collect()
+    } else {
+        all_queries.iter().filter(|q| filter_queries.iter().any(|f| f == q.id)).collect()
     };
 
     if queries.is_empty() {
-        eprintln!("ERROR: No matching query found for filter '{}'", filter_query.unwrap_or_default());
+        eprintln!("ERROR: no query selected");
         eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)");
         std::process::exit(1);
     }
@@ -906,6 +1007,8 @@ async fn main() -> Result<(), Error> {
     let mut empty_reads = 0usize;
     let mut last_category = "";
     let bench_start = Instant::now();
+    // Only collected when asked for, so the default path allocates nothing.
+    let mut all_results: Vec<BenchResult> = Vec::new();
 
     for query in &queries {
         // Print section separator when category changes
@@ -978,7 +1081,10 @@ async fn main() -> Result<(), Error> {
             continue;
         }
 
-        let result = run_benchmark(&client, query, &cypher, runs).await;
+        let result = run_benchmark(&client, query, &cypher, runs, warmup_runs).await;
+        if print_runs {
+            all_results.push(result.clone());
+        }
 
         if let Some(ref err) = result.error {
             println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  ERROR",
@@ -1010,7 +1116,11 @@ async fn main() -> Result<(), Error> {
         println!();
         println!("Profiled {} query/queries in {}.", queries.len(), format_duration(bench_time));
         bench_setup::report_drift(calibration);
-        if errors > 0 {
+        // Same rule as the summary path below: a short or complex read that
+        // returned nothing did not measure a traversal, and a profile of it is
+        // a profile of an empty plan. Exiting 0 here is how `--query IS7
+        // --profile` reported success against a postId with no replies.
+        if errors > 0 || empty_reads > 0 {
             std::process::exit(1);
         }
         return Ok(());
@@ -1020,6 +1130,33 @@ async fn main() -> Result<(), Error> {
     // ========================================================================
     // Summary
     // ========================================================================
+    // The series, when asked for. Ordered as executed, so a slow first run —
+    // a warm-up artefact — is visible rather than inferred from where the
+    // median sits between min and max. Those two want opposite fixes and
+    // min/median/max cannot tell them apart (#736).
+    if print_runs {
+        println!();
+        println!("Per-run timings, in execution order:");
+        for r in &all_results {
+            if r.series.is_empty() {
+                continue;
+            }
+            let spread = if r.min.as_secs_f64() > 0.0 {
+                r.max.as_secs_f64() / r.min.as_secs_f64()
+            } else {
+                1.0
+            };
+            let runs: Vec<String> = r.series.iter().map(|d| format_ms(*d)).collect();
+            // `runs` first, deliberately. `ch_bench_ldbc.py` and
+            // `analyse_noise.py` both scrape the results table with
+            //   ^\s*(?:Running\s+\w+\.\.\.)?(I[SC]\d+)\s+.+?\s+(\d+)\s+…
+            // and a line beginning `  IS3   …` is one format change away from
+            // being ingested as a result row. A leading word that is not
+            // `Running` and not a query id cannot match at all.
+            println!("  runs {:<6} spread {:>5.2}x  {}", r.id, spread, runs.join(" "));
+        }
+    }
+
     println!();
     println!("Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
         passed, queries.len(), empty_reads, errors, format_duration(bench_time));

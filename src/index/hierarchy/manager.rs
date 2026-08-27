@@ -419,6 +419,18 @@ impl HierarchyIndexManager {
         self.entries.read().unwrap().is_empty()
     }
 
+    /// Is *any* registered index usable — present, built and not stale?
+    ///
+    /// The difference from `is_empty` is what a hierarchy function should say
+    /// when it cannot find an index covering its arguments. "These two nodes
+    /// are in no declared hierarchy" is a legitimate `false`; "there is no
+    /// declared hierarchy at all, or every one of them is stale" is a question
+    /// the engine cannot answer, and answering `false` to it is a guess that
+    /// looks like a result (#721).
+    pub fn any_usable(&self) -> bool {
+        self.entries.read().unwrap().values().any(|e| e.read().unwrap().usable())
+    }
+
     /// All registered indexes, name-sorted.
     pub fn list(&self) -> Vec<HierarchyInfo> {
         let entries = self.entries.read().unwrap();

@@ -331,6 +331,98 @@ fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -
     }
 }
 
+/// Can the query see how many times a var-length target is reached?
+///
+/// The BFS in `VarLengthExpandOperator` marks a node visited at the depth it is
+/// first reached, so `(a)-[:R*1..2]-(x)` over a triangle answers `b, c` where
+/// openCypher answers `b, b, c, c`. Enumerating trails is the correct walk and
+/// is far more expensive, so it is used only where the difference is
+/// observable (#710).
+///
+/// **Conservative by construction: it answers `false` only for shapes it can
+/// prove are insensitive.** Getting this wrong in one direction is a wrong
+/// answer and in the other is LDBC IC1 enumerating every trail within three
+/// hops of a person, so anything unrecognised enumerates.
+///
+/// The provably-insensitive shape is a `DISTINCT` that dedups *before*
+/// anything counts, orders or truncates:
+///
+/// * `RETURN DISTINCT …` with no aggregate among the items and no `WITH`
+///   pipeline in between (IC1, IC11), or
+/// * the first `WITH` is `WITH DISTINCT …` with no aggregate among its items
+///   (IC5's `WITH DISTINCT friend`, IC6's `WITH DISTINCT post`).
+///
+/// A `DISTINCT` that comes *after* an aggregate does not help — in
+/// `WITH count(x) AS n RETURN DISTINCT n` the count has already seen the
+/// duplicates — which is why the position matters and a plain "does the query
+/// contain DISTINCT" test would be unsound.
+fn multiplicity_is_observable(query: &Query) -> bool {
+    fn has_aggregate(items: &[crate::query::ast::ReturnItem]) -> bool {
+        items.iter().any(|i| expression_has_aggregate(&i.expression))
+    }
+
+    // The first WITH in the pipeline, if any, is the first thing that can
+    // dedup. `stages` holds the pipeline; `with_clause` the single-WITH form.
+    // A query parsed as a **clause sequence** leaves every by-kind field empty —
+    // `return_clause` is `None` even for `RETURN DISTINCT` — so reading only
+    // those fields sends LDBC IC11 down the enumerating path and costs it 10%
+    // at SF10. Walk `clauses` when it is populated.
+    if !query.clauses.is_empty() {
+        for clause in &query.clauses {
+            match clause {
+                // The first projection decides: a DISTINCT here dedups before
+                // anything downstream can count the duplicates.
+                crate::query::ast::Clause::With(w) => {
+                    return !(w.distinct && !has_aggregate(&w.items));
+                }
+                crate::query::ast::Clause::Return(r) => {
+                    return !(r.distinct && !has_aggregate(&r.items));
+                }
+                _ => {}
+            }
+        }
+        return true;
+    }
+
+    // `with_clause` is the first WITH; `extra_with_stages` holds any that
+    // follow. Only the first can dedup before anything else sees the rows.
+    let first_with = query
+        .with_clause
+        .as_ref()
+        .or_else(|| query.extra_with_stages.first().map(|st| &st.0));
+
+    if let Some(w) = first_with {
+        // A WITH that dedups before counting absorbs the multiplicity.
+        return !(w.distinct && !has_aggregate(&w.items));
+    }
+
+    match &query.return_clause {
+        Some(r) => !(r.distinct && !has_aggregate(&r.items)),
+        None => true,
+    }
+}
+
+/// Whether an expression contains an aggregate call, at any depth.
+fn expression_has_aggregate(expr: &Expression) -> bool {
+    match expr {
+        Expression::Function { name, args, .. } => {
+            const AGGREGATES: &[&str] = &[
+                "count", "sum", "avg", "min", "max", "collect", "stdev", "stdevp",
+                "percentilecont", "percentiledisc",
+            ];
+            if AGGREGATES.contains(&name.to_lowercase().as_str()) {
+                return true;
+            }
+            args.iter().any(expression_has_aggregate)
+        }
+        Expression::Binary { left, right, .. } => {
+            expression_has_aggregate(left) || expression_has_aggregate(right)
+        }
+        Expression::Unary { expr, .. } => expression_has_aggregate(expr),
+        _ => false,
+    }
+}
+
 fn resolve_sort_key(
     key: &Expression,
     return_items: &[(Expression, String)],
@@ -427,6 +519,14 @@ pub struct QueryPlanner {
     cache_generation: std::sync::atomic::AtomicU64,
     /// Planner configuration (ADR-015)
     config: PlannerConfig,
+    /// Whether the query being planned can observe var-length multiplicity.
+    ///
+    /// Set once per `plan` call from `multiplicity_is_observable` and read at
+    /// the three sites that build a `VarLengthExpandOperator`, which sit in
+    /// functions that never see the `Query`. Threading a bool through all of
+    /// them would touch far more code than the decision is worth; an atomic
+    /// keeps `&self` and stays `Sync` (#710).
+    trail_enumeration: std::sync::atomic::AtomicBool,
 }
 
 impl QueryPlanner {
@@ -437,6 +537,7 @@ impl QueryPlanner {
             plan_cache: Mutex::new(HashMap::new()),
             cache_generation: std::sync::atomic::AtomicU64::new(0),
             config: PlannerConfig::default(),
+            trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -447,6 +548,7 @@ impl QueryPlanner {
             plan_cache: Mutex::new(HashMap::new()),
             cache_generation: std::sync::atomic::AtomicU64::new(0),
             config,
+            trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -733,6 +835,14 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        // Decide once, here, whether a var-length walk must enumerate trails.
+        // See `multiplicity_is_observable`: the BFS answers `b, c` where
+        // openCypher answers `b, b, c, c`, and enumerating is only affordable
+        // where a `DISTINCT` makes the difference invisible (#710).
+        self.trail_enumeration.store(
+            multiplicity_is_observable(query),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // A query parsed as a clause sequence has empty by-kind fields — it is
         // there precisely because they cannot represent it. Planning it through
         // the established path would read those empty fields as "no MATCH, no
@@ -1264,8 +1374,66 @@ impl QueryPlanner {
             }
         }
 
+        // Names for anonymous pattern variables, shared by both MATCH loops so
+        // a name minted before the first `WITH` cannot collide with one minted
+        // after it.
+        let mut anon_counter: usize = 0;
+
         // 1a. Handle pre-WITH MATCH clauses
         for (match_idx, match_clause) in pre_with_clauses.iter().enumerate() {
+            // A clause whose paths all start from a variable the pipeline has
+            // already bound is an expansion, not a second scan to join against.
+            // Only the post-`WITH` loop did this, so a query whose clauses all
+            // precede the first `WITH` — most queries — planned each one
+            // standalone and joined: `MATCH (m:Post {id: $id})-[:HAS_CREATOR]->(op)
+            // MATCH (op)-[:KNOWS]-(f) RETURN count(f)` scanned every `:Person`
+            // and hash-joined back to the one node already resolved (#711).
+            if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
+                let upstream = operator.take().unwrap();
+                let (current_op, new_vars) = self.plan_pushed_down_match(
+                    match_clause,
+                    per_match_where[match_idx].as_ref(),
+                    &pre_match_var_sets[match_idx],
+                    upstream,
+                    &mut anon_counter,
+                )?;
+                operator = Some(current_op);
+                known_vars.extend(new_vars);
+                continue;
+            }
+
+            // The same idea for `OPTIONAL MATCH`, which `can_pushdown_match`
+            // declines outright because it has to emit a null-filled row when
+            // nothing matches. A single-segment optional clause hanging off a
+            // bound variable can do that inside the expand, and the difference
+            // is not marginal: `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with
+            // both ends bound scanned every `:Person` and cost 422 ms where
+            // the equivalent `EXISTS` cost 0.02 (#726).
+            //
+            // A `WHERE` on the clause keeps the join: in `OPTIONAL MATCH` the
+            // predicate is part of the optional pattern, so a row failing it
+            // must still emit nulls, and a filter above the expand would
+            // delete exactly that row.
+            if operator.is_some() && per_match_where[match_idx].is_none() {
+                if let Some(null_vars) =
+                    Self::optional_pushdown_vars(match_clause, &known_vars)
+                {
+                    let upstream = operator.take().unwrap();
+                    let path = &match_clause.pattern.paths[0];
+                    let start_var = path.start.variable.clone().unwrap();
+                    operator = Some(self.plan_optional_expand(
+                        path,
+                        &start_var,
+                        null_vars,
+                        &known_vars,
+                        upstream,
+                        store,
+                    ));
+                    known_vars.extend(pre_match_var_sets[match_idx].iter().cloned());
+                    continue;
+                }
+            }
+
             let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
@@ -1434,8 +1602,6 @@ impl QueryPlanner {
             all_with_stages.push((wc, stage_unwind, post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
-        let mut anon_counter: usize = 0;
-
         for (stage_idx, (with_clause, stage_unwind, stage_matches, stage_where)) in all_with_stages.iter().enumerate() {
             // Apply the WITH barrier
             if let Some(op) = operator {
@@ -1465,6 +1631,23 @@ impl QueryPlanner {
                         unwind.variable.clone(),
                     )));
                     known_vars.insert(unwind.variable.clone());
+                }
+            }
+
+            // UNWINDs written after the final WITH. They belong here, above the
+            // barrier, because they read what the WITH projected -- applying
+            // them with the leading run gave `VariableNotFound` on a variable
+            // the WITH defines one line earlier (#785).
+            if stage_idx + 1 == all_with_stages.len() {
+                for extra in &query.post_with_unwind_clauses {
+                    if let Some(op) = operator {
+                        operator = Some(Box::new(UnwindOperator::new(
+                            op,
+                            extra.expression.clone(),
+                            extra.variable.clone(),
+                        )));
+                        known_vars.insert(extra.variable.clone());
+                    }
                 }
             }
 
@@ -1520,69 +1703,13 @@ impl QueryPlanner {
             for (match_idx, match_clause) in stage_matches.iter().enumerate() {
                 if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
                     let upstream = operator.take().unwrap();
-                    let preds = per_match_where[match_idx]
-                        .as_ref()
-                        .map(|wc| flatten_and_predicates(&wc.predicate))
-                        .unwrap_or_default();
-
-                    let mut current_op = upstream;
-                    let mut new_vars = HashSet::new();
-
-                    for path in &match_clause.pattern.paths {
-                        let start_var = path.start.variable.as_ref().unwrap();
-                        let path_var_set: HashSet<String> = {
-                            let mut vs = HashSet::new();
-                            vs.insert(start_var.clone());
-                            for seg in &path.segments {
-                                if let Some(v) = &seg.node.variable { vs.insert(v.clone()); }
-                                if let Some(v) = &seg.edge.variable { vs.insert(v.clone()); }
-                            }
-                            vs
-                        };
-                        let path_preds: Vec<Expression> = preds
-                            .iter()
-                            .filter(|p| {
-                                let mut pvars = HashSet::new();
-                                Self::collect_expression_variables(p, &mut pvars);
-                                pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
-                            })
-                            .cloned()
-                            .collect();
-
-                        let (expanded_op, path_vars) = self.plan_path_with_bound_start(
-                            path,
-                            start_var,
-                            path_preds,
-                            current_op,
-                            &mut anon_counter,
-                        )?;
-                        current_op = expanded_op;
-                        new_vars.extend(path_vars);
-                    }
-
-                    // Apply remaining predicates for this MATCH
-                    let remaining_preds: Vec<Expression> = preds
-                        .into_iter()
-                        .filter(|p| {
-                            let mut pvars = HashSet::new();
-                            Self::collect_expression_variables(p, &mut pvars);
-                            !pvars.is_empty()
-                                && !match_var_sets[match_idx]
-                                    .iter()
-                                    .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
-                        })
-                        .collect();
-                    if !remaining_preds.is_empty() {
-                        let filter_expr = remaining_preds
-                            .into_iter()
-                            .reduce(|acc, pred| Expression::Binary {
-                                left: Box::new(acc),
-                                op: BinaryOp::And,
-                                right: Box::new(pred),
-                            }).unwrap();
-                        current_op = Box::new(FilterOperator::new(current_op, filter_expr));
-                    }
-
+                    let (current_op, new_vars) = self.plan_pushed_down_match(
+                        match_clause,
+                        per_match_where[match_idx].as_ref(),
+                        &match_var_sets[match_idx],
+                        upstream,
+                        &mut anon_counter,
+                    )?;
                     operator = Some(current_op);
                     known_vars.extend(new_vars);
                 } else {
@@ -2910,6 +3037,21 @@ impl QueryPlanner {
                             min_hops,
                             max_hops,
                         );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
+                        // Relationship isomorphism applies to a var-length segment too: an
+                        // edge an earlier segment of this clause walked is not available to
+                        // it. `ExpandOperator` has done this since #684; this path did not
+                        // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                        // a row where openCypher answers none (#710).
+                        if track_edges {
+                            expand = expand.with_edge_isolation(first_expand);
+                            first_expand = false;
+                        }
                         if let Some(ref pv) = path.path_variable {
                             expand = expand.with_path_variable(pv.clone());
                         }
@@ -3114,29 +3256,6 @@ impl QueryPlanner {
         Ok(result)
     }
 
-    /// Attach any deferred predicate whose variables are all bound by now.
-    ///
-    /// The path builders used to hold every predicate that mentions a
-    /// non-anchor variable until the **whole path** was expanded. On LDBC IC3
-    /// that meant `m.creationDate >= … AND m.creationDate < …` -- which
-    /// references only `m`, bound by the *first* expand -- was evaluated after
-    /// the second expand had already produced 409,960 rows, of which 622
-    /// survived. The predicate could have cut the second expand's input by
-    /// ~80% (#328).
-    ///
-    /// Applying a conjunct as soon as its variables are bound cannot change
-    /// the answer of a conjunctive pattern: the rows it removes are rows the
-    /// later filter would have removed. `OPTIONAL MATCH` is not affected --
-    /// this runs inside a single path of a single MATCH, and the outer join is
-    /// built above it.
-    /// Equality predicates of the form `<var>.<prop> = <literal>` for one
-    /// variable, read out of the deferred set **without removing them**.
-    ///
-    /// Additive on purpose. The filter the planner would have built stays
-    /// where it is, so pushing these into an expand cannot change what the
-    /// query returns — only how much is materialised on the way. Getting a
-    /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
-    /// slow query.
     /// The exact node set a target's equality predicates admit, when that can
     /// be computed without scanning the whole store.
     ///
@@ -3161,18 +3280,25 @@ impl QueryPlanner {
     ) -> Option<HashSet<crate::graph::NodeId>> {
         let (key, value) = props.first()?;
 
-        // Preferred: an index answers without touching any node.
-        let candidates: Vec<Label> = labels
-            .iter()
-            .cloned()
-            .chain(store.catalog().label_counts.keys().cloned())
-            .collect();
-        for label in &candidates {
-            if let Some(index) = store.property_index.get_index(label, key) {
-                let ids = index.read().unwrap().get(value);
-                if !ids.is_empty() {
-                    return Some(ids.into_iter().collect());
-                }
+        // An unlabelled target cannot be resolved: a property index covers one
+        // label, and a node of any label may carry the property. Answering
+        // from one label's index would return the wrong set, not a wider one.
+        let label = labels.first()?;
+
+        // Preferred: an index answers without touching any node. Only this
+        // label's index — indexes are keyed by `(label, property)`, so
+        // consulting another label's answers a different question. Reading
+        // whichever index happened to hold the value first returned, say,
+        // `Person` ids for an `:Organisation` target: not a superset of the
+        // right answer but a disjoint set, so every correct row was dropped.
+        //
+        // A multi-label target resolves from the first label alone, which *is*
+        // a superset — the expand still applies `with_target_labels` and
+        // `target_props`, so a wider set only costs work, never rows.
+        if let Some(index) = store.property_index.get_index(label, key) {
+            let ids = index.read().unwrap().get(value);
+            if !ids.is_empty() {
+                return Some(ids.into_iter().collect());
             }
         }
 
@@ -3180,7 +3306,6 @@ impl QueryPlanner {
         // small — otherwise this trades a per-candidate cost for a per-query
         // one that is larger.
         const MAX_SCAN: usize = 50_000;
-        let label = labels.first()?;
         let nodes = store.get_nodes_by_label(label);
         if nodes.len() > MAX_SCAN {
             return None;
@@ -3194,6 +3319,14 @@ impl QueryPlanner {
         )
     }
 
+    /// Equality predicates of the form `<var>.<prop> = <literal>` for one
+    /// variable, read out of the deferred set **without removing them**.
+    ///
+    /// Additive on purpose. The filter the planner would have built stays
+    /// where it is, so pushing these into an expand cannot change what the
+    /// query returns — only how much is materialised on the way. Getting a
+    /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
+    /// slow query.
     fn target_equality_props(
         deferred: &[Expression],
         var: &str,
@@ -3217,6 +3350,21 @@ impl QueryPlanner {
         out
     }
 
+    /// Attach any deferred predicate whose variables are all bound by now.
+    ///
+    /// The path builders used to hold every predicate that mentions a
+    /// non-anchor variable until the **whole path** was expanded. On LDBC IC3
+    /// that meant `m.creationDate >= … AND m.creationDate < …` -- which
+    /// references only `m`, bound by the *first* expand -- was evaluated after
+    /// the second expand had already produced 409,960 rows, of which 622
+    /// survived. The predicate could have cut the second expand's input by
+    /// ~80% (#328).
+    ///
+    /// Applying a conjunct as soon as its variables are bound cannot change
+    /// the answer of a conjunctive pattern: the rows it removes are rows the
+    /// later filter would have removed. `OPTIONAL MATCH` is not affected --
+    /// this runs inside a single path of a single MATCH, and the outer join is
+    /// built above it.
     fn apply_ready_predicates(
         operator: OperatorBox,
         deferred: &mut Vec<Expression>,
@@ -3381,6 +3529,21 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
+                // Relationship isomorphism applies to a var-length segment too: an
+                // edge an earlier segment of this clause walked is not available to
+                // it. `ExpandOperator` has done this since #684; this path did not
+                // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                // a row where openCypher answers none (#710).
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
                 // relationships traversed. Dropping it made the query fail
                 // with "Variable not found: r" (#652).
@@ -3498,6 +3661,21 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
+                // Relationship isomorphism applies to a var-length segment too: an
+                // edge an earlier segment of this clause walked is not available to
+                // it. `ExpandOperator` has done this since #684; this path did not
+                // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                // a row where openCypher answers none (#710).
+                if track_edges {
+                    expand = expand.with_edge_isolation(first_expand);
+                    first_expand = false;
+                }
                 // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
                 // relationships traversed. Dropping it made the query fail
                 // with "Variable not found: r" (#652).
@@ -3639,7 +3817,7 @@ impl QueryPlanner {
             Expression::Function { args, .. } => {
                 for arg in args { Self::collect_expression_variables(arg, vars); }
             }
-            Expression::ExistsSubquery { pattern, where_clause } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 // An EXISTS subquery's pattern routinely references variables bound
                 // by the enclosing query — `NOT EXISTS { MATCH (a)-[:KNOWS]-(b) }`
                 // where both `a` and `b` come from the outer MATCH. Those are real
@@ -5609,10 +5787,271 @@ impl QueryPlanner {
 
     /// Check if all paths in a match clause have bound start variables and no special path types.
     /// Returns true if push-down can be applied to the entire clause.
+    /// Plan a MATCH whose paths all start from a variable the pipeline already
+    /// bound, chaining expands onto `upstream` instead of planning the clause
+    /// standalone and joining.
+    ///
+    /// The caller must have checked `can_pushdown_match`. Returns the operator
+    /// and the variables the clause introduced.
+    ///
+    /// This was inline in the post-`WITH` loop and nowhere else, so a query
+    /// whose clauses all precede the first `WITH` — which is most queries —
+    /// planned every clause independently and joined them. `MATCH (m:Post
+    /// {id: $id})-[:HAS_CREATOR]->(op) MATCH (op)-[:KNOWS]-(f) RETURN count(f)`
+    /// therefore scanned all 10,620 `:Person` nodes and hash-joined back to the
+    /// one node the first clause had already resolved: 99 ms to count one
+    /// person's ~23 friends (#711).
+    fn plan_pushed_down_match(
+        &self,
+        match_clause: &MatchClause,
+        where_clause: Option<&WhereClause>,
+        clause_vars: &HashSet<String>,
+        upstream: OperatorBox,
+        anon_counter: &mut usize,
+    ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
+        let preds = where_clause
+            .map(|wc| flatten_and_predicates(&wc.predicate))
+            .unwrap_or_default();
+
+        let mut current_op = upstream;
+        let mut new_vars = HashSet::new();
+
+        for path in &match_clause.pattern.paths {
+            let start_var = path
+                .start
+                .variable
+                .as_ref()
+                .expect("can_pushdown_match requires a bound start variable");
+            let path_var_set: HashSet<String> = {
+                let mut vs = HashSet::new();
+                vs.insert(start_var.clone());
+                for seg in &path.segments {
+                    if let Some(v) = &seg.node.variable {
+                        vs.insert(v.clone());
+                    }
+                    if let Some(v) = &seg.edge.variable {
+                        vs.insert(v.clone());
+                    }
+                }
+                vs
+            };
+            let path_preds: Vec<Expression> = preds
+                .iter()
+                .filter(|p| {
+                    let mut pvars = HashSet::new();
+                    Self::collect_expression_variables(p, &mut pvars);
+                    pvars.is_empty() || pvars.iter().all(|v| path_var_set.contains(v))
+                })
+                .cloned()
+                .collect();
+
+            let (expanded_op, path_vars) = self.plan_path_with_bound_start(
+                path,
+                start_var,
+                path_preds,
+                current_op,
+                anon_counter,
+            )?;
+            current_op = expanded_op;
+            new_vars.extend(path_vars);
+        }
+
+        // Predicates the per-path pass did not take.
+        let remaining_preds: Vec<Expression> = preds
+            .into_iter()
+            .filter(|p| {
+                let mut pvars = HashSet::new();
+                Self::collect_expression_variables(p, &mut pvars);
+                !pvars.is_empty()
+                    && !clause_vars.iter().any(|_| pvars.iter().all(|v| new_vars.contains(v)))
+            })
+            .collect();
+        if !remaining_preds.is_empty() {
+            let filter_expr = remaining_preds
+                .into_iter()
+                .reduce(|acc, pred| Expression::Binary {
+                    left: Box::new(acc),
+                    op: BinaryOp::And,
+                    right: Box::new(pred),
+                })
+                .unwrap();
+            current_op = Box::new(FilterOperator::new(current_op, filter_expr));
+        }
+
+        Ok((current_op, new_vars))
+    }
+
+    /// Build the optional expand for a clause `optional_pushdown_vars` accepted.
+    ///
+    /// One segment, so there is exactly one expand and no partial-match
+    /// ambiguity. Everything that decides whether the pattern matches has to
+    /// live *inside* the expand: a `FilterOperator` above it would delete the
+    /// null row the clause owes a source that matched nothing, turning
+    /// `OPTIONAL MATCH` back into `MATCH`. Inline properties therefore go
+    /// through `with_target_props`, which filters during the walk, and the
+    /// caller declines the pushdown when the clause carries a `WHERE`.
+    fn plan_optional_expand(
+        &self,
+        path: &PathPattern,
+        start_var: &str,
+        null_vars: Vec<String>,
+        known_vars: &HashSet<String>,
+        upstream: OperatorBox,
+        store: &GraphStore,
+    ) -> OperatorBox {
+        let segment = &path.segments[0];
+        let target_var = segment
+            .node
+            .variable
+            .clone()
+            .expect("optional_pushdown_vars requires a named far end");
+        let edge_types: Vec<String> =
+            segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+
+        let mut expand = ExpandOperator::new(
+            upstream,
+            start_var.to_string(),
+            target_var.clone(),
+            segment.edge.variable.clone(),
+            edge_types,
+            segment.edge.direction.clone(),
+        );
+        // A far end that is already bound is a closing hop: it can only land on
+        // that node, and the pin says so during the walk rather than after it.
+        // This is the `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` case.
+        if known_vars.contains(&target_var) {
+            expand = expand.with_target_bound_var(target_var.clone());
+        }
+        if !segment.node.labels.is_empty() {
+            expand = expand.with_target_labels(segment.node.labels.clone());
+        }
+        if let Some(props) = &segment.node.properties {
+            if !props.is_empty() {
+                let mut pushed: Vec<(String, PropertyValue)> =
+                    props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                pushed.sort_by(|a, b| a.0.cmp(&b.0));
+                // Same resolution the non-optional pushdown does: a hash
+                // lookup per candidate edge instead of a node fetch and a
+                // property compare (#665). This path was written after that
+                // one and did not inherit it.
+                if let Some(ids) =
+                    self.resolve_target_ids(&segment.node.labels, &pushed, store)
+                {
+                    expand = expand.with_target_ids(ids);
+                }
+                expand = expand.with_target_props(pushed);
+            }
+        }
+        Box::new(expand.with_optional(null_vars))
+    }
+
+    /// Whether an `OPTIONAL MATCH` can be pushed onto the pipeline as an
+    /// optional expand instead of planned standalone and left-outer-joined.
+    ///
+    /// Deliberately narrower than `can_pushdown_match`. An optional clause has
+    /// to emit a null-filled row when it matches nothing, and only a
+    /// **single-segment** path makes that unambiguous: with two segments a
+    /// source row that matches the first hop and not the second still owes one
+    /// null row, not one per partial match, and the chain cannot tell the
+    /// difference. That case keeps the join, which already handles it.
+    ///
+    /// The shape this does cover is the common one — `OPTIONAL MATCH
+    /// (a)-[r:T]->(b)` hanging off something already bound — and it is the one
+    /// that costs 422 ms where the equivalent `EXISTS` costs 0.02 (#726).
+    ///
+    /// Returns the variables the clause introduces, which are the ones the
+    /// operator nulls when nothing matches. `author` in
+    /// `OPTIONAL MATCH (op)-[k:KNOWS]-(author)` with both ends bound is *not*
+    /// among them: nulling it would erase a binding the row already had.
+    fn optional_pushdown_vars(
+        match_clause: &MatchClause,
+        known_vars: &HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if !match_clause.optional {
+            return None;
+        }
+        let [path] = &match_clause.pattern.paths[..] else {
+            return None;
+        };
+        if !matches!(path.path_type, PathType::Normal) || path.path_variable.is_some() {
+            return None;
+        }
+        let [seg] = &path.segments[..] else {
+            return None;
+        };
+        if seg.edge.length.is_some() {
+            return None;
+        }
+        let start = path.start.variable.as_ref()?;
+        if !known_vars.contains(start) {
+            return None;
+        }
+        let mut introduced = Vec::new();
+        // The far node may be bound -- that is the pinned case, and the expand
+        // already knows how to close onto it -- or new, in which case it is
+        // nulled on a miss.
+        if let Some(v) = &seg.node.variable {
+            if !known_vars.contains(v) {
+                introduced.push(v.clone());
+            }
+        } else {
+            // An anonymous far end cannot be observed, so there is nothing to
+            // null and nothing to bind; the join is no worse and is simpler.
+            return None;
+        }
+        // A bound edge variable would have to be matched rather than rebound,
+        // which this path does not do.
+        match &seg.edge.variable {
+            Some(v) if known_vars.contains(v) => return None,
+            Some(v) => introduced.push(v.clone()),
+            None => {}
+        }
+        if introduced.is_empty() {
+            return None;
+        }
+        Some(introduced)
+    }
+
     fn can_pushdown_match(match_clause: &MatchClause, known_vars: &HashSet<String>) -> bool {
         if match_clause.optional {
             return false;
         }
+        // Paths in one clause may not share a variable this clause introduces.
+        //
+        // The pushdown chains the paths, so a second path binding a variable
+        // the first already bound *rebinds* it rather than matching it, and
+        // the correlation between them is lost. TCK `Match3` [20]:
+        //
+        //   MATCH (a {name:'A'}), (b {name:'B'}), (c {name:'C'})
+        //   MATCH (a)-->(x), (b)-->(x), (c)-->(x) RETURN x
+        //
+        // wants the two nodes all three point at; chained, it answers with
+        // whatever the last path bound. A join across the paths gets this
+        // right, so a clause of that shape declines the pushdown.
+        let mut introduced: HashSet<&String> = HashSet::new();
+        for path in &match_clause.pattern.paths {
+            let mut this_path: Vec<&String> = Vec::new();
+            if let Some(v) = &path.start.variable {
+                this_path.push(v);
+            }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable {
+                    this_path.push(v);
+                }
+                if let Some(v) = &seg.edge.variable {
+                    this_path.push(v);
+                }
+            }
+            for v in this_path {
+                if known_vars.contains(v) {
+                    continue;
+                }
+                if !introduced.insert(v) {
+                    return false;
+                }
+            }
+        }
+
         for path in &match_clause.pattern.paths {
             // Must have a start variable that's bound
             let start_var = match &path.start.variable {
@@ -5621,6 +6060,30 @@ impl QueryPlanner {
             };
             if !known_vars.contains(start_var) {
                 return false;
+            }
+            // ...and nothing *after* the start may be bound already. The
+            // pushdown chains expands, which bind their target; a target that
+            // is already bound has to be *matched* against, and chaining
+            // rebinds it instead, losing the correlation the query asks for:
+            //
+            //   MATCH (b)<-[:ON]-(d1)-[:OF]->(v1)-[:VARIANT_OF]->(m) ...
+            //   MATCH (b)<-[:ON]-(d2)-[:OF]->(v2)-[:VARIANT_OF]->(m) ...
+            //
+            // pairs each model's fp32 variant with its *own* int8 variant --
+            // two rows. Chained, the second path rebinds `m` and answers four.
+            // A join on every shared variable gets this right (#360), so a
+            // clause that closes back onto a bound variable declines.
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable {
+                    if known_vars.contains(v) {
+                        return false;
+                    }
+                }
+                if let Some(v) = &seg.edge.variable {
+                    if known_vars.contains(v) {
+                        return false;
+                    }
+                }
             }
             // Skip shortestPath and variable-length patterns
             if !matches!(path.path_type, PathType::Normal) {
@@ -5640,6 +6103,128 @@ impl QueryPlanner {
 mod tests {
     use super::*;
     use crate::query::parser::parse_query;
+
+    /// `resolve_target_ids` must answer from a label scan when no index exists.
+    ///
+    /// LDBC IC11 pushes `org.name = "..."` into the expand over `:WORK_AT`.
+    /// With the equality resolved to ids the per-candidate test is a hash
+    /// lookup; without it, `target_props` fetches the node and compares a
+    /// property for each of ~29,000 candidate edges, which is 74% of the query
+    /// at SF10 (#665). Nothing asserted that the resolution actually happens.
+    #[test]
+    fn a_target_equality_resolves_to_ids_by_scanning_a_small_label() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        let mut wanted = Vec::new();
+        for i in 0..20i64 {
+            let id = store.create_node(Label::new("Organisation"));
+            let name = if i % 5 == 0 { "Acme" } else { "Other" };
+            store
+                .set_node_property("default", id, "name", PropertyValue::String(name.into()))
+                .unwrap();
+            if name == "Acme" {
+                wanted.push(id);
+            }
+        }
+
+        let planner = QueryPlanner::new();
+        let ids = planner
+            .resolve_target_ids(
+                &[Label::new("Organisation")],
+                &[("name".to_string(), PropertyValue::String("Acme".into()))],
+                &store,
+            )
+            .expect("a 20-node label is far under the scan cap");
+
+        let mut got: Vec<_> = ids.into_iter().collect();
+        got.sort();
+        wanted.sort();
+        assert_eq!(got, wanted);
+    }
+
+    /// A property index belongs to one label, so only the target's own index
+    /// may answer for it.
+    ///
+    /// `resolve_target_ids` used to walk every label in the catalog and take
+    /// the first index that held the value. With an index on `Person.name` and
+    /// none on `Organisation.name`, an `:Organisation {name: "Acme"}` target
+    /// resolved to the *Person* whose name is "Acme" — a disjoint set, not a
+    /// wider one, so the expand dropped every correct row. Silent: the plan
+    /// looked identical and the query returned nothing.
+    #[test]
+    fn a_target_equality_ignores_another_label_index_on_the_same_property() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
+
+        let person = store.create_node(Label::new("Person"));
+        store
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let org = store.create_node(Label::new("Organisation"));
+        store
+            .set_node_property("default", org, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let planner = QueryPlanner::new();
+        let ids = planner
+            .resolve_target_ids(
+                &[Label::new("Organisation")],
+                &[("name".to_string(), PropertyValue::String("Acme".into()))],
+                &store,
+            )
+            .expect("the Organisation label is far under the scan cap");
+
+        assert_eq!(ids, std::iter::once(org).collect::<std::collections::HashSet<_>>());
+        assert!(!ids.contains(&person), "a Person index must not answer for an Organisation target");
+    }
+
+    /// An unlabelled target declines rather than guessing a label.
+    ///
+    /// Any label may carry the property, so no single label's index or scan
+    /// answers the question. Declining leaves `target_props` to do it.
+    #[test]
+    fn a_target_equality_without_a_label_declines() {
+        use crate::graph::{Label, PropertyValue};
+
+        let mut store = GraphStore::new();
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
+        let person = store.create_node(Label::new("Person"));
+        store
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
+            .unwrap();
+
+        let planner = QueryPlanner::new();
+        let ids = planner.resolve_target_ids(
+            &[],
+            &[("name".to_string(), PropertyValue::String("Acme".into()))],
+            &store,
+        );
+        assert_eq!(ids, None);
+    }
+
+    /// A label bigger than the cap declines rather than scanning: above it the
+    /// per-candidate check is genuinely cheaper than one whole-label pass.
+    #[test]
+    fn a_target_equality_declines_a_label_over_the_scan_cap() {
+        use crate::graph::{Label, PropertyValue};
+
+        let store = GraphStore::new();
+        let planner = QueryPlanner::new();
+        // No such label, no index: the index loop finds nothing and the scan
+        // finds an empty label, which is a resolvable answer (the empty set) —
+        // not a decline. The decline is the *cap*, exercised in the engine at
+        // scale; asserted here only as "an unknown label is not a wildcard".
+        let ids = planner.resolve_target_ids(
+            &[Label::new("NoSuchLabel")],
+            &[("name".to_string(), PropertyValue::String("Acme".into()))],
+            &store,
+        );
+        assert_eq!(ids, Some(std::collections::HashSet::new()));
+    }
 
     #[test]
     fn test_plan_simple_match() {
@@ -6262,6 +6847,7 @@ mod tests {
             match_clauses: vec![],
             where_clause: None,
             return_clause: None,
+            post_with_unwind_clauses: vec![],
             create_clause: None,
             order_by: None,
             limit: None,

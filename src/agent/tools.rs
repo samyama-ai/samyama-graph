@@ -93,6 +93,10 @@ fn prop_to_json(p: &crate::graph::PropertyValue) -> Value {
         P::Float(f) => json!(f),
         P::Boolean(b) => json!(b),
         P::DateTime(ts) => json!(ts),
+        // Rendered, not decomposed: this feeds an LLM tool response, where
+        // "2015-07-21" is usable and {"days": 16637} is not (#689).
+        P::Date(_) | P::LocalTime(_) | P::Time { .. }
+        | P::LocalDateTime { .. } | P::ZonedDateTime { .. } => json!(p.to_cypher_string()),
         P::Null => Value::Null,
         P::Array(a) => Value::Array(a.iter().map(prop_to_json).collect()),
         P::Map(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), prop_to_json(v))).collect()),

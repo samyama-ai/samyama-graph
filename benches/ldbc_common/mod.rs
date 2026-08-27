@@ -2,6 +2,7 @@
 //!
 //! Used by both `ldbc_loader` and `ldbc_benchmark` examples.
 
+pub mod cli;
 pub mod params;
 
 use std::collections::HashMap;
@@ -645,6 +646,31 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
     let n = load_edges(&dynamic_dir.join("comment_replyOf_post_0_0.csv"), "REPLY_OF", graph, &ids.comment, &ids.post, no_props)?;
     print_done(&format!("  REPLY_OF (Comment->Post):              {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
     total_edges += n;
+
+    // Which adjacency layout the timings below were taken on, said out loud.
+    //
+    // The store keeps two: a frozen CSR, and a per-node write buffer that
+    // `compact_adjacency` folds into it. Snapshot import has always compacted;
+    // this loader never has, so every LDBC number ever published was measured
+    // on the buffer without saying so — and #504 claims CSR is "~2x faster",
+    // which would have made that a large undisclosed handicap.
+    //
+    // Measured, it is not: compacting SF1 costs 697 ms and buys **4%** overall
+    // (21 queries, 1216.6 ms -> 1166.9 ms), inside the run-to-run band the
+    // SF10 write-up already documents. So the layout is left alone and simply
+    // reported; `SAMYAMA_LDBC_COMPACT=1` measures the other one.
+    if std::env::var("SAMYAMA_LDBC_COMPACT").as_deref() == Ok("1") {
+        let t = std::time::Instant::now();
+        graph.compact_adjacency();
+        print_done(&format!(
+            "  adjacency layout: frozen CSR (compacted in {})",
+            format_duration(t.elapsed())
+        ));
+    } else {
+        print_done(
+            "  adjacency layout: per-node write buffer (set SAMYAMA_LDBC_COMPACT=1 for CSR)",
+        );
+    }
 
     Ok(LoadResult { total_nodes, total_edges })
 }

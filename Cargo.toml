@@ -69,6 +69,14 @@ tracing-subscriber = "0.3"
 rocksdb = { version = "0.22", default-features = false, features = ["lz4", "zstd"] }
 bincode = "1.3"
 chrono = "0.4"
+# The IANA tz database, for named time zones (`Europe/Stockholm`) in temporal
+# values (#767). MIT/Apache-2.0; the embedded database is public domain.
+#
+# The whole database, deliberately. `chrono-tz` can subset with
+# `filter-by-regex`, but subsetting to the zones the TCK happens to use would
+# be tuning the engine to the benchmark -- the standing rule against benchmark
+# identifiers in engine source is the same principle.
+chrono-tz = "0.10"
 sha2 = "0.10"
 
 # High Availability (Phase 4)
@@ -130,6 +138,48 @@ tempfile = "3.8"
 criterion = "0.5"
 samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.1" }
 http-body-util = "0.1"
+
+# These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
+# `test = false`, so without this the tests inside them compile and never run —
+# `cargo test --workspace` reported them as passing by never executing them.
+[[example]]
+name = "unified_benchmark"
+test = true
+
+[[example]]
+name = "tck_runner"
+test = true
+
+[[example]]
+name = "property_bridge"
+test = true
+
+[[example]]
+name = "ldbc_loader"
+test = true
+
+[[example]]
+name = "aact_biomarker_extractor"
+test = true
+
+[[example]]
+name = "civic_loader"
+test = true
+
+[[example]]
+name = "hgnc_ensembl_loader"
+test = true
+
+[[example]]
+name = "oncokb_loader"
+test = true
+
+# `ic11_probe` includes `benches/common/bench_setup.rs`, whose quiet-host check
+# carries the only tests that cover it. A bench target cannot run them: cargo
+# defaults `test = false` there too, and these benches set `harness = false`.
+[[example]]
+name = "ic11_probe"
+test = true
 
 [[bench]]
 name = "aggregate_throughput"

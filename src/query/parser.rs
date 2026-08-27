@@ -958,7 +958,17 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     let post_matches: Vec<_> = query.match_clauses.drain(split..).collect();
                     let post_where = query.post_with_where_clause.take();
                     let prev_with = query.with_clause.take().unwrap();
-                    let prev_unwind = query.unwind_clause.take();
+                    // The UNWIND that belongs to the stage being closed is the
+                    // one written *after* its WITH, not the query's leading
+                    // one. Taking `unwind_clause` here moved the head UNWIND
+                    // into a later stage, which is the same position-losing
+                    // mistake as #785 pointing the other way; it survived only
+                    // because `unwind_leading` then suppressed the stage copy.
+                    let prev_unwind = if query.post_with_unwind_clauses.is_empty() {
+                        query.unwind_clause.take()
+                    } else {
+                        Some(query.post_with_unwind_clauses.remove(0))
+                    };
                     query.extra_with_stages.push((prev_with, prev_unwind, post_matches, post_where));
                 }
                 // Record where WITH splits pre-WITH from post-WITH match clauses
@@ -992,8 +1002,16 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::unwind_clause => {
                 // The first UNWIND stays in `unwind_clause`; the rest queue up
                 // behind it, each a cross product with everything before.
+                //
+                // Unless a WITH has already been seen, in which case the UNWIND
+                // belongs *after* that WITH and must be kept apart: the planner
+                // applies the leading run before the WITH barrier, so a
+                // post-WITH unwind put there reads a variable the WITH has not
+                // projected yet (#785).
                 let u = parse_unwind_clause(inner)?;
-                if query.unwind_clause.is_none() {
+                if query.with_clause.is_some() {
+                    query.post_with_unwind_clauses.push(u);
+                } else if query.unwind_clause.is_none() {
                     query.unwind_clause = Some(u);
                 } else {
                     query.extra_unwind_clauses.push(u);
@@ -2250,6 +2268,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::ExistsSubquery {
                     pattern: Pattern { paths: vec![parse_path(inner)?] },
                     where_clause: None,
+                    bare_pattern: true,
                 });
             }
             Rule::reduce_expression => {
@@ -2400,6 +2419,9 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     Ok(Expression::ExistsSubquery {
         pattern: pattern.ok_or_else(|| ParseError::SemanticError("EXISTS missing pattern".to_string()))?,
         where_clause: where_clause.map(Box::new),
+        // `EXISTS { ... }` may introduce variables; a bare pattern predicate
+        // may not (#798).
+        bare_pattern: false,
     })
 }
 
@@ -2957,7 +2979,7 @@ mod tests {
         let result = parse_query(query);
         assert!(result.is_ok(), "Failed to parse EXISTS with WHERE: {:?}", result.err());
         let ast = result.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause } = &ast.where_clause.unwrap().predicate {
+        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &ast.where_clause.unwrap().predicate {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_some());
         } else {
@@ -3204,6 +3226,54 @@ mod tests {
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert!(ret.distinct);
+    }
+
+    /// `ASCENDING` and `DESCENDING` are the long forms, and the grammar only
+    /// had the short ones.
+    ///
+    /// `^"ASC"` matched the first three letters of `ASCENDING` and left
+    /// `ENDING` unconsumed, so this was a **parse error**, not a mis-sort --
+    /// and a parse error is invisible to any test that checks sort order. The
+    /// openCypher TCK uses the long forms throughout: 56 scenarios across
+    /// WithOrderBy1, WithOrderBy2 and WithOrderBy3 failed on this one rule.
+    #[test]
+    fn order_by_accepts_the_long_direction_keywords() {
+        for (q, want_asc) in [
+            ("MATCH (n) RETURN n ORDER BY n.age ASCENDING", true),
+            ("MATCH (n) RETURN n ORDER BY n.age DESCENDING", false),
+            ("MATCH (n) RETURN n ORDER BY n.age ascending", true),
+            ("MATCH (n) RETURN n ORDER BY n.age descending", false),
+            ("MATCH (n) RETURN n ORDER BY n.age ASC", true),
+            ("MATCH (n) RETURN n ORDER BY n.age DESC", false),
+        ] {
+            let parsed = parse_query(q).unwrap_or_else(|e| panic!("`{q}` should parse: {e:?}"));
+            let items = &parsed
+                .order_by
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{q}` should have an ORDER BY"))
+                .items;
+            assert_eq!(
+                items[0].ascending, want_asc,
+                "`{q}` sorts the wrong way -- parsing the keyword is not enough, \
+                 it has to reach `ascending`"
+            );
+        }
+    }
+
+    /// The long forms are only useful if they sort. A grammar that accepts
+    /// `DESCENDING` but hands the Rust side something it compares against
+    /// `\"DESC\"` would parse every scenario and silently sort all of them
+    /// ascending -- turning 56 parse errors into 56 wrong answers, which is
+    /// worse, because a parse error is loud.
+    #[test]
+    fn a_mixed_direction_list_keeps_each_direction_with_its_own_key() {
+        let q = "MATCH (n) RETURN n ORDER BY n.a DESCENDING, n.b ASCENDING, n.c DESC";
+        let parsed = parse_query(q).expect("should parse");
+        let items = &parsed.order_by.as_ref().expect("ORDER BY").items;
+        assert_eq!(items.len(), 3);
+        assert!(!items[0].ascending, "n.a DESCENDING");
+        assert!(items[1].ascending, "n.b ASCENDING");
+        assert!(!items[2].ascending, "n.c DESC");
     }
 
     #[test]
@@ -3650,7 +3720,7 @@ mod tests {
         assert!(result.is_ok(), "Failed to parse EXISTS subquery: {:?}", result.err());
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause } = &wc.predicate {
+        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &wc.predicate {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_none());
         } else {

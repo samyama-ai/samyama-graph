@@ -219,7 +219,14 @@ star_item = { "*" }
 // ORDER BY items
 order_items = { order_item ~ ("," ~ order_item)* }
 order_item = { expression ~ order_direction? }
-order_direction = { ^"ASC" | ^"DESC" }
+// `ASCENDING` and `DESCENDING` are the long forms openCypher spells out, and
+// the TCK uses them throughout: 56 scenarios across WithOrderBy1/2/3 failed to
+// *parse* on them alone. `^"ASC"` matched the first three letters of
+// `ASCENDING` and left `ENDING` for the next rule, so the failure was a syntax
+// error rather than a wrong sort -- which is why it never showed up as a
+// wrong answer. Longest alternative first, and a trailing boundary so a bare
+// `ASC` cannot be clipped out of a longer word (#758).
+order_direction = @{ (^"ASCENDING" | ^"DESCENDING" | ^"ASC" | ^"DESC") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 // Expressions
 // `NOT` is an expression-level prefix, not part of `term`. Inside `term` it bound to a
@@ -319,7 +326,23 @@ property_access = { ("(" ~ variable ~ ")" | variable) ~ "." ~ property_key }
 // where a nested path would mean something this engine does not implement.
 nested_property_access = { variable ~ "." ~ property_key ~ ("." ~ property_key)+ }
 function_call = { function_name ~ "(" ~ distinct? ~ (expression ~ ("," ~ expression)*)? ~ ")" }
-function_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// A function name may carry one namespace segment: `date.truncate`,
+// `duration.between`, `duration.inSeconds`.
+//
+// Without this the whole namespaced family was a **parse error**, which is why
+// every scenario in Temporal9 (truncation, 322) and Temporal10
+// (duration.between, 131) failed -- 453 of them, none reaching the evaluator.
+// `duration.between` was already implemented and had been unreachable from
+// Cypher the entire time.
+//
+// Safe against property access because `function_call` requires a `(` straight
+// after the name, so `n.name` fails the rule and the PEG backtracks to
+// `property_access` as before -- and `function_call` is already tried first in
+// `primary`, so the ordering does not change either (#769).
+function_name = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+    ~ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*)?
+}
 
 // Operators
 pow_op = { "^" }
