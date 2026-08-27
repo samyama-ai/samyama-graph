@@ -80,12 +80,28 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         // NOT sits between AND and the comparisons: `NOT a STARTS WITH b` negates the
         // comparison, while `NOT a AND b` still groups as `(NOT a) AND b`.
         .op(Op::prefix(Rule::not_op))
-        .op(Op::infix(Rule::in_op, Assoc::Left) | Op::infix(Rule::comparison_op, Assoc::Left))
+        .op(Op::infix(Rule::comparison_op, Assoc::Left))
+        // `IN` binds **tighter than every comparison operator**, so
+        // `a < b IN c` is `a < (b IN c)` and not `(a < b) IN c` (#833).
+        //
+        // Sharing a level with the comparisons made it group left, and the two
+        // readings agree whenever the list holds what the comparison would have
+        // produced -- which is most hand-written queries and every example
+        // anyone reaches for. The TCK settles it by enumerating all three
+        // truth values against six lists at once.
+        .op(Op::infix(Rule::in_op, Assoc::Left))
         .op(Op::infix(Rule::add_sub_op, Assoc::Left))
         .op(Op::infix(Rule::mul_div_mod_op, Assoc::Left))
-        // Exponentiation binds tightest and associates to the *right*:
-        // `2 ^ 3 ^ 2` is 2^(3^2), not (2^3)^2.
-        .op(Op::infix(Rule::pow_op, Assoc::Right))
+        // Exponentiation binds tightest and associates to the **left**:
+        // `2 ^ 3 ^ 2` is (2^3)^2 = 64, not 2^(3^2) = 512.
+        //
+        // This is where Cypher parts company with mathematical convention, and
+        // the convention is what was implemented. openCypher's grammar makes
+        // `PowerOfExpression` left-recursive, and two `Precedence2` scenarios
+        // pin it independently: `4 ^ 5 ^ 3` is 1073741824 (4^15) and
+        // `4 ^ 1 ^ 3` is 64, both of which only the left grouping produces
+        // (#835).
+        .op(Op::infix(Rule::pow_op, Assoc::Left))
 });
 
 /// Parser errors
@@ -499,7 +515,7 @@ fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Q
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::label => label = Some(Label::new(inner.as_str())),
-            Rule::property_key => properties.push(inner.as_str().to_string()),
+            Rule::property_key => properties.push(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -555,7 +571,7 @@ fn parse_create_hierarchy_index_statement(
                 for part in &parts {
                     match part.as_rule() {
                         Rule::label => measure_label = Some(part.as_str().to_string()),
-                        Rule::property_key => measure_property = Some(part.as_str().to_string()),
+                        Rule::property_key => measure_property = Some(unescape_name(part.as_str())),
                         _ => {}
                     }
                 }
@@ -593,7 +609,7 @@ fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Que
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::label => label = Some(Label::new(inner.as_str())),
-            Rule::property_key => property = Some(inner.as_str().to_string()),
+            Rule::property_key => property = Some(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -636,7 +652,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
                 // Extract property from property_access (variable.property)
                 for pa in inner.into_inner() {
                     if pa.as_rule() == Rule::property_key {
-                        property = Some(pa.as_str().to_string());
+                        property = Some(unescape_name(pa.as_str()));
                     }
                 }
             }
@@ -671,7 +687,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 label = Some(Label::new(inner.as_str()));
             }
             Rule::property_key => {
-                property_key = Some(inner.as_str().to_string());
+                property_key = Some(unescape_name(inner.as_str()));
             }
             Rule::options => {
                 let options_map = parse_properties(inner)?;
@@ -784,6 +800,23 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
         }
     }
     Ok(())
+}
+
+/// A name written delimited in backticks, with its delimiters removed.
+///
+/// Cypher spells a name that is a keyword, starts with a digit or contains
+/// punctuation by wrapping it in backticks, and doubles a literal backtick
+/// inside. Undelimited names pass through unchanged.
+///
+/// Every `Rule::property_key` read site goes through this. There are fourteen,
+/// and a key left with its backticks on round-trips through the engine
+/// perfectly well -- it just becomes a property nobody can find under the name
+/// they wrote (#847).
+fn unescape_name(raw: &str) -> String {
+    match raw.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
+        Some(inner) => inner.replace("``", "`"),
+        None => raw.to_string(),
+    }
 }
 
 /// Strip the surrounding quotes from a string literal and interpret its escape sequences.
@@ -959,13 +992,25 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     let post_where = query.post_with_where_clause.take();
                     let prev_with = query.with_clause.take().unwrap();
                     // The UNWIND that belongs to the stage being closed is the
-                    // one written *after* its WITH, not the query's leading
-                    // one. Taking `unwind_clause` here moved the head UNWIND
-                    // into a later stage, which is the same position-losing
-                    // mistake as #785 pointing the other way; it survived only
-                    // because `unwind_leading` then suppressed the stage copy.
+                    // one written *after* its WITH. The query's leading UNWIND
+                    // belongs at the head and stays in `unwind_clause`.
+                    //
+                    // Taking `unwind_clause` here made this slot mean two
+                    // different things -- the stage's own unwind when it had
+                    // one, the query's leading unwind when it did not -- and
+                    // the planner cannot tell them apart. It read
+                    // `extra_with_stages[0].1` as the leading unwind and so
+                    // hoisted `UNWIND b AS c` to the head of
+                    //
+                    //   UNWIND [1,2] AS a WITH [1,2] AS b UNWIND b AS c ...
+                    //
+                    // where `b` does not exist yet: `VariableNotFound("b")`.
+                    // A second hack in the planner suppressed stage 0's unwind
+                    // to compensate, and the two cancelled out for every shape
+                    // with no unwind on the first stage -- which is why one
+                    // WITH+UNWIND worked and two did not (#785).
                     let prev_unwind = if query.post_with_unwind_clauses.is_empty() {
-                        query.unwind_clause.take()
+                        None
                     } else {
                         Some(query.post_with_unwind_clauses.remove(0))
                     };
@@ -1153,6 +1198,34 @@ fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteC
     Ok(DeleteClause { expressions, detach })
 }
 
+/// `SET n = {…}` / `SET n += {…}`, in a `SET` clause or in `ON CREATE`/`ON MATCH`.
+///
+/// Extracted because `MERGE`'s arms need it too and had no implementation at
+/// all -- `parse_merge_clause` matched only `set_item` and `set_label_item`, so
+/// this form fell through and was silently discarded (#874).
+fn parse_set_entity_item(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<crate::query::ast::SetEntityItem> {
+    let mut variable = String::new();
+    let mut merge = false;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
+            Rule::set_entity_op => merge = part.as_str().trim() == "+=",
+            Rule::expression => value = Some(parse_expression(part)?),
+            _ => {}
+        }
+    }
+    Ok(crate::query::ast::SetEntityItem {
+        variable,
+        merge,
+        value: value.ok_or_else(|| {
+            ParseError::SemanticError("SET <entity> = missing a value".to_string())
+        })?,
+    })
+}
+
 /// `variable (":" label)+` — the label form of a SET item.
 ///
 /// Shared by `SET`, `ON CREATE SET` and `ON MATCH SET`. Kept as one function
@@ -1185,24 +1258,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
             continue;
         }
         if inner.as_rule() == Rule::set_entity_item {
-            let mut variable = String::new();
-            let mut merge = false;
-            let mut value = None;
-            for part in inner.into_inner() {
-                match part.as_rule() {
-                    Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
-                    Rule::set_entity_op => merge = part.as_str().trim() == "+=",
-                    Rule::expression => value = Some(parse_expression(part)?),
-                    _ => {}
-                }
-            }
-            entity_items.push(crate::query::ast::SetEntityItem {
-                variable,
-                merge,
-                value: value.ok_or_else(|| {
-                    ParseError::SemanticError("SET <entity> = missing a value".to_string())
-                })?,
-            });
+            entity_items.push(parse_set_entity_item(inner)?);
             continue;
         }
         if inner.as_rule() == Rule::set_item {
@@ -1216,7 +1272,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
                         for pa in si.into_inner() {
                             match pa.as_rule() {
                                 Rule::variable => variable = pa.as_str().to_string(),
-                                Rule::property_key => property = pa.as_str().to_string(),
+                                Rule::property_key => property = unescape_name(pa.as_str()),
                                 _ => {}
                             }
                         }
@@ -1251,7 +1307,7 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 for pa in children[0].clone().into_inner() {
                     match pa.as_rule() {
                         Rule::variable => variable = pa.as_str().to_string(),
-                        Rule::property_key => property = pa.as_str().to_string(),
+                        Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
                 }
@@ -1306,6 +1362,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
     let mut on_match_set = Vec::new();
     let mut on_create_labels = Vec::new();
     let mut on_match_labels = Vec::new();
+    let mut on_create_entity_set = Vec::new();
+    let mut on_match_entity_set = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1314,6 +1372,7 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => on_create_entity_set.push(parse_set_entity_item(si)?),
                         Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1323,6 +1382,7 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => on_match_entity_set.push(parse_set_entity_item(si)?),
                         Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1351,6 +1411,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
         on_match_set,
         on_create_labels,
         on_match_labels,
+        on_create_entity_set,
+        on_match_entity_set,
     });
     Ok(())
 }
@@ -1361,6 +1423,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
     let mut on_match_set = Vec::new();
     let mut on_create_labels = Vec::new();
     let mut on_match_labels = Vec::new();
+    let mut on_create_entity_set = Vec::new();
+    let mut on_match_entity_set = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1369,6 +1433,9 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_create_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => {
+                            on_create_entity_set.push(parse_set_entity_item(si)?)
+                        }
                         Rule::set_label_item => on_create_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1378,6 +1445,9 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
                 for si in inner.into_inner() {
                     match si.as_rule() {
                         Rule::set_item => on_match_set.push(parse_set_item(si)?),
+                        Rule::set_entity_item => {
+                            on_match_entity_set.push(parse_set_entity_item(si)?)
+                        }
                         Rule::set_label_item => on_match_labels.push(parse_set_label_item(si)?),
                         _ => {}
                     }
@@ -1396,6 +1466,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
         on_match_set,
         on_create_labels,
         on_match_labels,
+        on_create_entity_set,
+        on_match_entity_set,
     })
 }
 
@@ -1410,7 +1482,7 @@ fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
                 for pa in inner.into_inner() {
                     match pa.as_rule() {
                         Rule::variable => variable = pa.as_str().to_string(),
-                        Rule::property_key => property = pa.as_str().to_string(),
+                        Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
                 }
@@ -1578,7 +1650,13 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
     let mut direction = Direction::Both;
     let edge_str = pair.as_str();
 
-    if edge_str.starts_with("<-") {
+    // Arrows on **both** ends mean either direction, the same as no arrows at
+    // all. Testing `starts_with("<-")` first would call `<-->` incoming, which
+    // is the opposite of what it asks for and would silently halve the matches
+    // rather than fail (#868).
+    if edge_str.starts_with("<-") && edge_str.ends_with("->") {
+        direction = Direction::Both;
+    } else if edge_str.starts_with("<-") {
         direction = Direction::Incoming;
     } else if edge_str.ends_with("->") {
         direction = Direction::Outgoing;
@@ -1628,6 +1706,22 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
     })
 }
 
+/// One bound of a variable-length pattern.
+///
+/// The `integer` grammar rule accepts a leading `-`, and the bounds are
+/// `usize`, so a negative bound could not be parsed. It was handled three
+/// different ways in three lines: `*..-2` **panicked the process** on
+/// `.unwrap()` of a `ParseIntError`, `*-2..` was silently read as `*1..` by
+/// `unwrap_or(1)` and returned rows, and `*-2` reached neither. Cypher requires
+/// a SyntaxError at compile time for all of them (#878).
+fn parse_length_bound(text: &str, what: &str) -> ParseResult<usize> {
+    text.parse::<usize>().map_err(|_| {
+        ParseError::SemanticError(format!(
+            "a variable-length {what} bound must be a non-negative integer, not `{text}`"
+        ))
+    })
+}
+
 fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<LengthPattern> {
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::range_pattern {
@@ -1637,18 +1731,18 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
             let min = if parts[0].is_empty() {
                 Some(1)
             } else {
-                Some(parts[0].parse().unwrap_or(1))
+                Some(parse_length_bound(parts[0].trim(), "lower")?)
             };
 
             let max = if parts.len() > 1 && !parts[1].is_empty() {
-                Some(parts[1].parse().unwrap())
+                Some(parse_length_bound(parts[1].trim(), "upper")?)
             } else {
                 None
             };
 
             return Ok(LengthPattern { min, max });
         } else if inner.as_rule() == Rule::integer {
-            let exact = inner.as_str().parse().unwrap();
+            let exact = parse_length_bound(inner.as_str().trim(), "exact")?;
             return Ok(LengthPattern {
                 min: Some(exact),
                 max: Some(exact),
@@ -1683,7 +1777,7 @@ fn parse_properties_split(pair: pest::iterators::Pair<Rule>) -> ParseResult<Spli
                     let mut key = String::new();
                     for part in prop.into_inner() {
                         match part.as_rule() {
-                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::property_key => key = unescape_name(part.as_str()),
                             Rule::value => {
                                 literals.insert(key.clone(), parse_value(part)?);
                             }
@@ -1715,7 +1809,7 @@ fn parse_properties(pair: pest::iterators::Pair<Rule>) -> ParseResult<HashMap<St
                     for part in prop.into_inner() {
                         match part.as_rule() {
                             Rule::property_key => {
-                                key = part.as_str().to_string();
+                                key = unescape_name(part.as_str());
                             }
                             Rule::value => {
                                 value = parse_value(part)?;
@@ -1745,12 +1839,22 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Integer(parse_integer_literal(inner.as_str())?));
             }
             Rule::float => {
-                let val = inner.as_str().trim().parse().map_err(|_| {
-                    ParseError::SemanticError(format!(
-                        "float literal out of range: `{}`",
-                        inner.as_str()
-                    ))
+                let text = inner.as_str().trim();
+                let val: f64 = text.parse().map_err(|_| {
+                    ParseError::SemanticError(format!("float literal out of range: `{text}`"))
                 })?;
+                // Rust's `parse` returns `Ok(inf)` on overflow rather than an
+                // error, so `1.34E999` became a perfectly usable infinity.
+                // Cypher rejects an over-large *literal* at compile time.
+                //
+                // Only a literal: an infinity that a computation produces --
+                // `1.0 / 0.0` -- is a legitimate value and is untouched (#883).
+                if !val.is_finite() {
+                    return Err(ParseError::SemanticError(format!(
+                        "float literal `{text}` overflows to {}; the largest finite double is about 1.8e308",
+                        if val.is_sign_negative() { "-infinity" } else { "infinity" }
+                    )));
+                }
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
@@ -1793,7 +1897,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                         
                         for part in entry.into_inner() {
                             match part.as_rule() {
-                                Rule::property_key => key = part.as_str().to_string(),
+                                Rule::property_key => key = unescape_name(part.as_str()),
                                 Rule::string => {
                                     key = unescape_string_literal(part.as_str());
                                 }
@@ -2105,7 +2209,7 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     let key = index
                         .into_inner()
                         .find(|p| p.as_rule() == Rule::property_key)
-                        .map(|p| p.as_str().to_string())
+                        .map(|p| unescape_name(p.as_str()))
                         .ok_or_else(|| {
                             ParseError::SemanticError("member access without a name".to_string())
                         })?;
@@ -2231,7 +2335,7 @@ fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResul
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
-            Rule::property_key => keys.push(inner.as_str().to_string()),
+            Rule::property_key => keys.push(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -2339,7 +2443,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     let mut value = None;
                     for part in entry.into_inner() {
                         match part.as_rule() {
-                            Rule::property_key => key = part.as_str().to_string(),
+                            Rule::property_key => key = unescape_name(part.as_str()),
                             Rule::string => {
                                 key = unescape_string_literal(part.as_str());
                             }
@@ -2608,7 +2712,12 @@ fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     }
 
     let variable = parts[0].as_str().to_string();
-    let property = parts[1].as_str().to_string();
+    // The fifteenth read site, and the one a grep for `Rule::property_key`
+    // does not find: this one indexes positionally. Without the unescape,
+    // `map.`name`` parsed to `Property { property: "`name`" }` and looked up a
+    // key with backticks in its name -- null, from a query that had just been
+    // taught to parse (#847).
+    let property = unescape_name(parts[1].as_str());
 
     Ok(Expression::Property { variable, property })
 }

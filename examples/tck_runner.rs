@@ -169,6 +169,21 @@ fn float_repr(f: f64) -> String {
     if f.is_infinite() {
         return if f > 0.0 { "Inf".into() } else { "-Inf".into() };
     }
+    // Negative zero renders as `0`.
+    //
+    // `-0.0 == 0.0` is true, and this function turns a float into a string for
+    // a **string** comparison -- so rendering them differently makes the
+    // comparator disagree with the equality it is standing in for. `-0.0`
+    // arrived as `-0.000000000`, which trims to `-0` rather than to the empty
+    // string the guard below was written for, and `RETURN -0.0` was scored
+    // wrong against an expected `0.0` (#883).
+    //
+    // This is a fix to the ruler, not to the engine's score: it is only
+    // defensible because the two values are equal, and it applies to the
+    // expected side as much as the actual one.
+    if f == 0.0 {
+        return "0".into();
+    }
     // Enough digits to distinguish, few enough that 1.0 and 1.0000000001 do not
     // both appear as distinct-but-equal-looking.
     let s = format!("{f:.9}");
@@ -687,6 +702,21 @@ struct Scenario {
     /// A step this harness does not implement; the scenario is skipped and this
     /// says which step, so the gap is legible.
     unsupported: Option<String>,
+    /// Declared node and relationship deltas from `And the side effects should
+    /// be`, as `(+nodes, -nodes, +relationships, -relationships)`.
+    ///
+    /// Side effects used to be parsed and thrown away. A scenario asserting
+    /// *both* an empty result and a non-zero side effect therefore passed on
+    /// the empty result alone -- **83 scenarios** in the corpus, each scored
+    /// green while the write it exists to test went unchecked. That is how
+    /// `DELETE nodes.key` was found deleting nothing (#888).
+    ///
+    /// Only nodes and relationships. `+properties` and `+labels` count *writes
+    /// performed*, not the net change, so a `SET` that overwrites an existing
+    /// property is `+properties 1` with a delta of zero; a before/after count
+    /// cannot see it, and checking it that way would fail correct engines.
+    /// Those two stay unchecked, and say so.
+    side_effects: Option<(i64, i64, i64, i64)>,
     /// The `Examples:` blocks of a `Scenario Outline:`, each a header and its
     /// rows. Empty for an ordinary scenario.
     ///
@@ -799,7 +829,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 
     // The step a docstring or table belongs to.
     #[derive(PartialEq, Clone, Copy)]
-    enum Pending { None, Setup, Query, Control, Result(bool), Params, Examples }
+    enum Pending { None, Setup, Query, Control, Result(bool), Params, Examples, SideEffects }
     let mut pending = Pending::None;
 
     while i < lines.len() {
@@ -816,6 +846,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 control_query: None,
                 expect: None,
                 unsupported: None,
+                side_effects: None,
                 examples: Vec::new(),
                 is_outline: false,
             });
@@ -849,6 +880,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 control_query: None,
                 expect: None,
                 unsupported: None,
+                side_effects: None,
                 examples: Vec::new(),
                 is_outline: line.starts_with("Scenario Outline:"),
             };
@@ -899,10 +931,15 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             } else if body.contains("should be raised") {
                 let kind = body.split_whitespace().nth(1).unwrap_or("Error").to_string();
                 s.expect = Some(Expect::Error(kind));
-            } else if body.starts_with("no side effects") || body.starts_with("the side effects should be") {
-                // Side effects are not checked. Noted on the scenario only when
-                // it would otherwise pass, so the number is not inflated by
-                // scenarios whose *only* assertion is a side effect.
+            } else if body.starts_with("no side effects") {
+                s.side_effects = Some((0, 0, 0, 0));
+                if s.expect.is_none() {
+                    s.unsupported = Some("side-effect assertion only".into());
+                }
+            } else if body.starts_with("the side effects should be") {
+                // The table rows follow; `pending` collects them.
+                s.side_effects = Some((0, 0, 0, 0));
+                pending = Pending::SideEffects;
                 if s.expect.is_none() {
                     s.unsupported = Some("side-effect assertion only".into());
                 }
@@ -948,6 +985,26 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                         *header = cells;
                     } else {
                         rows.push(cells);
+                    }
+                }
+                continue;
+            }
+            if pending == Pending::SideEffects {
+                // Rows look like `| +nodes | 1 |`.
+                if cells.len() >= 2 {
+                    if let (Some(key), Ok(n)) = (cells.first(), cells[1].parse::<i64>()) {
+                        if let Some(se) = s.side_effects.as_mut() {
+                            match key.as_str() {
+                                "+nodes" => se.0 = n,
+                                "-nodes" => se.1 = n,
+                                "+relationships" => se.2 = n,
+                                "-relationships" => se.3 = n,
+                                // `+properties` / `+labels` count writes
+                                // performed rather than the net change, so a
+                                // before/after delta cannot check them.
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 continue;
@@ -1000,6 +1057,9 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
         query
     };
     let parsed = parse_query(query).map_err(|e| format!("parse: {e}"))?;
+    // Node and relationship counts either side of the query, so a declared
+    // side effect can be checked rather than parsed and discarded (#888).
+    let before = (store.node_count() as i64, store.edge_count() as i64);
     let batch = {
         let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
         match m.execute(&parsed) {
@@ -1009,6 +1069,22 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
                 .map_err(|e| format!("exec: {e}"))?,
         }
     };
+    if let Some((pn, mn, pr, mr)) = s.side_effects {
+        // Only when the query under test is the *main* one. With a control
+        // query the write already happened above and this snapshot spans the
+        // control query instead, which changes nothing by design.
+        if s.control_query.is_none() {
+            let after = (store.node_count() as i64, store.edge_count() as i64);
+            let (want_nodes, want_rels) = (pn - mn, pr - mr);
+            let (got_nodes, got_rels) = (after.0 - before.0, after.1 - before.1);
+            if got_nodes != want_nodes || got_rels != want_rels {
+                return Err(format!(
+                    "side effects: nodes {got_nodes:+} want {want_nodes:+}, \
+                     relationships {got_rels:+} want {want_rels:+}"
+                ));
+            }
+        }
+    }
     let mut rows = Vec::new();
     for rec in &batch.records {
         rows.push(
@@ -1019,6 +1095,41 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
         );
     }
     Ok(rows)
+}
+
+/// Compare a scenario's declared node/relationship deltas against what happened.
+///
+/// Side effects used to be parsed and thrown away, so a scenario asserting
+/// *both* an empty result and a non-zero side effect passed on the empty result
+/// alone -- **83 scenarios** in the corpus, each green while the write it exists
+/// to test went unchecked. `DELETE nodes.key` was found deleting nothing that
+/// way (#888).
+///
+/// Only nodes and relationships. `+properties` and `+labels` count *writes
+/// performed*, not the net change: a `SET` overwriting an existing property is
+/// `+properties 1` with a delta of zero, so a before/after count would fail a
+/// correct engine. Those stay unchecked.
+///
+/// Skipped when the scenario has a control query, since the write then happened
+/// before this snapshot and the snapshot spans the control query instead.
+fn side_effect_mismatch(
+    s: &Scenario,
+    before: (i64, i64),
+    store: &GraphStore,
+) -> Option<String> {
+    let (pn, mn, pr, mr) = s.side_effects?;
+    if s.control_query.is_some() {
+        return None;
+    }
+    let (want_nodes, want_rels) = (pn - mn, pr - mr);
+    let got_nodes = store.node_count() as i64 - before.0;
+    let got_rels = store.edge_count() as i64 - before.1;
+    if got_nodes == want_nodes && got_rels == want_rels {
+        return None;
+    }
+    Some(format!(
+        "side effects: nodes {got_nodes:+} want {want_nodes:+}, relationships {got_rels:+} want {want_rels:+}"
+    ))
 }
 
 fn run_scenario(s: &Scenario) -> (Outcome, String) {
@@ -1090,6 +1201,10 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
             .any(|k| u.contains(k))
     };
 
+    // Node and relationship counts either side of the query, so a declared side
+    // effect is checked rather than parsed and discarded (#888).
+    let before_counts = (store.node_count() as i64, store.edge_count() as i64);
+
     let batch = if is_write {
         let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
         m.execute(&parsed)
@@ -1113,10 +1228,12 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
             format!("expected {kind}, query succeeded with {} rows", batch.records.len()),
         ),
         Expect::Empty => {
-            if batch.records.is_empty() {
-                (Outcome::Pass, String::new())
-            } else {
+            if !batch.records.is_empty() {
                 (Outcome::WrongResult, format!("expected empty, got {} rows", batch.records.len()))
+            } else if let Some(why) = side_effect_mismatch(s, before_counts, &store) {
+                (Outcome::WrongResult, why)
+            } else {
+                (Outcome::Pass, String::new())
             }
         }
         Expect::Rows { header, rows: _, ordered: _, list_order_insensitive } => {

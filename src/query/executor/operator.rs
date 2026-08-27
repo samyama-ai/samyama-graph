@@ -160,6 +160,22 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
             }
             if unknown { None } else { Some(true) }
         }
+        // **A number equals a number across the two representations.**
+        // `1 = 1.0` is true in Cypher, and `PropertyValue`'s derived `PartialEq`
+        // compares variants, so it was answering false -- a wrong answer in the
+        // most ordinary comparison there is, and one that reads as a legitimate
+        // "these differ" (#860).
+        //
+        // Compared as integers rather than through `as f64`, so no bit is lost
+        // above 2^53: a float with a fractional part cannot equal an integer,
+        // and one without is exact.
+        (Integer(x), Float(y)) | (Float(y), Integer(x)) => Some(
+            y.is_finite()
+                && y.fract() == 0.0
+                && *y >= i64::MIN as f64
+                && *y <= i64::MAX as f64
+                && (*y as i64) == *x,
+        ),
         _ => Some(a == b),
     }
 }
@@ -212,14 +228,69 @@ pub(crate) mod statement_clock {
 
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
-    // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
+    // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
+    // p1 = p2).
+    //
+    // Only *nodes* were handled, so `r = r` on a relationship and `p1 = p2` on
+    // two paths raised "Binary op requires property values" -- an error from
+    // the most ordinary comparison there is, and the reason `WITH a MATCH ...
+    // WHERE a = b` could not be written at all (#860).
     if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-        if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
-            let eq = lid == rid;
+        let same = match (&left, &right) {
+            (Value::NodeRef(a) | Value::Node(a, _), Value::NodeRef(b) | Value::Node(b, _)) => {
+                Some(a == b)
+            }
+            (
+                Value::EdgeRef(a, ..) | Value::Edge(a, _),
+                Value::EdgeRef(b, ..) | Value::Edge(b, _),
+            ) => Some(a == b),
+            // Paths are equal when they visit the same nodes and traverse the
+            // same relationships in the same order. The TCK's scenario is a
+            // self-loop, where a path and its reverse have the identical node
+            // sequence -- so structural equality is what it asks for, and a
+            // direction-insensitive rule would be inventing something it does
+            // not test.
+            (
+                Value::Path { nodes: n1, edges: e1 },
+                Value::Path { nodes: n2, edges: e2 },
+            ) => Some(n1 == n2 && e1 == e2),
+            // An entity is never equal to a non-entity, and that is `false`
+            // rather than an error or a null: the two are comparable, they
+            // simply differ.
+            (Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. }, other)
+            | (other, Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. })
+                if !matches!(other, Value::Property(PropertyValue::Null) | Value::Null) =>
+            {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(eq) = same {
             return Ok(Value::Property(PropertyValue::Boolean(
                 if matches!(op, BinaryOp::Eq) { eq } else { !eq }
             )));
         }
+    }
+
+    // Ordering an entity against anything is **null**, not an error.
+    //
+    // Cypher's rule is that comparing across types yields null except between
+    // numbers, and a node, relationship or path is just another type that does
+    // not order. Raising instead took down the whole query: `Comparison2`
+    // builds a list of one value per type and compares every pair, so a single
+    // `TypeError` on `node < ''` lost all 90 rows including the numeric pair
+    // the scenario is actually about (#840).
+    //
+    // Only the ordering operators. `=` and `<>` on two entities are identity
+    // and are handled above; arithmetic on an entity stays an error, because
+    // there `null` really would hide a mistake.
+    if matches!(op, BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
+        && (!matches!(left, Value::Property(_) | Value::Null)
+            || !matches!(right, Value::Property(_) | Value::Null))
+    {
+        return Ok(Value::Property(PropertyValue::Null));
     }
 
     let left_prop = match left {
@@ -282,6 +353,27 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("XOR requires boolean operands".to_string())),
         },
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            // **NaN orders as false, not null.** `partial_cmp` returns `None`
+            // for it, which this branch maps to null -- the same answer it
+            // gives for two values that cannot be compared at all. Cypher
+            // separates the two: incomparable is null, NaN is false, and all
+            // four operators are false including `>=` against itself (#855).
+            //
+            // Only against another **number**. `0.0/0.0 < 'a'` is still null,
+            // because comparing across types is null before NaN is considered
+            // -- returning false there says "I compared them and they did not
+            // order", which is a different claim. A blanket NaN rule cost one
+            // scenario exactly that way.
+            let is_nan = |p: &PropertyValue| matches!(p, PropertyValue::Float(f) if f.is_nan());
+            let numeric = |p: &PropertyValue| {
+                matches!(p, PropertyValue::Float(_) | PropertyValue::Integer(_))
+            };
+            if (is_nan(&left_prop) || is_nan(&right_prop))
+                && numeric(&left_prop)
+                && numeric(&right_prop)
+            {
+                return Ok(Value::Property(PropertyValue::Boolean(false)));
+            }
             let cmp = cypher_ordering(&left_prop, &right_prop);
             match (op, cmp) {
                 (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
@@ -606,6 +698,20 @@ fn type_name_of(v: &Value) -> &'static str {
 }
 
 fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) -> ExecutionResult<Value> {
+    // A bound that is present and **null** makes the whole slice null:
+    // `[1,2,3][1..null]` is null, not `[2,3]` (#845).
+    //
+    // An *absent* bound is a different thing and still means "to the end":
+    // `[1,2,3][1..]` is `[2,3]`. The two were indistinguishable here because
+    // both arms fell through to the same `_` default, so a null bound was
+    // silently read as an omitted one -- and the result is a perfectly good
+    // list, which is why nothing downstream noticed.
+    let is_null = |b: &Option<Value>| {
+        matches!(b, Some(Value::Property(PropertyValue::Null)) | Some(Value::Null))
+    };
+    if is_null(&start) || is_null(&end) {
+        return Ok(Value::Property(PropertyValue::Null));
+    }
     match &collection {
         Value::Property(PropertyValue::Array(arr)) => {
             let len = arr.len() as i64;
@@ -656,6 +762,20 @@ fn read_property(
     // returns a `PropertyValue` and so would degrade a node to null.
     if let Value::Map(entries) = val {
         return Ok(entries.get(property).cloned().unwrap_or(Value::Null));
+    }
+    // A property read of something the query has already deleted is an error,
+    // not a null. `resolve_property` answers `null` for a missing entity, which
+    // is also the honest answer for a property nobody set -- so `MATCH (n)
+    // DELETE n RETURN n.num` was indistinguishable from reading an unset
+    // property, and reported success (#905).
+    match val {
+        Value::NodeRef(id) | Value::Node(id, _) if store.get_node(*id).is_none() => {
+            return Err(ExecutionError::EntityNotFound(format!("node {}", id.as_u64())));
+        }
+        Value::EdgeRef(id, ..) | Value::Edge(id, _) if store.get_edge(*id).is_none() => {
+            return Err(ExecutionError::EntityNotFound(format!("relationship {}", id.as_u64())));
+        }
+        _ => {}
     }
     Ok(Value::Property(val.resolve_property(property, store)))
 }
@@ -1157,14 +1277,36 @@ fn eval_list_comprehension(
         }
 
         // Apply map expression
-        let mapped = eval_expression(map_expr, &inner_record, store)?;
-        match mapped {
-            Value::Property(pv) => result.push(pv),
-            _ => result.push(PropertyValue::Null),
-        }
+        result.push(eval_expression(map_expr, &inner_record, store)?);
     }
 
-    Ok(Value::Property(PropertyValue::Array(result)))
+    // A projection that yields **entities** stays a `Value::List`.
+    //
+    // Every mapped value used to be forced into a `PropertyValue`, and anything
+    // that is not one -- a node, a relationship, a path, a nested entity list --
+    // became `Null`. So `[x IN collect(p) | head(nodes(x))]` answered
+    // `[null, null]` where two nodes belong: a list of the right length, full of
+    // nothing, which no caller can distinguish from a projection that
+    // legitimately produced nulls (#863).
+    //
+    // #800 fixed the *input* side of this same distinction -- a list holding
+    // entities is a `Value::List`, not a `PropertyValue` -- and left the output
+    // side converting them away.
+    //
+    // A list of plain property values still comes back as `PropertyValue::Array`,
+    // because that is what every existing caller of a comprehension expects and
+    // what the storage layer can hold.
+    if result.iter().all(|v| matches!(v, Value::Property(_))) {
+        let props = result
+            .into_iter()
+            .map(|v| match v {
+                Value::Property(p) => p,
+                _ => unreachable!("checked above"),
+            })
+            .collect();
+        return Ok(Value::Property(PropertyValue::Array(props)));
+    }
+    Ok(Value::List(result))
 }
 
 /// Evaluate predicate functions: all(x IN list WHERE pred), any(...), none(...), single(...)
@@ -1193,24 +1335,61 @@ fn eval_predicate_function(
         _ => return Ok(Value::Property(PropertyValue::Boolean(false))),
     };
 
+    // Quantifiers are **three-valued**: a predicate that evaluates to null on
+    // some element makes the answer null unless the elements that *did* decide
+    // already settle it (#826).
+    //
+    // Counting nulls as "not true" -- which is what tracking only `true_count`
+    // does -- collapses the third value into `false`, and `false` is a
+    // perfectly usable answer that the caller will branch on:
+    //
+    //     any(x IN [0, null] WHERE x = 2)     null, was false
+    //     all(x IN [2, null] WHERE x = 2)     null, was false
+    //     single(x IN [2, null] WHERE x = 2)  null, was true
+    //
+    // The last one is the worst of the three: it flips to the *opposite*
+    // certainty rather than to a weaker one.
     let mut true_count = 0usize;
+    let mut false_count = 0usize;
+    let mut unknown = false;
     for item in &items {
         let mut inner_record = record.clone_with_capacity(1);
         inner_record.bind(variable.to_string(), item.clone());
-        let result = eval_expression(predicate, &inner_record, store)?;
-        if matches!(result, Value::Property(PropertyValue::Boolean(true))) {
-            true_count += 1;
+        match eval_expression(predicate, &inner_record, store)? {
+            Value::Property(PropertyValue::Boolean(true)) => true_count += 1,
+            Value::Property(PropertyValue::Boolean(false)) => false_count += 1,
+            Value::Property(PropertyValue::Null) | Value::Null => unknown = true,
+            // A predicate that is neither boolean nor null keeps its existing
+            // treatment. Cypher would raise here; making that change without a
+            // scenario to check it against would be guessing.
+            _ => false_count += 1,
         }
     }
 
-    let result = match name {
-        "all" => true_count == items.len(),
-        "any" => true_count > 0,
-        "none" => true_count == 0,
-        "single" => true_count == 1,
-        _ => false,
+    // Each quantifier has one outcome it can be *certain* of from a single
+    // element. Reaching it beats an unknown; failing to reach it does not,
+    // because the unknown elements could have supplied it.
+    let decided = match name {
+        "all" => (false_count > 0).then_some(false),
+        "any" => (true_count > 0).then_some(true),
+        "none" => (true_count > 0).then_some(false),
+        // `single` is the one that can be settled by *either* certainty:
+        // two trues rule it out no matter what the unknowns hold.
+        "single" => (true_count > 1).then_some(false),
+        _ => Some(false),
     };
-    Ok(Value::Property(PropertyValue::Boolean(result)))
+    let result = match decided {
+        Some(v) => PropertyValue::Boolean(v),
+        None if unknown => PropertyValue::Null,
+        None => PropertyValue::Boolean(match name {
+            "all" => true,
+            "any" => false,
+            "none" => true,
+            "single" => true_count == 1,
+            _ => false,
+        }),
+    };
+    Ok(Value::Property(result))
 }
 
 /// Evaluate reduce(acc = init, x IN list | expr)
@@ -1227,8 +1406,20 @@ fn eval_reduce(
     let list_val = eval_expression(list_expr, record, store)?;
     // See the note in `eval_list_comprehension`: an all-float list literal is a
     // `Vector`, and giving up here returned the seed unchanged (#605).
-    let items = match list_val {
-        Value::Property(ref p) if p.as_list_items().is_some() => p.as_list_items().unwrap(),
+    //
+    // A list holding **entities** is a `Value::List`, and it fell into the same
+    // give-up arm: `reduce(acc = 0, x IN nodes(p) | acc + 1)` returned **0** for
+    // a two-node path. The seed is a legitimate answer for an empty list, so
+    // nothing distinguishes "nothing to fold" from "I did not recognise your
+    // list" (#863).
+    let items: Vec<Value> = match list_val {
+        Value::Property(ref p) if p.as_list_items().is_some() => p
+            .as_list_items()
+            .unwrap()
+            .into_iter()
+            .map(Value::Property)
+            .collect(),
+        Value::List(items) => items,
         _ => return Ok(init_val),
     };
 
@@ -1236,7 +1427,7 @@ fn eval_reduce(
     for item in items {
         let mut inner_record = record.clone();
         inner_record.bind(accumulator.to_string(), acc);
-        inner_record.bind(variable.to_string(), Value::Property(item));
+        inner_record.bind(variable.to_string(), item);
         acc = eval_expression(expression, &inner_record, store)?;
     }
     Ok(acc)
@@ -1568,6 +1759,27 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
         // that had been passing went red, which is the duplicated-evaluator
         // shape this codebase keeps producing: patching the copy in front of
         // you fixes nothing.
+        // Lists order **lexicographically**, then by length: `[1, 0] >= [1]`
+        // is true because the shared prefix is equal and the left is longer.
+        // There was no arm for this at all, so every list comparison fell to
+        // `_ => None` and answered null (#855).
+        //
+        // A null at a position that has to be compared makes the answer
+        // undecidable, which is what `None` means here. It is not reached by a
+        // list that is merely *longer* than the other: `[1, null] >= [1]` is
+        // decided by the length, the null never compared.
+        (Array(l), Array(r)) => {
+            for (a, b) in l.iter().zip(r.iter()) {
+                if matches!(a, Null) || matches!(b, Null) {
+                    return None;
+                }
+                match cypher_ordering(a, b) {
+                    Some(std::cmp::Ordering::Equal) => continue,
+                    other => return other,
+                }
+            }
+            Some(l.len().cmp(&r.len()))
+        }
         (Date(l), Date(r)) => Some(l.cmp(r)),
         (LocalTime(l), LocalTime(r)) => Some(l.cmp(r)),
         (
@@ -1648,6 +1860,22 @@ fn date_part_of(v: &PropertyValue) -> Option<i32> {
     }
 }
 
+/// Split a (days-since-epoch, nanoseconds-of-day) pair into the
+/// (seconds, nanos) a `LocalDateTime` or `ZonedDateTime` stores.
+///
+/// Computing `days * 86_400 * 1_000_000_000` first **overflows i64**: that
+/// product spans only about ±292 years from 1970, so `year: 1` silently became
+/// 1754 and `year: 9999` became 1815. Well-formed date-times, wrapped.
+///
+/// Seconds are the wider unit and cover ±292 *billion* years, so the days go
+/// through seconds and only the sub-day remainder is ever counted in
+/// nanoseconds (#814).
+fn day_and_nanos_to_secs(days: i32, nanos_of_day: i64) -> (i64, u32) {
+    let secs = days as i64 * 86_400 + nanos_of_day.div_euclid(1_000_000_000);
+    (secs, nanos_of_day.rem_euclid(1_000_000_000) as u32)
+}
+
+
 /// Apply a map's date components on top of an already-selected date.
 ///
 /// `{date: other, day: 28}` keeps `other`'s year and month and replaces the
@@ -1677,13 +1905,34 @@ fn apply_date_overrides(
         chrono::NaiveDate::from_yo_opt(year, ord as u32)
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid ordinalDay {ord}")))?
     } else if map.contains_key("week") || map.contains_key("dayOfWeek") {
+        // In a week date the year is the **ISO week year**, which is not the
+        // calendar year near a year boundary: 1816-12-30 is a Monday belonging
+        // to 1817-W01, so `{date: date('1816-12-30'), week: 2}` is in January
+        // 1817. Defaulting to `cur.year()` sent it to 1816-W02, eleven and a
+        // half months early -- a real date, in the wrong year (#851).
+        //
+        // An explicit `year` still wins, and is likewise read as the week year:
+        // `{date: date('1816-12-31'), year: 1817, week: 2}` is 1817-W02.
+        let week_year = g("year").unwrap_or(cur.iso_week().year() as i64) as i32;
         let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
         let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
-        chrono::NaiveDate::from_isoywd_opt(year, week, weekday_from_iso_num(dow))
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {year}-W{week}-{dow}")))?
+        chrono::NaiveDate::from_isoywd_opt(week_year, week, weekday_from_iso_num(dow))
+            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {week_year}-W{week}-{dow}")))?
     } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
         let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
-        let d = g("dayOfQuarter").unwrap_or(1);
+        // The day within the quarter defaults to the **current** one, exactly
+        // as `week`/`dayOfWeek` above default from `cur`. Defaulting to 1 made
+        // `{date: <1984-11-11>, quarter: 3}` answer 1984-07-01 instead of
+        // 1984-08-11: an override that names one component silently reset two
+        // others, and the result is a perfectly ordinary date (#838).
+        let cur_quarter_start = chrono::NaiveDate::from_ymd_opt(
+            cur.year(),
+            ((cur.month() - 1) / 3) * 3 + 1,
+            1,
+        )
+        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let cur_day_of_quarter = cur.signed_duration_since(cur_quarter_start).num_days() + 1;
+        let d = g("dayOfQuarter").unwrap_or(cur_day_of_quarter);
         let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid quarter {q}")))?;
         start
@@ -1778,23 +2027,21 @@ fn compose_date_and_time(
         }
     };
 
-    // Date overrides on top of a selected date.
-    if base_date.is_some()
-        && ["year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter"]
-            .iter()
-            .any(|k| map.contains_key(*k))
-    {
-        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-        let cur = epoch
-            .checked_add_signed(chrono::Duration::days(days as i64))
-            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
-        let y = map.get("year").and_then(|v| v.as_integer()).unwrap_or(cur.year() as i64) as i32;
-        let mo = map.get("month").and_then(|v| v.as_integer()).unwrap_or(cur.month() as i64) as u32;
-        let d = map.get("day").and_then(|v| v.as_integer()).unwrap_or(cur.day() as i64) as u32;
-        days = chrono::NaiveDate::from_ymd_opt(y, mo, d)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {y}-{mo}-{d}")))?
-            .signed_duration_since(epoch)
-            .num_days() as i32;
+    // Date overrides on top of a selected date, through the same function
+    // `date()` uses.
+    //
+    // This was a **second implementation** of the rule, and it tested for
+    // `week`, `dayOfWeek`, `ordinalDay`, `quarter` and `dayOfQuarter` in its
+    // condition and then handled only `year`/`month`/`day`. So
+    // `localdatetime({date: date('1816-12-31'), week: 2})` entered the branch,
+    // recomputed the same y/m/d it started with, and returned the date
+    // unchanged -- a correct-looking value from an override that did nothing.
+    //
+    // Routing both through `apply_date_overrides` also gives the composite
+    // constructors the week-year rule (#851) and the `quarter` fix (#838),
+    // neither of which they had (#851).
+    if base_date.is_some() {
+        days = apply_date_overrides(days, map)?;
     }
 
     let clock_keys = ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
@@ -2170,8 +2417,18 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // failing the query. Erroring made `toInteger` unusable for the
                 // thing it is mostly used for -- checking whether input is a
                 // number at all (#606).
+                // A string holding a **float** converts too, truncating:
+                // `toInteger('2.9')` is 2, the same as `toInteger(2.9)`. Only
+                // `parse::<i64>()` was tried, so it answered null -- the same
+                // null it gives for `'foo'`, which is the answer that means
+                // "not a number at all" (#885).
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(
-                    s.parse::<i64>()
+                    s.trim()
+                        .parse::<i64>()
+                        .ok()
+                        .or_else(|| {
+                            s.trim().parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i64)
+                        })
                         .map(PropertyValue::Integer)
                         .unwrap_or(PropertyValue::Null),
                 )),
@@ -2638,26 +2895,65 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
-                    let offset = match map.get("timezone").and_then(|v| v.as_string()) {
-                        Some(tz) => tmp::parse_timezone(&tz)?.0,
-                        None => 0,
+                    let named = match map.get("timezone").and_then(|v| v.as_string()) {
+                        Some(tz) => Some(tmp::parse_timezone(&tz)?.0),
+                        None => None,
                     };
                     if let Some(src) = map.get("time").or_else(|| map.get("datetime")) {
                         if let Some(n) = time_part_of(src) {
+                            // Selecting a time from a zoned value **inherits its
+                            // offset**. Defaulting to 0 relabelled 12:00+01:00 as
+                            // 12:00Z -- a different instant, rendered as a
+                            // perfectly good time (#838).
+                            let src_offset = offset_seconds_of(src);
+                            let from = src_offset.unwrap_or(0);
+                            // A `timezone` given alongside a **zoned** source
+                            // converts the instant rather than renaming the
+                            // offset: `{time: <12:00+01:00>, timezone: '+05:00'}`
+                            // is 16:00+05:00, the same moment read elsewhere.
+                            // Overrides apply after the conversion, so
+                            // `second: 42` on that gives 16:00:42+05:00.
+                            //
+                            // A **local** source has no instant to convert
+                            // from, so the timezone labels its clock and leaves
+                            // it where it is:
+                            // `{time: localtime('12:31'), timezone: '+05:00'}`
+                            // is 12:31+05:00, not 16:31. Converting
+                            // unconditionally gets the zoned rows right and
+                            // these four wrong -- the same asymmetry as #821,
+                            // one constructor over.
+                            let to = named.unwrap_or(from);
+                            let shifted = if src_offset.is_some() {
+                                (n + (to - from) as i64 * 1_000_000_000)
+                                    .rem_euclid(86_400 * 1_000_000_000)
+                            } else {
+                                n
+                            };
                             return Ok(Value::Property(PropertyValue::Time {
-                                nanos: apply_time_overrides(n, map),
-                                offset_seconds: offset,
+                                nanos: apply_time_overrides(shifted, map),
+                                offset_seconds: to,
                             }));
                         }
                     }
+                    // Built from components, `timezone` names the offset the
+                    // clock is *in*; there is no source instant to convert.
                     Ok(Value::Property(PropertyValue::Time {
                         nanos: tmp::time_of_day_nanos(map)?,
-                        offset_seconds: offset,
+                        offset_seconds: named.unwrap_or(0),
                     }))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-                other => match value_as_property(other).and_then(|p| time_part_of(&p)) {
-                    Some(n) => Ok(Value::Property(PropertyValue::Time { nanos: n, offset_seconds: 0 })),
+                other => match value_as_property(other) {
+                    // `time(<zoned value>)` keeps the value's own offset (#838).
+                    Some(p) => match time_part_of(&p) {
+                        Some(n) => Ok(Value::Property(PropertyValue::Time {
+                            nanos: n,
+                            offset_seconds: offset_seconds_of(&p).unwrap_or(0),
+                        })),
+                        None => Err(ExecutionError::TypeError(
+                            "time() requires a string, a map, or a temporal value".to_string(),
+                        )),
+                    },
                     None => Err(ExecutionError::TypeError(
                         "time() requires a string, a map, or a temporal value".to_string(),
                     )),
@@ -2681,11 +2977,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
                     crate::query::executor::temporal::reject_unknown_map(map)?;
                     let (d, t) = compose_date_and_time(map)?;
-                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
-                    Ok(Value::Property(PropertyValue::LocalDateTime {
-                        secs: total.div_euclid(1_000_000_000),
-                        nanos: total.rem_euclid(1_000_000_000) as u32,
-                    }))
+                    let (secs, nanos) = day_and_nanos_to_secs(d, t);
+                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                 // A bare temporal value: take its date and time parts.
@@ -2695,11 +2988,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(p) if date_part_of(p).is_some() => {
                     let d = date_part_of(p).unwrap_or(0);
                     let t = time_part_of(p).unwrap_or(0);
-                    let total = d as i64 * 86_400 * 1_000_000_000 + t;
-                    Ok(Value::Property(PropertyValue::LocalDateTime {
-                        secs: total.div_euclid(1_000_000_000),
-                        nanos: total.rem_euclid(1_000_000_000) as u32,
-                    }))
+                    let (secs, nanos) = day_and_nanos_to_secs(d, t);
+                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
                 }
                 _ => Err(ExecutionError::TypeError(
                     "localdatetime() requires a string, a map, or a temporal value".to_string(),
@@ -2787,7 +3077,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         None => None,
                     };
                     let (d, t) = compose_date_and_time(map)?;
-                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
+                    // Seconds, not nanoseconds: the nanosecond product spans
+                    // only ±292 years from 1970 and wraps for anything outside
+                    // 1678..2262 (#814).
+                    let (local_secs, local_nanos) = day_and_nanos_to_secs(d, t);
                     // A named zone has no single offset -- Europe/Stockholm is
                     // +01:00 in October and +02:00 in July -- so it is resolved
                     // against *this* local date, not at parse time (#767).
@@ -2829,15 +3122,15 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             _ => None,
                         });
                     // The components describe local time; store the instant.
-                    let utc = match source_offset {
-                        // A re-zoning: `local` is already the source's wall
+                    let utc_secs = match source_offset {
+                        // A re-zoning: the reading is already the source's wall
                         // clock, so undo *its* offset, not the target's.
-                        Some(src) if spec.is_some() => local - src as i64 * 1_000_000_000,
-                        _ => local - offset_seconds as i64 * 1_000_000_000,
+                        Some(src) if spec.is_some() => local_secs - src as i64,
+                        _ => local_secs - offset_seconds as i64,
                     };
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
-                        secs: utc.div_euclid(1_000_000_000),
-                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        secs: utc_secs,
+                        nanos: local_nanos,
                         offset_seconds,
                         zone,
                     }))
@@ -2857,11 +3150,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     };
                     let d = date_part_of(p).unwrap_or(0);
                     let t = time_part_of(p).unwrap_or(0);
-                    let local = d as i64 * 86_400 * 1_000_000_000 + t;
-                    let utc = local - off as i64 * 1_000_000_000;
+                    let (local_secs, nanos) = day_and_nanos_to_secs(d, t);
                     Ok(Value::Property(PropertyValue::ZonedDateTime {
-                        secs: utc.div_euclid(1_000_000_000),
-                        nanos: utc.rem_euclid(1_000_000_000) as u32,
+                        secs: local_secs - off as i64,
+                        nanos,
                         offset_seconds: off,
                         zone,
                     }))
@@ -2880,29 +3172,82 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     parse_iso_duration(s)
                 }
                 Value::Property(PropertyValue::Map(map)) => {
-                    let months = map.get("months").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let days = map.get("days").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let hours = map.get("hours").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let minutes = map.get("minutes").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let seconds = map.get("seconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let years = map.get("years").and_then(|v| v.as_integer()).unwrap_or(0);
-                    // The sub-second components, which were hardcoded to zero:
-                    // `duration({nanoseconds: 1})` silently lost the 1, so the
-                    // value was already wrong before any arithmetic touched it
-                    // (#787). Additive with each other, as everywhere else.
-                    let millis = map.get("milliseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let micros = map.get("microseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let nanos_in = map.get("nanoseconds").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let weeks = map.get("weeks").and_then(|v| v.as_integer()).unwrap_or(0);
-                    let total_months = years * 12 + months;
-                    let sub_nanos = millis * 1_000_000 + micros * 1_000 + nanos_in;
-                    let total_seconds = hours * 3600 + minutes * 60 + seconds
-                        + sub_nanos.div_euclid(1_000_000_000);
+                    // Every component may be **fractional**, and the fraction
+                    // carries into the next smaller unit (#829):
+                    //
+                    //     duration({months: 0.75})   ->  P22DT19H51M49.5S
+                    //     duration({weeks: 2.5})     ->  P17DT12H
+                    //     duration({months: 5, days: 1.5})  ->  P5M1DT12H
+                    //
+                    // `as_integer()` returns `None` for a float, so each of
+                    // these silently became zero: `duration({months: 0.75})`
+                    // was `PT0S`, a well-formed duration nothing downstream
+                    // could question. (#787 was the same shape, one component
+                    // over.)
+                    let num = |key: &str| -> f64 {
+                        map.get(key)
+                            .and_then(|v| v.as_integer().map(|i| i as f64).or_else(|| v.as_float()))
+                            .unwrap_or(0.0)
+                    };
+                    // A mean Gregorian month is 365.2425/12 days, which is
+                    // **exactly 2,629,746 seconds**. Carrying in seconds rather
+                    // than in days keeps the arithmetic on integers-as-floats:
+                    // 0.75 months is 1,972,309.5s exactly, where 0.75 x
+                    // 30.436875 days is not exactly representable and lands a
+                    // hundred nanoseconds short of the expected 49.5S.
+                    const SECS_PER_MEAN_MONTH: f64 = 2_629_746.0;
+
+                    let months_f = num("years") * 12.0 + num("months");
+                    let months = months_f.trunc();
+                    // A month's fraction becomes whole days first, then time --
+                    // 0.75 months is 22 days *and* 19:51:49.5, not 22.83 days.
+                    let month_carry_secs = (months_f - months) * SECS_PER_MEAN_MONTH;
+                    let carry_days = (month_carry_secs / 86_400.0).trunc();
+                    let month_rem_secs = month_carry_secs - carry_days * 86_400.0;
+
+                    let days_f = num("days") + num("weeks") * 7.0 + carry_days;
+                    let days = days_f.trunc();
+
+                    let secs_f = num("hours") * 3600.0
+                        + num("minutes") * 60.0
+                        + num("seconds")
+                        + (days_f - days) * 86_400.0
+                        + month_rem_secs;
+                    let secs = secs_f.trunc();
+
+                    // Sub-second components are additive with each other and
+                    // with whatever fell out of the seconds (#787).
+                    let nanos_f = num("milliseconds") * 1_000_000.0
+                        + num("microseconds") * 1_000.0
+                        + num("nanoseconds")
+                        + (secs_f - secs) * 1_000_000_000.0;
+                    // Ties to even: `.round()` goes half away from zero, which
+                    // biases an exact `...000.5` upward every time.
+                    let nanos_total = nanos_f.round_ties_even() as i64;
+
+                    // Combine seconds and nanoseconds into one total **before**
+                    // splitting, then split truncating toward zero. Neither
+                    // split alone is right, and each looks right on the cases
+                    // the other gets wrong:
+                    //
+                    //   {seconds: 2, milliseconds: -1}  is PT1.999S
+                    //     truncating in place: (2s, -1ms)   mixed signs
+                    //     Euclidean:           (1s, +999ms) correct
+                    //
+                    //   {nanoseconds: -1}               is PT-0.000000001S
+                    //     truncating in place: (0s, -1ns)   correct
+                    //     Euclidean:           (-1s, +999999999ns) mixed signs
+                    //
+                    // The invariant (#806) is that the components share the
+                    // sign of the **total**, so the total is what has to be
+                    // formed first. i128 because seconds can be large and the
+                    // nanosecond product overflows i64 past ~292 years (#814).
+                    let total_nanos = secs as i128 * 1_000_000_000 + nanos_total as i128;
                     Ok(Value::Property(PropertyValue::Duration {
-                        months: total_months,
-                        days: days + weeks * 7,
-                        seconds: total_seconds,
-                        nanos: sub_nanos.rem_euclid(1_000_000_000) as i32,
+                        months: months as i64,
+                        days: days as i64,
+                        seconds: (total_nanos / 1_000_000_000) as i64,
+                        nanos: (total_nanos % 1_000_000_000) as i32,
                     }))
                 }
                 _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
@@ -2964,15 +3309,25 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             // result carried the wrong sign -- and half the TCK rows expect a
             // negative answer, so it looked correct on exactly the half that
             // happened to be positive (#775).
-            let diff = temporal_difference(&b, &a)?;
-            let (days, seconds, nanos) = match diff {
-                PropertyValue::Duration { days, seconds, nanos, .. } => (days, seconds, nanos),
-                _ => (0, 0, 0),
+            // `inMonths` needs the **calendar** month count, so it uses the
+            // calendar difference; `inDays` and `inSeconds` want elapsed time
+            // and use the plain one. Dividing an elapsed day count by 30 gave
+            // `P11M29D...` where `P1Y` belongs — 12 months' worth of days that
+            // never became a year, because 365 / 30 is 12.16 and the truncation
+            // lands one month short (#812).
+            let diff = if lowered == "duration.inmonths" {
+                temporal_difference_calendar(&b, &a)?
+            } else {
+                temporal_difference(&b, &a)?
+            };
+            let (months, days, seconds, nanos) = match diff {
+                PropertyValue::Duration { months, days, seconds, nanos } => (months, days, seconds, nanos),
+                _ => (0, 0, 0, 0),
             };
             Ok(Value::Property(match lowered.as_str() {
-                // Seconds carries the whole difference in seconds plus the
-                // sub-second remainder; days and months carry only whole units,
-                // with the remainder discarded rather than rounded.
+                // Each truncates to its own unit and **discards** the
+                // remainder, rather than rounding it: `inDays` of 30 hours is
+                // one day, not one and a quarter.
                 "duration.inseconds" => PropertyValue::Duration {
                     months: 0, days: 0, seconds: days * 86_400 + seconds, nanos,
                 },
@@ -2980,7 +3335,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     months: 0, days: days + seconds / 86_400, seconds: 0, nanos: 0,
                 },
                 _ => PropertyValue::Duration {
-                    months: (days + seconds / 86_400) / 30, days: 0, seconds: 0, nanos: 0,
+                    months, days: 0, seconds: 0, nanos: 0,
                 },
             }))
         }
@@ -3139,7 +3494,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
                     "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
                     "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
-                    _ => Err(ExecutionError::TypeError(format!("Cannot convert '{}' to boolean", s))),
+                    // A string that is not a boolean converts to null, not to
+                    // an error: `toBoolean('')` is a *question* about the
+                    // string, and "no" is an answer. Erroring killed the whole
+                    // query -- `UNWIND [null, '', ' tru '] AS x RETURN
+                    // toBoolean(x)` returned nothing at all rather than three
+                    // nulls (#907).
+                    _ => Ok(Value::Property(PropertyValue::Null)),
                 },
                 Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Boolean(*i != 0))),
                 Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
@@ -3298,6 +3659,138 @@ fn scale_duration(
 /// that decision in one place is the point: the shift used to be written inline
 /// per operator, which is how `+` and `-` came to disagree about whether months
 /// were calendar months.
+/// The zone a value carries, if it carries one.
+///
+/// A `ZonedDateTime` may name a *region* whose offset depends on the moment it
+/// is applied to — `Europe/Stockholm` is +02:00 in summer and +01:00 in winter
+/// — so the name is kept rather than collapsed to the stored offset. A `Time`
+/// only ever carries a fixed offset.
+///
+/// The legacy `DateTime` is deliberately absent: it exists for snapshot
+/// compatibility and is already read as UTC everywhere.
+/// The UTC offset a value carries, if it carries one.
+///
+/// A `LocalTime` or `LocalDateTime` has none; a `Date` has none. Only the two
+/// zoned types answer, and the caller decides what "none" means -- inheriting
+/// zero and inheriting nothing are different (#838).
+fn offset_seconds_of(v: &PropertyValue) -> Option<i32> {
+    match v {
+        PropertyValue::Time { offset_seconds, .. }
+        | PropertyValue::ZonedDateTime { offset_seconds, .. } => Some(*offset_seconds),
+        PropertyValue::DateTime(_) => Some(0),
+        _ => None,
+    }
+}
+
+fn zone_of(v: &PropertyValue) -> Option<crate::query::executor::temporal::TzSpec> {
+    use crate::query::executor::temporal::{parse_timezone_spec, TzSpec};
+    match v {
+        PropertyValue::ZonedDateTime { zone, offset_seconds, .. } => Some(
+            zone.as_deref()
+                .and_then(|z| parse_timezone_spec(z).ok())
+                .unwrap_or(TzSpec::Offset(*offset_seconds)),
+        ),
+        PropertyValue::Time { offset_seconds, .. } => Some(TzSpec::Offset(*offset_seconds)),
+        _ => None,
+    }
+}
+
+/// Both values as instants, with an unzoned value read **in the other's zone**.
+///
+/// Cypher does not compare a local temporal against a zoned one by treating the
+/// local one as UTC. The local one is placed in the zoned one's zone, and only
+/// then are the two instants compared:
+///
+/// ```text
+/// duration.between(localdatetime('2015-07-21T21:40:32.142'),
+///                  datetime('2015-07-21T21:40:32.142+0100'))   ->  PT0S
+/// ```
+///
+/// Reading the left side as UTC gives `PT1H`. Every wrong answer in this class
+/// was off by exactly one offset, which is why it looked like a sign or
+/// rounding bug rather than a missing rule.
+///
+/// Two consequences that are easy to miss:
+///
+///   * **A value with no date borrows the other's.** `duration.between` of a
+///     `time` and a `datetime` compares them on the datetime's day — otherwise
+///     the time-of-day sits at the epoch and the answer is decades.
+///   * **DST is resolved at the local side's own wall clock**, not the zoned
+///     side's. On 2017-10-29 Stockholm falls back at 03:00, so a local
+///     midnight is still +02:00 while 04:00 is already +01:00:
+///
+/// ```text
+/// duration.between(localdatetime({year: 2017, month: 10, day: 29, hour: 0}),
+///                  datetime({year: 2017, month: 10, day: 29, hour: 4,
+///                            timezone: 'Europe/Stockholm'}))    ->  PT5H
+/// ```
+///
+/// `PT5H`, not the `PT4H` the wall clocks suggest. That one hour is the whole
+/// reason this cannot be done by subtracting local readings (#821).
+///
+/// Returns `None` when neither side is zoned, leaving the existing local-only
+/// paths untouched.
+fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, i128)> {
+    use crate::query::executor::temporal::resolve_offset;
+    let (za, zb) = (zone_of(a), zone_of(b));
+    if za.is_none() && zb.is_none() {
+        return None;
+    }
+    let (da, db) = (date_part_of(a), date_part_of(b));
+    // A date-less value borrows the other's day. When neither has one — two
+    // `time`s — the day is arbitrary and cancels.
+    let (day_a, day_b) = (da.or(db).unwrap_or(0), db.or(da).unwrap_or(0));
+    // A clock-less value is midnight, which is what a bare `date` means.
+    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+    let instant = |own: &Option<_>, other: &Option<_>, day: i32, nanos_of_day: i64| {
+        // Own zone first; the other's only when there is none of one's own.
+        let spec: Option<crate::query::executor::temporal::TzSpec> =
+            own.clone().or_else(|| other.clone());
+        let offset = match &spec {
+            Some(s) => resolve_offset(s, day as i64, nanos_of_day).ok()?,
+            None => 0,
+        };
+        // Seconds carry the day, so a far-off year cannot overflow the way a
+        // nanosecond product does (#814).
+        let secs = day as i128 * 86_400 + nanos_of_day.div_euclid(1_000_000_000) as i128
+            - offset as i128;
+        Some(secs * 1_000_000_000 + nanos_of_day.rem_euclid(1_000_000_000) as i128)
+    };
+    Some((
+        instant(&za, &zb, day_a, ta)?,
+        instant(&zb, &za, day_b, tb)?,
+    ))
+}
+
+/// A `Value` as something a property can hold, or `None` if it cannot.
+///
+/// The distinction that matters is `Value::List` versus
+/// `PropertyValue::Array`. `eval_expression` produces the latter only when
+/// every element was already a literal, so `{xs: [date('1984-10-11')]}` --
+/// or `[1 + 1]`, or `[abs(-1)]` -- arrives as a `Value::List`.
+///
+/// Five write paths each tested for `Value::Property` separately and each got
+/// this wrong in its own way: two raised "refers to a variable that is not
+/// bound here" about a query with no variables in it, one raised "must be a
+/// scalar" about a list, and the relationship path **silently stored nothing**
+/// -- `CREATE ()-[:R {xs: [date(...)]}]->()` succeeded with `xs` null (#831).
+///
+/// `Value::Null` is deliberately not handled here: the paths disagree about
+/// whether an unbound variable is an error or a null property, and that
+/// disagreement is theirs to keep.
+fn storable_property(v: &Value) -> Option<PropertyValue> {
+    match v {
+        Value::Property(p) => Some(p.clone()),
+        Value::List(items) => items
+            .iter()
+            .map(storable_property)
+            .collect::<Option<Vec<_>>>()
+            .map(PropertyValue::Array),
+        // A property can hold neither an entity nor a map.
+        _ => None,
+    }
+}
+
 fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
     match v {
         PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
@@ -3329,9 +3822,35 @@ fn shift_temporal(
     nanos: i64,
 ) -> Result<PropertyValue, ExecutionError> {
     use chrono::Datelike;
-    let exact = days as i128 * 86_400 * 1_000_000_000
-        + seconds as i128 * 1_000_000_000
-        + nanos as i128;
+    // A `Date` has no clock, so a duration's **sub-day part is dropped** rather
+    // than applied — and dropped *before* the components are combined.
+    //
+    // `days: -14` with a `+15h49m` remainder combines to -13.34 days, and
+    // truncating that gives -13: one day off, because the fractional part
+    // belongs to the clock the date does not have. Keeping the days field and
+    // discarding the rest gives -14, which is what the calendar arithmetic
+    // means.
+    //
+    // Addition looked correct throughout — a positive remainder truncates back
+    // to the same day — so this only showed up on subtraction and on
+    // mixed-sign durations (#817).
+    let drop_sub_day = matches!(v, PropertyValue::Date(_));
+    // A time of day has no calendar, so a duration's **date part is dropped**:
+    // months and days cannot move a clock. This is the mirror of the rule
+    // above, and it is why `localtime('12:31:14') + duration({months: 1,
+    // days: -14, hours: 16})` is a time sixteen hours later and not an error
+    // (#853).
+    let drop_date_part = matches!(v, PropertyValue::LocalTime(_) | PropertyValue::Time { .. });
+    let exact = if drop_sub_day {
+        days as i128 * 86_400 * 1_000_000_000
+    } else if drop_date_part {
+        seconds as i128 * 1_000_000_000 + nanos as i128
+    } else {
+        days as i128 * 86_400 * 1_000_000_000
+            + seconds as i128 * 1_000_000_000
+            + nanos as i128
+    };
+    let months = if drop_date_part { 0 } else { months };
 
     // Calendar months first, on whatever date part the value has.
     let month_shift_nanos = if months == 0 {
@@ -3452,38 +3971,9 @@ fn temporal_difference_calendar(
     }
 
     let (da, db) = (date_part_of(a), date_part_of(b));
-    if da.is_none() || db.is_none() {
-        // Compare instants only when **both** sides carry an offset; otherwise
-        // compare the local readings.
-        //
-        // `time('14:30')` vs `time('16:30+0100')` is `PT1H` — both are zoned, so
-        // the second is 15:30 UTC. But `localtime('14:30')` vs
-        // `time('16:30+0100')` is `PT2H`: the unzoned side has no instant to
-        // convert to, so the offset is not applied to the other. Normalising
-        // unconditionally gets the first right and the second wrong; not
-        // normalising at all does the reverse.
-        let has_offset = |v: &PropertyValue| matches!(v, PropertyValue::Time { .. });
-        let both_zoned = has_offset(a) && has_offset(b);
-        let clock = |v: &PropertyValue| -> Option<i64> {
-            let local = time_part_of(v)?;
-            Some(match v {
-                PropertyValue::Time { offset_seconds, .. } if both_zoned => {
-                    local - *offset_seconds as i64 * 1_000_000_000
-                }
-                _ => local,
-            })
-        };
-        let (ta, tb) = (clock(a), clock(b));
-        // One side may have a date and no time — `duration.between(date(...),
-        // localtime(...))` compares the clocks, and a date's clock is midnight.
-        let (ta, tb) = (ta.unwrap_or(0), tb.unwrap_or(0));
-        let diff = ta - tb;
-        return Ok(PropertyValue::Duration {
-            months: 0,
-            days: 0,
-            seconds: diff / 1_000_000_000,
-            nanos: (diff % 1_000_000_000) as i32,
-        });
+    if let Some(shared) = shared_component_difference(a, b) {
+        let _ = (da, db);
+        return shared;
     }
     let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
@@ -3522,7 +4012,26 @@ fn temporal_difference_calendar(
             .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
     };
     let (start, end) = (to_date(db)?, to_date(da)?);
-    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
+    // The clock parts must be compared as **instants** when both sides carry an
+    // offset, exactly as in the time-only path (#807). `time_part_of` returns
+    // the local wall clock, which is right for rendering and wrong here:
+    // 21:40:36.143+0200 and 21:40:32.142+0100 read as 4ms apart locally and are
+    // really 59m55.999s apart, so the borrow fired and stole a month —
+    // `P11M` where `P1Y` belongs (#812).
+    let both_zoned = matches!(
+        (a, b),
+        (PropertyValue::ZonedDateTime { .. }, PropertyValue::ZonedDateTime { .. })
+    );
+    let clock = |v: &PropertyValue| -> i64 {
+        let local = time_part_of(v).unwrap_or(0);
+        match v {
+            PropertyValue::ZonedDateTime { offset_seconds, .. } if both_zoned => {
+                local - *offset_seconds as i64 * 1_000_000_000
+            }
+            _ => local,
+        }
+    };
+    let (ta, tb) = (clock(a), clock(b));
 
     // Whole months, then leftover days, then the clock. Borrowing works as it
     // does on paper: if the clock difference is negative, one day is not yet
@@ -3595,13 +4104,77 @@ fn shift_months_clamped(
         .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
 }
 
+/// Only the components two temporals **share**, when one of them has no date.
+///
+/// A date has no time and a time has no date, so
+/// `duration.between(date(...), localtime('16:30'))` is `PT16H30M` — the clock
+/// difference alone, with the date side contributing nothing. Treating the
+/// missing part as zero instead gave `P-5396DT-7H-30M`: a real duration between
+/// two instants that were never comparable (#807).
+///
+/// Returns `None` when **both** sides carry a date, which is the ordinary case
+/// the callers handle themselves.
+///
+/// This lived inside `temporal_difference_calendar`, so `duration.between` had
+/// the rule and `duration.inDays`/`inSeconds` did not — the same difference
+/// measured two ways disagreed by fifteen years, and only on the mixed pairs
+/// (#849).
+fn shared_component_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Option<Result<PropertyValue, ExecutionError>> {
+    if date_part_of(a).is_some() && date_part_of(b).is_some() {
+        return None;
+    }
+    // Both sides have a clock and at least one carries a zone: they are real
+    // instants on a shared day, and only that treatment gets the
+    // daylight-saving rows right (#821). A side with no clock at all -- a bare
+    // `date` against a `localtime` -- falls through to the reading below,
+    // since there is no instant to compare.
+    if time_part_of(a).is_some() && time_part_of(b).is_some() {
+        if let Some((na, nb)) = zone_aligned_instants(a, b) {
+            let diff = na - nb;
+            return Some(Ok(PropertyValue::Duration {
+                months: 0,
+                days: 0,
+                seconds: (diff / 1_000_000_000) as i64,
+                nanos: (diff % 1_000_000_000) as i32,
+            }));
+        }
+    }
+    // Neither side is zoned: compare the local readings. A date's clock is
+    // midnight.
+    let (ta, tb) = (
+        time_part_of(a).unwrap_or(0),
+        time_part_of(b).unwrap_or(0),
+    );
+    let diff = ta - tb;
+    Some(Ok(PropertyValue::Duration {
+        months: 0,
+        days: 0,
+        seconds: diff / 1_000_000_000,
+        nanos: (diff % 1_000_000_000) as i32,
+    }))
+}
+
 fn temporal_difference(
     a: &PropertyValue,
     b: &PropertyValue,
 ) -> Result<PropertyValue, ExecutionError> {
-    let (na, nb) = match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
-        (Some(x), Some(y)) => (x, y),
-        _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+    // Only the shared components, when one side has no date (#807). This lived
+    // in the calendar function alone, so `duration.between` had the rule and
+    // `duration.inDays`/`inSeconds` did not (#849).
+    if let Some(shared) = shared_component_difference(a, b) {
+        return shared;
+    }
+    // When either side carries a zone the other is read in it, rather than as
+    // UTC (#821).
+    let (na, nb) = match zone_aligned_instants(a, b) {
+        Some(pair) => pair,
+        None => match (temporal_epoch_nanos(a), temporal_epoch_nanos(b)) {
+            (Some(x), Some(y)) => (x, y),
+            _ => return Err(ExecutionError::TypeError("not temporal values".to_string())),
+        },
     };
     let diff = na - nb;
     // Truncating division, not Euclidean. `div_euclid`/`rem_euclid` floor
@@ -3645,63 +4218,119 @@ fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64
 }
 
 /// Parse ISO 8601 duration string (e.g. "P1Y2M3DT4H5M6S")
+/// Parse an ISO-8601 duration, with **per-component signs** (#853).
+///
+/// `toString` renders a mixed-sign duration as `P1DT-0.001S`, and Cypher
+/// requires `duration(toString(d)) = d`. The old scanner accepted only digits
+/// and `.` into its number buffer, so a `-` was silently skipped and the value
+/// came back positive -- a round trip that returned a *different duration* and
+/// reported success.
+///
+/// It also computed the fraction as `(val - val.floor()) * 1e9` in `f64`, so
+/// `PT-2.001S` came back as `PT2.000999999S`: wrong sign and one nanosecond
+/// short. The fraction is now read from its digits, which is exact.
+///
+/// Time components are summed in nanoseconds and split once at the end, so the
+/// result's seconds and nanoseconds share the sign of their total (#806).
 fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
-    let s = s.trim();
-    if !s.starts_with('P') && !s.starts_with('p') {
+    let text = s.trim();
+    if !text.starts_with('P') && !text.starts_with('p') {
         return Err(ExecutionError::RuntimeError(format!("Invalid duration format: {}", s)));
     }
-    let rest = &s[1..];
-    let mut months: i64 = 0;
-    let mut days: i64 = 0;
-    let mut seconds: i64 = 0;
-    let mut nanos: i32 = 0;
-    let _ = nanos; // suppress warning
-
-    let (date_part, time_part) = if let Some(idx) = rest.find(|c: char| c == 'T' || c == 't') {
-        (&rest[..idx], &rest[idx + 1..])
-    } else {
-        (rest, "")
+    let rest = &text[1..];
+    let (date_part, time_part) = match rest.find(|c: char| c == 'T' || c == 't') {
+        Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+        None => (rest, ""),
     };
 
-    // Parse date part: Y, M, D
-    let mut num_buf = String::new();
-    for ch in date_part.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            num_buf.push(ch);
-        } else {
-            let val: f64 = num_buf.parse().unwrap_or(0.0);
-            num_buf.clear();
-            match ch {
-                'Y' | 'y' => months += (val * 12.0) as i64,
-                'M' | 'm' => months += val as i64,
-                'W' | 'w' => days += (val * 7.0) as i64,
-                'D' | 'd' => days += val as i64,
-                _ => {}
-            }
+    const NPS: i128 = 1_000_000_000;
+    // A mean Gregorian month is exactly 2,629,746 seconds (#829).
+    const MEAN_MONTH_NANOS: i128 = 2_629_746 * NPS;
+
+    let mut months: i128 = 0;
+    let mut days: i128 = 0;
+    let mut time_nanos: i128 = 0;
+
+    /// One component: an optional sign, digits, an optional fraction, a unit.
+    ///
+    /// Returns the value scaled to `unit_nanos`, exactly -- the fraction is
+    /// read from its digits rather than through a float, so `.001` is a
+    /// million nanoseconds and not 999,999.
+    fn scaled(sign: i128, int_digits: &str, frac_digits: &str, unit_nanos: i128) -> i128 {
+        let whole: i128 = int_digits.parse().unwrap_or(0);
+        let mut out = whole * unit_nanos;
+        if !frac_digits.is_empty() {
+            let num: i128 = frac_digits.parse().unwrap_or(0);
+            let denom = 10i128.checked_pow(frac_digits.len() as u32).unwrap_or(1);
+            out += num * unit_nanos / denom;
         }
+        sign * out
     }
 
-    // Parse time part: H, M, S
-    num_buf.clear();
-    for ch in time_part.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            num_buf.push(ch);
-        } else {
-            let val: f64 = num_buf.parse().unwrap_or(0.0);
-            num_buf.clear();
+    let mut scan = |section: &str, is_time: bool| -> Result<(), ExecutionError> {
+        let mut sign: i128 = 1;
+        let mut int_digits = String::new();
+        let mut frac_digits = String::new();
+        let mut in_fraction = false;
+        for ch in section.chars() {
             match ch {
-                'H' | 'h' => seconds += (val * 3600.0) as i64,
-                'M' | 'm' => seconds += (val * 60.0) as i64,
-                'S' | 's' => {
-                    seconds += val as i64;
-                    nanos = ((val - val.floor()) * 1_000_000_000.0) as i32;
+                '-' if int_digits.is_empty() && frac_digits.is_empty() => sign = -1,
+                '+' if int_digits.is_empty() && frac_digits.is_empty() => sign = 1,
+                '.' | ',' => in_fraction = true,
+                c if c.is_ascii_digit() => {
+                    if in_fraction { frac_digits.push(c) } else { int_digits.push(c) }
                 }
-                _ => {}
+                unit => {
+                    // Years, weeks and a fractional month or day contribute to
+                    // the next unit down, using the same constants the map
+                    // constructor derives (#829).
+                    match unit {
+                        'Y' | 'y' => months += scaled(sign, &int_digits, &frac_digits, 12),
+                        // A week's fraction carries into the day and then into
+                        // the clock, like a day's does: `P2.5W` is 17 days and
+                        // 12 hours, not 17 days. Scaling straight to whole days
+                        // truncated the half away (#885).
+                        'W' | 'w' => {
+                            let total =
+                                scaled(sign, &int_digits, &frac_digits, NPS * 86_400 * 7);
+                            days += total / (NPS * 86_400);
+                            time_nanos += total % (NPS * 86_400);
+                        }
+                        'D' | 'd' if !is_time => {
+                            let total = scaled(sign, &int_digits, &frac_digits, NPS * 86_400);
+                            days += total / (NPS * 86_400);
+                            time_nanos += total % (NPS * 86_400);
+                        }
+                        'M' | 'm' if !is_time => {
+                            let total = scaled(sign, &int_digits, &frac_digits, MEAN_MONTH_NANOS);
+                            months += total / MEAN_MONTH_NANOS;
+                            let rem = total % MEAN_MONTH_NANOS;
+                            days += rem / (NPS * 86_400);
+                            time_nanos += rem % (NPS * 86_400);
+                        }
+                        'H' | 'h' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 3600),
+                        'M' | 'm' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 60),
+                        'S' | 's' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS),
+                        _ => {}
+                    }
+                    sign = 1;
+                    int_digits.clear();
+                    frac_digits.clear();
+                    in_fraction = false;
+                }
             }
         }
-    }
+        Ok(())
+    };
+    scan(date_part, false)?;
+    scan(time_part, true)?;
 
-    Ok(Value::Property(PropertyValue::Duration { months, days, seconds, nanos }))
+    Ok(Value::Property(PropertyValue::Duration {
+        months: months as i64,
+        days: days as i64,
+        seconds: (time_nanos / NPS) as i64,
+        nanos: (time_nanos % NPS) as i32,
+    }))
 }
 
 /// Shared CASE expression evaluation
@@ -3834,6 +4463,37 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
 }
 
 /// Physical operator trait - all operators implement this
+/// Drain a pass-through operator's input **mutably**, once, and replace it with
+/// the rows it produced.
+///
+/// A pass-through operator's default `next_mut` delegates to `next`, which
+/// reads its input read-only -- so any write beneath it refuses outright with
+/// "requires mutable store access". That defect has now been fixed four times
+/// on different operators (#622 barriers, #624 joins, #649 SKIP and LIMIT, #866
+/// SORT and FILTER), each time for the ones a failing query happened to name.
+///
+/// This is the shared body for the rest. Draining first is not merely
+/// convenient: it lets each operator keep its single `next` implementation
+/// instead of growing a second, mutable copy of its own logic -- which is the
+/// duplication that produced most of this cycle's defects. It also matches
+/// Cypher, where a write is eager anyway; and `next_mut` is only reached when
+/// the query writes, so a read-only plan still streams (#870).
+fn drain_input_for_write(
+    input: &mut OperatorBox,
+    store: &mut GraphStore,
+    tenant_id: &str,
+) -> ExecutionResult<()> {
+    if input.is_materialized() {
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    while let Some(r) = input.next_mut(store, tenant_id)? {
+        rows.push(r);
+    }
+    *input = Box::new(MaterializedOperator::new(rows));
+    Ok(())
+}
+
 pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
@@ -3851,6 +4511,15 @@ pub trait PhysicalOperator: Send {
     /// Returns `true` if the hint was accepted somewhere in the subtree.
     /// The caller may still need to apply a `LimitOperator` on top — this
     /// hint is purely an optimization to avoid unnecessary work upstream.
+    /// Whether this operator replays an already-computed set of rows.
+    ///
+    /// Used by `drain_input_for_write` to tell "I have already drained my
+    /// input" from "I have not", without giving every pass-through operator a
+    /// bookkeeping field of its own (#870).
+    fn is_materialized(&self) -> bool {
+        false
+    }
+
     fn try_push_limit(&mut self, _n: usize) -> bool {
         false
     }
@@ -4716,246 +5385,33 @@ impl FilterOperator {
         }
     }
 
+    /// The filter's binary operator, **delegated** to `eval_binary_op` (#860).
+    ///
+    /// This was a second, drifted implementation -- 67 lines against 346 -- and
+    /// its own comment already said so: *"Note this is a second comparison
+    /// implementation, the two must agree, and did not."* It agreed on the easy
+    /// things and diverged on every rule added since, so a `WHERE` attached to a
+    /// `MATCH` quietly used a weaker comparison engine than the same expression
+    /// in a `RETURN` or after a `WITH`:
+    ///
+    /// ```text
+    /// MATCH ()-[a]->() MATCH ()-[b]->() WHERE a = b   TypeError
+    /// MATCH ()-[a]->() MATCH ()-[b]->() RETURN a = b  true
+    /// ```
+    ///
+    /// It was missing relationship and path identity, the three-valued list and
+    /// map equality of `cypher_equals`, the NaN and list ordering rules, and
+    /// integer-float equality -- every comparison rule fixed this cycle applied
+    /// everywhere *except* the clause most queries filter in.
+    ///
+    /// The seventeen `coerced_eq` / `compare_*` / `arithmetic_*` helpers it
+    /// called are **deleted**, not left unused. One of them carried a rule
+    /// Cypher does not have -- a String/Boolean coercion that made
+    /// `i.active = 'true'` match the boolean `true` -- and keeping them as dead
+    /// code invites the next change to route through them again, which is how
+    /// the two engines drifted apart in the first place.
     fn evaluate_binary_op(&self, op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
-        // Node/edge identity comparison (Cypher: n1 = n2, n1 <> n2)
-        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            if let (Some(lid), Some(rid)) = (node_id_of(&left), node_id_of(&right)) {
-                let eq = lid == rid;
-                return Ok(Value::Property(PropertyValue::Boolean(
-                    if matches!(op, BinaryOp::Eq) { eq } else { !eq }
-                )));
-            }
-        }
-
-        // Extract property values
-        let left_prop = match left {
-            Value::Property(p) => p,
-            Value::Null => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
-        };
-
-        let right_prop = match right {
-            Value::Property(p) => p,
-            Value::Null => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
-        };
-
-        // Three-valued logic, same rule as `eval_binary_op`: a comparison with a null
-        // operand is unknown, and a WHERE excludes unknown. `null <> 1` evaluating to true
-        // kept every row whose property was merely absent. Note this is a *second*
-        // comparison implementation — the two must agree, and did not.
-        if matches!(
-            op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-        ) && (matches!(left_prop, PropertyValue::Null)
-            || matches!(right_prop, PropertyValue::Null))
-        {
-            return Ok(Value::Property(PropertyValue::Null));
-        }
-
-        let result = match op {
-            BinaryOp::Eq => PropertyValue::Boolean(self.coerced_eq(&left_prop, &right_prop)),
-            BinaryOp::Ne => PropertyValue::Boolean(!self.coerced_eq(&left_prop, &right_prop)),
-            BinaryOp::Lt => self.compare_lt(&left_prop, &right_prop)?,
-            BinaryOp::Le => self.compare_le(&left_prop, &right_prop)?,
-            BinaryOp::Gt => self.compare_gt(&left_prop, &right_prop)?,
-            BinaryOp::Ge => self.compare_ge(&left_prop, &right_prop)?,
-            BinaryOp::And => self.logical_and(&left_prop, &right_prop)?,
-            BinaryOp::Or => self.logical_or(&left_prop, &right_prop)?,
-            // Delegated so `^` and XOR have one definition rather than two that
-            // can drift; this evaluator differs from `eval_binary_op` only in
-            // its comparison coercions, which neither operator uses.
-            BinaryOp::Pow | BinaryOp::Xor => {
-                match eval_binary_op(op, Value::Property(left_prop.clone()), Value::Property(right_prop.clone()))? {
-                    Value::Property(p) => p,
-                    other => return Err(ExecutionError::TypeError(format!("unexpected {other:?}"))),
-                }
-            }
-            BinaryOp::Add => self.arithmetic_add(&left_prop, &right_prop)?,
-            BinaryOp::Sub => self.arithmetic_sub(&left_prop, &right_prop)?,
-            BinaryOp::Mul => self.arithmetic_mul(&left_prop, &right_prop)?,
-            BinaryOp::Div => self.arithmetic_div(&left_prop, &right_prop)?,
-            BinaryOp::Mod => self.arithmetic_mod(&left_prop, &right_prop)?,
-            BinaryOp::StartsWith => self.string_starts_with(&left_prop, &right_prop)?,
-            BinaryOp::EndsWith => self.string_ends_with(&left_prop, &right_prop)?,
-            BinaryOp::Contains => self.string_contains(&left_prop, &right_prop)?,
-            BinaryOp::In => self.eval_in(&left_prop, &right_prop)?,
-            BinaryOp::RegexMatch => self.regex_match(&left_prop, &right_prop)?,
-        };
-
-        Ok(Value::Property(result))
-    }
-
-    /// Equality with type coercion: Integer↔Float numeric promotion,
-    /// String↔Boolean coercion ("true"/"false"), and Null handling.
-    fn coerced_eq(&self, left: &PropertyValue, right: &PropertyValue) -> bool {
-        match (left, right) {
-            // Same-type: use derived PartialEq
-            _ if std::mem::discriminant(left) == std::mem::discriminant(right) => left == right,
-            // Integer ↔ Float promotion
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => (*l as f64) == *r,
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => *l == (*r as f64),
-            // DateTime ↔ Integer coercion (DateTime stores epoch millis as i64)
-            (PropertyValue::DateTime(l), PropertyValue::Integer(r)) |
-            (PropertyValue::Integer(r), PropertyValue::DateTime(l)) => l == r,
-            // String ↔ Boolean coercion (LLMs often generate `prop = 'true'`)
-            (PropertyValue::Boolean(b), PropertyValue::String(s)) |
-            (PropertyValue::String(s), PropertyValue::Boolean(b)) => {
-                match s.to_lowercase().as_str() {
-                    "true" => *b,
-                    "false" => !*b,
-                    _ => false,
-                }
-            }
-            // Everything else: not equal
-            _ => false,
-        }
-    }
-
-    fn compare_lt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Less) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_le(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_gt(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Greater) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn compare_ge(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Incomparable types are null, not an error: raising here aborted
-        // the whole query, so rows that *did* compare never came back (#607).
-        Ok(match cypher_ordering(left, right) {
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => PropertyValue::Boolean(true),
-            Some(_) => PropertyValue::Boolean(false),
-            None => PropertyValue::Null,
-        })
-    }
-
-    fn logical_and(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Cypher three-valued logic: false AND x → false, true AND null → null
-        match (left, right) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l && *r)),
-            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => Ok(PropertyValue::Boolean(false)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("AND requires boolean operands".to_string())),
-        }
-    }
-
-    fn logical_or(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        // Cypher three-valued logic: true OR x → true, false OR null → null
-        match (left, right) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => Ok(PropertyValue::Boolean(*l || *r)),
-            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => Ok(PropertyValue::Boolean(true)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("OR requires boolean operands".to_string())),
-        }
-    }
-
-    fn arithmetic_add(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l + r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l + r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 + r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l + *r as f64)),
-            (PropertyValue::String(l), PropertyValue::String(r)) => Ok(PropertyValue::String(format!("{}{}", l, r))),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Addition requires numeric or string operands".to_string())),
-        }
-    }
-
-    fn arithmetic_sub(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l - r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l - r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 - r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l - *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Subtraction requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_mul(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l * r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l * r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 * r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l * *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Multiplication requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_div(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Division by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l / r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l / r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 / r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l / *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Division requires numeric operands".to_string())),
-        }
-    }
-
-    fn arithmetic_mod(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::Integer(_), PropertyValue::Integer(0)) => Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Integer(l % r)),
-            (PropertyValue::Float(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(l % r)),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => Ok(PropertyValue::Float(*l as f64 % r)),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => Ok(PropertyValue::Float(l % *r as f64)),
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("Modulo requires numeric operands".to_string())),
-        }
-    }
-
-    fn string_starts_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::StartsWith, left, right))
-    }
-
-    fn string_ends_with(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::EndsWith, left, right))
-    }
-
-    fn string_contains(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        Ok(string_position_op(StringPositionOp::Contains, left, right))
-    }
-
-    fn eval_in(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        eval_in_list(left, right)
-            .ok_or_else(|| ExecutionError::TypeError("IN requires a list on the right side".to_string()))
-    }
-
-    fn regex_match(&self, left: &PropertyValue, right: &PropertyValue) -> ExecutionResult<PropertyValue> {
-        match (left, right) {
-            (PropertyValue::String(text), PropertyValue::String(pattern)) => {
-                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
-                Ok(PropertyValue::Boolean(re.is_match(text)))
-            }
-            (PropertyValue::Null, _) | (_, PropertyValue::Null) => Ok(PropertyValue::Null),
-            _ => Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
-        }
+        eval_binary_op(op, left, right)
     }
 
     // evaluate_function removed — FilterOperator now delegates to global eval_function
@@ -4972,6 +5428,20 @@ impl PhysicalOperator for FilterOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next(store)? {
+            if self.evaluate_predicate(&record, store)? {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    // A pass-through operator's default `next_mut` delegates to `next`, which
+    // reads its input read-only -- so a write beneath a FILTER refused outright
+    // with "requires mutable store access". Same defect class as #649, which
+    // fixed it for SKIP and LIMIT and named them "the last two pass-through
+    // operators that still had it"; SORT and FILTER also had it (#866).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        while let Some(record) = self.input.next_mut(store, tenant_id)? {
             if self.evaluate_predicate(&record, store)? {
                 return Ok(Some(record));
             }
@@ -5589,6 +6059,15 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -6452,6 +6931,15 @@ fn reconstruct_path(
 }
 
 impl PhysicalOperator for VarLengthExpandOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -6533,17 +7021,22 @@ impl ProjectOperator {
                     .cloned()
                     .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))?;
                 // Materialize refs at projection time (RETURN n)
+                // A reference the store can no longer resolve is kept as a
+                // reference rather than refused. It still carries the
+                // structural data it was built with, which is what survives a
+                // delete: `MATCH ()-[r]->() DELETE r RETURN type(r)` is a
+                // legal query, and materialising `r` first turned it into
+                // "Edge not found" (#905). A *property* read of the same
+                // reference does fail -- see `read_property`.
                 match val {
-                    Value::NodeRef(id) => {
-                        let node = store.get_node(id)
-                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Node {:?} not found", id)))?;
-                        Ok(Value::Node(id, Box::new(node.clone())))
-                    }
-                    Value::EdgeRef(id, ..) => {
-                        let edge = store.get_edge(id)
-                            .ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {:?} not found", id)))?;
-                        Ok(Value::Edge(id, Box::new(edge.clone())))
-                    }
+                    Value::NodeRef(id) => Ok(match store.get_node(id) {
+                        Some(node) => Value::Node(id, Box::new(node.clone())),
+                        None => Value::NodeRef(id),
+                    }),
+                    Value::EdgeRef(id, src, dst, ref ty) => Ok(match store.get_edge(id) {
+                        Some(edge) => Value::Edge(id, Box::new(edge.clone())),
+                        None => Value::EdgeRef(id, src, dst, ty.clone()),
+                    }),
                     other => Ok(other),
                 }
             }
@@ -6709,6 +7202,13 @@ pub struct AggregateFunction {
     pub expr: Expression,
     pub alias: String,
     pub distinct: bool,
+    /// The percentile argument of `percentileCont` / `percentileDisc`.
+    ///
+    /// The struct held one expression, so the **second** argument was dropped
+    /// at extraction and the aggregator's `pct` stayed at its initial `0.5`:
+    /// every percentile call returned the median, whatever was asked for
+    /// (#871).
+    pub percentile: Option<Expression>,
 }
 
 /// Internal state for an aggregator
@@ -6847,6 +7347,37 @@ impl AggregatorState {
             (AggregateType::StDev, _) => AggregatorState::StDev { values: Vec::new(), population: false },
             (AggregateType::StDevP, _) => AggregatorState::StDev { values: Vec::new(), population: true },
         }
+    }
+
+    /// Set the percentile from the call's second argument.
+    ///
+    /// Cypher requires it in `[0, 1]` and raises otherwise. The finalizer used
+    /// to clamp the index with `.min(n - 1)` instead, so an out-of-range
+    /// percentile quietly returned the last element (#871).
+    fn set_percentile(&mut self, value: &Value) -> ExecutionResult<()> {
+        let AggregatorState::Percentile { pct, .. } = self else {
+            return Ok(());
+        };
+        let p = match value.as_property() {
+            Some(PropertyValue::Float(f)) => *f,
+            Some(PropertyValue::Integer(i)) => *i as f64,
+            // A null percentile leaves the aggregate undecidable; Cypher's own
+            // answer is null, which the finalizer already gives for no values.
+            Some(PropertyValue::Null) | None => return Ok(()),
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "percentile must be a number between 0 and 1, not {}",
+                    other.type_name()
+                )))
+            }
+        };
+        if !(0.0..=1.0).contains(&p) {
+            return Err(ExecutionError::RuntimeError(format!(
+                "percentile must be between 0.0 and 1.0 inclusive, got {p}"
+            )));
+        }
+        *pct = p;
+        Ok(())
     }
 
     fn update(&mut self, value: &Value) {
@@ -7478,6 +8009,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -7584,6 +8118,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -7639,6 +8176,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -7689,6 +8229,9 @@ impl AggregateOperator {
                     for (i, reader) in readers.iter_mut().enumerate() {
                         let val = reader.read(&record, store)?;
                         states[i].update(&val);
+                        if let Some(p) = &self.aggregates[i].percentile {
+                            states[i].set_percentile(&eval_expression(p, &record, store)?)?;
+                        }
                     }
                 }
             }
@@ -7997,6 +8540,15 @@ impl AdjacencyCountAggregateOperator {
 }
 
 impl PhysicalOperator for AdjacencyCountAggregateOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -8088,6 +8640,176 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
 }
 
 /// Limit operator: LIMIT 10
+/// Drains its input completely on the first pull, then replays the rows.
+///
+/// Cypher's rule is that `SKIP` and `LIMIT` trim the **result set** and not the
+/// **side effects**: `CREATE (n:N) RETURN n LIMIT 0` still creates the node.
+/// Without this, `LimitOperator(0)` never pulls, so the create beneath it never
+/// runs and the write is silently skipped -- a query that reports success and
+/// changes nothing (#866).
+///
+/// It is the standard "eager" barrier, placed between a write and a row-count
+/// clause. Only there: making every `LIMIT` eager would undo the whole point of
+/// a limit on a read, which is to stop early.
+pub struct EagerOperator {
+    input: OperatorBox,
+    skip: usize,
+    limit: Option<usize>,
+    buffered: Vec<Record>,
+    idx: usize,
+    drained: bool,
+}
+
+impl EagerOperator {
+    /// Wrap `input` so it runs to completion, then replay it trimmed by `skip`
+    /// and `limit`.
+    ///
+    /// The trimming is **this operator's job** rather than a `Skip`/`Limit`
+    /// above it, because `LimitOperator(0)` returns without pulling at all --
+    /// so a lazy barrier beneath it is never reached and the write never runs.
+    /// Being outermost is what makes the write happen.
+    pub fn new(input: OperatorBox, skip: usize, limit: Option<usize>) -> Self {
+        Self { input, skip, limit, buffered: Vec::new(), idx: 0, drained: false }
+    }
+
+    fn emit(&mut self) -> Option<Record> {
+        let start = self.skip;
+        let end = match self.limit {
+            Some(l) => (start + l).min(self.buffered.len()),
+            None => self.buffered.len(),
+        };
+        let pos = start + self.idx;
+        if pos >= end {
+            return None;
+        }
+        self.idx += 1;
+        Some(self.buffered[pos].clone())
+    }
+}
+
+impl PhysicalOperator for EagerOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if !self.drained {
+            while let Some(r) = self.input.next(store)? {
+                self.buffered.push(r);
+            }
+            self.drained = true;
+        }
+        Ok(self.emit())
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.drained {
+            while let Some(r) = self.input.next_mut(store, tenant_id)? {
+                self.buffered.push(r);
+            }
+            self.drained = true;
+        }
+        Ok(self.emit())
+    }
+
+    /// **Refuses a pushed-down limit.** Accepting one would let the limit reach
+    /// the write again, which is the defect this operator exists to prevent.
+    fn try_push_limit(&mut self, _n: usize) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.buffered.clear();
+        self.idx = 0;
+        self.drained = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Eager".to_string(),
+            details: String::new(),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
+/// Binds `p` for a **named path on a write pattern**: `CREATE p = (a)-[:R]->(b)`.
+///
+/// The parser has always captured `path_variable` on a `CREATE`/`MERGE`
+/// pattern, and the write operators never bound it, so `RETURN p` failed with
+/// `VariableNotFound("p")` — a query that parses and then cannot name what it
+/// just made (#876).
+///
+/// It reads the node and relationship variables the write already bound and
+/// assembles the path from them, rather than teaching every write operator to
+/// build one. Anonymous positions get a synthetic handle from the planner for
+/// the same reason edges do: something has to be nameable for the path to
+/// reference it.
+pub struct BindPathOperator {
+    input: OperatorBox,
+    /// `(path variable, node handles in order, relationship handles in order)`.
+    paths: Vec<(String, Vec<String>, Vec<String>)>,
+}
+
+impl BindPathOperator {
+    /// Wrap `input`, binding each named path from the handles listed.
+    pub fn new(input: OperatorBox, paths: Vec<(String, Vec<String>, Vec<String>)>) -> Self {
+        Self { input, paths }
+    }
+
+    fn bind(&self, mut record: Record) -> Record {
+        for (path_var, node_vars, edge_vars) in &self.paths {
+            let nodes: Vec<NodeId> =
+                node_vars.iter().filter_map(|v| record.get(v).and_then(|x| x.node_id())).collect();
+            // A path whose nodes are not all bound is not a path; leaving the
+            // variable unbound gives the caller the same "not found" it had
+            // before, rather than a plausible shorter path.
+            if nodes.len() != node_vars.len() {
+                continue;
+            }
+            let edges: Vec<crate::graph::types::EdgeId> = edge_vars
+                .iter()
+                .filter_map(|v| match record.get(v) {
+                    Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if edges.len() != edge_vars.len() {
+                continue;
+            }
+            record.bind(path_var.clone(), Value::Path { nodes, edges });
+        }
+        record
+    }
+}
+
+impl PhysicalOperator for BindPathOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Ok(self.input.next(store)?.map(|r| self.bind(r)))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        Ok(self.input.next_mut(store, tenant_id)?.map(|r| self.bind(r)))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "BindPath".to_string(),
+            details: self.paths.iter().map(|(p, _, _)| p.clone()).collect::<Vec<_>>().join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct LimitOperator {
     /// Input operator
     input: OperatorBox,
@@ -8403,6 +9125,34 @@ impl PhysicalOperator for SortOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
+            self.execute_all(store)?;
+        }
+
+        if self.current >= self.records.len() {
+            return Ok(None);
+        }
+
+        let record = self.records[self.current].clone();
+        self.current += 1;
+        Ok(Some(record))
+    }
+
+    // Same as the FILTER above: a write beneath a SORT refused with "requires
+    // mutable store access", which is what `CREATE (n) RETURN n ORDER BY n.x`
+    // hit (#866).
+    //
+    // The input is drained **mutably first** and replaced with the rows it
+    // produced, so the ordinary `execute_all` does the sorting. Duplicating the
+    // decorate-sort-undecorate path -- with its limit hint and its amortised
+    // trimming -- would be a second implementation of the one thing this
+    // operator does.
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
+            let mut rows = Vec::new();
+            while let Some(r) = self.input.next_mut(store, tenant_id)? {
+                rows.push(r);
+            }
+            self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
         }
 
@@ -9354,11 +10104,11 @@ impl PhysicalOperator for CreateNodeOperator {
                 if let Some(exprs) = property_exprs {
                     let empty = Record::new();
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &empty, store) {
-                            Ok(Value::Property(p)) => {
+                        match eval_expression(expr, &empty, store).ok().as_ref().and_then(storable_property) {
+                            Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
-                            _ => {
+                            None => {
                                 let _ = store.delete_node(tenant_id, node_id);
                                 return Err(ExecutionError::RuntimeError(format!(
                                     "CREATE property `{key}` refers to a variable that is not bound here; bind it first with MATCH, WITH or UNWIND"
@@ -10281,7 +11031,7 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
         // Phase 1: Create all edges
         if self.phase == 1 {
-            for (source_var, target_var, edge_type, properties, edge_var, _exprs) in
+            for (source_var, target_var, edge_type, properties, edge_var, exprs) in
                 &self.edges_to_create
             {
                 let source_id = self.var_to_node_id.get(source_var)
@@ -10289,12 +11039,37 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 let target_id = self.var_to_node_id.get(target_var)
                     .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
 
+                // Non-literal property values, evaluated before the edge is
+                // created so the immutable borrow ends first.
+                //
+                // This operator discarded them (`_exprs`), and the literal map
+                // carries a `Null` placeholder for each -- so
+                // `CREATE ()-[:R {xs: [date('1984-10-11')]}]->()` reported
+                // success and stored `xs = null`. Silent data loss on the write
+                // path, which no read can distinguish from a property that was
+                // never set (#831).
+                let mut evaluated: Vec<(String, PropertyValue)> = Vec::new();
+                if let Some(exprs) = exprs {
+                    let empty = Record::new();
+                    for (key, expr) in exprs {
+                        if let Some(pv) =
+                            storable_property(&eval_expression(expr, &empty, store)?)
+                        {
+                            evaluated.push((key.clone(), pv));
+                        }
+                    }
+                }
+
                 let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
                     .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
-                // Set properties on edge via DS-07c sparse map
+                // Set properties on edge via DS-07c sparse map. The evaluated
+                // expressions go last so they overwrite the placeholders.
                 for (key, value) in properties {
                     store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
+                }
+                for (key, value) in evaluated {
+                    store.set_edge_property_sparse(edge_id, key, value);
                 }
 
                 // Always track created edges for persistence (even without variable names)
@@ -10436,13 +11211,15 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         for (key, expr) in exprs {
                             let value = eval_expression(expr, &record, store)?;
                             let pv = match value {
-                                Value::Property(p) => p,
                                 Value::Null => PropertyValue::Null,
-                                other => {
-                                    return Err(ExecutionError::TypeError(format!(
-                                        "property `{key}` must be a scalar, got {other:?}"
-                                    )))
-                                }
+                                other => match storable_property(&other) {
+                                    Some(p) => p,
+                                    None => {
+                                        return Err(ExecutionError::TypeError(format!(
+                                            "property `{key}` must be a scalar, got {other:?}"
+                                        )))
+                                    }
+                                },
                             };
                             evaluated.insert(key.clone(), pv);
                         }
@@ -10492,7 +11269,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     // defect the node side had in #467.
                     if let Some(exprs) = property_exprs {
                         for (key, expr) in exprs {
-                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                            if let Some(pv) =
+                                storable_property(&eval_expression(expr, &record, store)?)
+                            {
                                 store.set_edge_property_sparse(edge_id, key.clone(), pv);
                             }
                         }
@@ -10506,7 +11285,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     // defect the node side had in #467.
                     if let Some(exprs) = property_exprs {
                         for (key, expr) in exprs {
-                            if let Value::Property(pv) = eval_expression(expr, &record, store)? {
+                            if let Some(pv) =
+                                storable_property(&eval_expression(expr, &record, store)?)
+                            {
                                 store.set_edge_property_sparse(edge_id, key.clone(), pv);
                             }
                         }
@@ -10570,6 +11351,9 @@ pub struct MatchMergeEdgeOperator {
     edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
     on_create_set: Vec<(String, String, Expression)>,
     on_match_set: Vec<(String, String, Expression)>,
+    /// Whole-entity `ON CREATE`/`ON MATCH SET`; see `MergeOperator` (#874).
+    on_create_entity_set: Vec<(String, bool, Expression)>,
+    on_match_entity_set: Vec<(String, bool, Expression)>,
     done: bool,
     results: Vec<Record>,
     result_index: usize,
@@ -10582,7 +11366,28 @@ impl MatchMergeEdgeOperator {
         on_create_set: Vec<(String, String, Expression)>,
         on_match_set: Vec<(String, String, Expression)>,
     ) -> Self {
-        Self { input, edges_to_merge, on_create_set, on_match_set, done: false, results: Vec::new(), result_index: 0 }
+        Self {
+            input,
+            edges_to_merge,
+            on_create_set,
+            on_match_set,
+            on_create_entity_set: Vec::new(),
+            on_match_entity_set: Vec::new(),
+            done: false,
+            results: Vec::new(),
+            result_index: 0,
+        }
+    }
+
+    /// Attach the whole-entity `ON CREATE`/`ON MATCH SET` items (#874).
+    pub fn with_entity_sets(
+        mut self,
+        on_create: Vec<(String, bool, Expression)>,
+        on_match: Vec<(String, bool, Expression)>,
+    ) -> Self {
+        self.on_create_entity_set = on_create;
+        self.on_match_entity_set = on_match;
+        self
     }
 }
 
@@ -10618,9 +11423,30 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         for (var, prop, expr) in &self.on_match_set {
                             if edge_var.as_deref() == Some(var) || var == "_edge" {
                                 let val = eval_expression(expr, &result_record, store)?;
-                                if let Value::Property(pv) = val {
-                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                // Setting null removes the property (#874).
+                                match val {
+                                    Value::Property(PropertyValue::Null) | Value::Null => {
+                                        store.remove_edge_property(edge_id, prop);
+                                    }
+                                    Value::Property(pv) => {
+                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                    }
+                                    _ => {}
                                 }
+                            }
+                        }
+                        let matched_target = Value::EdgeRef(
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type.clone(),
+                        );
+                        for (var, merge, expr) in &self.on_match_entity_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let value = eval_expression(expr, &result_record, store)?;
+                                apply_entity_assignment(
+                                    &matched_target, &value, *merge, store, tenant_id,
+                                )?;
                             }
                         }
                         if let Some(ref ev) = edge_var {
@@ -10640,9 +11466,30 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         for (var, prop, expr) in &self.on_create_set {
                             if edge_var.as_deref() == Some(var) || var == "_edge" {
                                 let val = eval_expression(expr, &result_record, store)?;
-                                if let Value::Property(pv) = val {
-                                    let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                // Setting null removes the property (#874).
+                                match val {
+                                    Value::Property(PropertyValue::Null) | Value::Null => {
+                                        store.remove_edge_property(edge_id, prop);
+                                    }
+                                    Value::Property(pv) => {
+                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                    }
+                                    _ => {}
                                 }
+                            }
+                        }
+
+                        // `ON CREATE SET r = a` / `r += {…}` (#874).
+                        let target = Value::EdgeRef(
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type.clone(),
+                        );
+                        for (var, merge, expr) in &self.on_create_entity_set {
+                            if edge_var.as_deref() == Some(var) || var == "_edge" {
+                                let value = eval_expression(expr, &result_record, store)?;
+                                apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
                             }
                         }
 
@@ -10719,6 +11566,10 @@ impl MaterializedOperator {
 }
 
 impl PhysicalOperator for MaterializedOperator {
+    fn is_materialized(&self) -> bool {
+        true
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.idx >= self.records.len() {
             Ok(None)
@@ -11570,13 +12421,46 @@ impl PhysicalOperator for SkipOperator {
 /// Delete operator: DELETE n or DETACH DELETE n
 pub struct DeleteOperator {
     input: OperatorBox,
-    variables: Vec<String>,
+    /// The expressions written after `DELETE`, not the names among them.
+    ///
+    /// This held `Vec<String>` and the planner filtered the clause down to
+    /// `Expression::Variable`, so every other way of naming an entity --
+    /// a map field, a list element, a path -- was dropped on the floor and
+    /// the delete silently did nothing (#891).
+    targets: Vec<Expression>,
     detach: bool,
 }
 
 impl DeleteOperator {
-    pub fn new(input: OperatorBox, variables: Vec<String>, detach: bool) -> Self {
-        Self { input, variables, detach }
+    pub fn new(input: OperatorBox, targets: Vec<Expression>, detach: bool) -> Self {
+        Self { input, targets, detach }
+    }
+
+    /// Entities reachable from a `DELETE` target, in the order they are found.
+    ///
+    /// A path or a list is a container of entities, and Cypher deletes what is
+    /// inside it. Nested containers recurse; anything that is not an entity is
+    /// ignored here -- `validate_delete_targets` is what refuses those (#887).
+    fn collect_entities(value: &Value, nodes: &mut Vec<crate::graph::types::NodeId>, edges: &mut Vec<crate::graph::types::EdgeId>) {
+        match value {
+            Value::Node(id, _) | Value::NodeRef(id) => nodes.push(*id),
+            Value::Edge(id, _) | Value::EdgeRef(id, ..) => edges.push(*id),
+            Value::Path { nodes: path_nodes, edges: path_edges } => {
+                edges.extend(path_edges.iter().copied());
+                nodes.extend(path_nodes.iter().copied());
+            }
+            Value::List(items) => {
+                for item in items {
+                    Self::collect_entities(item, nodes, edges);
+                }
+            }
+            Value::Map(entries) => {
+                for item in entries.values() {
+                    Self::collect_entities(item, nodes, edges);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -11591,26 +12475,29 @@ impl PhysicalOperator for DeleteOperator {
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
-            for var in &self.variables {
-                if let Some(val) = record.get(var) {
-                    match val {
-                        Value::NodeRef(id) | Value::Node(id, _) => {
-                            let node_id = *id;
-                            if self.detach {
-                                let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
-                                let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
-                                for eid in out_edges.into_iter().chain(in_edges) {
-                                    let _ = store.delete_edge(eid);
-                                }
-                            }
-                            let _ = store.delete_node(tenant_id, node_id);
-                        }
-                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            let _ = store.delete_edge(*id);
-                        }
-                        _ => {}
+            let mut nodes: Vec<crate::graph::types::NodeId> = Vec::new();
+            let mut edges: Vec<crate::graph::types::EdgeId> = Vec::new();
+            for target in &self.targets {
+                // An unresolvable target is not a silent no-op here: it means
+                // the row never bound what the query named, and deleting the
+                // rest of the row while ignoring that is how #887 hid.
+                let value = eval_expression(target, &record, store)?;
+                Self::collect_entities(&value, &mut nodes, &mut edges);
+            }
+            // Edges first: deleting a node may take its edges with it, and an
+            // edge id that has already gone is not an error worth reporting.
+            for edge_id in edges {
+                let _ = store.delete_edge(edge_id);
+            }
+            for node_id in nodes {
+                if self.detach {
+                    let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
+                    let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
+                    for eid in out_edges.into_iter().chain(in_edges) {
+                        let _ = store.delete_edge(eid);
                     }
                 }
+                let _ = store.delete_node(tenant_id, node_id);
             }
             Ok(Some(record))
         } else {
@@ -11627,7 +12514,16 @@ impl PhysicalOperator for DeleteOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let vars = self.variables.join(", ");
+        let vars = self
+            .targets
+            .iter()
+            .map(|t| match t {
+                Expression::Variable(v) | Expression::PathVariable(v) => v.clone(),
+                Expression::Property { variable, property } => format!("{}.{}", variable, property),
+                other => format!("{:?}", other),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         OperatorDescription {
             name: if self.detach { "DetachDelete" } else { "Delete" }.to_string(),
             details: vars,
@@ -11639,6 +12535,63 @@ impl PhysicalOperator for DeleteOperator {
 }
 
 /// Set property operator: SET n.name = "Alice"
+/// Apply `SET x = <map|node>` or `SET x += <map|node>` to one entity.
+///
+/// Shared, because `SET` and `MERGE ... ON CREATE/ON MATCH SET` both need it
+/// and the second had **no implementation at all**: `parse_merge_clause`
+/// matched only `set_item` and `set_label_item`, so a `set_entity_item` fell
+/// through its `match` and the clause the user wrote was silently discarded
+/// (#874).
+///
+/// `=` replaces -- every property not in the incoming map goes away -- and `+=`
+/// merges. Removing the leftovers first keeps the two spellings from differing
+/// only in what they forgot to clear.
+fn apply_entity_assignment(
+    target: &Value,
+    value: &Value,
+    merge: bool,
+    store: &mut GraphStore,
+    tenant_id: &str,
+) -> ExecutionResult<()> {
+    let incoming = SetPropertyOperator::source_properties(value, store)?;
+    match target {
+        Value::NodeRef(id) | Value::Node(id, _) => {
+            let id = *id;
+            if !merge {
+                for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
+                    if !incoming.contains_key(&key) {
+                        store.remove_node_property(id, &key);
+                    }
+                }
+            }
+            for (k, v) in incoming {
+                store
+                    .set_node_property(tenant_id, id, k, v)
+                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            }
+        }
+        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+            let id = *id;
+            if !merge {
+                let existing: Vec<String> = store
+                    .get_edge(id)
+                    .map(|e| e.properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                for key in existing {
+                    if !incoming.contains_key(&key) {
+                        store.remove_edge_property(id, &key);
+                    }
+                }
+            }
+            for (k, v) in incoming {
+                let _ = store.set_edge_property(id, k, v);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub struct SetPropertyOperator {
     input: OperatorBox,
     items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
@@ -11666,7 +12619,7 @@ impl SetPropertyOperator {
     /// own properties, which is what makes `SET a = b` a copy. Anything else
     /// is a type error rather than a silent no-op — assigning a scalar to an
     /// entity has no sensible meaning and guessing one would hide the mistake.
-    fn source_properties(
+    pub(crate) fn source_properties(
         value: &Value,
         store: &GraphStore,
     ) -> ExecutionResult<HashMap<String, PropertyValue>> {
@@ -11753,13 +12706,27 @@ impl PhysicalOperator for SetPropertyOperator {
             for (var, prop, val) in &evaluated {
 
                 if let Some(node_val) = record.get(var) {
+                    // `SET n.prop = null` **removes** the property. Storing a
+                    // null instead left the key present, so `keys(n)` still
+                    // listed it and a later `n.prop IS NULL` could not tell an
+                    // explicitly-nulled property from a removed one -- which is
+                    // the whole distinction (#874).
+                    let remove = matches!(val, PropertyValue::Null);
                     match node_val {
                         Value::NodeRef(id) | Value::Node(id, _) => {
-                            store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
-                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                            if remove {
+                                store.remove_node_property(*id, prop);
+                            } else {
+                                store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
+                                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                            }
                         }
                         Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                            let _ = store.set_edge_property(*id, prop.clone(), val.clone());
+                            if remove {
+                                store.remove_edge_property(*id, prop);
+                            } else {
+                                let _ = store.set_edge_property(*id, prop.clone(), val.clone());
+                            }
                         }
                         _ => {}
                     }
@@ -11772,45 +12739,7 @@ impl PhysicalOperator for SetPropertyOperator {
             for (var, merge, expr) in &self.entity_items {
                 let Some(target) = record.get(var).cloned() else { continue };
                 let value = eval_expression(expr, &record, store)?;
-                let incoming = Self::source_properties(&value, store)?;
-
-                match target {
-                    Value::NodeRef(id) | Value::Node(id, _) => {
-                        if !merge {
-                            // `=` replaces: every property not in the incoming
-                            // map goes away. Removing them first, then writing,
-                            // keeps the two spellings from differing only in
-                            // leftovers.
-                            for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
-                                if !incoming.contains_key(&key) {
-                                    let _ = store.remove_node_property(id, &key);
-                                }
-                            }
-                        }
-                        for (k, v) in incoming {
-                            store
-                                .set_node_property(tenant_id, id, k, v)
-                                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
-                        }
-                    }
-                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                        if !merge {
-                            let existing: Vec<String> = store
-                                .get_edge(id)
-                                .map(|e| e.properties.keys().cloned().collect())
-                                .unwrap_or_default();
-                            for key in existing {
-                                if !incoming.contains_key(&key) {
-                                    let _ = store.remove_edge_property(id, &key);
-                                }
-                            }
-                        }
-                        for (k, v) in incoming {
-                            let _ = store.set_edge_property(id, k, v);
-                        }
-                    }
-                    _ => {}
-                }
+                apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
             }
 
             Ok(Some(record))
@@ -12010,6 +12939,15 @@ impl UnwindOperator {
 }
 
 impl PhysicalOperator for UnwindOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -12103,10 +13041,32 @@ pub struct MergeOperator {
     on_create_labels: Vec<(String, Vec<Label>)>,
     /// `(variable, labels)` from `ON MATCH SET n:Label`.
     on_match_labels: Vec<(String, Vec<Label>)>,
+    /// `(variable, is_merge, value)` from `ON CREATE SET n = {…}` / `n += {…}`.
+    ///
+    /// The grammar always parsed these; `parse_merge_clause` matched only
+    /// `set_item` and `set_label_item`, so they fell through and the clause was
+    /// silently discarded (#874).
+    on_create_entity_set: Vec<(String, bool, Expression)>,
+    /// The same for `ON MATCH SET`.
+    on_match_entity_set: Vec<(String, bool, Expression)>,
     executed: bool,
 }
 
 impl MergeOperator {
+    /// Attach the whole-entity `ON CREATE`/`ON MATCH SET` items.
+    ///
+    /// A builder rather than two more `new` parameters, so the existing call
+    /// sites keep compiling and the addition stays reviewable (#874).
+    pub fn with_entity_sets(
+        mut self,
+        on_create: Vec<(String, bool, Expression)>,
+        on_match: Vec<(String, bool, Expression)>,
+    ) -> Self {
+        self.on_create_entity_set = on_create;
+        self.on_match_entity_set = on_match;
+        self
+    }
+
     pub fn new(
         pattern: Pattern,
         on_create_set: Vec<(String, String, Expression)>,
@@ -12121,6 +13081,8 @@ impl MergeOperator {
             on_match_set,
             on_create_labels,
             on_match_labels,
+            on_create_entity_set: Vec::new(),
+            on_match_entity_set: Vec::new(),
             executed: false,
         }
     }
@@ -12183,17 +13145,19 @@ impl MergeOperator {
         let mut out = literals.cloned().unwrap_or_default();
         for (key, expr) in exprs.into_iter().flatten() {
             match eval_expression(expr, record, store)? {
-                Value::Property(pv) => {
-                    out.insert(key.clone(), pv);
-                }
                 Value::Null => {
                     out.insert(key.clone(), PropertyValue::Null);
                 }
-                other => {
-                    return Err(ExecutionError::TypeError(format!(
-                        "MERGE property `{key}` must be a scalar value, got {other:?}"
-                    )));
-                }
+                other => match storable_property(&other) {
+                    Some(pv) => {
+                        out.insert(key.clone(), pv);
+                    }
+                    None => {
+                        return Err(ExecutionError::TypeError(format!(
+                            "MERGE property `{key}` must be a scalar value, got {other:?}"
+                        )));
+                    }
+                },
             }
         }
         Ok(Some(out))
@@ -12218,6 +13182,20 @@ impl MergeOperator {
     /// nodes with the same labels and properties already exist -- openCypher's documented
     /// behaviour, and the reason the idiomatic way to add an edge between existing nodes is
     /// to bind them first (`MATCH (a),(b) MERGE (a)-[:R]->(b)`), which reuses them.
+    /// The node a MERGE pattern variable is already bound to, if any.
+    ///
+    /// A variable that the incoming row already binds is **not** a search: it
+    /// names one node, and MERGE neither looks for another nor makes one. Both
+    /// merge paths ignored the row entirely, so
+    /// `CREATE (a) WITH a MERGE (x) MERGE (y) MERGE (x)-[:T]->(y)` re-created
+    /// `x` and `y` and left three nodes where the pattern named one (#893).
+    fn bound_node(record: &Record, variable: Option<&String>) -> Option<NodeId> {
+        match record.get(variable?) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn merge_path(
         &self,
         path: &crate::query::ast::PathPattern,
@@ -12253,9 +13231,16 @@ impl MergeOperator {
             pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone()));
         }
 
-        // Candidate node ids per pattern position. A pattern node with no label has no
-        // cheap candidate set, so it cannot participate in a match and the pattern is
-        // treated as absent (i.e. created).
+        // Candidate node ids per pattern position.
+        //
+        // An unlabelled pattern node used to yield an **empty** candidate set,
+        // so the pattern was treated as absent and created. That made
+        // `MERGE (a)` add a node to a graph that already had one -- the most
+        // basic MERGE there is, matching nothing and creating always (#889).
+        //
+        // A node with no label is a full scan by definition; there is no index
+        // to narrow it, and every engine pays that for an unlabelled MERGE. The
+        // shortcut bought a scan and sold the semantics.
         //
         // Resolved once per pattern node, before the search, because the same
         // values decide both what is matched and what would be created.
@@ -12270,13 +13255,33 @@ impl MergeOperator {
             )?);
         }
 
+        // A variable the row already binds is the whole candidate set for its
+        // position -- one node, decided before the search rather than by it.
+        let bound: Vec<Option<NodeId>> = pattern_nodes
+            .iter()
+            .map(|np| Self::bound_node(&base, np.variable.as_ref()))
+            .collect();
+
         let mut candidates: Vec<Vec<NodeId>> = Vec::with_capacity(pattern_nodes.len());
         for (i, np) in pattern_nodes.iter().enumerate() {
+            if let Some(id) = bound[i] {
+                candidates.push(vec![id]);
+                continue;
+            }
             let mut ids = Vec::new();
-            if let Some(first_label) = np.labels.first() {
-                for node in store.get_nodes_by_label(first_label) {
-                    if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
-                        ids.push(node.id);
+            match np.labels.first() {
+                Some(first_label) => {
+                    for node in store.get_nodes_by_label(first_label) {
+                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
+                    }
+                }
+                None => {
+                    for node in store.all_nodes() {
+                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
                     }
                 }
             }
@@ -12302,8 +13307,35 @@ impl MergeOperator {
                     record.bind(var.clone(), Value::NodeRef(assignment[i]));
                 }
             }
+            // The relationships the search accepted, bound under the names the
+            // pattern gave them. Only the nodes were bound, so `MERGE
+            // (a)-[r:R]->(b) RETURN r` failed with VariableNotFound and a named
+            // path had nothing to build from (#903).
+            let mut matched_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+            for (from, to, ty, props, var) in &pattern_rels {
+                let Some(edge_id) =
+                    Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                else {
+                    continue;
+                };
+                matched_edges.push(edge_id);
+                if let Some(var) = var {
+                    record.bind(
+                        var.clone(),
+                        Value::EdgeRef(edge_id, assignment[*from], assignment[*to], ty.clone()),
+                    );
+                }
+            }
+            if let Some(path_var) = &path.path_variable {
+                record.bind(
+                    path_var.clone(),
+                    Value::Path { nodes: assignment.clone(), edges: matched_edges },
+                );
+            }
             let sets = self.on_match_set.clone();
             self.apply_sets(&sets, &record, store, tenant_id)?;
+            let entity_sets = self.on_match_entity_set.clone();
+            self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             let labels = self.on_match_labels.clone();
             Self::apply_labels(&labels, &record, store, tenant_id);
             return Ok(Some(record));
@@ -12312,6 +13344,12 @@ impl MergeOperator {
         // Create the entire pattern.
         let mut created: Vec<NodeId> = Vec::with_capacity(pattern_nodes.len());
         for (i, np) in pattern_nodes.iter().enumerate() {
+            // A bound variable is reused, never re-created: creating the whole
+            // pattern means creating the parts of it that do not exist yet.
+            if let Some(id) = bound[i] {
+                created.push(id);
+                continue;
+            }
             // `MERGE ({...})` has no labels, and defaulting to "Node" gave the
             // node a label the query never wrote (#625).
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
@@ -12330,22 +13368,74 @@ impl MergeOperator {
             }
             created.push(node_id);
         }
-        for (from, to, edge_type, props, _var) in &pattern_rels {
+        let mut created_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+        for (from, to, edge_type, props, var) in &pattern_rels {
             let edge_id = store
                 .create_edge(created[*from], created[*to], edge_type.clone())
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             for (k, v) in props {
                 store.set_edge_property_sparse(edge_id, k.clone(), v.clone());
             }
+            created_edges.push(edge_id);
+            if let Some(var) = var {
+                record.bind(
+                    var.clone(),
+                    Value::EdgeRef(edge_id, created[*from], created[*to], edge_type.clone()),
+                );
+            }
+        }
+        if let Some(path_var) = &path.path_variable {
+            record.bind(
+                path_var.clone(),
+                Value::Path { nodes: created.clone(), edges: created_edges },
+            );
         }
 
         let sets = self.on_create_set.clone();
-        self.apply_sets(&sets, &record, store, tenant_id)?;
+self.apply_sets(&sets, &record, store, tenant_id)?;
+        let entity_sets = self.on_create_entity_set.clone();
+        self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
         Ok(Some(record))
     }
 
     /// Assign candidate nodes position by position, keeping only assignments whose
     /// relationships all exist in the store.
+    /// The edge from `src` to `dst` that satisfies a MERGE pattern segment.
+    ///
+    /// One implementation, used by the search *and* by the binding that follows
+    /// it, so a relationship variable cannot be bound to an edge the search did
+    /// not accept.
+    ///
+    /// The properties are part of the question. The search compared type and
+    /// endpoints only, so `MERGE (a)-[:R {k: 1}]->(b)` matched a bare `:R`
+    /// edge, bound nothing, and left the graph without the property the query
+    /// asked for (#903).
+    fn merge_edge_match(
+        store: &GraphStore,
+        src: NodeId,
+        dst: NodeId,
+        ty: &EdgeType,
+        props: &HashMap<String, PropertyValue>,
+    ) -> Option<crate::graph::types::EdgeId> {
+        store
+            .get_outgoing_edge_targets(src)
+            .iter()
+            .find(|(eid, _s, t, et)| {
+                if *t != dst || et != ty {
+                    return false;
+                }
+                if props.is_empty() {
+                    return true;
+                }
+                store.get_edge(*eid).is_some_and(|edge| {
+                    props
+                        .iter()
+                        .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
+                })
+            })
+            .map(|(eid, ..)| *eid)
+    }
+
     fn search(
         candidates: &[Vec<NodeId>],
         rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)],
@@ -12363,16 +13453,12 @@ impl MergeOperator {
             }
             assignment.push(cand);
             // Check every relationship whose endpoints are now both assigned.
-            let ok = rels.iter().all(|(from, to, ty, _p, _v)| {
+            let ok = rels.iter().all(|(from, to, ty, props, _v)| {
                 if *from > i || *to > i {
                     return true;
                 }
-                let src = assignment[*from];
-                let dst = assignment[*to];
-                store
-                    .get_outgoing_edge_targets(src)
-                    .iter()
-                    .any(|(_eid, _s, t, et)| *t == dst && et == ty)
+                Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                    .is_some()
             });
             if ok {
                 if let Some(found) = Self::search(candidates, rels, store, assignment) {
@@ -12397,9 +13483,33 @@ impl MergeOperator {
                 continue;
             };
             let val = eval_expression(expr, record, store)?;
-            if let Value::Property(pv) = val {
-                let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+            // `SET n.prop = null` removes the property (#874), the same rule
+            // the plain `SET` clause follows.
+            match val {
+                Value::Property(PropertyValue::Null) | Value::Null => {
+                    store.remove_node_property(node_id, prop);
+                }
+                Value::Property(pv) => {
+                    let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                }
+                _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// `ON CREATE SET n = {…}` / `n += {…}` (#874).
+    fn apply_entity_sets(
+        &self,
+        sets: &[(String, bool, Expression)],
+        record: &Record,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<()> {
+        for (var, merge, expr) in sets {
+            let Some(target) = record.get(var).cloned() else { continue };
+            let value = eval_expression(expr, record, store)?;
+            apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
         }
         Ok(())
     }
@@ -12461,23 +13571,31 @@ impl PhysicalOperator for MergeOperator {
         )?;
         let props = resolved.as_ref();
 
-        // Search for existing nodes matching labels + properties
-        let mut matched_node_id = None;
-        if let Some(first_label) = labels.first() {
-            let candidates = store.get_nodes_by_label(first_label);
+        // Search for an existing node matching the labels and properties.
+        //
+        // An **unlabelled** pattern searched nothing at all, so `MERGE (a)`
+        // added a node to a graph that already had one, and `MERGE (a {p: 1})`
+        // added a second alongside the node it should have matched. The most
+        // basic MERGE there is, matching never and creating always (#889).
+        //
+        // A node with no label is a full scan by definition -- there is no
+        // index to narrow it, and every engine pays that for an unlabelled
+        // MERGE. The shortcut bought a scan and sold the semantics.
+        //
+        // Through `Self::node_matches` rather than a third copy of the same
+        // comparison: this was the second, and it drifted from the first by
+        // exactly this gap.
+        let mut matched_node_id = Self::bound_node(&base, start.variable.as_ref());
+        if matched_node_id.is_none() {
+            let candidates: Vec<&crate::graph::Node> = match labels.first() {
+                Some(first_label) => store.get_nodes_by_label(first_label),
+                None => store.all_nodes(),
+            };
             for node in candidates {
-                let has_all_labels = labels.iter().all(|l| node.labels.contains(l));
-                if !has_all_labels { continue; }
-
-                if let Some(required_props) = props {
-                    let props_match = required_props.iter().all(|(k, v)| {
-                        node.properties.get(k).map_or(false, |pv| pv == v)
-                    });
-                    if !props_match { continue; }
+                if Self::node_matches(node, labels, props) {
+                    matched_node_id = Some(node.id);
+                    break;
                 }
-
-                matched_node_id = Some(node.id);
-                break;
             }
         }
 
@@ -12516,11 +13634,19 @@ impl PhysicalOperator for MergeOperator {
             for (var, prop, expr) in &self.on_create_set {
                 if var == &start_var {
                     let val = eval_expression(expr, &record, store)?;
-                    if let Value::Property(pv) = val {
-                        let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                    match val {
+                        Value::Property(PropertyValue::Null) | Value::Null => {
+                            store.remove_node_property(node_id, prop);
+                        }
+                        Value::Property(pv) => {
+                            let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                        }
+                        _ => {}
                     }
                 }
             }
+            let entity_sets = self.on_create_entity_set.clone();
+            self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             Self::apply_labels(&self.on_create_labels, &record, store, tenant_id);
         }
 
@@ -12641,14 +13767,16 @@ impl PhysicalOperator for ForeachOperator {
                             for (k, expr) in prop_exprs {
                                 let val = eval_expression(expr, &inner_record, store)?;
                                 let prop_val = match val {
-                                    Value::Property(p) => p,
                                     Value::Null => PropertyValue::Null,
-                                    other => {
-                                        return Err(ExecutionError::TypeError(format!(
-                                            "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
+                                    other => match storable_property(&other) {
+                                        Some(p) => p,
+                                        None => {
+                                            return Err(ExecutionError::TypeError(format!(
+                                                "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
 which cannot be stored as a property value"
-                                        )))
-                                    }
+                                            )))
+                                        }
+                                    },
                                 };
                                 let _ = store.set_node_property(tenant_id, node_id, k.to_string(), prop_val);
                             }
@@ -12939,6 +14067,15 @@ impl ShortestPathOperator {
 }
 
 impl PhysicalOperator for ShortestPathOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -13378,6 +14515,15 @@ impl ExpandIntoOperator {
 }
 
 impl PhysicalOperator for ExpandIntoOperator {
+    // A write beneath this operator refused with "requires mutable store
+    // access", because the default `next_mut` delegates to `next` and `next`
+    // reads its input read-only. Shared body rather than a second, mutable copy
+    // of this operator's own logic -- see `drain_input_for_write` (#870).
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -13806,6 +14952,7 @@ mod tests {
                 expr: Expression::Variable("n".to_string()),
                 alias: "count".to_string(),
                 distinct: false,
+                percentile: None,
             }]
         );
 

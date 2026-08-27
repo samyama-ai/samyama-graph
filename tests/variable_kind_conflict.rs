@@ -74,26 +74,37 @@ fn a_pattern_after_with_may_reuse_a_dropped_name() {
     assert!(accepted("MATCH (a)-[r]->(b) WITH a MATCH (r) RETURN a, r"));
 }
 
-/// The `CREATE`/`MERGE` forms of the same thing are rejected, but **not by
-/// this rule** -- `CreateOnBoundVariable` and `MergeOnBoundVariable` predate
-/// it and are not WITH-aware:
+/// The `CREATE`/`MERGE` forms of the same thing are now WITH-aware too (#764).
 ///
 /// ```text
-/// MATCH (a)-[r]->(b) WITH a CREATE (r:X)
-///   -> Variable `r` already declared; CREATE cannot add labels or properties to it
+/// MATCH (a)-[r]->(b) WITH a CREATE (r:X) RETURN a
 /// ```
 ///
-/// `r` is *not* carried through that WITH, so it is out of scope and the
-/// CREATE should bind a fresh node. Filed separately (#764) rather than fixed
-/// here, because it is a different rule with its own scope question. Asserting
-/// the current behaviour keeps this file honest about what it does and does
-/// not cover -- and turns red the moment #764 is fixed, which is the point.
+/// `r` is *not* carried through that WITH, so it is out of scope and the CREATE
+/// binds a fresh node that happens to share the name. `CreateOnBoundVariable`
+/// and `MergeOnBoundVariable` used to collect every name ever bound without
+/// applying the WITH boundary and rejected this valid query; `write_patterns`
+/// now re-scopes through each WITH via `carry_names_through_with`, so only
+/// projected names stay bound.
 #[test]
-fn create_and_merge_after_with_are_over_rejected_by_an_older_rule() {
-    assert!(rejected("MATCH (a)-[r]->(b) WITH a CREATE (r:X) RETURN a"));
-    assert!(rejected("MATCH (a)-[r]->(b) WITH a MERGE (r:X) RETURN a"));
-    // Not the kind rule: a fresh name is accepted in the same position.
+fn create_and_merge_after_with_may_reuse_a_dropped_name() {
+    assert!(accepted("MATCH (a)-[r]->(b) WITH a CREATE (r:X) RETURN a"));
+    assert!(accepted("MATCH (a)-[r]->(b) WITH a MERGE (r:X) RETURN a"));
+    // A fresh name in the same position was always accepted.
     assert!(accepted("MATCH (a)-[r]->(b) WITH a CREATE (z:X) RETURN a"));
+}
+
+/// The reset is not an escape hatch: a name the WITH *does* project stays
+/// bound, so relabelling it in a CREATE/MERGE is still rejected.
+///
+/// `WITH *` carries every name forward — it is expanded to explicit items
+/// before validation, so it must not be a loophole either.
+#[test]
+fn a_create_on_a_name_carried_through_with_is_still_rejected() {
+    assert!(rejected("MATCH (a) WITH a CREATE (a:Foo) RETURN a"));
+    assert!(rejected("MATCH (a) WITH a AS b CREATE (b:Foo) RETURN b"));
+    assert!(rejected("MATCH (a) WITH a MERGE (a:Foo) RETURN a"));
+    assert!(rejected("MATCH (a) WITH * CREATE (a:Foo) RETURN a"));
 }
 
 /// A name carried *through* a WITH keeps its kind, so the conflict still

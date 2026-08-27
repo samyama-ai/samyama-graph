@@ -124,6 +124,15 @@ pub enum ExecutionError {
     /// Variable not found
     #[error("Variable not found: {0}")]
     VariableNotFound(String),
+
+    /// A read of an entity that is no longer in the graph.
+    ///
+    /// Distinct from `RuntimeError` because the *caller* can tell these apart
+    /// and a null cannot: an unset property and a deleted node both answered
+    /// `null`, so a query that read a node it had already deleted looked
+    /// exactly like a query reading a property nobody set.
+    #[error("{0} was deleted in this query and cannot be read")]
+    EntityNotFound(String),
 }
 
 pub type ExecutionResult<T> = Result<T, ExecutionError>;
@@ -1623,11 +1632,23 @@ mod tests {
                 node.set_property("active", PropertyValue::Boolean(i % 2 == 0));
             }
         }
-        // Query: compare Boolean property to String literal 'true'
+        // Comparing a Boolean property to the *string* 'true' matches nothing.
+        //
+        // This asserted 2 rows, on the strength of a String/Boolean coercion in
+        // `coerced_eq` that Cypher does not have. Comparing across types is
+        // false: `1 = '1'` is false for the same reason, which the TCK settles
+        // in `Comparison1` scenario 9. The test encoded the coercion rather than
+        // the language, and was corrected against the reference when the second
+        // comparison engine that provided it was deleted (#860).
         let executor = QueryExecutor::new(&store);
         let query = parse_query("MATCH (i:Item) WHERE i.active = 'true' RETURN i.name").unwrap();
         let result = executor.execute(&query).unwrap();
-        // Item0=true, Item1=false, Item2=true, Item3=false
+        assert_eq!(result.records.len(), 0, "a boolean never equals a string");
+
+        // The same property compared to a boolean still works, so this is not
+        // simply everything matching nothing.
+        let query = parse_query("MATCH (i:Item) WHERE i.active = true RETURN i.name").unwrap();
+        let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 2, "Expected 2 active items");
     }
 

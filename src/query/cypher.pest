@@ -180,13 +180,20 @@ label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 //
 // Alternative order matters and is not arbitrary: `-` `->` must be tried
 // before `-` `-`, or `-->` matches the undirected form and leaves a stray `>`.
+// `<-->` is "an edge in either direction", the same as `--`. It has to be tried
+// **first**: `<-` otherwise matches the incoming form and leaves a stray `>`,
+// which is a parse error on `MATCH (n)<-->(k)` (#868).
 edge_pattern = {
+    ("<-" ~ edge_detail? ~ "->") |
     ("<-" ~ edge_detail? ~ "-") |
     ("-" ~ edge_detail? ~ "->") |
     ("-" ~ edge_detail? ~ "-")
 }
 edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ "]" }
-edge_types = { ":" ~ edge_type ~ (("|" | ":") ~ edge_type)* }
+// `MATCH ()-[:A|:B]->()` repeats the colon on each alternative, which is the
+// spelling openCypher's own scenarios use. Only `:A|B` and `:A:B` parsed, so
+// the query failed outright rather than matching either type (#909).
+edge_types = { ":" ~ edge_type ~ (("|" ~ ":"? | ":") ~ edge_type)* }
 edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Variable length: *1..5 or * or *3..
@@ -204,7 +211,16 @@ property = { property_key ~ ":" ~ (value ~ !expression_continues | expression) }
 // A literal followed by an operator is really the start of an expression
 // (`{n: 1 + 2}`), so `value` must not win in that case.
 expression_continues = { "+" | "-" | "*" | "/" | "%" | "." | "[" | "=" | "<" | ">" | "!" }
-property_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// A property key may be written **delimited in backticks**, which is how
+// Cypher spells a name that is a keyword, starts with a digit, or contains
+// punctuation: `{`null`: 'x'}.`null``. A literal backtick inside is doubled.
+//
+// The rule stays atomic, so `as_str()` returns the text with its delimiters
+// still on; every read site goes through `unescape_name`, because a key stored
+// with its backticks still round-trips through the engine and only shows up as
+// a property nobody can find (#847).
+escaped_name = @{ "`" ~ ("``" | (!"`" ~ ANY))* ~ "`" }
+property_key = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // RETURN items
 //
@@ -299,7 +315,20 @@ reduce_expression = { ^"reduce" ~ "(" ~ variable ~ "=" ~ expression ~ "," ~ vari
 pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~ expression ~ "]" }
 
 // EXISTS { MATCH pattern WHERE condition }
-exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH" ~ pattern ~ where_clause? ~ "}" }
+// `EXISTS { ... }` in all three spellings openCypher allows:
+//
+//   EXISTS { (n)-->() }                     a bare pattern, no MATCH keyword
+//   EXISTS { (n)-->(m) WHERE n.p = m.p }    and an optional WHERE
+//   EXISTS { MATCH (n)-->() RETURN true }   a full subquery
+//
+// `MATCH` was required and `RETURN` was forbidden, so eight of the nine
+// existential-subquery scenarios never reached the evaluator (#858).
+//
+// The projection is parsed and **discarded**: `EXISTS { ... }` is true iff the
+// subquery produces at least one row, so what those rows contain cannot change
+// the answer. The parser already ignored every inner rule but `pattern` and
+// `where_clause`, which is why allowing RETURN needed no evaluator change.
+exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}" }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is

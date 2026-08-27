@@ -150,3 +150,59 @@ fn a_localdatetime_against_a_zoned_time_uses_local_readings() {
         "PT-5H-10M-32.142S"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `duration.inX` family (#812): each truncates to its own unit.
+// ---------------------------------------------------------------------------
+
+/// `inMonths` returns **whole calendar months**, discarding days and clock.
+///
+/// It was dividing an elapsed day count by 30, which gives `P11M29D...` where
+/// `P1Y` belongs: 365/30 is 12.16, and truncating lands one month short while
+/// leaving the remainder as days that should not be there at all.
+#[test]
+fn in_months_counts_calendar_months_only() {
+    assert_eq!(rendered("duration.inMonths(date('1984-10-11'), date('2015-06-24'))"), "P30Y8M");
+    assert_eq!(
+        rendered("duration.inMonths(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142'))"),
+        "P31Y9M"
+    );
+    // Under a month is zero months, not a rounded one.
+    assert_eq!(rendered("duration.inMonths(date('1984-10-11'), localtime('16:30'))"), "PT0S");
+}
+
+/// **Two zoned datetimes compare as instants, not wall clocks.**
+///
+/// `21:40:36.143+0200` and `21:40:32.142+0100` read as 4ms apart locally and
+/// are really 59m55.999s apart. Comparing the local readings made the clock
+/// difference negative, so the month borrow fired and produced `P11M` where a
+/// full `P1Y` belongs — a year and a month apart from one 4ms illusion.
+///
+/// Same distinction as #807 one layer up, which is why it is asserted here
+/// rather than left to the `between` tests.
+#[test]
+fn two_zoned_datetimes_compare_as_instants() {
+    assert_eq!(
+        rendered("duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100'))"),
+        "P1Y"
+    );
+    assert_eq!(
+        rendered("duration.between(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100'))"),
+        "P1YT59M55.999S"
+    );
+}
+
+/// `inDays` and `inSeconds` use elapsed time, and truncate rather than round.
+#[test]
+fn in_days_and_in_seconds_truncate_elapsed_time() {
+    assert_eq!(rendered("duration.inDays(date('2017-10-11'), date('2017-10-13'))"), "P2D");
+    // 30 hours is one day, not one and a quarter.
+    assert_eq!(
+        rendered("duration.inDays(localdatetime('2018-01-01T00:00'), localdatetime('2018-01-02T06:00'))"),
+        "P1D"
+    );
+    assert_eq!(
+        rendered("duration.inSeconds(localdatetime('2018-01-01T00:00'), localdatetime('2018-01-01T00:01'))"),
+        "PT1M"
+    );
+}

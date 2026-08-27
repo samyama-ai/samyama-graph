@@ -48,8 +48,22 @@ pub enum ValidationError {
         second: &'static str,
     },
     PatternInSetValue,
+    /// `size()` applied to a pattern or a path (#843).
+    SizeOfNonCollection(&'static str),
+    /// A bare pattern used where a value is expected (#880).
+    PatternInProjection(&'static str),
+    /// `DELETE` applied to something that is not an entity (#887).
+    InvalidDeleteTarget(String),
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
+    /// A name used in an expression that nothing in the query binds.
+    UnboundVariable(String),
+    /// A `WITH` item that is not a bare variable and has no alias.
+    UnaliasedWithItem,
+    /// An aggregate where aggregation is not allowed.
+    AggregateNotAllowed(&'static str),
+    /// A function applied to the wrong kind of entity: (function, wanted, got).
+    FunctionArgumentKind(&'static str, &'static str, &'static str),
     /// An ORDER BY item that mixes an aggregate with a grouping expression.
     AmbiguousAggregationExpression,
     /// An ORDER BY that aggregates when the projection does not.
@@ -59,6 +73,23 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnboundVariable(v) => write!(
+                f,
+                "`{v}` is not bound: nothing in this query defines it"
+            ),
+            Self::UnaliasedWithItem => write!(
+                f,
+                "every WITH item that is not a bare variable needs an alias: nothing \
+                 downstream can name the column otherwise"
+            ),
+            Self::FunctionArgumentKind(func, wanted, got) => write!(
+                f,
+                "`{func}()` takes {wanted}, and was given {got}"
+            ),
+            Self::AggregateNotAllowed(where_) => write!(
+                f,
+                "an aggregate function is not allowed {where_}"
+            ),
             Self::OrderByUndefinedVariable(v) => write!(
                 f,
                 "`{v}` is not available to ORDER BY: the projection aggregates or is \
@@ -104,6 +135,20 @@ impl std::fmt::Display for ValidationError {
                 "AND, OR and XOR need boolean operands, and this one is {what}. \
                  A value whose type is only known at run time is fine here; a \
                  literal of the wrong type is not."
+            ),
+            Self::SizeOfNonCollection(what) => write!(
+                f,
+                "size() takes a list or a string, not {what}; \
+                 use length() for a path"
+            ),
+            Self::PatternInProjection(where_) => write!(
+                f,
+                "a pattern is a predicate, not a value; it cannot be projected by {where_}. \
+                 Use `EXISTS {{ ... }}` for a boolean, or a pattern comprehension for a list"
+            ),
+            Self::InvalidDeleteTarget(what) => write!(
+                f,
+                "DELETE takes a node, relationship or path; {what}"
             ),
             Self::VariableTypeConflict(name) => write!(
                 f,
@@ -214,6 +259,34 @@ enum WriteKind {
     Merge,
 }
 
+/// A `WITH` re-scopes: only names it projects *by name* stay bound on the far
+/// side, so a name it drops is free again and a later CREATE/MERGE may reuse it.
+///
+/// This mirrors `carry_kinds_through_with` for the bound-variable checks.
+/// Without it, `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` was rejected because `r`
+/// looked already-bound, even though the WITH does not carry it through — a
+/// valid query refused for no reason the user can act on (#764).
+///
+/// Only a bare `WITH v` (optionally `AS alias`) keeps a name bound as an entity.
+/// `WITH count(r) AS r` recomputes the name into a scalar that is no longer the
+/// original entity, so it does not carry forward here — reusing that name in a
+/// CREATE is legal, and any genuine type conflict is `validate_variable_kinds`'
+/// concern, not this one.
+fn carry_names_through_with(
+    bound: &HashSet<String>,
+    wc: &crate::query::ast::WithClause,
+) -> HashSet<String> {
+    let mut next = HashSet::new();
+    for item in &wc.items {
+        if let Expression::Variable(v) = &item.expression {
+            if bound.contains(v) {
+                next.insert(item.alias.clone().unwrap_or_else(|| v.clone()));
+            }
+        }
+    }
+    next
+}
+
 /// Every write pattern in the order it was written, each paired with the
 /// variables in scope *before* it.
 ///
@@ -245,18 +318,29 @@ fn write_patterns(query: &Query) -> Vec<(WriteKind, &crate::query::ast::Pattern,
                     out.push((WriteKind::Merge, &mc.pattern, bound.clone()));
                     pattern_variables(&mc.pattern, &mut bound);
                 }
-                // A WITH re-projects rather than binds new pattern variables,
-                // and its aliases are what survive it. Anything this does not
-                // model can only *shrink* the bound set, which risks accepting
-                // an invalid query rather than rejecting a valid one -- the
-                // trade this module states up front.
+                // A WITH re-scopes: only the names it projects survive it, so a
+                // name it drops is free for a later CREATE/MERGE to reuse. Not
+                // applying this boundary rejected valid queries like
+                // `MATCH (a)-[r]->(b) WITH a CREATE (r:X)` (#764).
+                Clause::With(wc) => bound = carry_names_through_with(&bound, wc),
                 _ => {}
             }
         }
         return out;
     }
 
-    for mc in &query.match_clauses {
+    // Pre-WITH matches bind first; a WITH then re-scopes the set to only what
+    // it projects, so a CREATE/MERGE after the WITH may reuse a name the WITH
+    // dropped (#764). `with_split_index` marks where the leading WITH cuts the
+    // match list.
+    let upto = query.with_split_index.unwrap_or(query.match_clauses.len());
+    for mc in query.match_clauses.iter().take(upto) {
+        pattern_variables(&mc.pattern, &mut bound);
+    }
+    if let Some(wc) = &query.with_clause {
+        bound = carry_names_through_with(&bound, wc);
+    }
+    for mc in query.match_clauses.iter().skip(upto) {
         pattern_variables(&mc.pattern, &mut bound);
     }
     if let Some(create) = &query.create_clause {
@@ -282,17 +366,13 @@ fn is_aggregate_call(expr: &Expression) -> bool {
 }
 
 /// Does this expression contain an aggregate anywhere inside it?
+///
+/// *Anywhere*, which it did not do: `walk_children` applies its closure to the
+/// **immediate** children only, so this saw one level. `count(a) > 10` was
+/// found and `a.n > 1 AND count(a) > 10` was not -- the same aggregate, one
+/// conjunction deeper.
 fn contains_aggregate(expr: &Expression) -> bool {
-    if is_aggregate_call(expr) {
-        return true;
-    }
-    let mut found = false;
-    walk_children(expr, &mut |e| {
-        if is_aggregate_call(e) {
-            found = true;
-        }
-    });
-    found
+    is_aggregate_call(expr) || child_expressions(expr).into_iter().any(contains_aggregate)
 }
 
 /// Variables named outside any aggregate call within `expr`.
@@ -1215,7 +1295,813 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
     Ok(())
 }
 
+/// `size()` takes a list or a string, and nothing else (#843).
+///
+/// ```text
+/// MATCH (a), (b), (c) RETURN size((a)-[:REL]->(b))
+/// MATCH p = (a)-[*]->(b) RETURN size(p)
+/// ```
+///
+/// Both must fail **at compile time**, and the reason the TCK insists on that
+/// rather than accepting a runtime error is visible in these very scenarios:
+/// they run against an empty graph, so `MATCH (a), (b), (c)` binds nothing, the
+/// argument is never evaluated, and a runtime check never fires. The query
+/// "succeeds" with zero rows.
+///
+/// The engine did raise a `TypeError` -- but only when the pattern matched
+/// something. A probe against an empty store showed the error and a probe with
+/// data showed it too; what neither showed is that the *scenario* never reaches
+/// either, because the failure has to happen before any row exists.
+///
+/// `size()` on a path is a separate spelling error rather than a type error:
+/// `length()` is the function for a path, and `size()` accepted one silently.
+fn validate_size_arguments(query: &Query) -> Result<(), ValidationError> {
+    // Every name bound as a path, from both AST representations.
+    let mut paths: HashSet<String> = HashSet::new();
+    let mut note = |pattern: &crate::query::ast::Pattern| {
+        for path in &pattern.paths {
+            if let Some(v) = &path.path_variable {
+                paths.insert(v.clone());
+            }
+        }
+    };
+    for mc in &query.match_clauses {
+        note(&mc.pattern);
+    }
+    for clause in &query.clauses {
+        if let crate::query::ast::Clause::Match(mc) = clause {
+            note(&mc.pattern);
+        }
+    }
+
+    fn walk(e: &Expression, paths: &HashSet<String>) -> Result<(), ValidationError> {
+        if let Expression::Function { name, args, .. } = e {
+            if name.eq_ignore_ascii_case("size") {
+                for arg in args {
+                    match arg {
+                        // A bare pattern. `EXISTS { ... }` desugars to the same
+                        // node, so the flag is what separates them -- widening
+                        // this to both would reject `size(...)` nowhere and
+                        // `EXISTS` everywhere, which is how #798 went wrong.
+                        Expression::ExistsSubquery { bare_pattern: true, .. } => {
+                            return Err(ValidationError::SizeOfNonCollection("a pattern"));
+                        }
+                        Expression::Variable(v) if paths.contains(v) => {
+                            return Err(ValidationError::SizeOfNonCollection("a path"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, paths)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        walk(e, &paths)?;
+    }
+    Ok(())
+}
+
+/// A bare pattern cannot be **projected** (#880).
+///
+/// ```text
+/// MATCH (n) RETURN (n)-[]->()
+/// MATCH (n) WITH (n)-[]->() AS x RETURN x
+/// ```
+///
+/// Both must fail at compile time. A pattern in that position is a predicate
+/// written where a value belongs, and the engine happily evaluated it as one
+/// and projected the boolean -- an answer to a question nobody asked.
+///
+/// Only the **top level** of a projection item is checked, and only a *bare*
+/// pattern. `EXISTS { ... }` desugars to the same AST node and is legal
+/// anywhere (`bare_pattern` is what separates them, as #798 established); a
+/// pattern comprehension is a different node; and a bare pattern nested inside
+/// a list comprehension's own `WHERE` is a predicate in a predicate position.
+/// Walking the whole tree would reject all three, and over-rejecting a valid
+/// query is the worse failure.
+fn validate_pattern_projections(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn check(items: &[crate::query::ast::ReturnItem], what: &'static str) -> Result<(), ValidationError> {
+        for item in items {
+            if matches!(item.expression, Expression::ExistsSubquery { bare_pattern: true, .. }) {
+                return Err(ValidationError::PatternInProjection(what));
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(rc) = &query.return_clause {
+        check(&rc.items, "RETURN")?;
+    }
+    if let Some(wc) = &query.with_clause {
+        check(&wc.items, "WITH")?;
+    }
+    for (wc, _, _, _) in &query.extra_with_stages {
+        check(&wc.items, "WITH")?;
+    }
+    for clause in &query.clauses {
+        match clause {
+            Clause::Return(rc) => check(&rc.items, "RETURN")?,
+            Clause::With(wc) => check(&wc.items, "WITH")?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// `DELETE` takes a node, a relationship or a path (#887).
+///
+/// ```text
+/// MATCH (n) DELETE n:Person     -- a boolean predicate
+/// MATCH (a) DELETE x            -- nothing named x
+/// MATCH () DELETE 1 + 1         -- a number
+/// MATCH (n) DELETE n.prop       -- a property, not the node
+/// ```
+///
+/// All four ran and deleted nothing, reporting success. Deleting nothing is a
+/// legitimate outcome — `MATCH (n:Nope) DELETE n` deletes nothing too — so a
+/// caller cannot tell "there was nothing to delete" from "I did not understand
+/// what you asked me to delete".
+///
+/// Only the shapes that **cannot** be an entity are refused: a literal,
+/// arithmetic, a property access, a label predicate (`n:Label` parses to
+/// `hasLabels`), and a variable nothing binds. A function call is left alone,
+/// because Cypher does allow an expression that resolves to an entity and
+/// deciding that statically is a different job — over-rejecting a valid
+/// `DELETE` is much worse than under-rejecting an invalid one.
+fn validate_delete_targets(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Names anything in the query binds, from either AST representation.
+    fn bound_names(query: &Query) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut note = |p: &crate::query::ast::Pattern| pattern_vars(p, &mut out);
+        for mc in &query.match_clauses {
+            note(&mc.pattern);
+        }
+        if let Some(cc) = &query.create_clause {
+            note(&cc.pattern);
+        }
+        if let Some(mc) = &query.merge_clause {
+            note(&mc.pattern);
+        }
+        if let Some(u) = &query.unwind_clause {
+            out.insert(u.variable.clone());
+        }
+        for u in &query.extra_unwind_clauses {
+            out.insert(u.variable.clone());
+        }
+        for u in &query.post_with_unwind_clauses {
+            out.insert(u.variable.clone());
+        }
+        if let Some(wc) = &query.with_clause {
+            out.extend(projected_names(&wc.items));
+        }
+        for (wc, uw, mcs, _) in &query.extra_with_stages {
+            out.extend(projected_names(&wc.items));
+            if let Some(u) = uw {
+                out.insert(u.variable.clone());
+            }
+            for mc in mcs {
+                pattern_vars(&mc.pattern, &mut out);
+            }
+        }
+        for clause in &query.clauses {
+            match clause {
+                Clause::Match(mc) => pattern_vars(&mc.pattern, &mut out),
+                Clause::Create(cc) => pattern_vars(&cc.pattern, &mut out),
+                Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut out),
+                Clause::Unwind(u) => {
+                    out.insert(u.variable.clone());
+                }
+                Clause::With(w) => out.extend(projected_names(&w.items)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    let mut targets: Vec<&Expression> = Vec::new();
+    if let Some(dc) = &query.delete_clause {
+        targets.extend(dc.expressions.iter());
+    }
+    for clause in &query.clauses {
+        if let Clause::Delete(dc) = clause {
+            targets.extend(dc.expressions.iter());
+        }
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let bound = bound_names(query);
+    for expr in targets {
+        let complaint = match expr {
+            Expression::Variable(v) if !bound.contains(v) => {
+                Some(format!("nothing in this query binds `{v}`"))
+            }
+            Expression::Variable(_) => None,
+            Expression::Literal(_) => Some("a literal is not one".to_string()),
+            Expression::Binary { .. } | Expression::Unary { .. } => {
+                Some("an arithmetic or boolean expression is not one".to_string())
+            }
+            // **Not** a property access. `WITH {key: u} AS nodes DELETE nodes.key`
+            // is valid Cypher -- a map field can hold an entity -- and
+            // rejecting it cost two scenarios that had been passing. Whether a
+            // property access yields an entity is a runtime question, and
+            // guessing it statically is the over-rejection this check is
+            // scoped to avoid.
+            // `n:Label` parses to a `hasLabels` call, and is a *predicate*.
+            Expression::Function { name, .. } if name.eq_ignore_ascii_case("hasLabels") => {
+                Some("`n:Label` is a label test; use REMOVE to drop a label".to_string())
+            }
+            _ => None,
+        };
+        if let Some(what) = complaint {
+            return Err(ValidationError::InvalidDeleteTarget(what));
+        }
+    }
+    Ok(())
+}
+
+/// A name used in an expression must be bound by something in the query.
+///
+/// ```text
+/// MATCH () RETURN foo                          -> SyntaxError: UndefinedVariable
+/// MATCH (s) WHERE s.name = undefinedVariable   -> SyntaxError: UndefinedVariable
+/// MERGE (n) ON CREATE SET x.num = 1            -> SyntaxError: UndefinedVariable
+/// ```
+///
+/// Every one of these ran and returned zero rows, or set a property on
+/// nothing, and reported success. A typo in a variable name is the single most
+/// ordinary mistake there is, and the engine answered it with silence.
+///
+/// **Deliberately coarse**: the question asked is "does *anything* in this
+/// query bind this name", not "is it in scope *here*". Real scope analysis
+/// would also catch a name dropped by an intervening `WITH`, but it has to be
+/// exactly right about `WITH`, `FOREACH`, comprehension binders, `CALL …
+/// YIELD` and both `Query` representations before it can be trusted -- and
+/// `validate.rs` opens by naming over-rejection as the worse failure. A false
+/// `SyntaxError` breaks a working query; a missed one leaves today's
+/// behaviour. `validate_order_by_in_scope` already covers the narrowing case
+/// where it is cheap to be certain.
+///
+/// Anything that binds anywhere counts as binding everywhere here, which is
+/// why comprehension variables and `FOREACH` loop variables are collected up
+/// front rather than tracked positionally.
+fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::{Clause, RemoveItem, SetClause};
+
+    let mut bound: HashSet<String> = HashSet::new();
+
+    /// Like `pattern_variables`, plus the path variable.
+    ///
+    /// `pattern_variables` exists to answer "what may a later CREATE not
+    /// redeclare", and a path name is not that. Here it is: `MATCH p = (a)-->(b)
+    /// RETURN p` binds `p`, and borrowing the other collector rejected every
+    /// named-path query in the suite.
+    fn pattern_and_path_variables(
+        pattern: &crate::query::ast::Pattern,
+        out: &mut HashSet<String>,
+    ) {
+        pattern_variables(pattern, out);
+        for path in &pattern.paths {
+            if let Some(v) = &path.path_variable {
+                out.insert(v.clone());
+            }
+        }
+    }
+
+    /// Names any expression *introduces*, at any depth.
+    fn binders(e: &Expression, out: &mut HashSet<String>) {
+        match e {
+            Expression::ListComprehension { variable, .. }
+            | Expression::PredicateFunction { variable, .. } => {
+                out.insert(variable.clone());
+            }
+            Expression::Reduce { accumulator, variable, .. } => {
+                out.insert(accumulator.clone());
+                out.insert(variable.clone());
+            }
+            Expression::PatternComprehension { pattern, .. } => pattern_variables(pattern, out),
+            Expression::ExistsSubquery { pattern, .. } => pattern_variables(pattern, out),
+            _ => {}
+        }
+        for child in child_expressions(e) {
+            binders(child, out);
+        }
+    }
+
+    fn note_set(sc: &SetClause, bound: &mut HashSet<String>) {
+        for item in &sc.items {
+            binders(&item.value, bound);
+        }
+        for item in &sc.entity_items {
+            binders(&item.value, bound);
+        }
+    }
+
+    fn note_clause_binders(query: &Query, bound: &mut HashSet<String>) {
+        for mc in &query.match_clauses {
+            pattern_and_path_variables(&mc.pattern, bound);
+        }
+        if let Some(c) = &query.create_clause {
+            pattern_and_path_variables(&c.pattern, bound);
+        }
+        if let Some(m) = &query.merge_clause {
+            pattern_and_path_variables(&m.pattern, bound);
+        }
+        for u in query
+            .unwind_clause
+            .iter()
+            .chain(query.extra_unwind_clauses.iter())
+            .chain(query.post_with_unwind_clauses.iter())
+        {
+            bound.insert(u.variable.clone());
+            binders(&u.expression, bound);
+        }
+        if let Some(f) = &query.foreach_clause {
+            bound.insert(f.variable.clone());
+            for c in &f.create_clauses {
+                pattern_and_path_variables(&c.pattern, bound);
+            }
+            for sc in &f.set_clauses {
+                note_set(sc, bound);
+            }
+        }
+        if let Some(call) = &query.call_clause {
+            for y in &call.yield_items {
+                bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
+            }
+        }
+        for c in &query.clauses {
+            match c {
+                Clause::Match(mc) => pattern_and_path_variables(&mc.pattern, bound),
+                Clause::Create(cc) => pattern_and_path_variables(&cc.pattern, bound),
+                Clause::Merge(mc) => pattern_and_path_variables(&mc.pattern, bound),
+                Clause::Unwind(u) => {
+                    bound.insert(u.variable.clone());
+                    binders(&u.expression, bound);
+                }
+                Clause::Foreach(f) => {
+                    bound.insert(f.variable.clone());
+                    for cc in &f.create_clauses {
+                        pattern_and_path_variables(&cc.pattern, bound);
+                    }
+                    for sc in &f.set_clauses {
+                        note_set(sc, bound);
+                    }
+                }
+                Clause::Call(call) => {
+                    for y in &call.yield_items {
+                        bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
+                    }
+                }
+                Clause::Set(sc) => note_set(sc, bound),
+                _ => {}
+            }
+        }
+        for sc in &query.set_clauses {
+            note_set(sc, bound);
+        }
+    }
+
+    note_clause_binders(query, &mut bound);
+
+    // A `CALL { … }` subquery exports the columns its RETURN names, and binds
+    // everything it binds internally. Recursing rather than duplicating the
+    // walk: a subquery is a `Query`.
+    if let Some(sub) = &query.call_subquery {
+        note_clause_binders(sub, &mut bound);
+        for items in sub
+            .return_clause
+            .iter()
+            .map(|r| &r.items)
+            .chain(sub.with_clause.iter().map(|w| &w.items))
+        {
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+        for c in &sub.clauses {
+            let items = match c {
+                Clause::Return(r) => &r.items,
+                Clause::With(w) => &w.items,
+                _ => continue,
+            };
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+    }
+
+    // Projections bind their aliases -- and a bare `RETURN n` keeps `n`.
+    let mut note_items = |items: &[ReturnItem], bound: &mut HashSet<String>| {
+        for item in items {
+            if let Some(a) = &item.alias {
+                bound.insert(a.clone());
+            }
+            binders(&item.expression, bound);
+        }
+    };
+    if let Some(w) = &query.with_clause {
+        note_items(&w.items, &mut bound);
+    }
+    for (w, u, post_matches, post_where) in &query.extra_with_stages {
+        note_items(&w.items, &mut bound);
+        if let Some(u) = u {
+            bound.insert(u.variable.clone());
+            binders(&u.expression, &mut bound);
+        }
+        // A MATCH written after a WITH binds too. Skipping these rejected
+        // `MATCH (m) WITH m MATCH (a)-->(m) WITH m, count(a) AS cnt RETURN cnt`
+        // -- an ordinary two-stage aggregation, and one the TCK does not
+        // cover but the engine's own suite does.
+        for mc in post_matches {
+            pattern_and_path_variables(&mc.pattern, &mut bound);
+        }
+        if let Some(w) = post_where {
+            binders(&w.predicate, &mut bound);
+        }
+    }
+    if let Some(r) = &query.return_clause {
+        note_items(&r.items, &mut bound);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::With(w) => note_items(&w.items, &mut bound),
+            Clause::Return(r) => note_items(&r.items, &mut bound),
+            _ => {}
+        }
+    }
+    // Binders inside predicates and inline property expressions count too.
+    for e in all_expressions(query) {
+        binders(e, &mut bound);
+    }
+
+    // ---- everything referenced, checked against that set.
+    let mut used: Vec<String> = Vec::new();
+    let mut note_expr = |e: &Expression, used: &mut Vec<String>| collect_all_vars(e, used);
+
+    for e in all_expressions(query) {
+        note_expr(e, &mut used);
+    }
+    let mut note_set_use = |sc: &SetClause, used: &mut Vec<String>| {
+        for item in &sc.items {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in &sc.entity_items {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in &sc.label_items {
+            used.push(item.variable.clone());
+        }
+    };
+    for sc in &query.set_clauses {
+        note_set_use(sc, &mut used);
+    }
+    for rc in &query.remove_clauses {
+        for item in &rc.items {
+            match item {
+                RemoveItem::Property { variable, .. } => used.push(variable.clone()),
+                RemoveItem::Label { variable, .. } => used.push(variable.clone()),
+            }
+        }
+    }
+    let mut note_merge_use = |mc: &crate::query::ast::MergeClause, used: &mut Vec<String>| {
+        for item in mc.on_create_set.iter().chain(mc.on_match_set.iter()) {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+        for item in mc
+            .on_create_entity_set
+            .iter()
+            .chain(mc.on_match_entity_set.iter())
+        {
+            used.push(item.variable.clone());
+            collect_all_vars(&item.value, used);
+        }
+    };
+    if let Some(mc) = &query.merge_clause {
+        note_merge_use(mc, &mut used);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Set(sc) => note_set_use(sc, &mut used),
+            Clause::Merge(mc) => note_merge_use(mc, &mut used),
+            Clause::Delete(dc) => {
+                for e in &dc.expressions {
+                    collect_all_vars(e, &mut used);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(dc) = &query.delete_clause {
+        for e in &dc.expressions {
+            collect_all_vars(e, &mut used);
+        }
+    }
+    // Inline property expressions in write patterns: `CREATE (b {name: missing})`.
+    for pattern in pattern_property_expressions(query) {
+        collect_all_vars(pattern, &mut used);
+    }
+
+    for name in used {
+        if !bound.contains(&name) {
+            return Err(ValidationError::UnboundVariable(name));
+        }
+    }
+    Ok(())
+}
+
+/// Every expression written inside a pattern's inline property map.
+///
+/// `CREATE (b {name: missing})` hides a reference to `missing` where no
+/// expression walker looks: it is a property map on a pattern node, not an
+/// expression of the clause.
+fn pattern_property_expressions(query: &Query) -> Vec<&Expression> {
+    use crate::query::ast::Clause;
+    let mut out: Vec<&Expression> = Vec::new();
+
+    fn from_pattern<'a>(pattern: &'a crate::query::ast::Pattern, out: &mut Vec<&'a Expression>) {
+        for path in &pattern.paths {
+            let mut nodes = vec![&path.start];
+            for seg in &path.segments {
+                nodes.push(&seg.node);
+                if let Some(pe) = &seg.edge.property_exprs {
+                    out.extend(pe.values());
+                }
+            }
+            for np in nodes {
+                if let Some(pe) = &np.property_exprs {
+                    out.extend(pe.values());
+                }
+            }
+        }
+    }
+
+    for mc in &query.match_clauses {
+        from_pattern(&mc.pattern, &mut out);
+    }
+    if let Some(c) = &query.create_clause {
+        from_pattern(&c.pattern, &mut out);
+    }
+    if let Some(m) = &query.merge_clause {
+        from_pattern(&m.pattern, &mut out);
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Match(mc) => from_pattern(&mc.pattern, &mut out),
+            Clause::Create(cc) => from_pattern(&cc.pattern, &mut out),
+            Clause::Merge(mc) => from_pattern(&mc.pattern, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A `WITH` item that is not a bare variable must be aliased (#897).
+///
+/// ```text
+/// MATCH (a) WITH a, count(*) RETURN a     -> SyntaxError: NoExpressionAlias
+/// ```
+///
+/// `WITH` re-scopes: what it projects is all that exists downstream, and a
+/// column nobody can name is a column nobody can use. `RETURN` is different --
+/// it is the end of the query, and `RETURN count(*)` names its column after
+/// the text the user wrote.
+fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn check(items: &[ReturnItem]) -> Result<(), ValidationError> {
+        for item in items {
+            if item.alias.is_none() && !matches!(item.expression, Expression::Variable(_)) {
+                return Err(ValidationError::UnaliasedWithItem);
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(w) = &query.with_clause {
+        check(&w.items)?;
+    }
+    for (w, ..) in &query.extra_with_stages {
+        check(&w.items)?;
+    }
+    for c in &query.clauses {
+        if let Clause::With(w) = c {
+            check(&w.items)?;
+        }
+    }
+    Ok(())
+}
+
+/// Aggregation is not allowed in a `WHERE`, nor inside a comprehension (#897).
+///
+/// ```text
+/// MATCH (a) WHERE count(a) > 10 RETURN a         -> SyntaxError
+/// MATCH (n) RETURN [x IN [1, 2] | count(*)]      -> SyntaxError
+/// ```
+///
+/// An aggregate is computed over a group of rows, and a `WHERE` runs on one
+/// row at a time -- the filter would have to consume the rows it is filtering.
+/// The `HAVING` shape Cypher does have is `WITH … count(*) AS c … WHERE c > 1`,
+/// which filters on the *alias*, not on the aggregate, and is untouched here.
+///
+/// A comprehension is the same argument one level down: its body runs per list
+/// element, and `count(*)` over a list element has no group to count.
+fn validate_aggregate_placement(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    fn inside_comprehension(e: &Expression) -> Result<(), ValidationError> {
+        let body: Vec<&Expression> = match e {
+            Expression::ListComprehension { map_expr, filter, .. } => {
+                let mut v: Vec<&Expression> = vec![map_expr.as_ref()];
+                v.extend(filter.iter().map(|b| b.as_ref()));
+                v
+            }
+            Expression::PatternComprehension { projection, filter, .. } => {
+                let mut v: Vec<&Expression> = vec![projection.as_ref()];
+                v.extend(filter.iter().map(|b| b.as_ref()));
+                v
+            }
+            _ => Vec::new(),
+        };
+        for b in body {
+            if contains_aggregate(b) {
+                return Err(ValidationError::AggregateNotAllowed(
+                    "inside a comprehension: its body runs once per element, \
+                     which is not a group",
+                ));
+            }
+        }
+        for child in child_expressions(e) {
+            inside_comprehension(child)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        inside_comprehension(e)?;
+    }
+
+    let mut where_predicates: Vec<&Expression> = Vec::new();
+    if let Some(w) = &query.where_clause {
+        where_predicates.push(&w.predicate);
+    }
+    for (_, _, _, post_where) in &query.extra_with_stages {
+        if let Some(w) = post_where {
+            where_predicates.push(&w.predicate);
+        }
+    }
+    for c in &query.clauses {
+        if let Clause::Where(w) = c {
+            where_predicates.push(&w.predicate);
+        }
+    }
+    for p in where_predicates {
+        if contains_aggregate(p) {
+            return Err(ValidationError::AggregateNotAllowed(
+                "in WHERE: it filters one row at a time, and an aggregate needs \
+                 the group. Aggregate in a WITH and filter on the alias",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A function applied to the wrong kind of entity (#901).
+///
+/// ```text
+/// MATCH (r) RETURN type(r)     -> SyntaxError: InvalidArgumentType
+/// MATCH (n) RETURN length(n)   -> SyntaxError: InvalidArgumentType
+/// ```
+///
+/// We returned a null column. `type()` asks a relationship for its type and a
+/// node does not have one; `length()` asks a path how long it is. The TCK wants
+/// these **at compile time**, which is only possible because the pattern says
+/// what kind each variable is -- the same `EntityKind` map that
+/// `validate_variable_kinds` builds.
+///
+/// Only a variable whose kind the pattern fixes is checked. An expression, a
+/// parameter, or a name a `WITH` recomputed has no kind here and is left alone:
+/// rejecting a valid query is the worse failure, and `carry_kinds_through_with`
+/// already refuses to guess for exactly that reason.
+fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Functions whose single argument must be one kind of entity.
+    const FIXED: &[(&str, EntityKind)] = &[
+        ("type", EntityKind::Relationship),
+        ("startnode", EntityKind::Relationship),
+        ("endnode", EntityKind::Relationship),
+        ("labels", EntityKind::Node),
+        ("length", EntityKind::Path),
+        ("nodes", EntityKind::Path),
+        ("relationships", EntityKind::Path),
+    ];
+
+    fn walk(
+        e: &Expression,
+        kinds: &std::collections::HashMap<String, EntityKind>,
+    ) -> Result<(), ValidationError> {
+        if let Expression::Function { name, args, .. } = e {
+            let lowered = name.to_lowercase();
+            if let Some((func, wanted)) = FIXED.iter().find(|(n, _)| *n == lowered) {
+                if let Some(Expression::Variable(v) | Expression::PathVariable(v)) = args.first() {
+                    if let Some(got) = kinds.get(v) {
+                        if got != wanted {
+                            return Err(ValidationError::FunctionArgumentKind(
+                                func,
+                                wanted.noun(),
+                                got.noun(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for child in child_expressions(e) {
+            walk(child, kinds)?;
+        }
+        Ok(())
+    }
+
+    // The kinds every pattern in the query fixes. Scope narrowing is not
+    // modelled here: a name a WITH drops is simply absent from a later
+    // pattern's map too, and a name it carries keeps its kind. The coarse
+    // version cannot produce a *wrong* kind, only miss one.
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
+    let mut note = |pattern: &crate::query::ast::Pattern,
+                    kinds: &mut std::collections::HashMap<String, EntityKind>| {
+        // Kind *clashes* are `validate_variable_kinds`'s job; ignored here so
+        // one rule reports them.
+        let _ = note_pattern_kinds(kinds, pattern);
+    };
+    for mc in &query.match_clauses {
+        note(&mc.pattern, &mut kinds);
+    }
+    if let Some(cc) = &query.create_clause {
+        note(&cc.pattern, &mut kinds);
+    }
+    if let Some(mc) = &query.merge_clause {
+        note(&mc.pattern, &mut kinds);
+    }
+    for (_, _, matches, _) in &query.extra_with_stages {
+        for mc in matches {
+            note(&mc.pattern, &mut kinds);
+        }
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Match(mc) => note(&mc.pattern, &mut kinds),
+            Clause::Create(cc) => note(&cc.pattern, &mut kinds),
+            Clause::Merge(mc) => note(&mc.pattern, &mut kinds),
+            _ => {}
+        }
+    }
+
+    for e in all_expressions(query) {
+        walk(e, &kinds)?;
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_variables_are_bound(query)?;
+
+    validate_with_items_aliased(query)?;
+
+    validate_aggregate_placement(query)?;
+
+    validate_function_argument_kinds(query)?;
+
+    validate_delete_targets(query)?;
+
+    validate_pattern_projections(query)?;
+
+    validate_size_arguments(query)?;
+
     validate_pattern_predicate_vars(query)?;
 
     validate_property_access_targets(query)?;

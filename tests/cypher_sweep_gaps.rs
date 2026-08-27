@@ -138,13 +138,20 @@ fn the_power_operator_works() {
 }
 
 #[test]
-fn the_power_operator_binds_tightest_and_associates_right() {
+fn the_power_operator_binds_tightest_and_associates_left() {
     // `2 + 3 ^ 2` is 11, not 25 — it binds tighter than `+`.
     assert_eq!(one("RETURN 2 + 3 ^ 2 AS r"), PropertyValue::Float(11.0));
     // `2 * 3 ^ 2` is 18, not 36 — tighter than `*` too.
     assert_eq!(one("RETURN 2 * 3 ^ 2 AS r"), PropertyValue::Float(18.0));
-    // `2 ^ 3 ^ 2` is 2^(3^2) = 512, not (2^3)^2 = 64.
-    assert_eq!(one("RETURN 2 ^ 3 ^ 2 AS r"), PropertyValue::Float(512.0));
+    // `2 ^ 3 ^ 2` is **(2^3)^2 = 64**, not 2^(3^2) = 512.
+    //
+    // This assertion had it the other way round, with a comment stating the
+    // mathematical convention as though it were the rule. Cypher does not
+    // follow it: openCypher's `PowerOfExpression` is left-recursive, and
+    // `Precedence2` scenarios 2 and 3 both pin the left grouping. The test was
+    // corrected against the reference rather than the code against the test
+    // (#835).
+    assert_eq!(one("RETURN 2 ^ 3 ^ 2 AS r"), PropertyValue::Float(64.0));
 }
 
 #[test]

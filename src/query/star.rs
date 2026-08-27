@@ -17,7 +17,8 @@
 //! expect. Deduplicated, because `MATCH (a)-->(b), (b)-->(c)` binds `b` twice.
 
 use crate::query::ast::{
-    Expression, MatchClause, Query, ReturnItem, UnwindClause, WithClause, STAR_ITEM,
+    Clause, Expression, MatchClause, Pattern, Query, ReturnItem, UnwindClause, WithClause,
+    STAR_ITEM,
 };
 
 /// Whether an item is the `*` sentinel.
@@ -43,7 +44,7 @@ fn push_unique(scope: &mut Vec<String>, name: &str) {
 /// Edge variables count: `MATCH (a)-[r]->(b) RETURN *` returns `r` too. Missing
 /// them is the easy mistake here, and it is invisible until a scenario returns
 /// two columns instead of three.
-fn bind_match(scope: &mut Vec<String>, clauses: &[MatchClause]) {
+pub(crate) fn bind_match(scope: &mut Vec<String>, clauses: &[MatchClause]) {
     for mc in clauses {
         for path in &mc.pattern.paths {
             if let Some(v) = &path.path_variable {
@@ -130,11 +131,96 @@ fn expand_into(items: &mut Vec<ReturnItem>, scope: &[String]) {
     *items = out;
 }
 
+/// Every variable a pattern binds, in written order.
+///
+/// `CREATE` and `MERGE` bind exactly like `MATCH` does, so this is the one
+/// implementation all three use.
+fn bind_pattern(scope: &mut Vec<String>, pattern: &Pattern) {
+    for path in &pattern.paths {
+        if let Some(v) = &path.path_variable {
+            push_unique(scope, v);
+        }
+        if let Some(v) = &path.start.variable {
+            push_unique(scope, v);
+        }
+        for seg in &path.segments {
+            if let Some(v) = &seg.edge.variable {
+                push_unique(scope, v);
+            }
+            if let Some(v) = &seg.node.variable {
+                push_unique(scope, v);
+            }
+        }
+    }
+}
+
+/// Expand the stars in a clause-pipeline query.
+///
+/// `Query` has two shapes -- the by-kind fields and this pipeline -- and this
+/// pass only ever walked the first. In the pipeline a `WITH *` kept a literal
+/// variable named `*`, so it projected nothing, every binding was dropped, and
+/// a later clause naming one of them treated it as new:
+///
+/// ```cypher
+/// CREATE (a) WITH * CREATE (b) CREATE (a)<-[:T]-(b)   -- created three nodes
+/// ```
+///
+/// The star is the reason to walk in order: scope is what has been bound so
+/// far, and a `WITH` replaces it (#892).
+fn expand_stars_pipeline(clauses: &mut [Clause]) {
+    let mut scope: Vec<String> = Vec::new();
+    for clause in clauses.iter_mut() {
+        match clause {
+            Clause::Match(mc) => bind_match(&mut scope, std::slice::from_ref(mc)),
+            Clause::Create(cc) => bind_pattern(&mut scope, &cc.pattern),
+            Clause::Merge(mc) => bind_pattern(&mut scope, &mc.pattern),
+            Clause::Foreach(_) => {
+                // FOREACH binds only inside its own body.
+            }
+            Clause::Unwind(u) => push_unique(&mut scope, &u.variable),
+            Clause::Call(call) => {
+                for item in &call.yield_items {
+                    push_unique(&mut scope, item.alias.as_ref().unwrap_or(&item.name));
+                }
+            }
+            Clause::With(wc) => {
+                expand_into(&mut wc.items, &scope);
+                scope = with_output(&wc.items);
+            }
+            Clause::Return(rc) => expand_into(&mut rc.items, &scope),
+            Clause::Where(_) | Clause::Set(_) | Clause::Remove(_) | Clause::Delete(_) => {}
+        }
+    }
+}
+
 /// Expand every `*` in `query`, in place.
 ///
 /// Walks the query in execution order so that each star sees the scope that
 /// actually reaches it, including through `WITH` stages that narrow it.
 pub fn expand_stars(query: &mut Query) {
+    // Both representations, always. The parser fills `clauses` even when the
+    // by-kind fields can express the query, and mirrors the RETURN into
+    // `return_clause` -- so expanding only one left a literal `*` in the other
+    // for whatever reads it next.
+    if !query.clauses.is_empty() {
+        expand_stars_pipeline(&mut query.clauses);
+    }
+    if query.needs_clause_pipeline {
+        // The parser mirrors the pipeline's RETURN into `return_clause` before
+        // this pass runs, so expanding one leaves the other holding a literal
+        // `*`. Re-mirrored rather than expanded twice: one of them has to be
+        // the copy, and the pipeline is the original.
+        if let Some(Clause::Return(rc)) = query
+            .clauses
+            .iter()
+            .rev()
+            .find(|c| matches!(c, Clause::Return(_)))
+        {
+            query.return_clause = Some(rc.clone());
+        }
+        return;
+    }
+
     let mut scope: Vec<String> = Vec::new();
 
     // Only the matches *before* the first WITH are in scope when that WITH is
@@ -152,19 +238,7 @@ pub fn expand_stars(query: &mut Query) {
     }
     if let Some(create) = &query.create_clause {
         // `CREATE (n) RETURN *` returns the created node.
-        for path in &create.pattern.paths {
-            if let Some(v) = &path.start.variable {
-                push_unique(&mut scope, v);
-            }
-            for seg in &path.segments {
-                if let Some(v) = &seg.edge.variable {
-                    push_unique(&mut scope, v);
-                }
-                if let Some(v) = &seg.node.variable {
-                    push_unique(&mut scope, v);
-                }
-            }
-        }
+        bind_pattern(&mut scope, &create.pattern);
     }
 
     // A WITH narrows scope to what it projects, so its own `*` is expanded

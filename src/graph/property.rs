@@ -807,6 +807,11 @@ impl fmt::Display for PropertyValue {
             | PropertyValue::ZonedDateTime { .. } => write!(f, "{}", self.to_cypher_string()),
             PropertyValue::String(s) => write!(f, "\"{}\"", s),
             PropertyValue::Integer(i) => write!(f, "{}", i),
+            // Negative zero prints as `0`, not `-0`. IEEE keeps the sign bit and
+            // Cypher does not show it: `RETURN -0.0` is `0.0`. The value is left
+            // alone -- only the rendering drops the sign, so a computed `-0.0`
+            // still compares equal to `0.0` as it always did (#883).
+            PropertyValue::Float(fl) if *fl == 0.0 => write!(f, "0"),
             PropertyValue::Float(fl) => write!(f, "{}", fl),
             PropertyValue::Boolean(b) => write!(f, "{}", b),
             PropertyValue::DateTime(dt) => write!(f, "DateTime({})", dt),

@@ -58,22 +58,30 @@ fn an_unwind_after_an_aggregating_with_expands_the_aggregate() {
 ///   -> VariableNotFound("b")
 /// ```
 ///
-/// This fix covers one `WITH` with a trailing `UNWIND`, which is the reported
-/// repro and the shape that matters in practice. With **two** such stages the
-/// planner's `stage_unwind` still falls back to the query's *leading* unwind
-/// once `extra_with_stages` is non-empty, so the head unwind is applied twice
-/// and a stage gets the wrong one.
+/// Two stages each carrying their own `UNWIND` now work, and the leading one
+/// is applied exactly once.
 ///
-/// `#[ignore]`d rather than deleted or weakened: the expected row count below
-/// is what Cypher specifies, and a test asserting today's error would have to
-/// be rewritten by whoever finishes this — which is the opposite of useful.
-/// Tracked on #785.
+/// This test was `#[ignore]`d while #785 was open, and **its expected value was
+/// wrong**: it asserted 24 while the comment beside it computed `2 x 2 x 3`,
+/// which is 12. A `WITH` is a projection, not an aggregation, so it does not
+/// multiply rows — the count is one factor per `UNWIND` and nothing else. Had
+/// the fix been judged against 24 it would have looked incomplete when it was
+/// finished, which is the failure mode of an expectation nobody re-derived.
 #[test]
-#[ignore = "multi-stage WITH+UNWIND still mis-assigns the leading unwind; see #785"]
 fn each_with_stage_keeps_its_own_unwind() {
     assert_eq!(
         rows("UNWIND [1,2] AS a WITH [1,2] AS b UNWIND b AS c WITH c, [1,2,3] AS d UNWIND d AS e RETURN e"),
-        24, // 2 x 2 x 3, and the leading UNWIND is not double-counted
+        12, // 2 (a) x 2 (b) x 3 (d); the leading UNWIND is not double-counted
+    );
+    // Three stages, to show the fix is not "one more than before".
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH [1,2] AS b UNWIND b AS c WITH c, [1,2,3] AS d UNWIND d AS e WITH e, [1,2] AS f UNWIND f AS g RETURN g"),
+        24, // x 2
+    );
+    // A stage with no UNWIND between two that have one must not shift them.
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH [1,2] AS b UNWIND b AS c WITH c AS k WITH k, [1,2,3] AS d UNWIND d AS e RETURN e"),
+        12,
     );
 }
 
