@@ -1935,6 +1935,35 @@ impl QueryPlanner {
 
         let mut operator = operator.unwrap();
 
+        // `MATCH p = (a)` binds `p` to a path of one node and no relationships.
+        //
+        // A named path is bound by the expand that walks it, so a pattern with
+        // no segments had no expand and nothing bound `p`: `MATCH p = (a)
+        // RETURN p` parsed and then failed with VariableNotFound. The
+        // zero-length path is the one case where there is nothing to walk, and
+        // it is exactly the case the walking code cannot reach (#909).
+        //
+        // `named_path_handles` already produces the right handle for a
+        // segment-less path -- it is what MERGE uses -- so this is the same
+        // description, bound by the same operator.
+        {
+            let mut zero_length: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+            for mc in &query.match_clauses {
+                for path in &mc.pattern.paths {
+                    if path.segments.is_empty() && path.path_variable.is_some() {
+                        let single = crate::query::ast::Pattern { paths: vec![path.clone()] };
+                        zero_length.extend(named_path_handles(&single));
+                    }
+                }
+            }
+            if !zero_length.is_empty() {
+                operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                    operator,
+                    zero_length,
+                ));
+            }
+        }
+
         // A *leading* UNWIND is planned before the WITH barriers, above, so that
         // a following WITH has its variable bound. It still lands below the
         // WHERE, which is what `UNWIND [1,2] AS x MATCH (p) WHERE p.n = x`
