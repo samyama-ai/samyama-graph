@@ -29,7 +29,7 @@ use samyama_graph_algorithms::{
     page_rank, PageRankConfig,
     weakly_connected_components,
     cdlp, CdlpConfig,
-    local_clustering_coefficient_directed,
+    local_clustering_coefficient_with, DirectedLcc,
 };
 
 #[path = "common/bench_setup.rs"]
@@ -528,7 +528,12 @@ fn run_algorithm(
 
         "LCC" => {
             let start = Instant::now();
-            let result = local_clustering_coefficient_directed(view, directed);
+            // LDBC's definition, because this bench is judged against LDBC's
+            // expected-output files. The default (Fagiolo) is what
+            // CH-ALGO-PARITY compares to NetworkX -- a different question with
+            // a different right answer (#916).
+            let definition = if directed { DirectedLcc::Ldbc } else { DirectedLcc::default() };
+            let result = local_clustering_coefficient_with(view, directed, definition);
             let duration = start.elapsed();
 
             let non_zero = result.coefficients.values().filter(|&&cc| cc > 0.0).count();

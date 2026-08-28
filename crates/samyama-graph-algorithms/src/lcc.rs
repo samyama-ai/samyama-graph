@@ -35,6 +35,36 @@ pub fn local_clustering_coefficient(view: &GraphView) -> LccResult {
     local_clustering_coefficient_directed(view, false)
 }
 
+/// Which directed clustering coefficient to compute.
+///
+/// There is more than one, and two of our own requirements ask for different
+/// ones (#916):
+///
+/// * **ALGO-02** measures agreement with NetworkX and igraph, which both
+///   implement Fagiolo (2007). `CH-ALGO-PARITY` has been green against it
+///   since #658.
+/// * **ALGO-08** measures agreement with LDBC Graphalytics, whose LCC is a
+///   different formula with no reciprocal-edge correction at all.
+///
+/// Both implementations are correct for their own reference and neither is
+/// correct for the other's, so the choice is a parameter rather than a hidden
+/// decision -- which is also what ALGO-03 asks for: normalization documented
+/// per algorithm. Picking one silently is how the next disagreement gets
+/// introduced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DirectedLcc {
+    /// Fagiolo (2007). Denominator `d_tot(d_tot - 1) - 2*d_bi`; the `-2*d_bi`
+    /// discounts reciprocal pairs, which cannot form the triangles the
+    /// denominator is counting possibilities for.
+    #[default]
+    Fagiolo,
+    /// LDBC Graphalytics. `|{(u,w) : u,w in N(v), u != w, (u,w) in E}| /
+    /// (d(v) * (d(v)-1))`, where `N(v)` is the *set* union of in- and
+    /// out-neighbours and the numerator counts **ordered** pairs joined by a
+    /// directed edge. No reciprocal correction.
+    Ldbc,
+}
+
 /// Fagiolo (2007) directed clustering coefficient, as NetworkX and igraph
 /// compute it.
 ///
@@ -87,6 +117,35 @@ fn directed_clustering(
     triangles as f64 / (denom as f64 * 2.0)
 }
 
+/// LDBC Graphalytics' directed clustering coefficient.
+///
+/// Ordered pairs of distinct neighbours joined by a directed edge, over
+/// `d(d-1)`. Both directions of a reciprocal pair count, and both slots of the
+/// denominator are available to them -- which is exactly where this parts
+/// company with Fagiolo.
+///
+/// Checked against the shipped `example-directed` reference: node 1 has
+/// `N = {3,5,8}`, the edges `3->5, 3->8, 5->3, 5->8` among them, and
+/// `4/6 = 0.6667`, which is what the reference file says.
+fn ldbc_clustering(idx: usize, neighbours: &HashSet<usize>, successor_sets: &[HashSet<usize>]) -> f64 {
+    let d = neighbours.len();
+    if d < 2 {
+        return 0.0;
+    }
+    let mut edges = 0usize;
+    for &u in neighbours {
+        if u == idx {
+            continue;
+        }
+        for &w in successor_sets[u].intersection(neighbours) {
+            if w != idx && w != u {
+                edges += 1;
+            }
+        }
+    }
+    edges as f64 / (d * (d - 1)) as f64
+}
+
 /// Compute local clustering coefficients for all nodes.
 ///
 /// When `directed=false`: uses undirected neighbor sets (union of successors +
@@ -97,6 +156,19 @@ fn directed_clustering(
 /// discovery, but counts *directed* edges (u→w) among neighbors, divides by
 /// Fagiolo's `d_tot(d_tot - 1) - 2*d_bi` (see `directed_clustering`).
 pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -> LccResult {
+    local_clustering_coefficient_with(view, directed, DirectedLcc::Fagiolo)
+}
+
+/// As [`local_clustering_coefficient_directed`], choosing the directed
+/// definition explicitly. See [`DirectedLcc`] for why there is a choice.
+///
+/// `definition` is ignored when `directed` is false: the undirected
+/// coefficient is the same under both references.
+pub fn local_clustering_coefficient_with(
+    view: &GraphView,
+    directed: bool,
+    definition: DirectedLcc,
+) -> LccResult {
     let n = view.node_count;
     if n == 0 {
         return LccResult { coefficients: HashMap::new(), average: 0.0 };
@@ -194,7 +266,14 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
             let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
             let cc = if directed {
-                directed_clustering(idx, &predecessor_sets, &successor_sets)
+                match definition {
+                    DirectedLcc::Fagiolo => {
+                        directed_clustering(idx, &predecessor_sets, &successor_sets)
+                    }
+                    DirectedLcc::Ldbc => {
+                        ldbc_clustering(idx, &neighbors[idx], &successor_sets)
+                    }
+                }
             } else {
                 let mut triangle_edges = 0usize;
                 for i in 0..neighbor_vec.len() {
@@ -217,7 +296,14 @@ pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -
             let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
             let cc = if directed {
-                directed_clustering(idx, &predecessor_sets, &successor_sets)
+                match definition {
+                    DirectedLcc::Fagiolo => {
+                        directed_clustering(idx, &predecessor_sets, &successor_sets)
+                    }
+                    DirectedLcc::Ldbc => {
+                        ldbc_clustering(idx, &neighbors[idx], &successor_sets)
+                    }
+                }
             } else {
                 let mut triangle_edges = 0usize;
                 for i in 0..neighbor_vec.len() {
@@ -250,6 +336,104 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use crate::common::GraphView;
+
+    /// The shipped `example-directed` Graphalytics reference graph.
+    fn example_directed() -> (GraphView, Vec<(u64, u64)>) {
+        let edges: Vec<(u64, u64)> = vec![
+            (1, 3), (1, 5), (2, 4), (2, 5), (2, 10), (3, 1), (3, 5), (3, 8),
+            (3, 10), (5, 3), (5, 4), (5, 8), (6, 3), (6, 4), (7, 4), (8, 1),
+            (9, 4),
+        ];
+        let ids: Vec<NodeId> = (1..=10).collect();
+        let node_to_index: HashMap<NodeId, usize> =
+            ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let mut outgoing = vec![Vec::new(); 10];
+        let mut incoming = vec![Vec::new(); 10];
+        for &(a, b) in &edges {
+            outgoing[node_to_index[&a]].push(node_to_index[&b]);
+            incoming[node_to_index[&b]].push(node_to_index[&a]);
+        }
+        (
+            GraphView::from_adjacency_list(10, ids, node_to_index, outgoing, incoming, None),
+            edges,
+        )
+    }
+
+    /// The expected-output file that ships beside the dataset.
+    const LDBC_EXPECTED: [(NodeId, f64); 10] = [
+        (1, 0.666_666_666_666_666_6),
+        (2, 0.166_666_666_666_666_7),
+        (3, 0.15),
+        (4, 0.05),
+        (5, 0.25),
+        (6, 0.0),
+        (7, 0.0),
+        (8, 0.833_333_333_333_333_4),
+        (9, 0.0),
+        (10, 0.0),
+    ];
+
+    #[test]
+    fn the_ldbc_definition_reproduces_the_graphalytics_reference() {
+        // The bench validated against this file the whole time and nothing ran
+        // it, so "Graphalytics 12/12" sat in the README while directed LCC
+        // answered a different question (#916).
+        let (view, _) = example_directed();
+        let got = local_clustering_coefficient_with(&view, true, DirectedLcc::Ldbc);
+        for (id, want) in LDBC_EXPECTED {
+            let g = got.coefficients[&id];
+            assert!(
+                (g - want).abs() < 1e-9,
+                "node {id}: LDBC expects {want}, got {g}"
+            );
+        }
+    }
+
+    #[test]
+    fn fagiolo_stays_the_default_and_stays_different() {
+        // ALGO-02 compares against NetworkX and igraph, which implement
+        // Fagiolo; changing the default to satisfy ALGO-08 would have traded
+        // one green suite for another.
+        let (view, _) = example_directed();
+        let fagiolo = local_clustering_coefficient_with(&view, true, DirectedLcc::Fagiolo);
+        let default = local_clustering_coefficient_directed(&view, true);
+        assert_eq!(
+            fagiolo.coefficients[&1], default.coefficients[&1],
+            "the unparameterised entry point is still Fagiolo"
+        );
+        // And it is genuinely a different formula, not a tolerance: node 1 has
+        // one reciprocal pair, so Fagiolo divides by 6*5-2 rather than 6*5.
+        assert!(
+            (fagiolo.coefficients[&1] - LDBC_EXPECTED[0].1).abs() > 1e-3,
+            "the two definitions disagree where reciprocal edges exist"
+        );
+    }
+
+    #[test]
+    fn the_definition_is_ignored_when_the_graph_is_undirected() {
+        // Both references agree on the undirected coefficient, and
+        // `example-undirected` passes under either. Asserting it here keeps a
+        // future change to the dispatch from quietly splitting them.
+        let (view, _) = example_directed();
+        assert_eq!(
+            local_clustering_coefficient_with(&view, false, DirectedLcc::Ldbc).coefficients,
+            local_clustering_coefficient_with(&view, false, DirectedLcc::Fagiolo).coefficients,
+        );
+    }
+
+    #[test]
+    fn a_node_with_fewer_than_two_neighbours_is_zero_under_both() {
+        // d(d-1) is zero there, and dividing by it is how an LCC becomes NaN.
+        let (view, _) = example_directed();
+        for def in [DirectedLcc::Ldbc, DirectedLcc::Fagiolo] {
+            let got = local_clustering_coefficient_with(&view, true, def);
+            for (id, cc) in &got.coefficients {
+                assert!(cc.is_finite(), "node {id} under {def:?} is {cc}");
+            }
+            assert_eq!(got.coefficients[&7], 0.0, "{def:?}");
+            assert_eq!(got.coefficients[&9], 0.0, "{def:?}");
+        }
+    }
 
     #[test]
     fn test_lcc_triangle() {

@@ -326,7 +326,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 | **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge ($2.50 spot) |
 | **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | **Parallel everything** | Rayon-parallel PageRank, LCC, CDLP and triangle counting; parallel scan, filter, compaction |
-| **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 11/12 against the LDBC reference answers ([#916](https://github.com/samyama-ai/samyama-graph/issues/916)) |
+| **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 12/12 against the LDBC reference answers |
 
 ---
 
@@ -438,14 +438,12 @@ re-derived or refuted.
 |-----------|--------|---------|-------|
 | SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
 | SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
-| Graphalytics | **11/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
+| Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
 | FinBench | **21 read queries run, 18 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
 
-Two of those are not clean, and saying so is the point of publishing them:
-directed LCC uses a different definition from LDBC's
-([#916](https://github.com/samyama-ai/samyama-graph/issues/916)), and three
-FinBench queries are pinned to ids the generated data does not guarantee, so
-they answer nothing while reporting `OK`
+One of those is not clean, and saying so is the point of publishing them:
+three FinBench queries are pinned to ids the generated data does not
+guarantee, so they answer nothing while reporting `OK`
 ([#918](https://github.com/samyama-ai/samyama-graph/issues/918)).
 
 ![LDBC benchmark results](ldbc-benchmark-results.png)
