@@ -2626,7 +2626,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         // `n:A:B` as a value, produced by the parser's postfix label check.
         // True when the node carries *every* named label; null when the
-        // subject is null, following Cypher's three-valued logic.
+        // subject is null, following Cypher's three-valued logic. On a
+        // relationship the same syntax is a type test -- see below.
         "haslabels" => {
             let wanted: Vec<String> = match &args[1] {
                 Value::Property(PropertyValue::Array(items)) => items
@@ -2638,6 +2639,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     .collect(),
                 _ => return Err(ExecutionError::TypeError("hasLabels expects a label list".into())),
             };
+            // On a relationship, `r:T` is a **type** test, and Cypher allows
+            // it: `MATCH ()-[r]->() RETURN r:T2` asks whether this
+            // relationship is a T2. We raised a TypeError and killed the query
+            // (#914).
+            //
+            // A relationship has exactly one type, so a multi-label test is
+            // false rather than an error -- `r:A:B` asks for something no
+            // relationship can be, which is a question with an answer.
+            let edge_type = match &args[0] {
+                Value::Edge(_, e) => Some(e.edge_type.as_str().to_string()),
+                Value::EdgeRef(_, _, _, ty) => Some(ty.as_str().to_string()),
+                _ => None,
+            };
+            if let Some(ty) = edge_type {
+                let matches = wanted.len() == 1 && wanted[0] == ty;
+                return Ok(Value::Property(PropertyValue::Boolean(matches)));
+            }
             let node = match &args[0] {
                 Value::Node(_, n) => Some((**n).clone()),
                 Value::NodeRef(id) => {
@@ -2651,7 +2669,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 }
                 _ => {
                     return Err(ExecutionError::TypeError(
-                        "a label test requires a node".to_string(),
+                        "a label test requires a node or a relationship".to_string(),
                     ))
                 }
             };
