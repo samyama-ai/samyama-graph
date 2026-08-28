@@ -325,9 +325,8 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 |------|-----|
 | **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge ($2.50 spot) |
 | **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
-| **Parallel everything** | Rayon: PageRank 3.1x, LCC 9.1x, Triangle Count 6x. Parallel scan, filter, compaction |
-| **975 QPS concurrent** | 16-client read workload, p99 < 25ms, zero errors across 67K queries |
-| **LDBC certified** | SNB Interactive 21/21, FinBench 40/40, Graphalytics 12/12 |
+| **Parallel everything** | Rayon-parallel PageRank, LCC, CDLP and triangle counting; parallel scan, filter, compaction |
+| **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 11/12 against the LDBC reference answers ([#916](https://github.com/samyama-ai/samyama-graph/issues/916)) |
 
 ---
 
@@ -399,7 +398,11 @@ question, so a speedup is only reported alongside an identical answer. Latest: *
 agree**; roll-up is flat at 15–20 ns from a 1-node subtree to a 137,257-node one. Against
 Neo4j on an identical graph it is **94× faster across the 58 queries expressible on both**,
 with no class losing — though without the index Samyama is 1.6× *slower* than Neo4j, so the
-index is the differentiator rather than the engine.
+index is the differentiator rather than the engine. That 94× is the ratio of the two
+*medians* over the 58 queries, which is not an average speedup and should not be read as
+one; the geometric mean of the per-query ratios is 88×. Both are recomputed from the
+committed per-query timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no
+longer exists.
 
 ### Scale: 74M Nodes, 1 Billion Edges
 
@@ -423,24 +426,40 @@ Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** acro
 | NCI-funded → Trial drugs | 19.4s | Cyclophosphamide (517) · Radiation (362) |
 | Aspirin articles → Trials | 1.5s | NCT00000491 "Aspirin MI study" |
 
-### LDBC Compliance
+### LDBC suites
 
-| Benchmark | Pass Rate | Dataset |
-|-----------|-----------|---------|
-| SNB Interactive | **21/21 (100%)** | SF1: 3.18M nodes, 17.26M edges |
-| SNB BI | **16/16 (100%)** | SF1 |
-| Graphalytics | **12/12 (100%)** | XS reference graphs |
-| FinBench | **40/40 (100%)** | 7.7K nodes, 42.2K edges |
+Run in-tree by the conformance harness, not audited by anyone: **LDBC
+certification is a formal third-party process and we have not been through
+it.** Every row below is a measurement from `samyama-graph-competitor-benchmarks`
+on 2026-08-28, and the suite that produced it is named so the number can be
+re-derived or refuted.
+
+| Benchmark | Result | Dataset | Suite |
+|-----------|--------|---------|-------|
+| SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
+| SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
+| Graphalytics | **11/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
+| FinBench | **21 read queries run, 18 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
+
+Two of those are not clean, and saying so is the point of publishing them:
+directed LCC uses a different definition from LDBC's
+([#916](https://github.com/samyama-ai/samyama-graph/issues/916)), and three
+FinBench queries are pinned to ids the generated data does not guarantee, so
+they answer nothing while reporting `OK`
+([#918](https://github.com/samyama-ai/samyama-graph/issues/918)).
 
 ![LDBC benchmark results](ldbc-benchmark-results.png)
 
-### Concurrent Performance
+### Concurrent performance
 
-| Workload | 1 client | 16 clients | Scaling |
-|----------|----------|------------|---------|
-| Pure read | 145 QPS | 975 QPS | 6.7x |
-| Mixed 80/20 | 181 QPS | 722 QPS | 4.0x |
-| Write-heavy | 279 QPS | 482 QPS | 1.7x |
+**Not published, because it is not measured.** The numbers that stood here were
+added in April 2026 with no benchmark, log, host or date behind them, and no
+benchmark in this repository produces them
+([#919](https://github.com/samyama-ai/samyama-graph/issues/919)). An unfounded
+number is worse than an absent one: it invites a reader to plan around it.
+
+`CH-PERF-CONC` (PERF-17 — 64 concurrent clients, p99 ≤ 3× single-client p50) is
+the suite that will answer this, and the figure returns here when it does.
 
 ---
 
