@@ -169,6 +169,32 @@ impl PartialEq for Value {
             // Path
             (Value::Path { nodes: n1, edges: e1 }, Value::Path { nodes: n2, edges: e2 }) => n1 == n2 && e1 == e2,
             (Value::Null, Value::Null) => true,
+            // Lists and maps had no arm at all, so they fell to `_ => false`
+            // and **no two lists were ever equal** -- `[] == []` included, and
+            // `a == a` with it, for a type that also implements `Eq` (#925).
+            //
+            // Nothing errored. `GROUP BY` a list simply never merged two
+            // groups and `DISTINCT` never removed a duplicate, so a query
+            // returned one row too many with every row individually right.
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
+            // The two spellings of one list. `PropertyValue::Array` cannot
+            // hold a node, so a list of relationships has to be a
+            // `Value::List` while a list read from a property is an `Array` --
+            // and a query that groups over both is mixing spellings, not
+            // types. Same for maps.
+            (Value::List(a), Value::Property(PropertyValue::Array(b)))
+            | (Value::Property(PropertyValue::Array(b)), Value::List(a)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| *x == Value::Property(y.clone()))
+            }
+            (Value::Map(a), Value::Property(PropertyValue::Map(b)))
+            | (Value::Property(PropertyValue::Map(b)), Value::Map(a)) => {
+                a.len() == b.len()
+                    && a.iter().all(|(k, v)| {
+                        b.get(k).is_some_and(|w| *v == Value::Property(w.clone()))
+                    })
+            }
             _ => false,
         }
     }
@@ -177,21 +203,61 @@ impl PartialEq for Value {
 impl Eq for Value {}
 
 impl Hash for Value {
+    /// Hash **canonically**, not per variant.
+    ///
+    /// `Eq` treats `Value::List` and `Value::Property(Array)` as the same
+    /// list, and `Value::Map` and `Value::Property(Map)` as the same map, so
+    /// the two spellings have to reach the same hash or the `Hash`/`Eq`
+    /// contract is broken and a HashMap loses entries it holds.
+    ///
+    /// That is why a list is hashed here rather than delegating to its
+    /// elements' `Hash`: the elements are `PropertyValue` on one side and
+    /// `Value` on the other, and only hashing each element *as the `Value` it
+    /// is equal to* makes the two agree.
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Use semantic tags so NodeRef and Node hash the same
         match self {
             Value::Node(id, _) | Value::NodeRef(id) => { 0u8.hash(state); id.hash(state); }
             Value::Edge(id, _) | Value::EdgeRef(id, ..) => { 1u8.hash(state); id.hash(state); }
+            // A property that is a list or a map hashes as the list or map it
+            // is, not as "a property".
+            Value::Property(PropertyValue::Array(items)) => {
+                5u8.hash(state);
+                items.len().hash(state);
+                for item in items { Value::Property(item.clone()).hash(state); }
+            }
+            Value::Property(PropertyValue::Map(entries)) => {
+                hash_map_entries(state, entries.iter().map(|(k, v)| (k, Value::Property(v.clone()))));
+            }
             Value::Property(p) => { 2u8.hash(state); p.hash(state); }
             Value::Path { nodes, edges } => { 3u8.hash(state); nodes.hash(state); edges.hash(state); }
-            Value::List(items) => { 5u8.hash(state); items.hash(state); }
+            Value::List(items) => {
+                5u8.hash(state);
+                items.len().hash(state);
+                for item in items { item.hash(state); }
+            }
             Value::Map(entries) => {
-                6u8.hash(state);
-                for (k, v) in entries { k.hash(state); v.hash(state); }
+                hash_map_entries(state, entries.iter().map(|(k, v)| (k, v.clone())));
             }
             Value::Null => { 4u8.hash(state); }
         }
     }
+}
+
+/// Hash a map's entries in key order.
+///
+/// `Value::Map` is a `BTreeMap` and `PropertyValue::Map` is a `HashMap`, whose
+/// iteration order is not stable between runs let alone between the two types.
+/// Sorting by key is what makes one hash of the other possible at all.
+fn hash_map_entries<'a, H: Hasher>(
+    state: &mut H,
+    entries: impl Iterator<Item = (&'a String, Value)>,
+) {
+    6u8.hash(state);
+    let mut pairs: Vec<(&String, Value)> = entries.collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs.len().hash(state);
+    for (k, v) in pairs { k.hash(state); v.hash(state); }
 }
 
 impl Record {
