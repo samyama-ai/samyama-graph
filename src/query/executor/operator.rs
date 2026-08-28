@@ -8958,17 +8958,17 @@ impl SortOperator {
     /// performed ~2·n·log₂(n) evaluations rather than n. On LDBC IC9 that was
     /// 389,461 rows -> ~14.5 million property resolutions where 389,461 would
     /// do, and `Sort` was 68.6% of the query.
-    fn key_of(&self, record: &Record, store: &GraphStore) -> Vec<PropertyValue> {
+    fn key_of(&self, record: &Record, store: &GraphStore) -> Vec<Value> {
         self.sort_items
             .iter()
             .map(|(expr, _)| {
                 // Errors are folded to Null, which is what the comparator did
                 // before and what ORDER BY over a missing property means.
-                Self::evaluate_expression(expr, record, store)
-                    .unwrap_or(Value::Null)
-                    .as_property()
-                    .cloned()
-                    .unwrap_or(PropertyValue::Null)
+                //
+                // The key is a `Value`, not a `PropertyValue`: going through
+                // `as_property()` turned every node, relationship and path
+                // into `Null` and sorted them all together at the end (#917).
+                Self::evaluate_expression(expr, record, store).unwrap_or(Value::Null)
             })
             .collect()
     }
@@ -8984,21 +8984,18 @@ impl SortOperator {
         sort_items: &[(Expression, bool)],
         record: &Record,
         store: &GraphStore,
-    ) -> Vec<PropertyValue> {
+    ) -> Vec<Value> {
         let mut key = Vec::with_capacity(sort_items.len());
         let mut cursor = readers.iter_mut();
         for (expr, _) in sort_items {
             match expr {
+                // A property is always a `PropertyValue`; the cursor stays.
                 Expression::Property { .. } => {
                     let c = cursor.next().expect("one cursor per property key");
-                    key.push(c.read(record, store));
+                    key.push(Value::Property(c.read(record, store)));
                 }
                 other => key.push(
-                    Self::evaluate_expression(other, record, store)
-                        .unwrap_or(Value::Null)
-                        .as_property()
-                        .cloned()
-                        .unwrap_or(PropertyValue::Null),
+                    Self::evaluate_expression(other, record, store).unwrap_or(Value::Null),
                 ),
             }
         }
@@ -9006,7 +9003,7 @@ impl SortOperator {
     }
 
     /// Compare two precomputed keys under the per-column sort directions.
-    fn cmp_keys(a: &[PropertyValue], b: &[PropertyValue], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+    fn cmp_keys(a: &[Value], b: &[Value], items: &[(Expression, bool)]) -> std::cmp::Ordering {
         for (i, (_, ascending)) in items.iter().enumerate() {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
@@ -9014,8 +9011,10 @@ impl SortOperator {
             // Cypher's orderability, not the index's: `ORDER BY` puts a
             // string before a number and a list before both, where the `Ord`
             // backing the property index does the opposite. See
-            // `graph::property::cypher_order` for why both orders exist.
-            let ord = crate::graph::property::cypher_order(x, y);
+            // `graph::property::cypher_order` for why both orders exist, and
+            // `record::cypher_order_value` for the entity ranks it cannot
+            // express.
+            let ord = crate::query::executor::record::cypher_order_value(x, y);
             if ord != std::cmp::Ordering::Equal {
                 return if *ascending { ord } else { ord.reverse() };
             }
@@ -9033,7 +9032,7 @@ impl SortOperator {
     /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
     /// runs may therefore disagree about *which* — the same latitude the
     /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(Vec<PropertyValue>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    fn trim_to(keyed: &mut Vec<(Vec<Value>, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -9248,7 +9247,7 @@ impl SortOperator {
             })
             .collect();
 
-        let mut keyed: Vec<(Vec<PropertyValue>, Record)> = Vec::new();
+        let mut keyed: Vec<(Vec<Value>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
@@ -14382,13 +14381,13 @@ impl WithBarrierOperator {
                 for (expr, ascending) in sort_items {
                     let val_a = Self::evaluate_expression(expr, a, store).unwrap_or(Value::Null);
                     let val_b = Self::evaluate_expression(expr, b, store).unwrap_or(Value::Null);
-                    let prop_a = val_a.as_property().unwrap_or(&PropertyValue::Null);
-                    let prop_b = val_b.as_property().unwrap_or(&PropertyValue::Null);
                     // Cypher's orderability, not the property index's — see
                     // `graph::property::cypher_order`. A WITH ... ORDER BY
                     // sorts here rather than in `SortOperator`, so wiring only
-                    // that one left every `WITH` sort on the old order.
-                    let ord = crate::graph::property::cypher_order(prop_a, prop_b);
+                    // that one left every `WITH` sort on the old order — the
+                    // same trap for the entity ranks (#917), which is why both
+                    // sites now call the `Value`-level comparison.
+                    let ord = crate::query::executor::record::cypher_order_value(&val_a, &val_b);
                     if ord != std::cmp::Ordering::Equal {
                         return if *ascending { ord } else { ord.reverse() };
                     }

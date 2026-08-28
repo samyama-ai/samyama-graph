@@ -1307,3 +1307,110 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
         }
     }
 }
+
+/// Cypher's orderability over `Value`, for `ORDER BY`.
+///
+/// openCypher defines one total order across types, ascending:
+///
+/// ```text
+/// Map < Node < Relationship < List < Path < String < Boolean < Number < NaN < null
+/// ```
+///
+/// [`crate::graph::property::cypher_order`] already implements the part of
+/// that order a `PropertyValue` can express. It cannot express the rest: a
+/// `PropertyValue` holds no node, relationship or path, so sorting through
+/// `as_property()` folded every entity to `Null` (#917). The rows still came
+/// back — the right rows, in fact — with every node, relationship and path
+/// bunched at the null end and indistinguishable from each other and from a
+/// missing value. `ORDER BY` reported success and answered wrongly.
+///
+/// So the comparison has to happen at `Value`, above the property type, and
+/// this function is where the three entity ranks live. Everything it can hand
+/// to `cypher_order` it hands over, so there is still one implementation of
+/// the property half rather than two that drift.
+pub fn cypher_order_value(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // Ranks are the ascending order above. `Value::List`/`Value::Map` and
+    // their `PropertyValue` spellings are the same type to a query and must
+    // rank the same, or `[1]` and a list of nodes sort into different places.
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Map(_) => 0,
+            Value::Node(..) | Value::NodeRef(_) => 1,
+            Value::Edge(..) | Value::EdgeRef(..) => 2,
+            Value::List(_) => 3,
+            Value::Path { .. } => 4,
+            Value::Null => 9,
+            Value::Property(p) => match p {
+                PropertyValue::Map(_) => 0,
+                PropertyValue::Array(_) | PropertyValue::Vector(_) => 3,
+                PropertyValue::String(_) => 5,
+                PropertyValue::Boolean(_) => 6,
+                PropertyValue::Float(f) if f.is_nan() => 8,
+                PropertyValue::Null => 9,
+                _ => 7,
+            },
+        }
+    }
+
+    let (ra, rb) = (rank(a), rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+
+    match (a, b) {
+        // Both are properties of the same rank: the existing order decides,
+        // including NaN and the element-wise list comparison.
+        (Value::Property(x), Value::Property(y)) => crate::graph::property::cypher_order(x, y),
+        // Element-wise, then by length — the same rule `cypher_order` applies
+        // to `PropertyValue::Array`, restated here because the elements are
+        // `Value`s and may be entities.
+        (Value::List(x), Value::List(y)) => {
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                let c = cypher_order_value(xi, yi);
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+        // A `Value::Map` against a `PropertyValue::Map`, or a list against an
+        // array: same rank, different spelling. Compare by sorted key, then by
+        // the value under it, so the two spellings interleave.
+        (Value::Map(x), Value::Map(y)) => {
+            let (mut xk, mut yk): (Vec<_>, Vec<_>) =
+                (x.keys().collect(), y.keys().collect());
+            xk.sort();
+            yk.sort();
+            for (kx, ky) in xk.iter().zip(yk.iter()) {
+                let c = kx.cmp(ky);
+                if c != Ordering::Equal {
+                    return c;
+                }
+                let c = cypher_order_value(&x[*kx], &y[*ky]);
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            xk.len().cmp(&yk.len())
+        }
+        // Entities of the same kind. openCypher leaves the order among them
+        // undefined; element id is stable and total, which is what a sort
+        // needs. Two runs over the same graph therefore agree.
+        _ => entity_id(a).cmp(&entity_id(b)),
+    }
+}
+
+fn entity_id(v: &Value) -> (u64, usize) {
+    match v {
+        Value::Node(id, _) | Value::NodeRef(id) => (id.as_u64(), 0),
+        Value::Edge(id, _) | Value::EdgeRef(id, ..) => (id.as_u64(), 0),
+        // A path has no id; length then first node orders it deterministically.
+        Value::Path { nodes, edges } => (
+            nodes.first().map(|n| n.as_u64()).unwrap_or(0),
+            edges.len(),
+        ),
+        _ => (0, 0),
+    }
+}
