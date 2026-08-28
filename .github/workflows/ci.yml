@@ -158,6 +158,13 @@ jobs:
         # from a pre-existing one.
         run: ./scripts/check_thread_determinism.sh /tmp/openCypher/tck/features
 
+      - name: The release gate refuses for three reasons, not one
+        # It is the missing and the stale verdict that actually happen, and
+        # both look like "nothing is wrong" to a check that only compares a
+        # status string. This runs in CI because a gate nobody tests is a gate
+        # nobody can rely on at the moment it matters.
+        run: python3 scripts/test_check_release_gate.py
+
       - name: LINT-RATCHET — the clippy warning count may not rise
         # A ceiling, not a clean-tree gate: the debt stops growing while what
         # to do about the existing 769 stays open (#487).

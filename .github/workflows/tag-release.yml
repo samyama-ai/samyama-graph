@@ -70,6 +70,23 @@ jobs:
           echo "version=$WS_VERSION" >> "$GITHUB_OUTPUT"
           echo "new=true" >> "$GITHUB_OUTPUT"
 
+      # spec 19 §2 condition 3: CH-REGRESS green on its own nightly bare-metal
+      # run **and blocking the release tag**. See scripts/check_release_gate.py
+      # for why the verdict lives on its own branch and why missing and stale
+      # block the tag exactly as red does.
+      - name: CH-REGRESS must be green and recent before a tag is cut
+        if: steps.check.outputs.new == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! git fetch origin release-gate --depth=1 2>/dev/null; then
+            echo "::error::no release-gate branch — the nightly has never published a verdict"
+            exit 1
+          fi
+          git show FETCH_HEAD:RELEASE-GATE.json > RELEASE-GATE.json
+          cat RELEASE-GATE.json
+          python3 scripts/check_release_gate.py RELEASE-GATE.json
+
       - name: Tag and publish the GitHub Release
         if: steps.check.outputs.new == 'true'
         env:
