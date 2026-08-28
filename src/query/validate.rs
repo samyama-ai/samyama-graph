@@ -60,6 +60,14 @@ pub enum ValidationError {
     UnboundVariable(String),
     /// A `WITH` item that is not a bare variable and has no alias.
     UnaliasedWithItem,
+    /// A projection mixes an aggregate with an expression that is not a
+    /// grouping key. See [`validate_aggregation_is_unambiguous`].
+    ///
+    /// Distinct from [`Self::AmbiguousAggregationExpression`], which is the
+    /// same openCypher error name raised for the narrower ORDER BY case; both
+    /// render as `AmbiguousAggregationExpression`, which is what the TCK
+    /// matches on.
+    AmbiguousGroupingExpression(String),
     /// An aggregate where aggregation is not allowed.
     AggregateNotAllowed(&'static str),
     /// A function applied to the wrong kind of entity: (function, wanted, got).
@@ -85,6 +93,14 @@ impl std::fmt::Display for ValidationError {
             Self::FunctionArgumentKind(func, wanted, got) => write!(
                 f,
                 "`{func}()` takes {wanted}, and was given {got}"
+            ),
+            Self::AmbiguousGroupingExpression(what) => write!(
+                f,
+                "AmbiguousAggregationExpression: {what} appears inside an expression \
+                 that also aggregates, but is not itself a grouping key. Cypher \
+                 groups by the projection's non-aggregating items, so there is no \
+                 group for this to be evaluated over -- project it as its own item, \
+                 or move it past a WITH"
             ),
             Self::AggregateNotAllowed(where_) => write!(
                 f,
@@ -1915,6 +1931,126 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A projection that aggregates may only combine the aggregate with a
+/// **grouping key** (#930).
+///
+/// ```text
+/// WITH me.age + count(you.age) AS agg                 -> AmbiguousAggregationExpression
+/// RETURN me.age + you.age, me.age + you.age + count(*) -> AmbiguousAggregationExpression
+/// ```
+///
+/// Cypher forms its groups from the projection's *non-aggregating* items, so
+/// in `me.age + count(you.age)` there is no group `me.age` could be evaluated
+/// over -- the rows have already been folded. It is not that the answer is
+/// hard to define; it is that two readings (the first row's `me.age`, or one
+/// group per distinct `me.age`) are equally defensible, which is what
+/// "ambiguous" means here.
+///
+/// We answered these with **zero rows and no error**, which is the worst of
+/// the three options: the query looks like it ran and found nothing.
+///
+/// The check is deliberately narrow. A whole projected item is a grouping key,
+/// so `RETURN n, n.age + count(*)` is left alone: `n` is projected, and
+/// rejecting it would fail queries Cypher accepts. Only a variable that is
+/// referenced inside an aggregating expression and is *not* projected on its
+/// own is reported -- a wider rule cost 126 valid scenarios the last time this
+/// file guessed.
+fn validate_aggregation_is_unambiguous(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    /// Variables referenced by the parts of `e` that do **not** aggregate.
+    fn free_variables_outside_aggregates(e: &Expression, out: &mut HashSet<String>) {
+        if is_aggregate_call(e) {
+            // Inside an aggregate is exactly where a non-grouping variable is
+            // allowed: `count(you.age)` is the point of the query.
+            return;
+        }
+        match e {
+            Expression::Variable(v) => {
+                out.insert(v.clone());
+            }
+            // `n.age` carries its variable as a `String` field, not as a child
+            // expression, so a walk over `child_expressions` alone never sees
+            // it -- and the whole rule silently matched nothing, because every
+            // scenario it targets is written with property access.
+            Expression::Property { variable, .. } => {
+                out.insert(variable.clone());
+            }
+            _ => {}
+        }
+        for child in child_expressions(e) {
+            free_variables_outside_aggregates(child, out);
+        }
+    }
+
+    fn check(items: &[ReturnItem]) -> Result<(), ValidationError> {
+        if !items.iter().any(|i| contains_aggregate(&i.expression)) {
+            return Ok(());
+        }
+        // A whole item that does not aggregate is a grouping key, and so is
+        // the variable it is, when it is just a variable.
+        let mut keys: HashSet<String> = HashSet::new();
+        for item in items {
+            if contains_aggregate(&item.expression) {
+                continue;
+            }
+            match &item.expression {
+                Expression::Variable(v) => {
+                    keys.insert(v.clone());
+                }
+                // `WITH n.age, count(*)` groups by `n.age`, and referring to
+                // `n.age` inside the aggregating item is then unambiguous.
+                // Recorded under the variable rather than the property because
+                // grouping by `n.age` fixes `n.age` and nothing else about `n`
+                // -- and this rule only reports variables.
+                Expression::Property { variable, .. } => {
+                    keys.insert(variable.clone());
+                }
+                _ => {}
+            }
+        }
+        for item in items {
+            if !contains_aggregate(&item.expression) || is_aggregate_call(&item.expression) {
+                continue;
+            }
+            let mut used = HashSet::new();
+            free_variables_outside_aggregates(&item.expression, &mut used);
+            let mut ungrouped: Vec<&String> =
+                used.iter().filter(|v| !keys.contains(*v)).collect();
+            if let Some(v) = ungrouped.pop() {
+                // Sorted so the message is the same on every run; a HashSet
+                // would name a different variable each time and make the
+                // failure look intermittent.
+                ungrouped.push(v);
+                ungrouped.sort();
+                return Err(ValidationError::AmbiguousGroupingExpression(format!(
+                    "`{}`",
+                    ungrouped[0]
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(r) = &query.return_clause {
+        check(&r.items)?;
+    }
+    if let Some(w) = &query.with_clause {
+        check(&w.items)?;
+    }
+    for (w, ..) in &query.extra_with_stages {
+        check(&w.items)?;
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::With(w) => check(&w.items)?,
+            Clause::Return(r) => check(&r.items)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Aggregation is not allowed in a `WHERE`, nor inside a comprehension (#897).
 ///
 /// ```text
@@ -2093,6 +2229,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_with_items_aliased(query)?;
 
     validate_aggregate_placement(query)?;
+    validate_aggregation_is_unambiguous(query)?;
 
     validate_function_argument_kinds(query)?;
 
