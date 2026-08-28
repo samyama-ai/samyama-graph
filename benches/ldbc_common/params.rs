@@ -165,6 +165,12 @@ impl Derived {
 
 /// Read a `|`-separated LDBC CSV, calling `f` with the fields of each data row.
 /// The header line is skipped; LDBC never quotes or escapes the separator.
+///
+/// Positional, and correct only where the position is fixed by the file's
+/// shape — an edge file is two id columns whatever they are called, and
+/// `person_knows_person_0_0.csv` names *both* of its columns `Person.id`, so
+/// by-name lookup cannot address them. Node files go through
+/// [`for_each_named_row`] instead.
 fn for_each_row<F: FnMut(&[&str])>(path: &Path, mut f: F) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     for line in text.lines().skip(1) {
@@ -175,6 +181,54 @@ fn for_each_row<F: FnMut(&[&str])>(path: &Path, mut f: F) -> Result<(), String> 
         f(&fields);
     }
     Ok(())
+}
+
+/// The same, but addressing columns by their header name.
+///
+/// The node files do not have a fixed column order. `datagen` has emitted at
+/// least two layouts for `person_0_0.csv` and `post_0_0.csv` — one leading
+/// with `creationDate`, and the one the LDBC council publishes today, leading
+/// with `id`. This deriver was written against the first and read `f[1]` as
+/// the id, so against a freshly downloaded extract every row failed to parse,
+/// the name histogram came back empty and derivation aborted with
+/// "no persons within 3 hops of the anchor" — which reads as a fact about the
+/// graph and is a fact about the column order (#921).
+///
+/// The quieter half of that bug is the reason this is by name rather than by a
+/// corrected offset: a shifted column does not always fail to parse. Reading a
+/// `creationDate` where an id belongs yields a perfectly good integer, and the
+/// derived parameters would then be nonsense that every query accepts.
+fn for_each_named_row<F: FnMut(&NamedRow)>(path: &Path, mut f: F) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split('|').collect();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('|').collect();
+        f(&NamedRow { header: &header, fields: &fields });
+    }
+    Ok(())
+}
+
+struct NamedRow<'a> {
+    header: &'a [&'a str],
+    fields: &'a [&'a str],
+}
+
+impl NamedRow<'_> {
+    /// The field under `name`, or `None` when the column is absent or the row
+    /// is short. Never falls back to a position: a wrong column that parses is
+    /// the failure this whole helper exists to prevent.
+    fn get(&self, name: &str) -> Option<&str> {
+        let i = self.header.iter().position(|h| h.eq_ignore_ascii_case(name))?;
+        self.fields.get(i).copied()
+    }
+
+    fn id(&self, name: &str) -> Option<i64> {
+        parse_id(self.get(name)?)
+    }
 }
 
 /// Parse an LDBC identifier.
@@ -296,12 +350,9 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
     // which is the population IC1 searches.
     let mut names_in_hop3: HashMap<String, usize> = HashMap::new();
     let mut person_first_name: HashMap<i64, String> = HashMap::new();
-    for_each_row(&dynamic.join("person_0_0.csv"), |f| {
-        if f.len() < 3 {
-            return;
-        }
-        let Some(id) = parse_id(f[1]) else { return };
-        let name = f[2].to_string();
+    for_each_named_row(&dynamic.join("person_0_0.csv"), |f| {
+        let Some(id) = f.id("id") else { return };
+        let Some(name) = f.get("firstName").map(str::to_string) else { return };
         if hop3.contains(&id) && id != person_id {
             *names_in_hop3.entry(name.clone()).or_insert(0) += 1;
         }
@@ -329,11 +380,8 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         }
     })?;
     let mut post_date: HashMap<i64, i64> = HashMap::new();
-    for_each_row(&dynamic.join("post_0_0.csv"), |f| {
-        if f.len() < 2 {
-            return;
-        }
-        if let (Some(d), Some(id)) = (parse_id(f[0]), parse_id(f[1])) {
+    for_each_named_row(&dynamic.join("post_0_0.csv"), |f| {
+        if let (Some(d), Some(id)) = (f.id("creationDate"), f.id("id")) {
             post_date.insert(id, d);
         }
     })?;
@@ -471,15 +519,18 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
     // percentile so they are distinct without either being the maximum.
     let mut place_name: HashMap<i64, String> = HashMap::new();
     let mut is_country: HashSet<i64> = HashSet::new();
-    for_each_row(&static_dir.join("place_0_0.csv"), |f| {
-        if f.len() < 4 {
-            return;
+    // Case-insensitively, because the published extracts write `country` and
+    // this compared against `"Country"` — so `is_country` came back empty, no
+    // post passed the filter, and derivation aborted with "no posts located in
+    // a country within the derived window": a message about the graph for a
+    // mismatch in a string literal (#921).
+    for_each_named_row(&static_dir.join("place_0_0.csv"), |f| {
+        let Some(id) = f.id("id") else { return };
+        if let Some(name) = f.get("name") {
+            place_name.insert(id, name.to_string());
         }
-        if let Some(id) = parse_id(f[0]) {
-            place_name.insert(id, f[1].to_string());
-            if f[3] == "Country" {
-                is_country.insert(id);
-            }
+        if f.get("type").is_some_and(|t| t.eq_ignore_ascii_case("country")) {
+            is_country.insert(id);
         }
     })?;
     let mut country_counts: HashMap<String, usize> = HashMap::new();
@@ -607,6 +658,96 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a one-row CSV and read it back through `for_each_named_row`.
+    fn one_named_row<T>(header: &str, row: &str, f: impl Fn(&NamedRow) -> T) -> Vec<T> {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-params-{}-{}",
+            std::process::id(),
+            header.len() * 31 + row.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rows.csv");
+        std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
+        let mut out = Vec::new();
+        for_each_named_row(&path, |r| out.push(f(r))).unwrap();
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    #[test]
+    fn a_column_is_found_by_name_in_either_layout() {
+        // datagen has emitted both. The deriver was written against the
+        // creationDate-first one and read `f[1]` as the id, so against the
+        // layout the LDBC council publishes it parsed a *name* as an id,
+        // every row failed, and derivation reported that the anchor had no
+        // neighbours within three hops (#921).
+        let published = "id|firstName|lastName";
+        let older = "creationDate|id|firstName";
+        assert_eq!(
+            one_named_row(published, "933|Mahinda|Perera", |r| r.id("id")),
+            vec![Some(933)]
+        );
+        assert_eq!(
+            one_named_row(older, "1266161530447|933|Mahinda", |r| r.id("id")),
+            vec![Some(933)]
+        );
+        // And the name comes from the name column in both, not from an offset.
+        assert_eq!(
+            one_named_row(published, "933|Mahinda|Perera", |r| r
+                .get("firstName")
+                .map(str::to_string)),
+            vec![Some("Mahinda".to_string())]
+        );
+        assert_eq!(
+            one_named_row(older, "1266161530447|933|Mahinda", |r| r
+                .get("firstName")
+                .map(str::to_string)),
+            vec![Some("Mahinda".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_absent_column_is_none_and_never_a_position() {
+        // The dangerous failure is not the one that errors. Reading a
+        // creationDate where an id belongs yields a perfectly good integer,
+        // and the derived parameters are then nonsense that every query
+        // accepts and every timer times. So there is no positional fallback.
+        assert_eq!(
+            one_named_row("creationDate|firstName", "1266161530447|Mahinda", |r| r.id("id")),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn a_header_name_matches_regardless_of_case() {
+        assert_eq!(
+            one_named_row("ID|FirstName", "933|Mahinda", |r| r.id("id")),
+            vec![Some(933)]
+        );
+    }
+
+    #[test]
+    fn a_short_row_yields_none_rather_than_panicking() {
+        assert_eq!(
+            one_named_row("id|firstName|lastName", "933|Mahinda", |r| r
+                .get("lastName")
+                .map(str::to_string)),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn a_place_type_matches_regardless_of_case() {
+        // `place_0_0.csv` writes `country`; the deriver compared against
+        // `"Country"`, so `is_country` was empty, no post passed the filter,
+        // and derivation aborted with "no posts located in a country within
+        // the derived window" (#921). The comparison the fix uses:
+        for written in ["country", "Country", "COUNTRY"] {
+            assert!(written.eq_ignore_ascii_case("country"), "{written}");
+        }
+        assert!(!"city".eq_ignore_ascii_case("country"));
+    }
 
     #[test]
     fn percentile_is_nearest_rank_and_clamped() {
