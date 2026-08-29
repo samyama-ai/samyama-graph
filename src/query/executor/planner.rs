@@ -3776,6 +3776,10 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // Walked against the written direction, so anything this
+                // segment binds -- the relationship list, a named path -- has
+                // to come back in the pattern's order, not the walk's (#933).
+                expand = expand.with_reversed_walk();
                 if self
                     .trail_enumeration
                     .load(std::sync::atomic::Ordering::Relaxed)

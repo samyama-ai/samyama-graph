@@ -6308,6 +6308,19 @@ pub struct VarLengthExpandOperator {
     /// The pattern's own name for the relationships traversed, bound to a
     /// list of them (#652).
     rel_variable: Option<String>,
+    /// This segment is being walked against the direction it was written in.
+    ///
+    /// The planner may anchor a variable-length segment at whichever end is
+    /// more selective and walk back along it -- `(a)-[:R*1..2]->(b)` read from
+    /// `b` is `(b)<-[:R*1..2]-(a)`, and the pairs are identical. The *order* of
+    /// what it collects is not: the walk produces relationships starting from
+    /// the anchor, and `r` must list them in the pattern's direction.
+    ///
+    /// `MATCH (a)-[r:REL*2..2]->(b:End) RETURN r` anchored on `b:End` and
+    /// answered `[{num: 2}, {num: 1}]` where the graph reads 1 then 2 (#933).
+    /// Two right relationships in the wrong order, from a query that reported
+    /// success.
+    reversed_walk: bool,
     /// Output records buffered for the current input record.
     pending: std::collections::VecDeque<Record>,
     /// `edge_types` resolved to interned ids, cached after the first use.
@@ -6390,6 +6403,7 @@ impl VarLengthExpandOperator {
             max_hops,
             path_variable: None,
             rel_variable: None,
+            reversed_walk: false,
             pending: std::collections::VecDeque::new(),
             type_ids: None,
             pinned_target: None,
@@ -6418,6 +6432,14 @@ impl VarLengthExpandOperator {
     /// hop. The variable was simply dropped, so the query failed with
     /// "Variable not found: r" -- the traversal was right and its own name for
     /// what it traversed did not exist (#652).
+    /// Mark this segment as walked against its written direction, so a bound
+    /// path or relationship list is emitted in the pattern's order rather than
+    /// the walk's. See [`Self::reversed_walk`].
+    pub fn with_reversed_walk(mut self) -> Self {
+        self.reversed_walk = true;
+        self
+    }
+
     pub fn with_rel_variable(mut self, var: String) -> Self {
         self.rel_variable = Some(var);
         self
@@ -6892,7 +6914,14 @@ impl VarLengthExpandOperator {
             }
         }
         if self.path_variable.is_some() || self.rel_variable.is_some() {
-            let (nodes, edges) = reconstruct_path(parent, source, target);
+            let (mut nodes, mut edges) = reconstruct_path(parent, source, target);
+            // `reconstruct_path` returns the walk in the order it was walked,
+            // which is the pattern's order only when the two agree. When the
+            // planner anchored the far end and walked back, they do not.
+            if self.reversed_walk {
+                nodes.reverse();
+                edges.reverse();
+            }
             if let Some(ref rv) = self.rel_variable {
                 // A list of relationships, not of ids: `r` is the same kind of
                 // thing a single-hop `[r]` binds, one per hop.
