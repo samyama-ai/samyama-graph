@@ -2199,14 +2199,47 @@ impl QueryPlanner {
             // still reported success.
             let mut matched_vars: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            for mc in &query.match_clauses {
-                for path in &mc.pattern.paths {
-                    if let Some(v) = &path.start.variable {
+            // A WITH re-scopes: what it projects is all that exists after it,
+            // under the names it gives them. Reading the MATCH clauses instead
+            // meant `MATCH (n) WITH n AS a CREATE (a)-[:T]->(b)` did not
+            // recognise `a` and created a *fresh* node for it, so a query that
+            // should add one node added two and returned the new blank one
+            // where the caller expected the matched one (#940).
+            //
+            // Only the last WITH matters here: this CREATE runs after all of
+            // them, and each stage's scope replaces the one before it.
+            let scoping_with = query
+                .with_clause
+                .as_ref()
+                .or_else(|| query.extra_with_stages.last().map(|(wc, ..)| wc));
+            if let Some(wc) = scoping_with {
+                for item in &wc.items {
+                    if let Some(alias) = &item.alias {
+                        matched_vars.insert(alias.clone());
+                    } else if let Expression::Variable(v) = &item.expression {
                         matched_vars.insert(v.clone());
                     }
-                    for seg in &path.segments {
-                        if let Some(v) = &seg.node.variable {
+                }
+                // A MATCH written after the WITH binds on top of what it
+                // projected.
+                let split = query
+                    .with_split_index
+                    .unwrap_or(query.match_clauses.len());
+                for mc in &query.match_clauses[split..] {
+                    for v in Self::clause_variables(&mc.pattern) {
+                        matched_vars.insert(v);
+                    }
+                }
+            } else {
+                for mc in &query.match_clauses {
+                    for path in &mc.pattern.paths {
+                        if let Some(v) = &path.start.variable {
                             matched_vars.insert(v.clone());
+                        }
+                        for seg in &path.segments {
+                            if let Some(v) = &seg.node.variable {
+                                matched_vars.insert(v.clone());
+                            }
                         }
                     }
                 }
