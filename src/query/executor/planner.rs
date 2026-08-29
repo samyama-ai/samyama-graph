@@ -2460,7 +2460,20 @@ impl QueryPlanner {
                     }
 
                     if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
-                        edges_to_merge.push((src.clone(), tgt.clone(), edge_type, edge_props, edge_var));
+                        // `-[r:T]-` matches a relationship either way round.
+                        // Without this the operator only ever looked for
+                        // `src -> tgt`, so an existing `tgt -> src` did not
+                        // match and MERGE wrote a duplicate beside it (#938).
+                        let undirected =
+                            matches!(edge.direction, crate::query::ast::Direction::Both);
+                        edges_to_merge.push((
+                            src.clone(),
+                            tgt.clone(),
+                            edge_type,
+                            edge_props,
+                            edge_var,
+                            undirected,
+                        ));
                     }
                     current_var = target_var;
                 }
