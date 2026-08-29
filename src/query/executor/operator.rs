@@ -12619,6 +12619,32 @@ impl PhysicalOperator for DeleteOperator {
                     for eid in out_edges.into_iter().chain(in_edges) {
                         let _ = store.delete_edge(eid);
                     }
+                } else {
+                    // A plain DELETE must refuse a node that still has
+                    // relationships. `store.delete_node` removes them itself,
+                    // so without this check `DELETE n` silently behaved as
+                    // `DETACH DELETE n` -- the graph stayed consistent and
+                    // relationships the query never mentioned disappeared
+                    // (#946). The whole reason Cypher separates the two is
+                    // that this is a decision the user has to make out loud.
+                    //
+                    // Checked here, not at plan time: `MATCH (a)-[r]->(b)
+                    // DELETE r, a` is legal because the relationship goes
+                    // first, and by this point the node is unconnected. That
+                    // is why edges are deleted before nodes above.
+                    //
+                    // Both directions, or `DELETE b` on `(a)-[r]->(b)` would
+                    // still cascade.
+                    let attached = store.get_outgoing_edges(node_id).len()
+                        + store.get_incoming_edges(node_id).len();
+                    if attached > 0 {
+                        return Err(ExecutionError::ConstraintVerificationFailed(format!(
+                            "Cannot delete node {}, because it still has {} relationship(s). \
+                             Delete them first, or use DETACH DELETE.",
+                            node_id.as_u64(),
+                            attached
+                        )));
+                    }
                 }
                 let _ = store.delete_node(tenant_id, node_id);
             }

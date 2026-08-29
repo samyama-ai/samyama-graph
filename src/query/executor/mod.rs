@@ -133,6 +133,15 @@ pub enum ExecutionError {
     /// exactly like a query reading a property nobody set.
     #[error("{0} was deleted in this query and cannot be read")]
     EntityNotFound(String),
+
+    /// A write refused because it would break an invariant the graph
+    /// guarantees, as distinct from one that is merely wrong.
+    ///
+    /// Its own variant because the caller's response differs: a `TypeError` is
+    /// a bug in the query, while this is the engine declining to do something
+    /// destructive the query did not say it wanted (#946).
+    #[error("Constraint verification failed: {0}")]
+    ConstraintVerificationFailed(String),
 }
 
 pub type ExecutionResult<T> = Result<T, ExecutionError>;
