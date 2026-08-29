@@ -886,10 +886,18 @@ impl QueryPlanner {
 
     fn late_bound_variables(query: &Query) -> HashSet<String> {
         let mut vars = HashSet::new();
-        if query.unwind_leading {
-            if let Some(u) = &query.unwind_clause {
-                vars.insert(u.variable.clone());
-            }
+        // Not gated on `unwind_leading`. That flag says the *query* opens with
+        // UNWIND; the question here is whether the variable is bound above the
+        // matches, and an `unwind_clause` always is -- the parser only puts a
+        // pre-WITH unwind there. Gating on the wrong flag left
+        // `MATCH (n) UNWIND [1,2,3] AS x WHERE x > 1 WITH x RETURN x` with its
+        // predicate decomposed into match planning, filtering on an `x` that
+        // nothing had bound yet (#927).
+        if let Some(u) = &query.unwind_clause {
+            vars.insert(u.variable.clone());
+        }
+        for extra in &query.extra_unwind_clauses {
+            vars.insert(extra.variable.clone());
         }
         if let Some(call) = &query.call_clause {
             for item in &call.yield_items {
@@ -1629,13 +1637,31 @@ impl QueryPlanner {
         // holds a stage's *own* trailing unwind, and nothing distinguished the
         // two. With both present the stage's unwind was hoisted to the head
         // and read a variable its WITH had not projected yet (#785).
-        let leading_unwind: Option<&UnwindClause> = if query.unwind_leading {
-            query.unwind_clause.as_ref()
-        } else {
-            None
-        };
+        //
+        // `unwind_leading` says the *query* opens with UNWIND. It does not say
+        // which side of the WITH the unwind is on, and that is the question
+        // the planner has to answer. The parser already settles it: it only
+        // fills `unwind_clause` while no WITH has been seen, and puts anything
+        // after one in `post_with_unwind_clauses`. So an `unwind_clause` is
+        // *always* written before the WITH, leading or not.
+        //
+        // Gating this block on `unwind_leading` therefore sent
+        // `MATCH ... UNWIND ... WITH ...` down the trailing path, where the
+        // barrier runs first and the unwind's list expression then reads
+        // variables the WITH has already dropped: `MATCH (n) UNWIND [n] AS x
+        // WITH x RETURN x` died with VariableNotFound("n") (#927).
+        let leading_unwind: Option<&UnwindClause> = query.unwind_clause.as_ref();
 
-        if query.unwind_leading {
+        // Applied here only when a WITH follows. Without one there are no
+        // barriers to be on the wrong side of, and the trailing site below
+        // already places it after the filter so the cross product is built
+        // from narrowed rows -- doing both ran the unwind twice and turned ten
+        // rows into a hundred, which is the second half of the #785 trap.
+        let unwind_before_barrier = query.unwind_leading
+            || query.with_clause.is_some()
+            || !query.extra_with_stages.is_empty();
+
+        if unwind_before_barrier {
             if let Some(unwind) = leading_unwind {
                 use crate::query::executor::operator::SingleRowOperator;
                 let base: OperatorBox = match operator.take() {
@@ -1711,18 +1737,12 @@ impl QueryPlanner {
             all_with_stages.push((wc, uw.as_ref(), mcs.iter().collect(), wh.as_ref()));
         }
         if let Some(wc) = &query.with_clause {
-            // A *leading* UNWIND was applied before the barriers, above. Only a
-            // trailing one belongs to this stage.
-            // A *leading* UNWIND was applied at the head, whatever the stage
-            // count. The `extra_with_stages.is_empty()` guard existed only
-            // because the parser emptied `unwind_clause` when there were more
-            // stages; with that gone, keeping the guard re-applies the head
-            // unwind a second time (#785).
-            let stage_unwind = if query.unwind_leading {
-                None
-            } else {
-                query.unwind_clause.as_ref()
-            };
+            // `query.unwind_clause` is applied above, before the barriers,
+            // because the parser only ever puts a *pre-WITH* unwind there --
+            // see the comment at that block. Applying it here as well ran it
+            // twice; applying it only here ran it on the wrong side of the
+            // barrier (#927). A post-WITH unwind is a different field.
+            let stage_unwind: Option<&UnwindClause> = None;
             all_with_stages.push((wc, stage_unwind, post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
@@ -1970,6 +1990,46 @@ impl QueryPlanner {
         // needs -- the predicate references the unwound variable.
         let leading_unwind = query.unwind_leading;
 
+        // A trailing UNWIND whose variable the WHERE mentions has to bind it
+        // *before* the filter runs.
+        //
+        // The unwind normally goes below, after the filter, so the cross
+        // product is built from already-narrowed rows -- a real saving, and
+        // correct as long as the predicate does not name the unwound variable.
+        // When it does, the filter below re-applies the whole WHERE (see the
+        // `has_late_bound` reasoning there) above an Unwind that has not run
+        // yet, and `MATCH (n) UNWIND [1,2,3] AS x WHERE x > 1 RETURN x` died
+        // with VariableNotFound("x") (#927).
+        //
+        // Reordered only in that case, so the ordinary shape keeps the saving.
+        let mut trailing_unwind_hoisted = false;
+        if !unwind_before_barrier && query.with_clause.is_none() {
+            if let (Some(unwind_clause), Some(where_clause)) =
+                (&query.unwind_clause, &query.where_clause)
+            {
+                let mut where_vars = HashSet::new();
+                Self::collect_expression_variables(&where_clause.predicate, &mut where_vars);
+                let unwound: Vec<&String> = std::iter::once(&unwind_clause.variable)
+                    .chain(query.extra_unwind_clauses.iter().map(|u| &u.variable))
+                    .collect();
+                if unwound.iter().any(|v| where_vars.contains(*v)) {
+                    operator = Box::new(UnwindOperator::new(
+                        operator,
+                        unwind_clause.expression.clone(),
+                        unwind_clause.variable.clone(),
+                    ));
+                    for extra in &query.extra_unwind_clauses {
+                        operator = Box::new(UnwindOperator::new(
+                            operator,
+                            extra.expression.clone(),
+                            extra.variable.clone(),
+                        ));
+                    }
+                    trailing_unwind_hoisted = true;
+                }
+            }
+        }
+
         // Add WHERE clause if present.
         // When a WITH clause exists, WHERE predicates were already decomposed and
         // pushed into per-MATCH/cross-MATCH filters above. Applying them again here
@@ -2101,7 +2161,7 @@ impl QueryPlanner {
         // Add standalone UNWIND clause (only when no WITH clause handles it, and not
         // already applied above as a leading UNWIND). A trailing UNWIND stays here, after
         // the filter, so the cross product is built from the already-narrowed rows.
-        if query.with_clause.is_none() && !leading_unwind {
+        if !unwind_before_barrier && !trailing_unwind_hoisted {
             if let Some(unwind_clause) = &query.unwind_clause {
                 operator = Box::new(UnwindOperator::new(
                     operator,
