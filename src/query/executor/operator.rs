@@ -11393,8 +11393,13 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
 /// Checks if edge exists between bound endpoints before creating.
 pub struct MatchMergeEdgeOperator {
     input: OperatorBox,
-    /// (source_var, target_var, edge_type, properties, edge_var)
-    edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+    /// (source_var, target_var, edge_type, properties, edge_var, undirected)
+    ///
+    /// `undirected` is `-[r:T]-`, which matches a relationship either way
+    /// round. It used to be dropped, so this operator looked only for
+    /// `source -> target` and MERGE created a duplicate beside an existing
+    /// `target -> source` (#938).
+    edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)>,
     on_create_set: Vec<(String, String, Expression)>,
     on_match_set: Vec<(String, String, Expression)>,
     /// Whole-entity `ON CREATE`/`ON MATCH SET`; see `MergeOperator` (#874).
@@ -11408,7 +11413,7 @@ pub struct MatchMergeEdgeOperator {
 impl MatchMergeEdgeOperator {
     pub fn new(
         input: OperatorBox,
-        edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>)>,
+        edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)>,
         on_create_set: Vec<(String, String, Expression)>,
         on_match_set: Vec<(String, String, Expression)>,
     ) -> Self {
@@ -11449,7 +11454,9 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if !self.done {
             while let Some(record) = self.input.next_mut(store, tenant_id)? {
-                for (source_var, target_var, edge_type, properties, edge_var) in &self.edges_to_merge {
+                for (source_var, target_var, edge_type, properties, edge_var, undirected) in
+                    &self.edges_to_merge
+                {
                     let source_id = match record.get(source_var).and_then(|v| v.node_id()) {
                         Some(id) => id,
                         None => continue,
@@ -11459,8 +11466,17 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         None => continue,
                     };
 
-                    // Check if edge already exists
-                    let existing = store.edge_between(source_id, target_id, Some(edge_type));
+                    // Does one already exist? For `-[r:T]-`, either way round;
+                    // the pattern's own direction is preferred when both do.
+                    let existing = store
+                        .edge_between(source_id, target_id, Some(edge_type))
+                        .or_else(|| {
+                            if *undirected {
+                                store.edge_between(target_id, source_id, Some(edge_type))
+                            } else {
+                                None
+                            }
+                        });
 
                     let mut result_record = record.clone();
 
@@ -13251,8 +13267,13 @@ impl MergeOperator {
     ) -> ExecutionResult<Option<Record>> {
         // Flatten the path into nodes and the relationships between them.
         let mut pattern_nodes: Vec<&crate::query::ast::NodePattern> = vec![&path.start];
-        // (from_index, to_index, type, properties, variable)
-        let mut pattern_rels: Vec<(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)> = Vec::new();
+        // (from_index, to_index, type, properties, variable, undirected)
+        //
+        // `undirected` is carried because `Direction::Both` used to be folded
+        // into `Outgoing` here, so `MERGE (a)-[r:KNOWS]-(b)` only ever looked
+        // for `a -> b`. An existing `b -> a` did not match and MERGE created a
+        // second relationship beside it (#938).
+        let mut pattern_rels: Vec<(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)> = Vec::new();
         for segment in &path.segments {
             pattern_nodes.push(&segment.node);
             let to = pattern_nodes.len() - 1;
@@ -13274,7 +13295,11 @@ impl MergeOperator {
                 Direction::Incoming => (to, from),
                 Direction::Outgoing | Direction::Both => (from, to),
             };
-            pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone()));
+            // An undirected pattern *creates* left-to-right, which is why the
+            // orientation above is still (from, to) for `Both`. Only matching
+            // has to look both ways.
+            let undirected = matches!(segment.edge.direction, Direction::Both);
+            pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone(), undirected));
         }
 
         // Candidate node ids per pattern position.
@@ -13358,9 +13383,9 @@ impl MergeOperator {
             // (a)-[r:R]->(b) RETURN r` failed with VariableNotFound and a named
             // path had nothing to build from (#903).
             let mut matched_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
-            for (from, to, ty, props, var) in &pattern_rels {
+            for (from, to, ty, props, var, undirected) in &pattern_rels {
                 let Some(edge_id) =
-                    Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                    Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props, *undirected)
                 else {
                     continue;
                 };
@@ -13415,7 +13440,7 @@ impl MergeOperator {
             created.push(node_id);
         }
         let mut created_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
-        for (from, to, edge_type, props, var) in &pattern_rels {
+        for (from, to, edge_type, props, var, _undirected) in &pattern_rels {
             let edge_id = store
                 .create_edge(created[*from], created[*to], edge_type.clone())
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
@@ -13456,35 +13481,50 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
     /// endpoints only, so `MERGE (a)-[:R {k: 1}]->(b)` matched a bare `:R`
     /// edge, bound nothing, and left the graph without the property the query
     /// asked for (#903).
+    /// The existing relationship a MERGE pattern segment matches, if any.
+    ///
+    /// `undirected` comes from `-[r:T]-`, where the pattern matches a
+    /// relationship in *either* direction. Folding that into "outgoing" meant
+    /// an existing `b -> a` never matched `MERGE (a)-[r:T]-(b)` and MERGE
+    /// created a second relationship beside it (#938) -- a duplicate write
+    /// from a clause whose entire purpose is not to write when the thing is
+    /// already there.
     fn merge_edge_match(
         store: &GraphStore,
         src: NodeId,
         dst: NodeId,
         ty: &EdgeType,
         props: &HashMap<String, PropertyValue>,
+        undirected: bool,
     ) -> Option<crate::graph::types::EdgeId> {
-        store
-            .get_outgoing_edge_targets(src)
-            .iter()
-            .find(|(eid, _s, t, et)| {
-                if *t != dst || et != ty {
-                    return false;
-                }
-                if props.is_empty() {
-                    return true;
-                }
-                store.get_edge(*eid).is_some_and(|edge| {
+        let props_ok = |eid: crate::graph::types::EdgeId| {
+            props.is_empty()
+                || store.get_edge(eid).is_some_and(|edge| {
                     props
                         .iter()
                         .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
                 })
-            })
+        };
+        let forward = store
+            .get_outgoing_edge_targets(src)
+            .iter()
+            .find(|(eid, _s, t, et)| *t == dst && et == ty && props_ok(*eid))
+            .map(|(eid, ..)| *eid);
+        if forward.is_some() || !undirected {
+            return forward;
+        }
+        // The other way round. Checked second so a relationship written in the
+        // pattern's own direction is preferred when both exist.
+        store
+            .get_outgoing_edge_targets(dst)
+            .iter()
+            .find(|(eid, _s, t, et)| *t == src && et == ty && props_ok(*eid))
             .map(|(eid, ..)| *eid)
     }
 
     fn search(
         candidates: &[Vec<NodeId>],
-        rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>)],
+        rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)],
         store: &GraphStore,
         assignment: &mut Vec<NodeId>,
     ) -> Option<Vec<NodeId>> {
@@ -13499,11 +13539,11 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
             }
             assignment.push(cand);
             // Check every relationship whose endpoints are now both assigned.
-            let ok = rels.iter().all(|(from, to, ty, props, _v)| {
+            let ok = rels.iter().all(|(from, to, ty, props, _v, undirected)| {
                 if *from > i || *to > i {
                     return true;
                 }
-                Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props)
+                Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props, *undirected)
                     .is_some()
             });
             if ok {
