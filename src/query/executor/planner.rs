@@ -3357,6 +3357,15 @@ impl QueryPlanner {
                             min_hops,
                             max_hops,
                         );
+                // Inline relationship properties, e.g. `-[:R* {year: 1988}]->`.
+                // The operator had nowhere to put these and the planner
+                // dropped them, so the pattern matched every path and the
+                // filter failed *open* (#934).
+                if let Some(props) = &segment.edge.properties {
+                    if !props.is_empty() {
+                        expand = expand.with_edge_properties(props.clone());
+                    }
+                }
                 if self
                     .trail_enumeration
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -3504,7 +3513,12 @@ impl QueryPlanner {
                         }
                     }
 
-                    if let Some((_, predicate)) = edge_filter {
+                    // Single-hop only; see the note at the other two sites.
+                    // A variable-length segment's inline properties are
+                    // enforced inside the expand (#934).
+                    if let (Some((_, predicate)), None) =
+                        (edge_filter, segment.edge.length.as_ref())
+                    {
                         path_operator = Box::new(FilterOperator::new(path_operator, predicate));
                     }
 
@@ -3853,6 +3867,15 @@ impl QueryPlanner {
                 // segment binds -- the relationship list, a named path -- has
                 // to come back in the pattern's order, not the walk's (#933).
                 expand = expand.with_reversed_walk();
+                // Inline relationship properties, e.g. `-[:R* {year: 1988}]->`.
+                // The operator had nowhere to put these and the planner
+                // dropped them, so the pattern matched every path and the
+                // filter failed *open* (#934).
+                if let Some(props) = &segment.edge.properties {
+                    if !props.is_empty() {
+                        expand = expand.with_edge_properties(props.clone());
+                    }
+                }
                 if self
                     .trail_enumeration
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -3947,7 +3970,13 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
-            if let Some((_, predicate)) = edge_filter {
+            // Only for a single-hop segment. On a variable-length one the
+            // constraint belongs to every relationship on the path, which is
+            // the expand operator's job (#934) -- and this filter cannot do it
+            // anyway: it names either the *list* variable, comparing a list to
+            // a scalar, or an invented name nothing binds, which raised
+            // VariableNotFound.
+            if let (Some((_, predicate)), None) = (edge_filter, segment.edge.length.as_ref()) {
                 path_operator = Box::new(FilterOperator::new(path_operator, predicate));
             }
             bound.insert(target.var.clone());
@@ -3985,6 +4014,15 @@ impl QueryPlanner {
                     length.min.unwrap_or(1),
                     length.max.unwrap_or(usize::MAX),
                 );
+                // Inline relationship properties, e.g. `-[:R* {year: 1988}]->`.
+                // The operator had nowhere to put these and the planner
+                // dropped them, so the pattern matched every path and the
+                // filter failed *open* (#934).
+                if let Some(props) = &segment.edge.properties {
+                    if !props.is_empty() {
+                        expand = expand.with_edge_properties(props.clone());
+                    }
+                }
                 if self
                     .trail_enumeration
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -4056,7 +4094,13 @@ impl QueryPlanner {
                     path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                 }
             }
-            if let Some((_, predicate)) = edge_filter {
+            // Only for a single-hop segment. On a variable-length one the
+            // constraint belongs to every relationship on the path, which is
+            // the expand operator's job (#934) -- and this filter cannot do it
+            // anyway: it names either the *list* variable, comparing a list to
+            // a scalar, or an invented name nothing binds, which raised
+            // VariableNotFound.
+            if let (Some((_, predicate)), None) = (edge_filter, segment.edge.length.as_ref()) {
                 path_operator = Box::new(FilterOperator::new(path_operator, predicate));
             }
             bound.insert(target.var.clone());
