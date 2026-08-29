@@ -6321,6 +6321,21 @@ pub struct VarLengthExpandOperator {
     /// Two right relationships in the wrong order, from a query that reported
     /// success.
     reversed_walk: bool,
+    /// Inline property constraints on the relationship, e.g.
+    /// `-[:R* {year: 1988}]->`.
+    ///
+    /// Applies to **every** hop, not just the first or last: `-[:R* {k: v}]->`
+    /// means every relationship on the path has `k = v`. So it is enforced
+    /// inside the walk rather than as a filter above this operator -- a filter
+    /// above cannot see the intermediate hops at all.
+    ///
+    /// The planner had nowhere to put these and dropped them, so
+    /// `MATCH (a)-[:WORKED_WITH* {year: 1988}]->(b)` returned every path in
+    /// the graph (#934). A filter that silently does not filter, failing
+    /// *open*.
+    ///
+    /// Pruning, not cost: a hop that fails the predicate ends that branch.
+    edge_properties: std::collections::HashMap<String, PropertyValue>,
     /// Output records buffered for the current input record.
     pending: std::collections::VecDeque<Record>,
     /// `edge_types` resolved to interned ids, cached after the first use.
@@ -6404,6 +6419,7 @@ impl VarLengthExpandOperator {
             path_variable: None,
             rel_variable: None,
             reversed_walk: false,
+            edge_properties: std::collections::HashMap::new(),
             pending: std::collections::VecDeque::new(),
             type_ids: None,
             pinned_target: None,
@@ -6438,6 +6454,28 @@ impl VarLengthExpandOperator {
     pub fn with_reversed_walk(mut self) -> Self {
         self.reversed_walk = true;
         self
+    }
+
+    /// Constrain every relationship on the path by these properties. See
+    /// [`Self::edge_properties`].
+    pub fn with_edge_properties(
+        mut self,
+        props: std::collections::HashMap<String, PropertyValue>,
+    ) -> Self {
+        self.edge_properties = props;
+        self
+    }
+
+    /// Does this edge satisfy the segment's inline property constraints?
+    fn edge_props_ok(&self, eid: crate::graph::EdgeId, store: &GraphStore) -> bool {
+        if self.edge_properties.is_empty() {
+            return true;
+        }
+        store.get_edge(eid).is_some_and(|edge| {
+            self.edge_properties
+                .iter()
+                .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
+        })
     }
 
     pub fn with_rel_variable(mut self, var: String) -> Self {
@@ -6487,10 +6525,25 @@ impl VarLengthExpandOperator {
         node: NodeId,
         type_ids: Option<&[u16]>,
         direction: &Direction,
+        edge_properties: &std::collections::HashMap<String, PropertyValue>,
         store: &GraphStore,
         visit: &mut impl FnMut(NodeId),
     ) {
-        let mut with_edge = |nb: NodeId, _e: crate::graph::EdgeId| visit(nb);
+        // The reachability BFS has to honour the same constraint as the
+        // forward walk, or a pinned target is reported reachable by a path the
+        // pattern excludes -- and the two would then disagree about the same
+        // question depending on which end the planner anchored.
+        let mut with_edge = |nb: NodeId, e: crate::graph::EdgeId| {
+            if edge_properties.is_empty()
+                || store.get_edge(e).is_some_and(|edge| {
+                    edge_properties
+                        .iter()
+                        .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
+                })
+            {
+                visit(nb)
+            }
+        };
         match direction {
             Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
             Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
@@ -6508,6 +6561,14 @@ impl VarLengthExpandOperator {
         store: &GraphStore,
         mut visit: impl FnMut(NodeId, crate::graph::EdgeId),
     ) {
+        // Wrapped here rather than at each call site: every walk in this
+        // operator enumerates through this one function, so the constraint
+        // cannot be missed by a path that forgot to check it.
+        let mut visit = |nb: NodeId, eid: crate::graph::EdgeId| {
+            if self.edge_props_ok(eid, store) {
+                visit(nb, eid);
+            }
+        };
         match self.direction {
             Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut visit),
             Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut visit),
@@ -6588,7 +6649,7 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, store, &mut |nb| {
+                    Self::neighbors_in(cur, type_filter, &reversed, &self.edge_properties, store, &mut |nb| {
                         if visited.insert(nb) {
                             next.push(nb);
                             if depth >= self.min_hops {
