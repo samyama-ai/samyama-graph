@@ -4818,7 +4818,14 @@ impl NodeScanOperator {
         // Three cases:
         //   1. No labels  → scan all nodes (rare)
         //   2. Single label → direct copy of label_index entry; no dedup
-        //   3. Multi-label → union with HashSet for dedup
+        //   3. Multi-label → **intersection**
+        //
+        // Case 3 used to be a union, and said so. `(a:A:B)` in Cypher is a
+        // conjunction: the node carries A *and* B. Returning the union made
+        // `MATCH (a:A:B)` answer six rows where two are correct, and
+        // `(a:A:B:C)` return every labelled node in the graph (#942) --
+        // strictly more rows than asked for, from a query that reported
+        // success, so the filter failed open.
         //
         // Sort behavior is conditional:
         //   - With early_limit (LIMIT pushdown): skip sort — only `limit`
@@ -4833,18 +4840,30 @@ impl NodeScanOperator {
         } else if self.labels.len() == 1 {
             self.node_ids = store.node_ids_by_label(&self.labels[0], self.early_limit);
         } else {
-            // Multi-label: union via HashSet. Stop early if early_limit is set.
+            // Intersection, driven from the *smallest* label set: the answer
+            // is a subset of it, so every other label can only remove. That
+            // also makes this cheaper than the union it replaces, which always
+            // walked all of them.
+            //
+            // `early_limit` counts nodes that actually match. The union
+            // counted insertions, so with a LIMIT it could stop before finding
+            // any node carrying all the labels.
+            let mut sets: Vec<Vec<NodeId>> = self
+                .labels
+                .iter()
+                .map(|l| store.node_ids_by_label(l, None))
+                .collect();
+            sets.sort_unstable_by_key(|v| v.len());
+            let (smallest, rest) = sets.split_first().expect("labels.len() > 1");
+            let rest: Vec<HashSet<NodeId>> =
+                rest.iter().map(|v| v.iter().copied().collect()).collect();
             let cap = self.early_limit.unwrap_or(usize::MAX);
-            let mut node_set: HashSet<NodeId> = HashSet::new();
-            'outer: for label in &self.labels {
-                for nid in store.node_ids_by_label(label, None) {
-                    node_set.insert(nid);
-                    if node_set.len() >= cap {
-                        break 'outer;
-                    }
-                }
-            }
-            self.node_ids = node_set.into_iter().collect();
+            self.node_ids = smallest
+                .iter()
+                .copied()
+                .filter(|id| rest.iter().all(|s| s.contains(id)))
+                .take(cap)
+                .collect();
         }
 
         // Sort only when no early_limit (preserves cache locality on full scans).
