@@ -14949,10 +14949,19 @@ mod tests {
         for _ in 0..50 {
             let id = store.create_node("Person");
             // Second label on half of them, so union and intersection differ.
+            //
+            // Through `add_label_to_node`, not `get_node_mut().labels.insert`.
+            // The direct insert writes the node and **not** `label_index`, so
+            // `node_ids_by_label("Adult")` returned nothing -- and the union
+            // hid that, because `Person ∪ nothing` is still 50. The
+            // intersection is what exposed the fixture, which is the same
+            // failure the index itself exists to prevent: a label the node
+            // carries and the index does not know about is invisible to every
+            // query that looks for it.
             if id.as_u64() % 2 == 0 {
-                if let Some(node) = store.get_node_mut(id) {
-                    node.labels.insert(Label::new("Adult"));
-                }
+                store
+                    .add_label_to_node("default", id, Label::new("Adult"))
+                    .expect("label added through the store, so the index sees it");
             }
         }
         let mut op = NodeScanOperator::new(
