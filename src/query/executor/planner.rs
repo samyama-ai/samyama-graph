@@ -2757,7 +2757,16 @@ impl QueryPlanner {
                 && !matches!(
                     query.match_clauses[0].pattern.paths[0].segments[0].edge.direction,
                     Direction::Both
-                );
+                )
+                // And distinct endpoints, for the same reason: this count is
+                // also blind to `(n)-[r]->(n)` (#962).
+                && {
+                    let path = &query.match_clauses[0].pattern.paths[0];
+                    match (&path.start.variable, &path.segments[0].node.variable) {
+                        (Some(a), Some(b)) => a != b,
+                        _ => true,
+                    }
+                };
 
             // O(1) count for a single edge type (or all edges): the metadata that already
             // answers `type(r), count(r)` and node label counts can answer this too, but
@@ -2815,7 +2824,24 @@ impl QueryPlanner {
                 && !matches!(
                     query.match_clauses[0].pattern.paths[0].segments[0].edge.direction,
                     Direction::Both
-                );
+                )
+                // And the two endpoints must be *different* variables.
+                // `MATCH (n)-[r]->(n)` asks for self-loops only, and the
+                // store's edge count knows nothing about that constraint --
+                // the fast path answered the **total** edge count, 2 over a
+                // graph with one loop and one ordinary edge, where `RETURN r`
+                // on the same pattern gives one row (#962).
+                //
+                // The same query answering two different numbers depending on
+                // whether it counts is what a fast path has to be checked
+                // against: an optimisation may skip *work*, never a predicate.
+                && {
+                    let path = &query.match_clauses[0].pattern.paths[0];
+                    match (&path.start.variable, &path.segments[0].node.variable) {
+                        (Some(a), Some(b)) => a != b,
+                        _ => true,
+                    }
+                };
 
             if use_edge_count {
                 let edge_type = query.match_clauses[0].pattern.paths[0].segments[0]
