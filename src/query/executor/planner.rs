@@ -1585,6 +1585,31 @@ impl QueryPlanner {
                         } else {
                             Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                         }
+                    } else if match_clause.optional {
+                        // A *disjoint* OPTIONAL MATCH -- one sharing no
+                        // variable with anything bound so far -- used to fall
+                        // to a cartesian product, which ignores `optional`
+                        // entirely. A cartesian with an empty right side
+                        // yields nothing, so
+                        // `MATCH (f:Exists) OPTIONAL MATCH (n:DoesNotExist)`
+                        // destroyed every row the MATCH had found and
+                        // `count(f)` answered 0 instead of 3 (#954): a left
+                        // outer join behaving as an inner one, which is the
+                        // one property OPTIONAL MATCH exists to provide.
+                        //
+                        // The join operator already does the right thing with
+                        // no join variables. `key_of` over an empty list is
+                        // `Some(vec![])` for every record on both sides, so a
+                        // non-empty right still produces the full cartesian
+                        // product and an empty one null-fills the left.
+                        let right_only: Vec<String> =
+                            clause_vars.difference(&known_vars).cloned().collect();
+                        let mut join =
+                            LeftOuterJoinOperator::new(existing, match_op, Vec::new(), right_only);
+                        if let Some(pred) = optional_join_predicates[match_idx].clone() {
+                            join = join.with_join_predicate(pred);
+                        }
+                        Box::new(join) as OperatorBox
                     } else {
                         Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                     }
@@ -1876,6 +1901,19 @@ impl QueryPlanner {
                                 } else {
                                     Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                                 }
+                            } else if match_clause.optional {
+                                // Disjoint OPTIONAL MATCH, post-WITH. Same as
+                                // the pre-WITH site: a cartesian product
+                                // ignores `optional` and an empty right side
+                                // then deletes every left row (#954).
+                                let right_only: Vec<String> =
+                                    clause_vars.difference(&known_vars).cloned().collect();
+                                Box::new(LeftOuterJoinOperator::new(
+                                    existing,
+                                    match_op,
+                                    Vec::new(),
+                                    right_only,
+                                )) as OperatorBox
                             } else {
                                 Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                             }
