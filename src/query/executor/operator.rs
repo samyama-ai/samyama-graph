@@ -2153,28 +2153,34 @@ const NULL_TOLERANT_FUNCTIONS: &[&str] = &["coalesce", "exists"];
 /// so over an empty graph the call never ran and the query "succeeded". A
 /// compile-time check does not depend on the data.
 ///
-/// **One list, cross-checked.** `known_function_is_dispatched` asserts every
-/// name here is one `eval_function` actually handles, so the two cannot drift
-/// into rejecting a function that works -- which is much worse than accepting
-/// one that does not.
+/// **One list, cross-checked.** `tests/function_reachability.rs` extracts the
+/// arms straight from this file's dispatcher and asserts every one can be
+/// named in Cypher, so this list and the dispatcher cannot drift into
+/// rejecting a function that works -- which is much worse than accepting one
+/// that does not.
+///
+/// `true` and `false` are here because they are dispatcher *arms*, not because
+/// `true()` is a function anybody should write. Leaving them out made that
+/// reachability test fail, and narrowing an existing guard to keep a new check
+/// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
     "abs", "acos", "asin", "atan", "atan2", "bfs", "breadthfirstsearch", "cdlp", "ceil",
     "coalesce", "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
     "date.truncate", "datetime", "datetime.truncate", "degrees", "dijkstra", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor", "haslabels",
-    "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan", "keys",
-    "l2", "labelpropagation", "labels", "last", "lcc", "left", "length", "localdatetime",
-    "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10", "louvain",
-    "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank", "pagerank2", "percentilecont",
-    "percentiledisc", "pi", "prank", "properties", "radians", "rand", "randomuuid", "range",
-    "relationships", "rels", "replace", "reverse", "right", "round", "rtrim", "scc",
-    "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size", "split", "sqrt",
-    "startnode", "stdev", "stdevp", "substring", "subsumes", "tail", "tan", "tanh", "time",
-    "time.truncate", "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull",
-    "toint", "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
-    "tostringornull", "toupper", "touppercase", "trianglecount", "trim", "type", "valuetype",
-    "wcc", "weightedpath",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp", "false", "floor",
+    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
+    "isnan", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
+    "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
+    "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
+    "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "properties", "radians",
+    "rand", "randomuuid", "range", "relationships", "rels", "replace", "reverse", "right",
+    "round", "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh",
+    "size", "split", "sqrt", "startnode", "stdev", "stdevp", "substring", "subsumes", "tail",
+    "tan", "tanh", "time", "time.truncate", "timestamp", "toboolean", "tobooleanornull",
+    "tofloat", "tofloatornull", "toint", "tointeger", "tointegerornull", "tolower",
+    "tolowercase", "tostring", "tostringornull", "toupper", "touppercase", "trianglecount",
+    "trim", "true", "type", "valuetype", "wcc", "weightedpath",
 ];
 
 /// Is `name` a function this engine implements?
