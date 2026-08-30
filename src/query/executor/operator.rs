@@ -11639,21 +11639,42 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         None => continue,
                     };
 
-                    // Does one already exist? For `-[r:T]-`, either way round;
-                    // the pattern's own direction is preferred when both do.
-                    let existing = store
-                        .edge_between(source_id, target_id, Some(edge_type))
-                        .or_else(|| {
-                            if *undirected {
-                                store.edge_between(target_id, source_id, Some(edge_type))
-                            } else {
-                                None
-                            }
+                    // **Every** existing match, not the first. MERGE is
+                    // match-or-create, and when it matches it binds each match
+                    // as its own row: over two `:TYPE` relationships between
+                    // the same pair, `MERGE (a)-[r:TYPE]->(b) RETURN count(r)`
+                    // is 2, and taking one made it 1 (#968). The node half of
+                    // the same defect was #956.
+                    //
+                    // For `-[r:T]-`, either way round; the pattern's own
+                    // direction comes first, so when relationships exist both
+                    // ways the order is deterministic.
+                    let mut existing_all =
+                        store.edges_between(source_id, target_id, Some(edge_type));
+                    if *undirected {
+                        existing_all
+                            .extend(store.edges_between(target_id, source_id, Some(edge_type)));
+                    }
+                    // The pattern's inline properties narrow what counts as a
+                    // match. `edges_between` knows only the endpoints and the
+                    // type, so without this `MERGE (a)-[r:T {k: v}]->(b)`
+                    // matched a relationship with the wrong `k` and created
+                    // nothing -- and, once every match was emitted rather than
+                    // the first, returned it as an extra row.
+                    if !properties.is_empty() {
+                        existing_all.retain(|eid| {
+                            store.get_edge(*eid).is_some_and(|e| {
+                                properties.iter().all(|(k, v)| {
+                                    e.properties.get(k).is_some_and(|have| have == v)
+                                })
+                            })
                         });
+                    }
 
-                    let mut result_record = record.clone();
-
-                    if let Some(edge_id) = existing {
+                    for edge_id in &existing_all {
+                        let edge_id = *edge_id;
+                        let mut result_record = record.clone();
+                        {
                         // Edge exists — apply ON MATCH SET
                         for (var, prop, expr) in &self.on_match_set {
                             if edge_var.as_deref() == Some(var) || var == "_edge" {
@@ -11689,8 +11710,13 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                                 result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
                             }
                         }
-                    } else {
-                        // Edge doesn't exist — create it + apply ON CREATE SET
+                        }
+                            self.results.push(result_record);
+                    }
+
+                    let mut result_record = record.clone();
+                    if existing_all.is_empty() {
+                        // Nothing matched — create it + apply ON CREATE SET
                         let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
                             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
@@ -11733,8 +11759,12 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                                 result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
                             }
                         }
+                        // Inside the branch. Left outside, a pattern that
+                        // *matched* also pushed this bare record, with the
+                        // relationship variable unbound -- VariableNotFound at
+                        // read time, and an extra row before that.
+                        self.results.push(result_record);
                     }
-                    self.results.push(result_record);
                 }
             }
             self.done = true;

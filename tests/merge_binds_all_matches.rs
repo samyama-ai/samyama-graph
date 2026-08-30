@@ -117,3 +117,65 @@ fn on_create_set_still_runs_for_the_created_node() {
     write(&mut store, "MERGE (n:Fresh) ON CREATE SET n.made = 1 RETURN n");
     assert_eq!(count(&store, "MATCH (n:Fresh) WHERE n.made = 1 RETURN count(n) AS c"), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The relationship half of the same defect (#968).
+//
+// `MatchMergeEdgeOperator` called `store.edge_between`, which returns one, so
+// `MERGE (a)-[r:TYPE]->(b)` over two existing `:TYPE` relationships between
+// the same pair bound one and `count(r)` answered 1 where openCypher says 2.
+
+fn pair_with_two_edges() -> GraphStore {
+    let mut store = GraphStore::new();
+    let a = store.create_node_with_labels([Label::new("A")]);
+    let b = store.create_node_with_labels([Label::new("B")]);
+    store.create_edge(a, b, "TYPE").unwrap();
+    store.create_edge(a, b, "TYPE").unwrap();
+    store
+}
+
+#[test]
+fn merge_binds_each_matching_relationship() {
+    let mut store = pair_with_two_edges();
+    assert_eq!(
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"),
+        2
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"),
+        2,
+        "matched, not created"
+    );
+}
+
+#[test]
+fn an_inline_property_narrows_which_relationships_match() {
+    // `edges_between` knows only the endpoints and the type. Without filtering
+    // on the pattern's properties, emitting every match returns relationships
+    // the pattern excludes — the failure this fix's first attempt produced.
+    let mut store = GraphStore::new();
+    let a = store.create_node_with_labels([Label::new("A")]);
+    let b = store.create_node_with_labels([Label::new("B")]);
+    for v in [1i64, 2] {
+        let e = store.create_edge(a, b, "TYPE").unwrap();
+        let _ = store.set_edge_property_sparse(e, "k", PropertyValue::Integer(v));
+    }
+    assert_eq!(
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE {k: 1}]->(b) RETURN r"),
+        1
+    );
+    assert_eq!(count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"), 2);
+}
+
+#[test]
+fn a_relationship_merge_that_matches_nothing_still_creates_one() {
+    let mut store = GraphStore::new();
+    let a = store.create_node_with_labels([Label::new("A")]);
+    let b = store.create_node_with_labels([Label::new("B")]);
+    let _ = (a, b);
+    assert_eq!(
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"),
+        1
+    );
+    assert_eq!(count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"), 1);
+}
