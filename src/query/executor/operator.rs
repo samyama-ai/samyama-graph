@@ -4818,7 +4818,14 @@ impl NodeScanOperator {
         // Three cases:
         //   1. No labels  → scan all nodes (rare)
         //   2. Single label → direct copy of label_index entry; no dedup
-        //   3. Multi-label → union with HashSet for dedup
+        //   3. Multi-label → **intersection**
+        //
+        // Case 3 used to be a union, and said so. `(a:A:B)` in Cypher is a
+        // conjunction: the node carries A *and* B. Returning the union made
+        // `MATCH (a:A:B)` answer six rows where two are correct, and
+        // `(a:A:B:C)` return every labelled node in the graph (#944) --
+        // strictly more rows than asked for, from a query that reported
+        // success, so the filter failed open.
         //
         // Sort behavior is conditional:
         //   - With early_limit (LIMIT pushdown): skip sort — only `limit`
@@ -4833,18 +4840,30 @@ impl NodeScanOperator {
         } else if self.labels.len() == 1 {
             self.node_ids = store.node_ids_by_label(&self.labels[0], self.early_limit);
         } else {
-            // Multi-label: union via HashSet. Stop early if early_limit is set.
+            // Intersection, driven from the *smallest* label set: the answer
+            // is a subset of it, so every other label can only remove. That
+            // also makes this cheaper than the union it replaces, which always
+            // walked all of them.
+            //
+            // `early_limit` counts nodes that actually match. The union
+            // counted insertions, so with a LIMIT it could stop before finding
+            // any node carrying all the labels.
+            let mut sets: Vec<Vec<NodeId>> = self
+                .labels
+                .iter()
+                .map(|l| store.node_ids_by_label(l, None))
+                .collect();
+            sets.sort_unstable_by_key(|v| v.len());
+            let (smallest, rest) = sets.split_first().expect("labels.len() > 1");
+            let rest: Vec<HashSet<NodeId>> =
+                rest.iter().map(|v| v.iter().copied().collect()).collect();
             let cap = self.early_limit.unwrap_or(usize::MAX);
-            let mut node_set: HashSet<NodeId> = HashSet::new();
-            'outer: for label in &self.labels {
-                for nid in store.node_ids_by_label(label, None) {
-                    node_set.insert(nid);
-                    if node_set.len() >= cap {
-                        break 'outer;
-                    }
-                }
-            }
-            self.node_ids = node_set.into_iter().collect();
+            self.node_ids = smallest
+                .iter()
+                .copied()
+                .filter(|id| rest.iter().all(|s| s.contains(id)))
+                .take(cap)
+                .collect();
         }
 
         // Sort only when no early_limit (preserves cache locality on full scans).
@@ -14920,20 +14939,31 @@ mod tests {
     }
 
     #[test]
-    fn test_node_scan_multi_label_dedup_and_limit() {
-        // Multi-label scan must dedup across labels (a node with both labels
-        // counts once) and still respect early_limit.
+    fn test_node_scan_multi_label_is_a_conjunction() {
+        // This assertion used to read `count == 50, "multi-label union should
+        // dedup"`. It encoded the defect: `(n:Person:Adult)` in Cypher is a
+        // conjunction, so the answer is the 25 nodes carrying **both**, not the
+        // 50 carrying either. openCypher `Match1` [3] settles it, and this test
+        // is why the union survived (#944).
         let mut store = GraphStore::new();
         for _ in 0..50 {
             let id = store.create_node("Person");
-            // Add second label to half — ensures overlap
+            // Second label on half of them, so union and intersection differ.
+            //
+            // Through `add_label_to_node`, not `get_node_mut().labels.insert`.
+            // The direct insert writes the node and **not** `label_index`, so
+            // `node_ids_by_label("Adult")` returned nothing -- and the union
+            // hid that, because `Person ∪ nothing` is still 50. The
+            // intersection is what exposed the fixture, which is the same
+            // failure the index itself exists to prevent: a label the node
+            // carries and the index does not know about is invisible to every
+            // query that looks for it.
             if id.as_u64() % 2 == 0 {
-                if let Some(node) = store.get_node_mut(id) {
-                    node.labels.insert(Label::new("Adult"));
-                }
+                store
+                    .add_label_to_node("default", id, Label::new("Adult"))
+                    .expect("label added through the store, so the index sees it");
             }
         }
-        // Without limit: 50 unique nodes (the Adults are also Persons)
         let mut op = NodeScanOperator::new(
             "n".to_string(),
             vec![Label::new("Person"), Label::new("Adult")],
@@ -14942,9 +14972,22 @@ mod tests {
         while let Ok(Some(_)) = op.next(&store) {
             count += 1;
         }
-        assert_eq!(count, 50, "multi-label union should dedup");
+        assert_eq!(count, 25, "both labels, not either");
 
-        // With early_limit: capped at limit
+        // Each label alone still scans its own set, so a fix that simply
+        // narrowed everything would be caught here.
+        for (label, want) in [("Person", 50), ("Adult", 25)] {
+            let mut op = NodeScanOperator::new("n".to_string(), vec![Label::new(label)]);
+            let mut count = 0;
+            while let Ok(Some(_)) = op.next(&store) {
+                count += 1;
+            }
+            assert_eq!(count, want, "{label} alone");
+        }
+
+        // `early_limit` counts nodes that actually match. The union counted
+        // insertions, so with a LIMIT it could stop before finding any node
+        // carrying all the labels.
         let mut op = NodeScanOperator::new(
             "n".to_string(),
             vec![Label::new("Person"), Label::new("Adult")],
@@ -14955,6 +14998,13 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 10);
+
+        // A label no node carries makes the whole conjunction empty.
+        let mut op = NodeScanOperator::new(
+            "n".to_string(),
+            vec![Label::new("Person"), Label::new("Nonexistent")],
+        );
+        assert!(matches!(op.next(&store), Ok(None)));
     }
 
     #[test]
