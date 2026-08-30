@@ -293,6 +293,64 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         return Ok(Value::Property(PropertyValue::Null));
     }
 
+    // Concatenation, at the `Value` level, before either side is narrowed to a
+    // `PropertyValue`.
+    //
+    // A list has two spellings: `Value::Property(PropertyValue::Array)`, which
+    // the parser folds a literal into, and `Value::List`, which an expression
+    // builds because a `PropertyValue` cannot hold an entity. `+` only
+    // understood the first, so `[1,2] + [3]` worked and
+    // `[a.list2[1], a.list2[0]] + a.list` raised "Binary op requires property
+    // values" -- the same operator, on the same kind of thing, decided by how
+    // the list happened to be written (#986).
+    //
+    // Doing it here rather than after narrowing also keeps a list of nodes
+    // concatenable, which narrowing would have destroyed.
+    if matches!(op, BinaryOp::Add) {
+        let as_items = |v: &Value| -> Option<Vec<Value>> {
+            match v {
+                Value::List(items) => Some(items.clone()),
+                Value::Property(PropertyValue::Array(items)) => {
+                    Some(items.iter().cloned().map(Value::Property).collect())
+                }
+                _ => None,
+            }
+        };
+        // ...and hand back the *narrower* spelling whenever it fits. Returning
+        // `Value::List` unconditionally was correct arithmetic and a
+        // regression anyway: `IN` and slicing read the `Array` spelling, so
+        // `[1]+[2] IN [3]+[4]` and `… + […][1..3]` broke -- the mirror image
+        // of the bug being fixed. A list of properties concatenates to a list
+        // of properties; only an entity forces the wider spelling.
+        let narrow = |items: Vec<Value>| -> Value {
+            let props: Option<Vec<PropertyValue>> =
+                items.iter().map(|v| v.as_property().cloned()).collect();
+            match props {
+                Some(p) => Value::Property(PropertyValue::Array(p)),
+                None => Value::List(items),
+            }
+        };
+        match (as_items(&left), as_items(&right)) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                return Ok(narrow(a));
+            }
+            // Cypher appends a non-list to a list and prepends one to a list.
+            // Null is not appended: `[1] + null` is null, which the narrowing
+            // below already yields, so it must not be caught here.
+            (Some(mut a), None) if !right.is_null() => {
+                a.push(right);
+                return Ok(narrow(a));
+            }
+            (None, Some(b)) if !left.is_null() => {
+                let mut out = vec![left];
+                out.extend(b);
+                return Ok(narrow(out));
+            }
+            _ => {}
+        }
+    }
+
     let left_prop = match left {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
