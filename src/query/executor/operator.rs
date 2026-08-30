@@ -12611,6 +12611,213 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     ///
     /// Community detection by label propagation (LDBC CDLP). CPU-first; routes to the
     /// GPU automatically above the size threshold when built with `--features gpu`.
+    /// Shared setup for the temporal primitives: build the view, collect the
+    /// aligned edge times, and read the optional `{label, edgeType, timeProperty}`
+    /// config.
+    ///
+    /// One place, because four algorithms reading the same config four times
+    /// is four places for them to disagree about what `timeProperty` means.
+    fn temporal_setup(
+        &self,
+        store: &GraphStore,
+    ) -> ExecutionResult<(crate::algo::GraphView, crate::algo::TemporalEdges)> {
+        let (mut label, mut edge_type, mut time_prop) = (None, None, None);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("timeProperty") {
+                    time_prop = Some(v.clone());
+                }
+            }
+        }
+        let (view, times) = crate::algo::build_temporal_view(
+            store, label.as_deref(), edge_type.as_deref(), time_prop.as_deref(),
+        );
+        let edges = crate::algo::TemporalEdges::new(&view, times)
+            .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        Ok((view, edges))
+    }
+
+    /// The node id in argument `i`, resolved to a dense view index.
+    fn temporal_node_arg(
+        &self,
+        view: &crate::algo::GraphView,
+        i: usize,
+        what: &str,
+    ) -> ExecutionResult<usize> {
+        let raw = match self.args.get(i) {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => *n as u64,
+            _ => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{}() requires {what} as argument {} (a node id)",
+                    self.name,
+                    i + 1
+                )))
+            }
+        };
+        view.node_to_index.get(&raw).copied().ok_or_else(|| {
+            // Not silently empty. A node id outside the projected subgraph is
+            // almost always a `label` filter that excluded it, and answering
+            // "nothing is reachable" would send the caller looking at the
+            // wrong thing.
+            ExecutionError::RuntimeError(format!(
+                "node {raw} is not in the projected graph -- check the `label` \
+                 and `edgeType` filters"
+            ))
+        })
+    }
+
+    /// The `startTime` from the config map, or `i64::MIN` for "from the
+    /// beginning".
+    fn temporal_start(&self) -> i64 {
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get("startTime") {
+                    Some(PropertyValue::Integer(t)) => return *t,
+                    Some(PropertyValue::DateTime(ms)) => return *ms,
+                    _ => {}
+                }
+            }
+        }
+        i64::MIN
+    }
+
+    /// `algo.temporalReachability(source, {..})` and `algo.propagationRanking`.
+    ///
+    /// The same traversal under two names, because they answer two questions
+    /// an operator asks differently: *what can this reach in time* and *what
+    /// does this break, and in what order*. The ranking column is the
+    /// difference, and it is the reason the second exists.
+    fn execute_temporal_reachability(
+        &mut self,
+        store: &GraphStore,
+        ranked: bool,
+    ) -> ExecutionResult<()> {
+        let (view, times) = self.temporal_setup(store)?;
+        let source = self.temporal_node_arg(&view, 0, "a source")?;
+        let reached = crate::algo::temporal_reachability(
+            &view, &times, &[source], self.temporal_start(),
+        )
+        .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+
+        for (rank, (node_id, at)) in reached.into_iter().enumerate() {
+            let mut record = Record::new();
+            let nid = NodeId::new(node_id);
+            match store.get_node(nid) {
+                Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
+                None => record.bind("node".to_string(), Value::NodeRef(nid)),
+            }
+            record.bind("time".to_string(), Value::Property(PropertyValue::Integer(at)));
+            if ranked {
+                record.bind(
+                    "rank".to_string(),
+                    Value::Property(PropertyValue::Integer(rank as i64 + 1)),
+                );
+            }
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
+    /// `algo.temporalShortestPath(source, target, {..})` -- earliest arrival.
+    fn execute_temporal_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (view, times) = self.temporal_setup(store)?;
+        let source = self.temporal_node_arg(&view, 0, "a source")?;
+        let target = self.temporal_node_arg(&view, 1, "a target")?;
+        let found = crate::algo::temporal_shortest_path(
+            &view, &times, source, target, self.temporal_start(),
+        )
+        .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+
+        // No time-respecting route is *no rows*, not an error and not a row of
+        // nulls: it is the ordinary answer to "can this have caused that".
+        if let Some(path) = found {
+            let mut record = Record::new();
+            record.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    path.nodes
+                        .iter()
+                        .map(|n| PropertyValue::Integer(*n as i64))
+                        .collect(),
+                )),
+            );
+            record.bind(
+                "times".to_string(),
+                Value::Property(PropertyValue::Array(
+                    path.edge_times.iter().map(|t| PropertyValue::Integer(*t)).collect(),
+                )),
+            );
+            record.bind("arrival".to_string(), Value::Property(PropertyValue::Integer(path.arrival)));
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
+    /// `algo.symptomExplanation([[node, seenAt], ...], {..})`.
+    ///
+    /// The backward direction, and the one an operator actually starts from:
+    /// a page listing broken services and a time for each.
+    fn execute_symptom_explanation(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (view, times) = self.temporal_setup(store)?;
+        let list = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Array(a))) => a.clone(),
+            _ => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{}() requires a list of [nodeId, seenAt] pairs as its first argument",
+                    self.name
+                )))
+            }
+        };
+        let mut symptoms = Vec::with_capacity(list.len());
+        for item in &list {
+            let PropertyValue::Array(pair) = item else {
+                return Err(ExecutionError::RuntimeError(
+                    "each symptom must be a [nodeId, seenAt] pair".to_string(),
+                ));
+            };
+            let (Some(PropertyValue::Integer(id)), Some(PropertyValue::Integer(at))) =
+                (pair.first(), pair.get(1))
+            else {
+                return Err(ExecutionError::RuntimeError(
+                    "each symptom must be a [nodeId, seenAt] pair of integers".to_string(),
+                ));
+            };
+            let idx = view.node_to_index.get(&(*id as u64)).copied().ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "symptom node {id} is not in the projected graph"
+                ))
+            })?;
+            symptoms.push((idx, *at));
+        }
+
+        let ranked = crate::algo::symptom_explanation(&view, &times, &symptoms)
+            .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        for e in ranked {
+            let mut record = Record::new();
+            let nid = NodeId::new(e.node);
+            match store.get_node(nid) {
+                Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
+                None => record.bind("node".to_string(), Value::NodeRef(nid)),
+            }
+            record.bind(
+                "explains".to_string(),
+                Value::Property(PropertyValue::Integer(e.symptoms_explained as i64)),
+            );
+            record.bind(
+                "onset".to_string(),
+                Value::Property(PropertyValue::Integer(e.latest_onset)),
+            );
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13052,6 +13259,14 @@ impl AlgorithmOperator {
                 | "cdlp"
                 | "lcc"
                 | "or.solve"
+                // The four causal/temporal primitives (ALGO-15). Reachability
+                // in a temporal graph is not transitive -- an edge that fired
+                // before you arrived is not traversable -- so none of these
+                // can be expressed with the static algorithms above.
+                | "temporalreachability"
+                | "temporalshortestpath"
+                | "propagationranking"
+                | "symptomexplanation"
         )
     }
 }
@@ -13070,6 +13285,10 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "temporalreachability" => self.execute_temporal_reachability(store, false)?,
+                "propagationranking" => self.execute_temporal_reachability(store, true)?,
+                "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
+                "symptomexplanation" => self.execute_symptom_explanation(store)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13102,6 +13321,15 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                // The four temporal primitives read the graph and do not write
+                // it, so they run here exactly as they do on the read path.
+                // Adding them to `next` alone left every one of them
+                // "Unknown algorithm" under a write executor -- which is the
+                // executor an ordinary session uses.
+                "temporalreachability" => self.execute_temporal_reachability(store, false)?,
+                "propagationranking" => self.execute_temporal_reachability(store, true)?,
+                "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
+                "symptomexplanation" => self.execute_symptom_explanation(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;

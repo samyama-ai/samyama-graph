@@ -98,9 +98,15 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("bridges", "CALL algo.bridges() YIELD source, target RETURN count(*)"),
     ("articulationPoints", "CALL algo.articulationPoints() YIELD node RETURN count(*)"),
     ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
-    // Temporal/causal primitives ALGO-01's H1 target names explicitly.
+    // The four temporal/causal primitives ALGO-15 names, and which ALGO-01's
+    // target of 40 counts explicitly.
     ("temporalReachability", "CALL algo.temporalReachability({a}) YIELD node RETURN count(*)"),
     ("temporalShortestPath", "CALL algo.temporalShortestPath({a}, {b}) YIELD path RETURN count(*)"),
+    ("propagationRanking", "CALL algo.propagationRanking({a}) YIELD node, rank RETURN count(*)"),
+    ("symptomExplanation", "CALL algo.symptomExplanation([[{b}, 9999]]) YIELD node, explains RETURN count(*)"),
+    // Plausible aliases for the two above that we do *not* provide. Kept in
+    // the list because the point of it is to name what a user would reach for,
+    // and someone coming from an RCA tool reaches for these.
     ("causalAncestors", "CALL algo.causalAncestors({a}) YIELD node RETURN count(*)"),
     ("causalDescendants", "CALL algo.causalDescendants({a}) YIELD node RETURN count(*)"),
 ];
