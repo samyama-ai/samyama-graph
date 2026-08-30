@@ -1868,6 +1868,9 @@ impl QueryPlanner {
                 .unwrap_or_default();
             let mut per_match_where: Vec<Option<WhereClause>> = vec![None; stage_matches.len()];
             let mut cross_match_preds: Vec<Expression> = Vec::new();
+            // Predicates that become join conditions on an OPTIONAL MATCH.
+            let mut stage_optional_join_predicates: Vec<Option<Expression>> =
+                vec![None; stage_matches.len()];
 
             // A predicate referring to a leading UNWIND's variable cannot be evaluated
             // during match planning -- the variable is not bound until the Unwind operator
@@ -1883,6 +1886,47 @@ impl QueryPlanner {
                 if pred_vars.iter().any(|v| late_bound.contains(v)) {
                     continue;
                 }
+                // A predicate spanning an OPTIONAL MATCH's own variables and
+                // an outer one is a **join condition**, not a filter above the
+                // join. Cypher scopes the WHERE after an OPTIONAL MATCH to the
+                // optional match, so a row failing it keeps the left side and
+                // nulls the right; filtering above the join deletes the row.
+                //
+                // #667 established this for the pre-WITH decomposition and
+                // this path never inherited it, so
+                // `… WITH r, a1 LIMIT 1 OPTIONAL MATCH (a2)<-[r]-(b2)
+                //  WHERE a1 = a2` returned **no rows** where Cypher returns one
+                // with nulls (#978). The same rule, in the copy that did not
+                // have it.
+                let optional_target = stage_matches.iter().enumerate().find(|(i, mc)| {
+                    if !mc.optional || pred_vars.is_empty() {
+                        return false;
+                    }
+                    let own = &match_var_sets[*i];
+                    let earlier: HashSet<&String> = match_var_sets[..*i]
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .chain(known_vars.iter())
+                        .collect();
+                    let introduced: HashSet<&String> =
+                        own.iter().filter(|v| !earlier.contains(*v)).collect();
+                    let touches_optional = pred_vars.iter().any(|v| introduced.contains(v));
+                    let touches_outer = pred_vars.iter().any(|v| !introduced.contains(v));
+                    touches_optional && touches_outer
+                });
+                if let Some((i, _)) = optional_target {
+                    stage_optional_join_predicates[i] =
+                        Some(match stage_optional_join_predicates[i].take() {
+                            Some(existing) => Expression::Binary {
+                                left: Box::new(existing),
+                                op: BinaryOp::And,
+                                right: Box::new(pred),
+                            },
+                            None => pred,
+                        });
+                    continue;
+                }
+
                 let target = match_var_sets.iter().position(|match_vars| {
                     pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
                 });
@@ -1933,7 +1977,14 @@ impl QueryPlanner {
                             if !shared.is_empty() {
                                 if match_clause.optional {
                                     let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
-                                    Box::new(LeftOuterJoinOperator::new(existing, match_op, shared.clone(), right_only)) as OperatorBox
+                                    let mut join = LeftOuterJoinOperator::new(
+                                        existing, match_op, shared.clone(), right_only);
+                                    if let Some(pred) =
+                                        stage_optional_join_predicates[match_idx].clone()
+                                    {
+                                        join = join.with_join_predicate(pred);
+                                    }
+                                    Box::new(join) as OperatorBox
                                 } else {
                                     Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                                 }
@@ -1944,12 +1995,18 @@ impl QueryPlanner {
                                 // then deletes every left row (#954).
                                 let right_only: Vec<String> =
                                     clause_vars.difference(&known_vars).cloned().collect();
-                                Box::new(LeftOuterJoinOperator::new(
+                                let mut join = LeftOuterJoinOperator::new(
                                     existing,
                                     match_op,
                                     Vec::new(),
                                     right_only,
-                                )) as OperatorBox
+                                );
+                                if let Some(pred) =
+                                    stage_optional_join_predicates[match_idx].clone()
+                                {
+                                    join = join.with_join_predicate(pred);
+                                }
+                                Box::new(join) as OperatorBox
                             } else {
                                 Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
                             }
