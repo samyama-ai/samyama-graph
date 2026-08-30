@@ -226,6 +226,43 @@ pub(crate) mod statement_clock {
 }
 
 
+/// Build a `Duration` with `nanos` carried into `seconds`.
+///
+/// `nanos` is a sub-second remainder in `0..1_000_000_000`, and every producer
+/// of a `Duration` has to leave it that way. `duration()` already does -- it
+/// combines seconds and nanos into one i128 total before splitting (#814) --
+/// but duration *arithmetic* added the fields straight across, so adding a
+/// duration to itself gave `nanos: 1000000006` and rendered as
+/// `P25Y10M58DT67H56M26.1000000006S` where openCypher says
+/// `...M27.000000006S`: one second short, with the missing second sitting
+/// unrendered inside the nanoseconds field (#1001).
+///
+/// Months and days are *not* carried into each other or into seconds. Cypher
+/// keeps the three groups separate on purpose -- a month is not 30 days and a
+/// day is not always 86,400 seconds across a DST boundary -- so normalising
+/// them would change answers rather than tidy them.
+///
+/// `i128` for the same reason `duration()` uses it: the nanosecond product
+/// overflows `i64` past roughly 292 years.
+fn normalized_duration(months: i64, days: i64, seconds: i128, nanos: i128) -> PropertyValue {
+    let total = seconds * 1_000_000_000 + nanos;
+    // Truncating division, exactly as `duration()` does -- **not** floor
+    // division. The two differ only for a negative total, and the difference
+    // is not academic: flooring gives `{seconds: -1, nanos: 999_999_999}`,
+    // which is the same instant but which the renderer, reading the sign off
+    // each field, prints as `PT-1.999999999S` instead of `PT-0.000000001S`.
+    // The representation carries the sign in `nanos`, and a normaliser that
+    // does not follow that convention produces a correct value that renders
+    // wrong.
+    PropertyValue::Duration {
+        months,
+        days,
+        seconds: (total / 1_000_000_000) as i64,
+        nanos: (total % 1_000_000_000) as i32,
+    }
+}
+
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
@@ -509,7 +546,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             // Duration + Duration
             (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
-                PropertyValue::Duration { months: m1 + m2, days: d1 + d2, seconds: s1 + s2, nanos: n1 + n2 }
+                normalized_duration(m1 + m2, d1 + d2, *s1 as i128 + *s2 as i128,
+                                    *n1 as i128 + *n2 as i128)
             }
             // Cypher null propagation: any arithmetic with a null operand is null,
             // not an error. Without this, `p.a + p.missing` aborts the whole query --
@@ -556,7 +594,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             // Duration - Duration
             (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
              PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
-                PropertyValue::Duration { months: m1 - m2, days: d1 - d2, seconds: s1 - s2, nanos: n1 - n2 }
+                normalized_duration(m1 - m2, d1 - d2, *s1 as i128 - *s2 as i128,
+                                    *n1 as i128 - *n2 as i128)
             }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(ExecutionError::TypeError("Sub requires numeric operands".to_string())),
@@ -4066,7 +4105,21 @@ fn shift_temporal(
     // (#853).
     let drop_date_part = matches!(v, PropertyValue::LocalTime(_) | PropertyValue::Time { .. });
     let exact = if drop_sub_day {
-        days as i128 * 86_400 * 1_000_000_000
+        // Only the *sub-day remainder* is dropped, not the whole seconds
+        // field. A duration's seconds can hold entire days -- `P25Y10M58D` +
+        // `T67H56M27S` is 67 hours, nearly three days of them -- and those days
+        // are calendar days a date can move by. Discarding the field wholesale
+        // lost them: `date('1984-10-11') + duration({...})` answered 1997-10-10
+        // where openCypher says 1997-10-11, and the subtraction missed by a day
+        // the other way (#1001).
+        //
+        // The whole days come out by truncation toward zero, which is what
+        // keeps #817 intact: there, `days: -14` with a `+15h49m` remainder
+        // yields zero whole days, so `days` stays -14 rather than becoming the
+        // -13 that combining and then truncating produced.
+        let whole_days_in_seconds =
+            (seconds as i128 * 1_000_000_000 + nanos as i128) / (86_400 * 1_000_000_000);
+        (days as i128 + whole_days_in_seconds) * 86_400 * 1_000_000_000
     } else if drop_date_part {
         seconds as i128 * 1_000_000_000 + nanos as i128
     } else {
