@@ -2141,6 +2141,62 @@ enum StringPositionOp {
 /// question separately, and most answered it with a type error.
 const NULL_TOLERANT_FUNCTIONS: &[&str] = &["coalesce", "exists"];
 
+/// Every variable name an expression reads.
+///
+/// Names only -- `a.num` contributes `a` -- because that is what a record is
+/// keyed on. Used to decide which pre-projection bindings a `WITH ... ORDER BY`
+/// has to carry (#970).
+fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
+    match expr {
+        Expression::Variable(v) | Expression::PathVariable(v) => {
+            out.insert(v.clone());
+        }
+        Expression::Property { variable, .. } => {
+            out.insert(variable.clone());
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_expression_names(left, out);
+            collect_expression_names(right, out);
+        }
+        Expression::Unary { expr, .. } => collect_expression_names(expr, out),
+        Expression::Function { args, .. } => {
+            for a in args {
+                collect_expression_names(a, out);
+            }
+        }
+        Expression::ListExpr(items) => {
+            for e in items {
+                collect_expression_names(e, out);
+            }
+        }
+        Expression::MapExpr(entries) => {
+            for (_, e) in entries {
+                collect_expression_names(e, out);
+            }
+        }
+        Expression::Index { expr, index } => {
+            collect_expression_names(expr, out);
+            collect_expression_names(index, out);
+        }
+        Expression::ListSlice { expr, start, end } => {
+            collect_expression_names(expr, out);
+            for e in start.iter().chain(end.iter()) {
+                collect_expression_names(e, out);
+            }
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            for e in operand.iter().chain(else_result.iter()) {
+                collect_expression_names(e, out);
+            }
+            for (w, t) in when_clauses {
+                collect_expression_names(w, out);
+                collect_expression_names(t, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Every function `eval_function` dispatches on.
 ///
 /// Exists so an unknown name can be rejected at **compile time** rather than
@@ -7868,6 +7924,7 @@ impl AggregateOperator {
             executed: false,
         }
     }
+
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
@@ -14509,6 +14566,59 @@ impl WithBarrierOperator {
         }
     }
 
+    /// Bindings a sort expression names that the projection did not carry.
+    ///
+    /// `WITH a, a.num2 % 3 AS mod ORDER BY sum` sorts by `sum`, projected by
+    /// an *earlier* WITH and not by this one. Cypher allows that: ORDER BY
+    /// after a WITH sees the projected aliases **and** the scope in front of
+    /// it. Sorting the projected rows alone evaluated `sum` to null on every
+    /// row, so the order was whatever the input order happened to be and the
+    /// LIMIT then kept the wrong three (#970).
+    ///
+    /// Copied under a private prefix rather than bound plainly, so a carried
+    /// name cannot collide with something the projection produced or leak into
+    /// the rows the next clause sees.
+    const CARRY: &'static str = "__orderby_carry_";
+
+    fn carry_sort_scope(&self, from: &Record, into: &mut Record) {
+        if self.sort_items.is_empty() {
+            return;
+        }
+        for (expr, _) in &self.sort_items {
+            let mut names = HashSet::new();
+            collect_expression_names(expr, &mut names);
+            for name in names {
+                if into.get(&name).is_none() {
+                    if let Some(v) = from.get(&name) {
+                        into.bind(format!("{}{}", Self::CARRY, name), v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+
+    /// Evaluate a sort expression against a projected row, falling back to the
+    /// pre-projection bindings `carry_sort_scope` copied in.
+    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> Value {
+        match Self::evaluate_expression(expr, record, store) {
+            Ok(Value::Null) | Err(_) => {}
+            Ok(v) => return v,
+        }
+        let mut names = HashSet::new();
+        collect_expression_names(expr, &mut names);
+        if names.is_empty() {
+            return Value::Null;
+        }
+        let mut widened = record.clone();
+        for name in names {
+            if let Some(v) = record.get(&format!("{}{}", Self::CARRY, name)) {
+                widened.bind(name, v.clone());
+            }
+        }
+        Self::evaluate_expression(expr, &widened, store).unwrap_or(Value::Null)
+    }
+
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
@@ -14623,6 +14733,7 @@ impl WithBarrierOperator {
                     let value = Self::evaluate_expression(expr, &intermediate, store)?;
                     new_record.bind(alias.clone(), value);
                 }
+                self.carry_sort_scope(&intermediate, &mut new_record);
                 projected.push(new_record);
             }
             projected
@@ -14652,6 +14763,7 @@ impl WithBarrierOperator {
                         let value = Self::evaluate_expression(expr, &record, store)?;
                         new_record.bind(alias.clone(), value);
                     }
+                    self.carry_sort_scope(&record, &mut new_record);
                     records.push(new_record);
                     if let Some(c) = cap {
                         if records.len() >= c {
@@ -14689,8 +14801,10 @@ impl WithBarrierOperator {
             let sort_items = &self.sort_items;
             output_records.sort_by(|a, b| {
                 for (expr, ascending) in sort_items {
-                    let val_a = Self::evaluate_expression(expr, a, store).unwrap_or(Value::Null);
-                    let val_b = Self::evaluate_expression(expr, b, store).unwrap_or(Value::Null);
+                    // The projected name wins; the carried pre-projection
+                    // binding answers for anything the projection dropped.
+                    let val_a = Self::eval_sort_key(expr, a, store);
+                    let val_b = Self::eval_sort_key(expr, b, store);
                     // Cypher's orderability, not the property index's — see
                     // `graph::property::cypher_order`. A WITH ... ORDER BY
                     // sorts here rather than in `SortOperator`, so wiring only
@@ -14704,6 +14818,15 @@ impl WithBarrierOperator {
                 }
                 std::cmp::Ordering::Equal
             });
+        }
+
+        // The carried pre-projection bindings are the sort's business only.
+        // Left in place they would appear as columns and, worse, re-enter
+        // scope for the next clause under a name it never projected.
+        if !self.sort_items.is_empty() {
+            for record in output_records.iter_mut() {
+                record.retain_bindings(|k| !k.starts_with(Self::CARRY));
+            }
         }
 
         // Apply SKIP

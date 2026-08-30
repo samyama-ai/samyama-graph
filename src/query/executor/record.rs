@@ -330,6 +330,15 @@ impl Record {
     }
 
     /// All bindings, in binding order.
+    /// Drop every binding whose name the predicate rejects.
+    ///
+    /// Used to strip the private bindings a `WITH ... ORDER BY` carries for
+    /// the sort: they must not become columns, and must not re-enter scope for
+    /// the next clause under a name it never projected (#970).
+    pub fn retain_bindings(&mut self, keep: impl Fn(&str) -> bool) {
+        self.bindings.retain(|(k, _)| keep(k));
+    }
+
     pub fn bindings(&self) -> &[(Arc<str>, Value)] {
         &self.bindings
     }
