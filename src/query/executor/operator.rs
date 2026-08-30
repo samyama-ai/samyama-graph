@@ -6903,17 +6903,25 @@ impl VarLengthExpandOperator {
                          bound it with an upper hop limit or a more selective start"
                     )));
                 }
-                // `parent` reconstructs the path for a bound path or
-                // relationship variable. Built from the current stack, so it
-                // describes *this* trail rather than a shortest route.
-                let mut parent: std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)> =
-                    std::collections::HashMap::new();
-                let mut prev = source_id;
-                for (n, e) in &path {
-                    parent.insert(*n, (prev, *e));
-                    prev = *n;
-                }
-                self.buffer(record, nb, &parent, source_id, store);
+                // The trail, handed over directly.
+                //
+                // It used to be flattened into a `parent` map keyed by node and
+                // reconstructed from that -- which cannot represent a trail
+                // that **revisits a node**. Every later visit overwrote the
+                // earlier one, so reconstruction walked back along the wrong
+                // edges and stopped early: an undirected `*3..3` came back as
+                // a two-hop path (#976). Undirected walks over a small graph
+                // revisit constantly, which is why this shows up there and not
+                // on a directed chain.
+                //
+                // `path` is already the walk, in order. There was never a
+                // reason to go through a lossy intermediate.
+                let mut trail_nodes = Vec::with_capacity(path.len() + 1);
+                trail_nodes.push(source_id);
+                trail_nodes.extend(path.iter().map(|(n, _)| *n));
+                let trail_edges: Vec<crate::graph::EdgeId> =
+                    path.iter().map(|(_, e)| *e).collect();
+                self.buffer_trail(record, nb, trail_nodes, trail_edges, store);
             }
 
             if depth < self.max_hops {
@@ -7086,6 +7094,22 @@ impl VarLengthExpandOperator {
     }
 
     /// Build and buffer an output record binding the target (and optional path).
+    /// `buffer`, given the walk directly instead of a parent map.
+    ///
+    /// The BFS has only a parent map, which is fine there: it visits each node
+    /// once. A trail may revisit one, and a map keyed by node cannot hold that
+    /// (#976).
+    fn buffer_trail(
+        &mut self,
+        base: &Record,
+        target: NodeId,
+        nodes: Vec<NodeId>,
+        edges: Vec<crate::graph::EdgeId>,
+        store: &GraphStore,
+    ) {
+        self.buffer_walk(base, target, nodes, edges, store)
+    }
+
     fn buffer(
         &mut self,
         base: &Record,
@@ -7101,17 +7125,34 @@ impl VarLengthExpandOperator {
         // clause cannot retake it (#710). Reconstructed from `parent` rather
         // than from the path variable, because isolation applies whether or not
         // the pattern names the path.
+        let (nodes, edges) = reconstruct_path(parent, source, target);
+        self.buffer_walk(base, target, nodes, edges, store)
+    }
+
+    /// Shared by both walks: bind the target, record isolation, and materialise
+    /// a path or relationship list from the walk it was given.
+    fn buffer_walk(
+        &mut self,
+        base: &Record,
+        target: NodeId,
+        nodes: Vec<NodeId>,
+        edges: Vec<crate::graph::EdgeId>,
+        store: &GraphStore,
+    ) {
+        let mut rec = base.clone();
+        rec.bind(self.target_var.clone(), Value::NodeRef(target));
+
         if self.track_edges {
             if self.starts_clause {
                 rec.clear_used_edges();
             }
-            let (_, walked) = reconstruct_path(parent, source, target);
+            let walked = edges.clone();
             for e in walked {
                 rec.mark_edge_used(e);
             }
         }
         if self.path_variable.is_some() || self.rel_variable.is_some() {
-            let (mut nodes, mut edges) = reconstruct_path(parent, source, target);
+            let (mut nodes, mut edges) = (nodes, edges);
             // `reconstruct_path` returns the walk in the order it was walked,
             // which is the pattern's order only when the two agree. When the
             // planner anchored the far end and walked back, they do not.
