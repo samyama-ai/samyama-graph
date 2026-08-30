@@ -2485,6 +2485,23 @@ impl QueryPlanner {
                 delete_clause.expressions.clone(),
                 delete_clause.detach,
             ));
+            // ...and the delete is fully applied before anything reads the
+            // graph again. `MATCH (a:A) DELETE a MERGE (a2:A)` matched a node
+            // the DELETE had already removed: rows were pulled one at a time,
+            // so the first row's MERGE ran when only the first node was gone
+            // and matched the second, which was about to be deleted. The
+            // scenario is named for exactly that -- "merges should not be able
+            // to match on deleted nodes" (#994).
+            //
+            // The barrier below materialises the delete's *input*; this one
+            // drains its *output*, which is what makes every deletion happen
+            // before the next clause begins. Both are needed and they solve
+            // opposite halves: #899 stopped a write from un-producing rows the
+            // read had matched, and this stops a later read from seeing rows
+            // the write was about to remove.
+            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+                operator, 0, None,
+            ));
             true
         } else {
             is_write
@@ -2791,7 +2808,20 @@ impl QueryPlanner {
 
             // Label count cache: O(1) shortcut for MATCH (n:Label) RETURN count(n)
             // Detect: single count aggregate, no group-by, no WHERE, no edges, single MATCH
+            // **No shortcut answers a query that writes.** Each of the three
+            // below replaces the whole plan with a metadata read, discarding
+            // the operator built above -- which is where DELETE, SET, REMOVE,
+            // MERGE and FOREACH live. `MATCH (a:A) DELETE a RETURN count(*)`
+            // therefore returned 2 and **deleted nothing**: a fast, confident
+            // number, and the caller's data still there (#993).
+            //
+            // That is the same rule the inline-property guard below already
+            // states -- the shortcut may only fire when the query says nothing
+            // the metadata cannot express -- and a write is the largest such
+            // thing there is. `is_write` is already computed above and covers
+            // every write clause, so it is the whole condition.
             let use_label_count = has_aggregation
+                && !is_write
                 && aggregates.len() == 1
                 && group_by.is_empty()
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -2828,6 +2858,7 @@ impl QueryPlanner {
             // Edge type count cache: O(1) shortcut for MATCH ()-[r]->() RETURN type(r), count(r)
             // Detect: one count aggregate, one group-by with type() function, single edge path, no WHERE
             let use_edge_type_count = has_aggregation
+                && !is_write
                 && aggregates.len() == 1
                 && group_by.len() == 1
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -2876,6 +2907,7 @@ impl QueryPlanner {
                 None
             };
             let use_edge_count = has_aggregation
+                && !is_write
                 && aggregates.len() == 1
                 && group_by.is_empty()
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -6169,6 +6201,12 @@ impl QueryPlanner {
                         operator, 0, None,
                     ));
                     operator = Box::new(DeleteOperator::new(operator, dc.expressions.clone(), dc.detach));
+                    // The same drain in the clause-pipeline shape (#994). A
+                    // rule applied to one AST shape and not its twin silently
+                    // no-ops for every query written the other way.
+                    operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+                        operator, 0, None,
+                    ));
                 }
                 Clause::Where(w) => {
                     operator = Box::new(FilterOperator::new(operator, w.predicate.clone()));
