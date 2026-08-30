@@ -2141,6 +2141,67 @@ enum StringPositionOp {
 /// question separately, and most answered it with a type error.
 const NULL_TOLERANT_FUNCTIONS: &[&str] = &["coalesce", "exists"];
 
+/// Every function `eval_function` dispatches on.
+///
+/// Exists so an unknown name can be rejected at **compile time** rather than
+/// producing an empty result at run time. `RETURN foo(a)` used to succeed with
+/// zero rows -- a misspelled `lenght(x)` or `toLowerCase(s)` returned an empty
+/// result set from a query that reported success, and the reader concluded
+/// something about their data (#947).
+///
+/// Worse, the run-time error only fires on a row that reaches the expression,
+/// so over an empty graph the call never ran and the query "succeeded". A
+/// compile-time check does not depend on the data.
+///
+/// **One list, cross-checked.** `tests/function_reachability.rs` extracts the
+/// arms straight from this file's dispatcher and asserts every one can be
+/// named in Cypher, so this list and the dispatcher cannot drift into
+/// rejecting a function that works -- which is much worse than accepting one
+/// that does not.
+///
+/// `true` and `false` are here because they are dispatcher *arms*, not because
+/// `true()` is a function anybody should write. Leaving them out made that
+/// reachability test fail, and narrowing an existing guard to keep a new check
+/// green is the wrong way round.
+pub const KNOWN_FUNCTIONS: &[&str] = &[
+    "abs", "acos", "asin", "atan", "atan2", "bfs", "breadthfirstsearch", "cdlp", "ceil",
+    "coalesce", "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
+    "date.truncate", "datetime", "datetime.truncate", "degrees", "dijkstra", "duration",
+    "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp", "false", "floor",
+    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
+    "isnan", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
+    "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
+    "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
+    "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "properties", "radians",
+    "rand", "randomuuid", "range", "relationships", "rels", "replace", "reverse", "right",
+    "round", "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh",
+    "size", "split", "sqrt", "startnode", "stdev", "stdevp", "substring", "subsumes", "tail",
+    "tan", "tanh", "time", "time.truncate", "timestamp", "toboolean", "tobooleanornull",
+    "tofloat", "tofloatornull", "toint", "tointeger", "tointegerornull", "tolower",
+    "tolowercase", "tostring", "tostringornull", "toupper", "touppercase", "trianglecount",
+    "trim", "true", "type", "valuetype", "wcc", "weightedpath",
+];
+
+/// Is `name` a function this engine implements?
+///
+/// Case-insensitive, because Cypher's function names are. Aggregates are not
+/// here -- they are dispatched by the planner into `AggregateOperator`, and
+/// `validate.rs` checks them against `AGGREGATE_NAMES`.
+///
+/// **A namespaced name is always allowed.** `date.realtime`, `datetime.statement`
+/// and friends are tolerated at run time -- several of them exist only to
+/// propagate null -- and rejecting them at compile time turned 345 passing
+/// scenarios into errors on the first attempt at this check. The name that
+/// actually costs a user a debugging session is the un-namespaced typo
+/// (`lenght`, `toLowerCase`), and that is what this catches. Narrower on
+/// purpose: over-rejecting a valid query is the worse failure.
+pub fn is_known_function(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains('.') || KNOWN_FUNCTIONS.contains(&lower.as_str())
+}
+
+
 /// Shared function evaluation for scalar functions (not aggregates)
 pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
     let lowered = name.to_lowercase();

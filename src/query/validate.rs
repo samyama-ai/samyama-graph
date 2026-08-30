@@ -60,6 +60,8 @@ pub enum ValidationError {
     UnboundVariable(String),
     /// A `WITH` item that is not a bare variable and has no alias.
     UnaliasedWithItem,
+    /// A call to a function this engine does not implement.
+    UnknownFunction(String),
     /// A projection mixes an aggregate with an expression that is not a
     /// grouping key. See [`validate_aggregation_is_unambiguous`].
     ///
@@ -93,6 +95,13 @@ impl std::fmt::Display for ValidationError {
             Self::FunctionArgumentKind(func, wanted, got) => write!(
                 f,
                 "`{func}()` takes {wanted}, and was given {got}"
+            ),
+            Self::UnknownFunction(name) => write!(
+                f,
+                "UnknownFunction: `{name}` is not a function this engine implements. \
+                 Checked at compile time on purpose: as a run-time error it only \
+                 fired on a row that reached the call, so the same query over an \
+                 empty graph returned no rows and reported success"
             ),
             Self::AmbiguousGroupingExpression(what) => write!(
                 f,
@@ -1931,6 +1940,52 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A function call must name a function this engine implements (#947).
+///
+/// ```text
+/// MATCH (a) RETURN foo(a)   -> UnknownFunction
+/// ```
+///
+/// It used to **succeed with zero rows**. A misspelled `lenght(x)` or
+/// `toLowerCase(s)` produced an empty result set from a query that reported
+/// success, and the reader concluded something about their data. Empty is also
+/// the answer that survives review: a wrong number gets questioned, an empty
+/// result looks like a legitimately empty match.
+///
+/// At compile time rather than at run time, because the run-time error only
+/// fires on a row that reaches the expression — over an empty graph the call
+/// never ran and the query "succeeded". A compile-time check does not depend
+/// on the data.
+///
+/// Aggregates are dispatched by the planner rather than by `eval_function`, so
+/// they are checked against `AGGREGATE_NAMES` instead. `all`/`any`/`none`/
+/// `single`, `reduce` and the comprehensions are their own AST nodes and never
+/// reach here at all.
+fn validate_function_names(query: &Query) -> Result<(), ValidationError> {
+    fn check(e: &Expression) -> Result<(), ValidationError> {
+        if let Expression::Function { name, .. } = e {
+            let lower = name.to_lowercase();
+            let known = crate::query::executor::operator::is_known_function(&lower)
+                || AGGREGATE_NAMES.contains(&lower.as_str())
+                // The parser lowers postfix `:A:B` and a few other forms into
+                // synthetic calls that are not user-writable names.
+                || lower.starts_with("__");
+            if !known {
+                return Err(ValidationError::UnknownFunction(name.clone()));
+            }
+        }
+        for child in child_expressions(e) {
+            check(child)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        check(e)?;
+    }
+    Ok(())
+}
+
 /// A projection that aggregates may only combine the aggregate with a
 /// **grouping key** (#930).
 ///
@@ -2230,6 +2285,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
 
     validate_aggregate_placement(query)?;
     validate_aggregation_is_unambiguous(query)?;
+    validate_function_names(query)?;
 
     validate_function_argument_kinds(query)?;
 
