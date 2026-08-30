@@ -524,6 +524,55 @@ impl Cursor {
     }
 }
 
+/// Split one Gherkin table row into cells, undoing the table's own escaping.
+///
+/// A cell is not raw text. Gherkin escapes `|` as `\|` inside a cell -- it has
+/// to, since `|` is the delimiter -- and therefore escapes the backslash
+/// itself as `\\`. Both have to be undone before the cell is read as Cypher.
+///
+/// Splitting on a bare `|` and handing the cell straight to `parse_quoted`
+/// skipped that step, with two consequences. A cell containing `\|` was torn
+/// into two cells. And a `\\`, which the table writes for one backslash,
+/// survived as two -- so `Literals6[5]`, whose expected value is
+/// `a\bcn5t'"\//\"'`, was compared against a string with every backslash
+/// doubled and **no engine could pass it**. Neo4j fails it too, which is how
+/// this was found: when every engine loses the same scenario, suspect the
+/// ruler.
+///
+/// Only `\|` and `\\` are handled here, deliberately. `\n` and friends are
+/// Cypher escapes inside the quoted literal and belong to `parse_quoted`;
+/// interpreting them at this layer as well would decode them twice.
+fn split_gherkin_row(line: &str) -> Vec<String> {
+    let inner = line.trim().trim_matches('|');
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some('|') => {
+                    cur.push('|');
+                    chars.next();
+                }
+                Some('\\') => {
+                    cur.push('\\');
+                    chars.next();
+                }
+                // Left intact for the Cypher layer.
+                _ => cur.push('\\'),
+            },
+            '|' => {
+                cells.push(cur.trim().to_string());
+                cur = String::new();
+            }
+            other => cur.push(other),
+        }
+    }
+    cells.push(cur.trim().to_string());
+    cells
+}
+
+
 fn parse_expected(text: &str) -> Tck {
     let t = text.trim();
     if t.is_empty() {
@@ -974,11 +1023,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 
         // Table row
         if line.starts_with('|') {
-            let cells: Vec<String> = line
-                .trim_matches('|')
-                .split('|')
-                .map(|c| c.trim().to_string())
-                .collect();
+            let cells: Vec<String> = split_gherkin_row(line);
             if pending == Pending::Examples {
                 if let Some((header, rows)) = s.examples.last_mut() {
                     if header.is_empty() {
