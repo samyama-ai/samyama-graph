@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use crate::query::ast::{Expression, OrderByClause, Query, ReturnItem};
+use crate::query::ast::{BinaryOp, Expression, OrderByClause, Query, ReturnItem, UnaryOp};
 
 /// Why a query was rejected. Carries the offending name so the message can
 /// say which one rather than that something, somewhere, was wrong.
@@ -62,6 +62,10 @@ pub enum ValidationError {
     UnaliasedWithItem,
     /// A call to a function this engine does not implement.
     UnknownFunction(String),
+    /// A MERGE pattern carrying a literal null property.
+    MergeNullProperty(String),
+    /// A bare node pattern used as a predicate.
+    InvalidPredicatePattern,
     /// `RETURN *` where nothing is in scope.
     NoVariablesInScope,
     /// The same relationship variable twice in one pattern.
@@ -106,6 +110,20 @@ impl std::fmt::Display for ValidationError {
                  Checked at compile time on purpose: as a run-time error it only \
                  fired on a row that reached the call, so the same query over an \
                  empty graph returned no rows and reported success"
+            ),
+            Self::MergeNullProperty(key) => write!(
+                f,
+                "MergeReadOwnWrites: MERGE cannot use a null property. `{key}: null` \
+                 matches nothing -- Cypher stores no null -- so the MERGE would \
+                 create a node without that property and then fail to find it on \
+                 the next run, creating another"
+            ),
+            Self::InvalidPredicatePattern => write!(
+                f,
+                "InvalidArgumentType: a bare node pattern is not a predicate. \
+                 `WHERE (n)` asks whether a node exists that is already bound, \
+                 which is always true; the pattern shorthand needs a relationship, \
+                 as in `WHERE (n)-->()`"
             ),
             Self::NoVariablesInScope => write!(
                 f,
@@ -1958,6 +1976,140 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A MERGE pattern may not carry a literal null property (#973).
+///
+/// ```text
+/// MERGE ({num: null})   -> SemanticError: MergeReadOwnWrites
+/// ```
+///
+/// Cypher stores no null, so `{num: null}` matches nothing and the node MERGE
+/// creates does not carry the property either. The next run therefore fails to
+/// find it and creates another, and another -- a MERGE that cannot read its
+/// own writes. We accepted it and returned no rows.
+fn validate_merge_null_properties(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::{Clause, Pattern};
+
+    fn check(pattern: &Pattern) -> Result<(), ValidationError> {
+        for path in &pattern.paths {
+            let nodes = std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
+            for n in nodes {
+                if let Some(props) = &n.properties {
+                    for (k, v) in props {
+                        if matches!(v, crate::graph::PropertyValue::Null) {
+                            return Err(ValidationError::MergeNullProperty(k.clone()));
+                        }
+                    }
+                }
+            }
+            for seg in &path.segments {
+                if let Some(props) = &seg.edge.properties {
+                    for (k, v) in props {
+                        if matches!(v, crate::graph::PropertyValue::Null) {
+                            return Err(ValidationError::MergeNullProperty(k.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(m) = &query.merge_clause {
+        check(&m.pattern)?;
+    }
+    for c in &query.clauses {
+        if let Clause::Merge(m) = c {
+            check(&m.pattern)?;
+        }
+    }
+    Ok(())
+}
+
+/// A bare node pattern is not a predicate (#973).
+///
+/// ```text
+/// MATCH (n) WHERE (n) RETURN n   -> SyntaxError: InvalidArgumentType
+/// ```
+///
+/// The pattern shorthand in a WHERE asks whether a *relationship* pattern has
+/// a match. `(n)` on its own asks whether a node that is already bound exists,
+/// which is always true and cannot be what anyone meant. We accepted it and
+/// answered no rows -- the opposite of "always true", which is its own tell
+/// that nothing was evaluating it sensibly.
+fn validate_predicate_patterns(query: &Query) -> Result<(), ValidationError> {
+    // Which names bind an entity, so `WHERE n` can be told apart from a
+    // `WHERE flag` over a boolean.
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
+    for mc in &query.match_clauses {
+        let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
+    }
+    for c in &query.clauses {
+        if let crate::query::ast::Clause::Match(mc) = c {
+            let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
+        }
+    }
+
+    let check = |e: &Expression| -> Result<(), ValidationError> {
+        // **Only where a boolean is expected**: the predicate itself and the
+        // operands of the boolean connectives. Applying it to every nested
+        // variable reference rejects `WHERE n = m`, `WHERE n:Label` and
+        // `WHERE a.x > 1` -- 23 scenarios on the first attempt, because the
+        // left side of a comparison is a bare variable too.
+        fn walk(
+            e: &Expression,
+            kinds: &std::collections::HashMap<String, EntityKind>,
+        ) -> Result<(), ValidationError> {
+            match e {
+                // `WHERE (n)-->()` is the pattern shorthand and is fine; a
+                // pattern with no relationship is not a question.
+                Expression::ExistsSubquery { pattern, bare_pattern: true, where_clause, .. }
+                    if pattern.paths.iter().all(|p| p.segments.is_empty())
+                        && where_clause.is_none() =>
+                {
+                    Err(ValidationError::InvalidPredicatePattern)
+                }
+                // `WHERE (n)` parses as a parenthesised variable, so the
+                // pattern arm above never sees it. An entity is not a
+                // predicate; a boolean variable is.
+                Expression::Variable(v) if kinds.contains_key(v) => {
+                    Err(ValidationError::InvalidPredicatePattern)
+                }
+                // Recurse only through the connectives, whose operands are
+                // themselves predicates.
+                Expression::Binary { left, op, right }
+                    if matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor) =>
+                {
+                    walk(left, kinds)?;
+                    walk(right, kinds)
+                }
+                Expression::Unary { op: UnaryOp::Not, expr } => walk(expr, kinds),
+                _ => Ok(()),
+            }
+        }
+        walk(e, &kinds)
+    };
+
+    use crate::query::ast::Clause;
+    if let Some(w) = &query.where_clause {
+        check(&w.predicate)?;
+    }
+    if let Some(w) = &query.post_with_where_clause {
+        check(&w.predicate)?;
+    }
+    for (_, _, _, post) in &query.extra_with_stages {
+        if let Some(w) = post {
+            check(&w.predicate)?;
+        }
+    }
+    for c in &query.clauses {
+        if let Clause::Where(w) = c {
+            check(&w.predicate)?;
+        }
+    }
+    Ok(())
+}
+
 /// `RETURN *` must have something to return (#958).
 ///
 /// ```text
@@ -2379,6 +2531,8 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_aggregation_is_unambiguous(query)?;
     validate_function_names(query)?;
     validate_star_has_scope(query)?;
+    validate_merge_null_properties(query)?;
+    validate_predicate_patterns(query)?;
     validate_relationship_uniqueness(query)?;
 
     validate_function_argument_kinds(query)?;
