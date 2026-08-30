@@ -3330,7 +3330,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         // is the neighbouring behaviour (#809).
                         None => match map.get("datetime").or_else(|| map.get("time")) {
                             Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
-                                (*offset_seconds, zone.clone())
+                                // The *zone* is inherited; its **offset is not**.
+                                // A named zone has no single offset, and the
+                                // selection has just moved the date --
+                                // `{date: <a March date>, time: <an October
+                                // datetime in Europe/Stockholm>}` is a summer
+                                // date, so the answer is +02:00 and not the
+                                // source's wintertime +01:00. Copying the
+                                // offset carried a value derived from a date
+                                // that is no longer the date (#1006).
+                                match zone {
+                                    Some(name) => {
+                                        let sp = tmp::parse_timezone_spec(name)?;
+                                        (tmp::resolve_offset(&sp, d as i64, t)?, zone.clone())
+                                    }
+                                    // A bare offset has no date to depend on.
+                                    None => (*offset_seconds, None),
+                                }
                             }
                             Some(PropertyValue::Time { offset_seconds, .. }) => (*offset_seconds, None),
                             _ => (0, None),
@@ -3346,14 +3362,26 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     // zoned source the same reading is an instant, and treating
                     // it as local time shifts every value by the difference
                     // between the two offsets (#809).
-                    let source_offset = map
-                        .get("datetime")
-                        .or_else(|| map.get("time"))
-                        .and_then(|v| match v {
-                            PropertyValue::ZonedDateTime { offset_seconds, .. }
-                            | PropertyValue::Time { offset_seconds, .. } => Some(*offset_seconds),
-                            _ => None,
-                        });
+                    //
+                    // The source's offset is **re-resolved at the selected
+                    // date** for the same reason the inherited one above is: a
+                    // named zone's offset is a function of the date, and the
+                    // selection has moved it. Reading the stored +01:00 of an
+                    // October value while placing it on a March date undid the
+                    // wrong hour and landed the instant one hour out (#1006).
+                    let source_offset = match map.get("datetime").or_else(|| map.get("time")) {
+                        Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
+                            match zone {
+                                Some(name) => {
+                                    let sp = tmp::parse_timezone_spec(name)?;
+                                    Some(tmp::resolve_offset(&sp, d as i64, t)?)
+                                }
+                                None => Some(*offset_seconds),
+                            }
+                        }
+                        Some(PropertyValue::Time { offset_seconds, .. }) => Some(*offset_seconds),
+                        _ => None,
+                    };
                     // The components describe local time; store the instant.
                     let utc_secs = match source_offset {
                         // A re-zoning: the reading is already the source's wall
