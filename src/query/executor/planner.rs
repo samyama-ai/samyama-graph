@@ -4246,6 +4246,101 @@ impl QueryPlanner {
                     Self::collect_expression_variables(&wc.predicate, vars);
                 }
             }
+            // Everything else that *contains* expressions.
+            //
+            // These used to fall into `_ => {}`, so a predicate whose only
+            // variables sat inside a comprehension looked **constant** and was
+            // pushed down to the initial scan, where those variables are not
+            // bound yet:
+            //
+            //   MATCH (n)-->(b) WHERE n.name IN [x IN labels(b) | toLower(x)]
+            //   -> VariableNotFound("b")
+            //
+            // Same failure the `ExistsSubquery` arm above was added for, in
+            // every other compound expression (#948). The reasoning there
+            // applies unchanged: over-approximating only ever defers a filter
+            // to a later, still-correct point, while under-approximating
+            // evaluates it too early.
+            Expression::ListExpr(items) => {
+                for e in items {
+                    Self::collect_expression_variables(e, vars);
+                }
+            }
+            Expression::MapExpr(entries) => {
+                for (_, e) in entries {
+                    Self::collect_expression_variables(e, vars);
+                }
+            }
+            Expression::Index { expr, index } => {
+                Self::collect_expression_variables(expr, vars);
+                Self::collect_expression_variables(index, vars);
+            }
+            Expression::ListSlice { expr, start, end } => {
+                Self::collect_expression_variables(expr, vars);
+                for e in start.iter().chain(end.iter()) {
+                    Self::collect_expression_variables(e, vars);
+                }
+            }
+            Expression::Case { operand, when_clauses, else_result } => {
+                for e in operand.iter() {
+                    Self::collect_expression_variables(e, vars);
+                }
+                for (w, t) in when_clauses {
+                    Self::collect_expression_variables(w, vars);
+                    Self::collect_expression_variables(t, vars);
+                }
+                for e in else_result.iter() {
+                    Self::collect_expression_variables(e, vars);
+                }
+            }
+            // The binder cases. Each introduces a variable of its own, which
+            // is *not* an outer dependency -- deferring a predicate on a name
+            // nothing outside ever binds would defer it past every point that
+            // could apply it.
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+                let mut inner = HashSet::new();
+                Self::collect_expression_variables(list_expr, &mut inner);
+                for e in filter.iter() {
+                    Self::collect_expression_variables(e, &mut inner);
+                }
+                Self::collect_expression_variables(map_expr, &mut inner);
+                inner.remove(variable);
+                vars.extend(inner);
+            }
+            Expression::PredicateFunction { variable, list_expr, predicate, .. } => {
+                let mut inner = HashSet::new();
+                Self::collect_expression_variables(list_expr, &mut inner);
+                Self::collect_expression_variables(predicate, &mut inner);
+                inner.remove(variable);
+                vars.extend(inner);
+            }
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+                let mut inner = HashSet::new();
+                Self::collect_expression_variables(init, &mut inner);
+                Self::collect_expression_variables(list_expr, &mut inner);
+                Self::collect_expression_variables(expression, &mut inner);
+                inner.remove(accumulator);
+                inner.remove(variable);
+                vars.extend(inner);
+            }
+            Expression::PatternComprehension { pattern, filter, projection } => {
+                // The pattern's own variables are over-approximated as
+                // dependencies, exactly as in the `ExistsSubquery` arm.
+                for path in &pattern.paths {
+                    if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+                    for seg in &path.segments {
+                        if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                        if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+                    }
+                }
+                for e in filter.iter() {
+                    Self::collect_expression_variables(e, vars);
+                }
+                Self::collect_expression_variables(projection, vars);
+            }
+            Expression::PathVariable(v) => {
+                vars.insert(v.clone());
+            }
             _ => {}
         }
     }
