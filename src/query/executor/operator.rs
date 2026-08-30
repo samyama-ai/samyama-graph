@@ -7634,12 +7634,30 @@ impl AggregatorState {
             // directions: while null sorted smallest it won every min(), and once ordering
             // was corrected so null sorts greatest (#369) it would have won every max().
             // Neither is a comparator problem; the accumulator simply must not see nulls.
+            // Cypher's orderability, not `PropertyValue`'s derived `Ord`.
+            //
+            // That `Ord` backs the B-tree property index and orders Boolean,
+            // Number, String, ..., Array, Map, Null; Cypher orders
+            // Map < List < String < Boolean < Number < null. Over mixed input
+            // the two disagree about which value is smallest, so
+            // `min([1, 'a', [1,2], 0.2, 'b'])` answered `0.2` where openCypher
+            // answers `[1, 2]`, and `max` answered the list where the answer
+            // is `1` (#960).
+            //
+            // `graph::property::cypher_order` is the comparator ORDER BY uses.
+            // Both orders exist on purpose and neither can be dropped -- see
+            // its doc comment -- so the fix is for each caller to ask for the
+            // one it means.
             AggregatorState::Min(curr) => {
                 if let Some(prop) = value.as_property() {
                     if matches!(prop, PropertyValue::Null) {
                         return;
                     }
-                    if curr.is_none() || prop < curr.as_ref().unwrap() {
+                    let smaller = curr.as_ref().is_none_or(|c| {
+                        crate::graph::property::cypher_order(prop, c)
+                            == std::cmp::Ordering::Less
+                    });
+                    if smaller {
                         *curr = Some(prop.clone());
                     }
                 }
@@ -7649,7 +7667,11 @@ impl AggregatorState {
                     if matches!(prop, PropertyValue::Null) {
                         return;
                     }
-                    if curr.is_none() || prop > curr.as_ref().unwrap() {
+                    let larger = curr.as_ref().is_none_or(|c| {
+                        crate::graph::property::cypher_order(prop, c)
+                            == std::cmp::Ordering::Greater
+                    });
+                    if larger {
                         *curr = Some(prop.clone());
                     }
                 }
@@ -7717,16 +7739,26 @@ impl AggregatorState {
                 *sum += bs;
                 *count += bc;
             }
+            // The same comparator as the accumulator above, or a parallel
+            // aggregation would answer differently from a sequential one.
             (AggregatorState::Min(a), AggregatorState::Min(b)) => {
                 if let Some(b) = b {
-                    if a.is_none() || &b < a.as_ref().unwrap() {
+                    let smaller = a.as_ref().is_none_or(|c| {
+                        crate::graph::property::cypher_order(&b, c)
+                            == std::cmp::Ordering::Less
+                    });
+                    if smaller {
                         *a = Some(b);
                     }
                 }
             }
             (AggregatorState::Max(a), AggregatorState::Max(b)) => {
                 if let Some(b) = b {
-                    if a.is_none() || &b > a.as_ref().unwrap() {
+                    let larger = a.as_ref().is_none_or(|c| {
+                        crate::graph::property::cypher_order(&b, c)
+                            == std::cmp::Ordering::Greater
+                    });
+                    if larger {
                         *a = Some(b);
                     }
                 }
