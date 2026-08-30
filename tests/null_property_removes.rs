@@ -109,9 +109,17 @@ fn a_relationship_property_behaves_the_same() {
 }
 
 #[test]
-fn merge_does_not_store_one_either() {
+fn merge_refuses_a_literal_null_property_outright() {
+    // This used to assert that MERGE, like CREATE, simply did not store the
+    // null. openCypher is stricter: `MERGE ({num: null})` is a SemanticError,
+    // because the pattern matches nothing *and* the node it creates does not
+    // carry the property, so the next run creates another (#973). The rule
+    // supersedes the behaviour asserted here; the assertion is inverted rather
+    // than deleted, so the change is visible rather than silent.
     let mut store = GraphStore::new();
-    run(&mut store, "MERGE ({id: 1, absent: null})");
+    assert!(parse_query("MERGE ({id: 1, absent: null})").is_err());
+    // A MERGE without one is unaffected.
+    run(&mut store, "MERGE ({id: 1})");
     assert_eq!(keys(&store, "MATCH (n) RETURN keys(n) AS k"), vec!["id"]);
 }
 
