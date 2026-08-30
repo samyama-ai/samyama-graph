@@ -7088,6 +7088,28 @@ impl VarLengthExpandOperator {
                 );
             }
             if let Some(ref pv) = self.path_variable {
+                // **Extend** an already-bound path rather than replacing it.
+                //
+                // Every segment of a pattern gets the same path variable, so
+                // with two of them the second overwrote the first and `p` held
+                // only the last segment's walk:
+                // `MATCH p = (a)-[:KNOWS*0..1]->(b)-[:FRIEND*0..1]->(c)`
+                // returned three paths of the right count and every one a
+                // segment short (#966).
+                //
+                // The incoming path ends where this walk begins, so its final
+                // node is dropped to avoid repeating the join node.
+                let (nodes, edges) = match base.get(pv) {
+                    Some(Value::Path { nodes: pn, edges: pe }) if !pn.is_empty() => {
+                        let mut n = pn.clone();
+                        n.pop();
+                        n.extend(nodes);
+                        let mut e = pe.clone();
+                        e.extend(edges);
+                        (n, e)
+                    }
+                    _ => (nodes, edges),
+                };
                 rec.bind(pv.clone(), Value::Path { nodes, edges });
             }
         }
