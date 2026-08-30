@@ -66,6 +66,8 @@ pub enum ValidationError {
     MergeNullProperty(String),
     /// A bare node pattern used as a predicate.
     InvalidPredicatePattern,
+    /// A property read from a path variable.
+    PropertyOnPath(String),
     /// `RETURN *` where nothing is in scope.
     NoVariablesInScope,
     /// The same relationship variable twice in one pattern.
@@ -124,6 +126,12 @@ impl std::fmt::Display for ValidationError {
                  `WHERE (n)` asks whether a node exists that is already bound, \
                  which is always true; the pattern shorthand needs a relationship, \
                  as in `WHERE (n)-->()`"
+            ),
+            Self::PropertyOnPath(var) => write!(
+                f,
+                "InvalidArgumentType: `{var}` is a path, and a path has no \
+                 properties. `length({var})`, `nodes({var})` and \
+                 `relationships({var})` are what a path answers"
             ),
             Self::NoVariablesInScope => write!(
                 f,
@@ -1976,6 +1984,62 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// A path has no properties (#980).
+///
+/// ```text
+/// MATCH r = (n)-[*]->() WHERE r.name = 'apa'   -> InvalidArgumentType
+/// ```
+///
+/// `r` is a path. Reading `r.name` is not a question a path can answer, and
+/// we answered zero rows -- indistinguishable from a graph where nothing has
+/// that name.
+///
+/// Only for variables a pattern binds *as a path*. The kind map is the same
+/// one `validate_variable_kinds` builds, so a name that binds a node keeps
+/// answering property reads.
+fn validate_no_property_on_path(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
+    for mc in &query.match_clauses {
+        let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
+    }
+    for c in &query.clauses {
+        if let Clause::Match(mc) = c {
+            let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
+        }
+    }
+    let paths: std::collections::HashSet<&String> = kinds
+        .iter()
+        .filter(|(_, k)| matches!(k, EntityKind::Path))
+        .map(|(v, _)| v)
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    fn check(
+        e: &Expression,
+        paths: &std::collections::HashSet<&String>,
+    ) -> Result<(), ValidationError> {
+        if let Expression::Property { variable, .. } = e {
+            if paths.contains(variable) {
+                return Err(ValidationError::PropertyOnPath(variable.clone()));
+            }
+        }
+        for child in child_expressions(e) {
+            check(child, paths)?;
+        }
+        Ok(())
+    }
+
+    for e in all_expressions(query) {
+        check(e, &paths)?;
+    }
+    Ok(())
+}
+
 /// A MERGE pattern may not carry a literal null property (#973).
 ///
 /// ```text
@@ -2532,6 +2596,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_function_names(query)?;
     validate_star_has_scope(query)?;
     validate_merge_null_properties(query)?;
+    validate_no_property_on_path(query)?;
     validate_predicate_patterns(query)?;
     validate_relationship_uniqueness(query)?;
 
@@ -2701,9 +2766,17 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                 let bound = &bound;
                 let mut check = |np: &crate::query::ast::NodePattern| -> Result<(), ValidationError> {
                     if let Some(v) = &np.variable {
+                        // A property map counts even when it is **empty**.
+                        // `CREATE (n:Foo) CREATE (n {})-[:OWNS]->(:Dog)` is a
+                        // rebinding attempt Cypher rejects, and treating `{}`
+                        // as "adds nothing" accepted it and created the
+                        // relationship anyway (#980). Writing braces at all is
+                        // the tell; a bare re-mention has `properties: None`
+                        // and stays legal, which is how
+                        // `CREATE (a)-[:R]->(b)` works.
                         let adds_something = !np.labels.is_empty()
-                            || np.properties.as_ref().is_some_and(|p| !p.is_empty())
-                            || np.property_exprs.as_ref().is_some_and(|p| !p.is_empty());
+                            || np.properties.is_some()
+                            || np.property_exprs.is_some();
                         if bound.contains(v) && adds_something {
                             return Err(if merge {
                                 ValidationError::MergeOnBoundVariable(v.clone())
