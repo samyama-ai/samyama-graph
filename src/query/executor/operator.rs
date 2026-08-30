@@ -3915,14 +3915,45 @@ fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, 
 /// disagreement is theirs to keep.
 fn storable_property(v: &Value) -> Option<PropertyValue> {
     match v {
+        // A list literal reaches here already folded into an `Array`, so the
+        // element check has to look *inside* it: `[{num: 1}]` arrives as
+        // `Array([Map(..)])` and was stored whole, giving a node a property no
+        // Cypher expression can produce (#975).
+        Value::Property(p) if !property_is_storable(p) => None,
         Value::Property(p) => Some(p.clone()),
+        // A list built in the query rather than folded by the parser. Each
+        // element is checked as a *list element*, which is stricter than as a
+        // property in its own right: a bare map may be stored (NDS-08), a map
+        // inside a list may not.
         Value::List(items) => items
             .iter()
-            .map(storable_property)
+            .map(|i| match i {
+                Value::Property(PropertyValue::Map(_)) | Value::Map(_) => None,
+                other => storable_property(other),
+            })
             .collect::<Option<Vec<_>>>()
             .map(PropertyValue::Array),
         // A property can hold neither an entity nor a map.
         _ => None,
+    }
+}
+
+/// Can this value be a property?
+///
+/// A property is a scalar or a list of scalars. A **map** is neither, at any
+/// depth: `SET a.maplist = [{num: 1}]` must raise a TypeError rather than
+/// storing something `properties(a)` can hand back but no query can build.
+///
+/// A bare map is left alone here. Storing one is a documented extension
+/// (NDS-08, nested map properties) rather than an accident, and turning that
+/// off is a decision this fix is not entitled to make; the TCK scenario is
+/// about a list *containing* one.
+fn property_is_storable(p: &PropertyValue) -> bool {
+    match p {
+        PropertyValue::Array(items) => items
+            .iter()
+            .all(|i| !matches!(i, PropertyValue::Map(_)) && property_is_storable(i)),
+        _ => true,
     }
 }
 
@@ -13071,6 +13102,22 @@ impl PhysicalOperator for SetPropertyOperator {
                 };
                 (var.clone(), prop.clone(), val)
             }).collect();
+
+            // A property is a scalar or a list of scalars. `SET a.maplist =
+            // [{num: 1}]` stored an `Array([Map(..)])` -- something
+            // `properties(a)` hands back and no Cypher expression can build
+            // (#975). SET has its own value conversion, a fourth copy of this
+            // logic, so the shared `storable_property` never saw it; the check
+            // is applied to the result instead, which covers whichever
+            // converter produced it.
+            for (_, prop, val) in &evaluated {
+                if !property_is_storable(val) {
+                    return Err(ExecutionError::TypeError(format!(
+                        "InvalidPropertyType: `{prop}` cannot hold a map inside a list. \
+                         A property is a scalar or a list of scalars."
+                    )));
+                }
+            }
 
             // Apply mutations via store methods (syncs columnar + row + index)
             for (var, prop, val) in &evaluated {

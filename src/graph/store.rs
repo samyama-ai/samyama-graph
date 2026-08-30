@@ -750,6 +750,31 @@ pub struct GraphStore {
     statistics_cache: std::sync::RwLock<Option<std::sync::Arc<GraphStatistics>>>,
 }
 
+
+/// Can this value be a property?
+///
+/// A property is a scalar or a list of scalars. A **map inside a list** is
+/// neither, at any depth: `SET a.maplist = [{num: 1}]` stored an
+/// `Array([Map(..)])`, which `properties(a)` hands back and no Cypher
+/// expression can build (#975).
+///
+/// A bare map is left alone. Storing one is a documented extension (NDS-08,
+/// nested map properties) rather than an accident, and withdrawing it is a
+/// separate decision.
+///
+/// Checked here rather than at each writer because there are four separate
+/// value converters -- CREATE's, MERGE's, SET's, and the shared
+/// `storable_property` -- and inline literal properties go through none of
+/// them.
+pub fn property_is_storable(p: &PropertyValue) -> bool {
+    match p {
+        PropertyValue::Array(items) => items
+            .iter()
+            .all(|i| !matches!(i, PropertyValue::Map(_)) && property_is_storable(i)),
+        _ => true,
+    }
+}
+
 impl GraphStore {
     /// Create a new empty graph store
     pub fn new() -> Self {
@@ -1394,6 +1419,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // `CREATE ({b: null})` stored a `Null` and `'b' IN keys(n)` answered
         // true (#952) -- the engine disagreeing with itself across two paths
         // to the same state.
+        if !property_is_storable(&val) {
+            return Err(GraphError::ConstraintViolation(format!(
+                "InvalidPropertyType: `{key_str}` cannot hold a map inside a list. \
+                 A property is a scalar or a list of scalars."
+            )));
+        }
         if matches!(val, PropertyValue::Null) {
             // Still checked for existence. The early return skipped the
             // `NodeNotFound` the non-null path raises, so setting a property
@@ -1522,6 +1553,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
+        if !property_is_storable(&val) {
+            return Err(GraphError::ConstraintViolation(format!(
+                "InvalidPropertyType: `{key_str}` cannot hold a map inside a list."
+            )));
+        }
         // Null removes, as on the node path above (#952) -- and, as there,
         // a write to an edge that does not exist is still an error.
         if matches!(val, PropertyValue::Null) {
