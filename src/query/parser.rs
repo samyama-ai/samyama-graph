@@ -848,10 +848,16 @@ fn unescape_name(raw: &str) -> String {
 ///
 /// An unrecognised escape yields the escaped character itself (`\\q` -> `q`), which keeps
 /// Windows-style paths and regex fragments from turning into a parse error.
-fn unescape_string_literal(literal: &str) -> String {
+///
+/// `\\u` is the exception, because it is not unrecognised: openCypher defines it as
+/// exactly four hex digits, so `'\\uH'` is a malformed *known* escape rather than an
+/// unknown one, and the spec asks for `InvalidUnicodeLiteral` at compile time. It used
+/// to fall back to the unknown-escape rule and yield the string `"uH"` -- a query that
+/// should not compile instead returning a plausible value nobody wrote (#989).
+fn unescape_string_literal(literal: &str) -> ParseResult<String> {
     let inner = &literal[1..literal.len() - 1];
     if !inner.contains('\\') {
-        return inner.to_string();
+        return Ok(inner.to_string());
     }
 
     let mut out = String::with_capacity(inner.len());
@@ -871,14 +877,23 @@ fn unescape_string_literal(literal: &str) -> String {
             Some('\\') => out.push('\\'),
             Some('\'') => out.push('\''),
             Some('"') => out.push('"'),
-            // \uXXXX, as in openCypher
+            // \uXXXX, as in openCypher. Exactly four hex digits: fewer, or a
+            // non-hex digit among them, is a malformed literal and not a
+            // string. `take(4)` yields whatever is left at the end of the
+            // input, so the length is checked rather than assumed.
             Some('u') => {
                 let hex: String = chars.by_ref().take(4).collect();
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    Some(decoded) => out.push(decoded),
+                let decoded = if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                } else {
+                    None
+                };
+                match decoded {
+                    Some(c) => out.push(c),
                     None => {
-                        out.push('u');
-                        out.push_str(&hex);
+                        return Err(ParseError::SemanticError(format!(
+                            "InvalidUnicodeLiteral: `\\u{hex}` is not four hex digits"
+                        )))
                     }
                 }
             }
@@ -886,7 +901,7 @@ fn unescape_string_literal(literal: &str) -> String {
             None => out.push('\\'),
         }
     }
-    out
+    Ok(out)
 }
 
 fn parse_match_statement_partial(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
@@ -1854,7 +1869,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
-                return Ok(PropertyValue::String(unescape_string_literal(inner.as_str())));
+                return Ok(PropertyValue::String(unescape_string_literal(inner.as_str())?));
             }
             Rule::list => {
                 // `Vector` is the embedding type -- f32 throughout. Treating *any*
@@ -1895,7 +1910,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                             match part.as_rule() {
                                 Rule::property_key => key = unescape_name(part.as_str()),
                                 Rule::string => {
-                                    key = unescape_string_literal(part.as_str());
+                                    key = unescape_string_literal(part.as_str())?;
                                 }
                                 Rule::value => val = parse_value(part)?,
                                 _ => {}
@@ -2441,7 +2456,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                         match part.as_rule() {
                             Rule::property_key => key = unescape_name(part.as_str()),
                             Rule::string => {
-                                key = unescape_string_literal(part.as_str());
+                                key = unescape_string_literal(part.as_str())?;
                             }
                             Rule::expression => value = Some(parse_expression(part)?),
                             _ => {}
