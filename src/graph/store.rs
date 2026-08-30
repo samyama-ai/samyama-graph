@@ -1385,6 +1385,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
+        // Setting a property to null **removes** it. Cypher has no stored
+        // null: `CREATE ({missing: null})` creates a node with no `missing`
+        // key at all, so `keys(n)` and `properties(n)` must not report one.
+        //
+        // At the store rather than at each writer. The SET operator already
+        // did this for itself, so `SET n.b = null` was right while
+        // `CREATE ({b: null})` stored a `Null` and `'b' IN keys(n)` answered
+        // true (#952) -- the engine disagreeing with itself across two paths
+        // to the same state.
+        if matches!(val, PropertyValue::Null) {
+            // Still checked for existence. The early return skipped the
+            // `NodeNotFound` the non-null path raises, so setting a property
+            // to null on a node that does not exist silently succeeded --
+            // caught by `test_set_node_property`, which uses exactly that
+            // case. A removal is still a write, and a write to nothing is
+            // still an error.
+            if self.get_node(node_id).is_none() {
+                return Err(GraphError::NodeNotFound(node_id));
+            }
+            self.remove_node_property(node_id, &key_str);
+            return Ok(());
+        }
         let idx = node_id.as_u64() as usize;
 
         // Enforce unique constraints on the write path. The constraint registry, the
@@ -1500,6 +1522,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
+        // Null removes, as on the node path above (#952) -- and, as there,
+        // a write to an edge that does not exist is still an error.
+        if matches!(val, PropertyValue::Null) {
+            if self.get_edge(edge_id).is_none() {
+                return Err(GraphError::EdgeNotFound(edge_id));
+            }
+            self.remove_edge_property(edge_id, &key_str);
+            return Ok(());
+        }
         let idx = edge_id.as_u64() as usize;
 
         // Apply the mutation to the live stores first so the snapshot below
@@ -2042,8 +2073,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// DS-07c: Set a property on an edge via sparse map
     pub fn set_edge_property_sparse(&mut self, edge_id: EdgeId, key: impl Into<String>, value: impl Into<PropertyValue>) {
         self.invalidate_statistics_cache();
+        let key = key.into();
+        let value = value.into();
+        // Null removes, as on the other two property setters (#952). This is
+        // the one CREATE and MERGE use for relationships, so without it
+        // `CREATE ()-[:R {p: null}]->()` stored a key Cypher says is not
+        // there.
+        if matches!(value, PropertyValue::Null) {
+            self.remove_edge_property(edge_id, &key);
+            return;
+        }
         let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
-        props.insert(key.into(), value.into());
+        props.insert(key, value);
     }
 
     /// Check if an edge exists
