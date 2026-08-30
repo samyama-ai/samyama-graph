@@ -6645,6 +6645,134 @@ impl VarLengthExpandOperator {
         })
     }
 
+    /// Is this segment's relationship variable already bound to a list?
+    ///
+    /// Only a *list* counts. A relationship variable bound to a single
+    /// relationship is a different question -- and an error the validator
+    /// still rejects -- so this must not fire on one.
+    fn walk_is_bound(&self, record: &Record) -> bool {
+        let Some(rv) = self.rel_variable.as_ref() else { return false };
+        matches!(
+            record.get(rv),
+            Some(Value::List(_)) | Some(Value::Property(PropertyValue::Array(_)))
+        )
+    }
+
+    /// Verify the one path `rs` names, and emit it if it is legal.
+    ///
+    /// Everything the search would enforce is enforced here too, because a
+    /// pattern does not stop meaning what it says when its walk is handed to
+    /// it: the length bounds, the type filter, the inline property filter,
+    /// relationship isomorphism, and the direction each edge is traversed in.
+    /// Leaving any of them out would make the bound form quietly more
+    /// permissive than the searched form -- the same query, two answers.
+    fn walk_bound_list(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        let Some(rv) = self.rel_variable.clone() else { return Ok(()) };
+        let source_val = record
+            .get(&self.source_var)
+            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
+        if matches!(source_val, Value::Null)
+            || matches!(source_val.as_property(), Some(PropertyValue::Null))
+        {
+            return Ok(());
+        }
+        let source_id = source_val.node_id().ok_or_else(|| {
+            ExecutionError::TypeError(format!("{} is not a node", self.source_var))
+        })?;
+
+        let ids: Vec<crate::graph::EdgeId> = match record.get(&rv) {
+            Some(Value::List(items)) => items.iter().filter_map(|v| v.edge_id()).collect(),
+            // A list that reached here as a property array cannot hold an
+            // entity (see `Value` vs `PropertyValue`), so it can never name a
+            // relationship. An empty walk is the honest reading.
+            Some(Value::Property(PropertyValue::Array(_))) => Vec::new(),
+            _ => return Ok(()),
+        };
+        // A non-relationship somewhere in the list means the list is not a
+        // walk. Matching nothing is right; matching the prefix that happened
+        // to be relationships is not.
+        let named = match record.get(&rv) {
+            Some(Value::List(items)) => items.len(),
+            _ => 0,
+        };
+        if ids.len() != named || ids.len() < self.min_hops || ids.len() > self.max_hops {
+            return Ok(());
+        }
+
+        self.ensure_type_ids(store);
+        let mut at = source_id;
+        let mut nodes = vec![at];
+        let mut seen: Vec<crate::graph::EdgeId> = Vec::with_capacity(ids.len());
+        for eid in &ids {
+            // Relationship isomorphism inside the list itself: a walk that
+            // reuses an edge is not a walk, whether a BFS built it or a WITH
+            // did.
+            if seen.contains(eid) {
+                return Ok(());
+            }
+            let Some(edge) = store.get_edge(*eid) else { return Ok(()) };
+            if !self.edge_types.is_empty()
+                && !self.edge_types.iter().any(|t| t.as_str() == edge.edge_type.as_str())
+            {
+                return Ok(());
+            }
+            if !self.edge_props_ok(*eid, store) {
+                return Ok(());
+            }
+            // Where this edge lands, given where we stand and which way the
+            // pattern lets us cross it. `Both` may be crossed either way; the
+            // directed forms may not, and an edge that does not touch `at` at
+            // all fails whichever direction is written.
+            let next = match self.direction {
+                Direction::Outgoing if edge.source == at => edge.target,
+                Direction::Incoming if edge.target == at => edge.source,
+                Direction::Both if edge.source == at => edge.target,
+                Direction::Both if edge.target == at => edge.source,
+                _ => return Ok(()),
+            };
+            seen.push(*eid);
+            at = next;
+            nodes.push(at);
+        }
+
+        // An edge this clause already walked is not available to this segment
+        // (#710), exactly as in the searched form.
+        if self.track_edges && !self.starts_clause {
+            let used = record.used_edge_slice();
+            if ids.iter().any(|e| used.contains(e)) {
+                return Ok(());
+            }
+        }
+        // A bound target must be the node the walk actually reaches.
+        if let Some(bound) = record.get(&self.target_var).and_then(|v| v.node_id()) {
+            if bound != at {
+                return Ok(());
+            }
+        }
+        if let Some(pinned) = self.pinned_target {
+            if pinned != at {
+                return Ok(());
+            }
+        }
+        if !self.target_labels.is_empty() {
+            let ok = store.get_node(at).is_some_and(|n| {
+                self.target_labels.iter().all(|l| n.labels.contains(l))
+            });
+            if !ok {
+                return Ok(());
+            }
+        }
+        // `buffer_walk` rebinds `rs` from `edges`, which is the same list it
+        // was given -- so the binding survives unchanged, which is what the
+        // pattern asks for. `reversed_walk` does not apply: the list is
+        // already in the pattern's order.
+        let base = record.clone();
+        let reversed = std::mem::replace(&mut self.reversed_walk, false);
+        self.buffer_walk(&base, at, nodes, ids, store);
+        self.reversed_walk = reversed;
+        Ok(())
+    }
+
     pub fn with_rel_variable(mut self, var: String) -> Self {
         self.rel_variable = Some(var);
         self
@@ -6968,6 +7096,15 @@ impl VarLengthExpandOperator {
     /// BFS from the source bound in `record`, buffering one output record per
     /// distinct reachable target in `[min_hops, max_hops]`.
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        // `MATCH (first)-[rs*]->(second)` where `rs` is *already bound* to a
+        // list of relationships is not a search at all. openCypher reads it as
+        // "the walk is exactly `rs`", so there is one candidate path and the
+        // only question is whether it is legal. Running the BFS here would
+        // rebind `rs` to whatever it found and answer a different question
+        // (#984).
+        if self.walk_is_bound(record) {
+            return self.walk_bound_list(record, store);
+        }
         let source_val = record
             .get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
