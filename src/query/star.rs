@@ -88,9 +88,10 @@ fn with_output(items: &[ReturnItem]) -> Vec<String> {
 
 /// Replace the `*` item in `items` with one item per name in `scope`,
 /// preserving any other items written alongside it.
-fn expand_into(items: &mut Vec<ReturnItem>, scope: &[String]) {
+/// Returns true when a star was expanded and produced no columns at all.
+fn expand_into(items: &mut Vec<ReturnItem>, scope: &[String]) -> bool {
     if !has_star(items) {
-        return;
+        return false;
     }
 
     // Names the query projects explicitly, wherever they appear relative to
@@ -128,7 +129,9 @@ fn expand_into(items: &mut Vec<ReturnItem>, scope: &[String]) {
             out.push(item);
         }
     }
+    let empty = out.is_empty();
     *items = out;
+    empty
 }
 
 /// Every variable a pattern binds, in written order.
@@ -167,8 +170,9 @@ fn bind_pattern(scope: &mut Vec<String>, pattern: &Pattern) {
 ///
 /// The star is the reason to walk in order: scope is what has been bound so
 /// far, and a `WITH` replaces it (#892).
-fn expand_stars_pipeline(clauses: &mut [Clause]) {
+fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
     let mut scope: Vec<String> = Vec::new();
+    let mut empty_star = false;
     for clause in clauses.iter_mut() {
         match clause {
             Clause::Match(mc) => bind_match(&mut scope, std::slice::from_ref(mc)),
@@ -184,13 +188,18 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) {
                 }
             }
             Clause::With(wc) => {
-                expand_into(&mut wc.items, &scope);
+                // A `WITH *` that projects nothing is legal --
+                // `MATCH () CREATE () WITH * CREATE ()` is a TCK scenario that
+                // must pass. Only `RETURN *` with nothing in scope is the
+                // error, so the flag is set at RETURN sites only.
+                let _ = expand_into(&mut wc.items, &scope);
                 scope = with_output(&wc.items);
             }
-            Clause::Return(rc) => expand_into(&mut rc.items, &scope),
+            Clause::Return(rc) => empty_star |= expand_into(&mut rc.items, &scope),
             Clause::Where(_) | Clause::Set(_) | Clause::Remove(_) | Clause::Delete(_) => {}
         }
     }
+    empty_star
 }
 
 /// Expand every `*` in `query`, in place.
@@ -203,7 +212,7 @@ pub fn expand_stars(query: &mut Query) {
     // `return_clause` -- so expanding only one left a literal `*` in the other
     // for whatever reads it next.
     if !query.clauses.is_empty() {
-        expand_stars_pipeline(&mut query.clauses);
+        query.star_expanded_to_nothing |= expand_stars_pipeline(&mut query.clauses);
     }
     if query.needs_clause_pipeline {
         // The parser mirrors the pipeline's RETURN into `return_clause` before
@@ -244,8 +253,9 @@ pub fn expand_stars(query: &mut Query) {
     // A WITH narrows scope to what it projects, so its own `*` is expanded
     // against the scope that reaches it, and everything after sees only its
     // output.
+    let mut empty_star = false;
     let mut apply_with = |wc: &mut WithClause, scope: &mut Vec<String>| {
-        expand_into(&mut wc.items, scope);
+        let _ = expand_into(&mut wc.items, scope);
         *scope = with_output(&wc.items);
     };
 
@@ -273,6 +283,7 @@ pub fn expand_stars(query: &mut Query) {
     }
 
     if let Some(rc) = query.return_clause.as_mut() {
-        expand_into(&mut rc.items, &scope);
+        empty_star |= expand_into(&mut rc.items, &scope);
     }
+    query.star_expanded_to_nothing |= empty_star;
 }

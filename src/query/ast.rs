@@ -160,6 +160,15 @@ pub struct Query {
     /// trailing UNWIND deliberately stays after the filter so the cross product is built
     /// from the already-narrowed rows.
     pub unwind_leading: bool,
+    /// A `RETURN *` / `WITH *` that expanded to **no** columns.
+    ///
+    /// Star expansion replaces `*` with the variables in scope, so a star that
+    /// found none leaves an empty projection and nothing downstream can tell
+    /// it apart from a query that projected nothing on purpose. Recorded here
+    /// because validation runs after expansion, and `MATCH () RETURN *` --
+    /// every element anonymous, so the query names no variable -- has to be
+    /// rejected rather than answered with zero rows (#958).
+    pub star_expanded_to_nothing: bool,
     /// MERGE clause (optional)
     pub merge_clause: Option<MergeClause>,
     /// UNION queries (chained via UNION/UNION ALL)
@@ -879,6 +888,7 @@ impl Query {
             extra_unwind_clauses: Vec::new(),
             post_with_unwind_clauses: Vec::new(),
             unwind_leading: false,
+            star_expanded_to_nothing: false,
             merge_clause: None,
             union_queries: Vec::new(),
             explain: false,

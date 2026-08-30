@@ -62,6 +62,10 @@ pub enum ValidationError {
     UnaliasedWithItem,
     /// A call to a function this engine does not implement.
     UnknownFunction(String),
+    /// `RETURN *` where nothing is in scope.
+    NoVariablesInScope,
+    /// The same relationship variable twice in one pattern.
+    RelationshipUniquenessViolation(String),
     /// A projection mixes an aggregate with an expression that is not a
     /// grouping key. See [`validate_aggregation_is_unambiguous`].
     ///
@@ -102,6 +106,20 @@ impl std::fmt::Display for ValidationError {
                  Checked at compile time on purpose: as a run-time error it only \
                  fired on a row that reached the call, so the same query over an \
                  empty graph returned no rows and reported success"
+            ),
+            Self::NoVariablesInScope => write!(
+                f,
+                "NoVariablesInScope: `RETURN *` has nothing to return. Every \
+                 pattern element here is anonymous, so the query names no \
+                 variable — `MATCH () RETURN *` asks for all of nothing, which \
+                 is a query nobody meant to write"
+            ),
+            Self::RelationshipUniquenessViolation(var) => write!(
+                f,
+                "RelationshipUniquenessViolation: `{var}` appears twice in one \
+                 pattern. Cypher matches relationships edge-distinctly, so a \
+                 single pattern cannot traverse the same relationship twice — \
+                 the pattern can never match, whatever the graph holds"
             ),
             Self::AmbiguousGroupingExpression(what) => write!(
                 f,
@@ -1940,6 +1958,80 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// `RETURN *` must have something to return (#958).
+///
+/// ```text
+/// MATCH () RETURN *   -> NoVariablesInScope
+/// ```
+///
+/// Every element of that pattern is anonymous, so the query names no
+/// variable and `*` expands to nothing. We answered zero rows: a query
+/// asking for all of nothing, reported as a successful empty match.
+///
+/// Only when the expansion finds nothing at all. `MATCH (n) RETURN *` is
+/// fine, and so is any query that binds one variable anywhere.
+///
+/// `RETURN` only. A `WITH *` that projects nothing is legal --
+/// `MATCH () CREATE () WITH * CREATE ()` is a scenario that must pass, and
+/// flagging it too broke two of them.
+///
+/// The flag is set during expansion because validation runs after it: by the
+/// time this sees the query the `*` has already become zero columns, which is
+/// indistinguishable from a projection that was empty on purpose.
+fn validate_star_has_scope(query: &Query) -> Result<(), ValidationError> {
+    if query.star_expanded_to_nothing {
+        return Err(ValidationError::NoVariablesInScope);
+    }
+    Ok(())
+}
+
+/// A relationship variable may appear once per pattern (#958).
+///
+/// ```text
+/// MATCH (a)-[r]->()-[r]->(a) RETURN r   -> RelationshipUniquenessViolation
+/// ```
+///
+/// Cypher matches relationships edge-distinctly: one pattern cannot traverse
+/// the same relationship twice, so this pattern can never match whatever the
+/// graph holds. We ran it and returned zero rows -- true, and indistinguishable
+/// from a graph that simply has no such shape.
+///
+/// Per *path*, not per query: `MATCH (a)-[r]->(b) MATCH (c)-[r]->(d)` is a
+/// different rule (the second clause re-uses a bound relationship, which is
+/// legal and means the same edge).
+fn validate_relationship_uniqueness(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::{Clause, Pattern};
+
+    fn check(pattern: &Pattern) -> Result<(), ValidationError> {
+        for path in &pattern.paths {
+            let mut seen: HashSet<&String> = HashSet::new();
+            for seg in &path.segments {
+                if let Some(v) = &seg.edge.variable {
+                    if !seen.insert(v) {
+                        return Err(ValidationError::RelationshipUniquenessViolation(v.clone()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for mc in &query.match_clauses {
+        check(&mc.pattern)?;
+    }
+    for c in &query.clauses {
+        match c {
+            Clause::Match(mc) => check(&mc.pattern)?,
+            Clause::Create(cc) => check(&cc.pattern)?,
+            _ => {}
+        }
+    }
+    if let Some(cc) = &query.create_clause {
+        check(&cc.pattern)?;
+    }
+    Ok(())
+}
+
 /// A function call must name a function this engine implements (#947).
 ///
 /// ```text
@@ -2286,6 +2378,8 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     validate_aggregate_placement(query)?;
     validate_aggregation_is_unambiguous(query)?;
     validate_function_names(query)?;
+    validate_star_has_scope(query)?;
+    validate_relationship_uniqueness(query)?;
 
     validate_function_argument_kinds(query)?;
 
