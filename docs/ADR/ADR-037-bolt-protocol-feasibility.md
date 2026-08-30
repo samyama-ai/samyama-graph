@@ -1,7 +1,55 @@
 # ADR-037: Bolt Protocol — Feasibility and Decision
 
 ## Status
-**Accepted** — Bolt is approved in principle; implementation is gated (see *Decision*).
+**Accepted, with a correction.** Bolt is approved in principle; implementation is gated
+(see *Decision*).
+
+> ### Correction, 2026-08-30 (same day as publication)
+>
+> **This ADR asserted that Samyama has no `Duration` type and no zoned or offset-aware
+> time. Both claims are false and are withdrawn.** The original wording is preserved in
+> §*The actual blocker* below, struck through, per the
+> [correction & retraction policy](https://git.samyama.ai/Samyama.ai/samyama-cloud/src/branch/main/docs/product/policy/correction-and-retraction.md).
+>
+> `PropertyValue` already carries `Duration { months, days, seconds, nanos }` — the
+> openCypher four-component model — and `ZonedDateTime { secs, nanos, offset_seconds,
+> zone }`, which holds an IANA zone name *and* a resolved offset. Verified by execution:
+>
+> ```
+> RETURN duration('P2012Y2M2DT14H37M21.545S')
+>   -> Duration { months: 24146, days: 2, seconds: 52641, nanos: 545000000 }
+> RETURN datetime('1984-03-28T00:00:42-10:00[Pacific/Honolulu]')
+>   -> ZonedDateTime { secs: 449316042, offset_seconds: -36000, zone: "Pacific/Honolulu" }
+> ```
+>
+> The latter round-trips to its exact input string, DST offset included.
+>
+> **Cause.** The claim came from reading a filtered view of the `PropertyValue` enum
+> rather than the enum. A `grep` shaped to match simple variants listed `DateTime(i64)`,
+> `Date(i32)` and `LocalTime(i64)` and stopped short of the braced variants —
+> `Time`, `LocalDateTime`, `ZonedDateTime` and `Duration` — which begin a few lines
+> later. The absence of a type was inferred from a listing that could not have shown it.
+>
+> **What is actually missing** is completeness inside types that exist, which is a
+> materially smaller thing. Every remaining temporal TCK failure is one of these, and
+> not one is a missing type:
+>
+> | Scenario | Actual cause |
+> |---|---|
+> | `Temporal8[1]`, `[6]` | `nanos` not normalised — `nanos: 1000000006` should carry a second, giving `…M27.000000006S` where we render `…M26.1000000006S` |
+> | `Temporal2[7]` | a malformed duration string is silently accepted as a zero duration |
+> | `Temporal10[9]`, `[10]` | extended-year date literals (`-999999999-01-01`); `duration.between` itself is correct |
+> | `Temporal3[10]` ×2 | datetime *selection* semantics; the zone handling underneath is correct |
+> | `Temporal1[11]` | `datetime.fromepoch` / `datetime.fromepochmillis` not implemented |
+>
+> **Effect on the decision.** Gates 1 and 2 below are wrong as written and are restated
+> in *Decision*. The deferral itself does not depend on them — it rests on the vector
+> gap, which is unaffected and was verified independently — but the gates were the part
+> that made the deferral look long, and they are smaller than stated.
+>
+> **Mechanism fix.** A claim that a type does not exist must be sourced from the type's
+> definition, not from a search that filters. This one was cheap to check by execution
+> and was not checked.
 
 ## Date
 2026-08-30
@@ -63,17 +111,29 @@ available encoding is a list of floats, which means a vector written through a B
 driver and read back is no longer a vector — it is a list that happens to contain
 numbers. The round-trip loses the type, silently, and the client cannot tell.
 
-**2. Temporals are lossy in the direction clients care about.** Samyama has
-`DateTime(i64)`, `Date(i32)`, `LocalTime(i64)`. Bolt v5 distinguishes seven temporal
-structures, including offset-aware `DateTime`, zone-id-aware `DateTimeZoneId`, and
-`Duration`. Samyama has **no `Duration` type and no zoned or offset-aware time**.
-A driver sending a zoned datetime — the ordinary case in every JVM application —
-has nowhere to land it without dropping the zone.
+**2. Temporals.** ~~Samyama has `DateTime(i64)`, `Date(i32)`, `LocalTime(i64)`. Bolt
+v5 distinguishes seven temporal structures, including offset-aware `DateTime`,
+zone-id-aware `DateTimeZoneId`, and `Duration`. Samyama has **no `Duration` type and no
+zoned or offset-aware time**. A driver sending a zoned datetime — the ordinary case in
+every JVM application — has nowhere to land it without dropping the zone.~~
+
+> **Withdrawn 2026-08-30 — see the Correction above.** `Duration { months, days,
+> seconds, nanos }` and `ZonedDateTime { secs, nanos, offset_seconds, zone }` both
+> exist. A zoned datetime lands correctly and round-trips to its exact input string,
+> DST offset included. The remaining gaps are completeness bugs inside those types —
+> an unnormalised `nanos` carry, a silently-accepted malformed duration string,
+> extended-year date literals, two missing `datetime.fromepoch*` functions — not
+> absent types. Bolt's temporal mapping is a matter of finishing them, not building
+> them.
 
 **3. Points do not exist on either side yet.** Bolt requires `Point2D`/`Point3D`.
 NDS-04 (geospatial types and index) is 🔴 unbuilt. There is no gap *today* because
 neither side has points, but it means a Bolt path cannot be called complete before
 NDS-04 lands, and any client sending a point must be refused rather than coerced.
+
+**The vector gap (1) is the one that survives review**, and it is the one the decision
+below actually rests on. It was verified independently: Bolt has no vector, and
+`PropertyValue::Vector(Vec<f32>)` has no lossless encoding in PackStream.
 
 Spec 14 §4 already anticipated exactly this: CH-INTEROP's mandatory hostile cases
 name *"vectors, and temporals with timezones"*. The spike's finding is that those
@@ -99,9 +159,13 @@ this spike undermines it.
 
 1. **NDS-04 (geospatial types)** ships, or the Bolt read path explicitly refuses
    point-valued messages with a typed error rather than coercing them.
-2. **A `Duration` type and zone-aware temporals** exist in `PropertyValue`, or the
-   Bolt path refuses them with a typed error. Dropping a timezone silently is not
-   acceptable.
+2. ~~**A `Duration` type and zone-aware temporals** exist in `PropertyValue`, or the
+   Bolt path refuses them with a typed error.~~ **Restated 2026-08-30:** both types
+   exist. The gate is instead that the **temporal completeness bugs listed in the
+   Correction are closed** — chiefly the `nanos` carry, since a duration that renders
+   as `26.1000000006` seconds would cross the wire wrong in a way no client could
+   detect. This is a smaller gate than the one originally written. Dropping a timezone
+   silently is not acceptable, and is not what the engine does.
 3. **The server agent string is decided by a person**, with the trademark question
    answered, before any driver-facing code is written.
 
