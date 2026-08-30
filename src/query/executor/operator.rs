@@ -14566,14 +14566,19 @@ impl WithBarrierOperator {
         }
     }
 
-    /// Bindings a sort expression names that the projection did not carry.
+    /// Bindings the ORDER BY or WHERE names that the projection did not carry.
     ///
     /// `WITH a, a.num2 % 3 AS mod ORDER BY sum` sorts by `sum`, projected by
-    /// an *earlier* WITH and not by this one. Cypher allows that: ORDER BY
-    /// after a WITH sees the projected aliases **and** the scope in front of
-    /// it. Sorting the projected rows alone evaluated `sum` to null on every
-    /// row, so the order was whatever the input order happened to be and the
-    /// LIMIT then kept the wrong three (#970).
+    /// an *earlier* WITH and not by this one. Cypher allows that: after a
+    /// WITH, both ORDER BY and WHERE see the projected aliases **and** the
+    /// scope in front of them. Evaluating against the projected rows alone
+    /// made `sum` null on every row, so the order was whatever the input order
+    /// happened to be and the LIMIT then kept the wrong three (#970).
+    ///
+    /// The WHERE has the identical shape:
+    /// `WITH a.name2 AS name WHERE name = 'B' OR a.name2 = 'C'` filters on
+    /// both, and `a` is gone by then, so the second disjunct was always false
+    /// and the row it should have kept was dropped.
     ///
     /// Copied under a private prefix rather than bound plainly, so a carried
     /// name cannot collide with something the projection produced or leak into
@@ -14581,10 +14586,15 @@ impl WithBarrierOperator {
     const CARRY: &'static str = "__orderby_carry_";
 
     fn carry_sort_scope(&self, from: &Record, into: &mut Record) {
-        if self.sort_items.is_empty() {
+        if self.sort_items.is_empty() && self.where_predicate.is_none() {
             return;
         }
-        for (expr, _) in &self.sort_items {
+        for expr in self
+            .sort_items
+            .iter()
+            .map(|(e, _)| e)
+            .chain(self.where_predicate.iter())
+        {
             let mut names = HashSet::new();
             collect_expression_names(expr, &mut names);
             for name in names {
@@ -14598,25 +14608,28 @@ impl WithBarrierOperator {
     }
 
 
-    /// Evaluate a sort expression against a projected row, falling back to the
-    /// pre-projection bindings `carry_sort_scope` copied in.
+    /// Evaluate an ORDER BY or WHERE expression against a projected row,
+    /// widened with the pre-projection bindings `carry_sort_scope` copied in.
+    ///
+    /// Widened **always**, not only when the projected row yields null. A
+    /// predicate over a name the projection dropped does not have to evaluate
+    /// to null to be wrong: `name = 'B' OR a.name2 = 'C'` with `a` gone gives
+    /// a perfectly ordinary `false`, and a fallback keyed on null never fires.
+    ///
+    /// The projected alias still wins, because `carry_sort_scope` only copies
+    /// a name the projection did not already bind.
     fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> Value {
-        match Self::evaluate_expression(expr, record, store) {
-            Ok(Value::Null) | Err(_) => {}
-            Ok(v) => return v,
-        }
         let mut names = HashSet::new();
         collect_expression_names(expr, &mut names);
-        if names.is_empty() {
-            return Value::Null;
-        }
-        let mut widened = record.clone();
+        let mut widened: Option<Record> = None;
         for name in names {
             if let Some(v) = record.get(&format!("{}{}", Self::CARRY, name)) {
-                widened.bind(name, v.clone());
+                let v = v.clone();
+                widened.get_or_insert_with(|| record.clone()).bind(name, v);
             }
         }
-        Self::evaluate_expression(expr, &widened, store).unwrap_or(Value::Null)
+        let target = widened.as_ref().unwrap_or(record);
+        Self::evaluate_expression(expr, target, store).unwrap_or(Value::Null)
     }
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
@@ -14778,11 +14791,12 @@ impl WithBarrierOperator {
         // Apply WHERE filter (if present in WITH ... WHERE ...)
         if let Some(ref predicate) = self.where_predicate {
             output_records.retain(|record| {
-                match Self::evaluate_expression(predicate, record, store) {
-                    Ok(Value::Property(PropertyValue::Boolean(b))) => b,
-                    Ok(Value::Null) | Ok(Value::Property(PropertyValue::Null)) => false,
-                    _ => false,
-                }
+                // Through the same widening as the sort: a WITH's WHERE sees
+                // the projected aliases *and* the scope in front of them.
+                matches!(
+                    Self::eval_sort_key(predicate, record, store),
+                    Value::Property(PropertyValue::Boolean(true))
+                )
             });
         }
 
@@ -14823,7 +14837,7 @@ impl WithBarrierOperator {
         // The carried pre-projection bindings are the sort's business only.
         // Left in place they would appear as columns and, worse, re-enter
         // scope for the next clause under a name it never projected.
-        if !self.sort_items.is_empty() {
+        if !self.sort_items.is_empty() || self.where_predicate.is_some() {
             for record in output_records.iter_mut() {
                 record.retain_bindings(|k| !k.starts_with(Self::CARRY));
             }

@@ -131,3 +131,85 @@ fn order_by_a_property_of_a_projected_node_still_works() {
         vec![1, 3]
     );
 }
+
+// ---------------------------------------------------------------------------
+// A WITH's WHERE has the identical scope rule.
+//
+//   WITH a.name2 AS name WHERE name = 'B' OR a.name2 = 'C'
+//
+// filters on the projected alias *and* on `a`, which the projection dropped.
+// With `a` gone the second disjunct was an ordinary `false` — not a null — so
+// a fallback keyed on null would never have fired. That is why the widening is
+// unconditional.
+
+fn named() -> GraphStore {
+    let mut store = GraphStore::new();
+    for v in ["A", "B", "C"] {
+        let n = store.create_node("");
+        let _ = store.set_node_property(
+            "default", n, "name2".to_string(), PropertyValue::String(v.into()));
+    }
+    store
+}
+
+fn strings(store: &GraphStore, cypher: &str, col: &str) -> Vec<String> {
+    let q = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    let mut out: Vec<String> = QueryExecutor::new(store)
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("{cypher}: {e:?}"))
+        .records
+        .iter()
+        .map(|r| match r.get(col) {
+            Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+            other => panic!("{col}: {other:?}"),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_with_where_sees_both_scopes() {
+    let store = named();
+    assert_eq!(
+        strings(
+            &store,
+            "MATCH (a) WITH a.name2 AS name WHERE name = \"B\" OR a.name2 = \"C\" RETURN *",
+            "name",
+        ),
+        vec!["B", "C"]
+    );
+}
+
+#[test]
+fn a_with_where_on_the_alias_alone_is_unchanged() {
+    let store = named();
+    assert_eq!(
+        strings(&store, "MATCH (a) WITH a.name2 AS name WHERE name = \"B\" RETURN *", "name"),
+        vec!["B"]
+    );
+}
+
+#[test]
+fn a_with_where_that_matches_nothing_still_returns_nothing() {
+    // The direction an unconditional widening could break: a predicate that
+    // is legitimately false everywhere must stay false.
+    let store = named();
+    let q = parse_query("MATCH (a) WITH a.name2 AS name WHERE name = \"Z\" RETURN *").unwrap();
+    assert_eq!(QueryExecutor::new(&store).execute(&q).unwrap().records.len(), 0);
+}
+
+#[test]
+fn the_projected_alias_shadows_the_carried_name() {
+    // `name` is projected from `a.name2`; a carried `a` must not change what
+    // `name` means.
+    let store = named();
+    assert_eq!(
+        strings(
+            &store,
+            "MATCH (a) WITH a.name2 AS name WHERE name <> \"A\" AND a.name2 <> \"C\" RETURN *",
+            "name",
+        ),
+        vec!["B"]
+    );
+}
