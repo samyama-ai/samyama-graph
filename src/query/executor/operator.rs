@@ -4532,6 +4532,77 @@ fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64
     }
 }
 
+/// ISO 8601's alternative duration form: `P<date>T<time>`, where the date is
+/// `YYYY-MM-DD` (or `YYYYMMDD`) and the time is `hh:mm:ss[.fff]` (or `hhmmss`).
+///
+/// Returns `None` when the input is not in that shape, so the unit scanner
+/// keeps every string it already handled. The two forms are mutually
+/// exclusive -- one has unit letters and the other has separators -- so a
+/// shape test is enough to route between them and neither needs to know about
+/// the other.
+///
+/// The fields are durations, not calendar positions: the year field may exceed
+/// any real year and the month field is a count of months, so no date
+/// validation applies.
+fn parse_extended_duration(date_part: &str, time_part: &str) -> Option<Value> {
+    /// `a-b-c` with every field all digits, or one run of `n` digits split
+    /// into fixed-width fields.
+    fn fields(s: &str, widths: [usize; 3]) -> Option<[i128; 3]> {
+        let parts: Vec<&str> = if s.contains('-') || s.contains(':') {
+            s.split(|c| c == '-' || c == ':').collect()
+        } else {
+            if s.len() != widths.iter().sum::<usize>() {
+                return None;
+            }
+            let (a, b) = s.split_at(widths[0]);
+            let (b, c) = b.split_at(widths[1]);
+            vec![a, b, c]
+        };
+        if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+            return None;
+        }
+        let mut out = [0i128; 3];
+        for (i, p) in parts.iter().enumerate() {
+            out[i] = p.parse::<i128>().ok()?;
+        }
+        Some(out)
+    }
+
+    // A fraction is allowed only on the seconds, and only in the time half.
+    let (time_head, frac) = match time_part.split_once(|c| c == '.' || c == ',') {
+        Some((h, f)) if f.bytes().all(|b| b.is_ascii_digit()) && !f.is_empty() => (h, f),
+        Some(_) => return None,
+        None => (time_part, ""),
+    };
+
+    let [years, months_f, days] = fields(date_part, [4, 2, 2])?;
+    let [hours, minutes, seconds] = if time_head.is_empty() {
+        [0, 0, 0]
+    } else {
+        fields(time_head, [2, 2, 2])?
+    };
+    // A bare date with no `T` is ambiguous against the unit form only in ways
+    // the digit test already excludes, but an empty date is not a duration.
+    if date_part.is_empty() {
+        return None;
+    }
+
+    const NPS: i128 = 1_000_000_000;
+    let mut nanos = frac
+        .chars()
+        .chain(std::iter::repeat('0'))
+        .take(9)
+        .fold(0i128, |acc, c| acc * 10 + c.to_digit(10).unwrap_or(0) as i128);
+    nanos += (hours * 3600 + minutes * 60 + seconds) * NPS;
+
+    Some(Value::Property(PropertyValue::Duration {
+        months: (years * 12 + months_f) as i64,
+        days: days as i64,
+        seconds: (nanos / NPS) as i64,
+        nanos: (nanos % NPS) as i32,
+    }))
+}
+
 /// Parse ISO 8601 duration string (e.g. "P1Y2M3DT4H5M6S")
 /// Parse an ISO-8601 duration, with **per-component signs** (#853).
 ///
@@ -4557,6 +4628,19 @@ fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
         Some(idx) => (&rest[..idx], &rest[idx + 1..]),
         None => (rest, ""),
     };
+
+    // ISO 8601's *alternative* duration form, which spells the components as a
+    // date and a clock rather than with unit letters:
+    //
+    //     P2012-02-02T14:37:21.545   ==   P2012Y2M2DT14H37M21.545S
+    //
+    // The unit scanner below cannot read it -- there are no units to read, and
+    // its `-` handling is a per-component sign, so the separators looked like
+    // signs on empty numbers and the whole string scanned to zero. `duration()`
+    // returned `PT0S` for a perfectly valid duration, with no error (#1005).
+    if let Some(v) = parse_extended_duration(date_part, time_part) {
+        return Ok(v);
+    }
 
     const NPS: i128 = 1_000_000_000;
     // A mean Gregorian month is exactly 2,629,746 seconds (#829).

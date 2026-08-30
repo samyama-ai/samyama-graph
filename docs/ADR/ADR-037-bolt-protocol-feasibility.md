@@ -37,7 +37,7 @@
 > | Scenario | Actual cause |
 > |---|---|
 > | `Temporal8[1]`, `[6]` | `nanos` not normalised — `nanos: 1000000006` should carry a second, giving `…M27.000000006S` where we render `…M26.1000000006S` |
-> | `Temporal2[7]` | a malformed duration string is silently accepted as a zero duration |
+> | `Temporal2[7]` | ~~a malformed duration string is silently accepted as a zero duration~~ — **restated 2026-08-30**: the string is *valid*. `'P2012-02-02T14:37:21.545'` is ISO 8601's alternative duration notation, spelling the components as a date and a clock; the unit scanner cannot read it and returned zero |
 > | `Temporal10[9]`, `[10]` | extended-year date literals (`-999999999-01-01`); `duration.between` itself is correct |
 > | `Temporal3[10]` ×2 | datetime *selection* semantics; the zone handling underneath is correct |
 > | `Temporal1[11]` | `datetime.fromepoch` / `datetime.fromepochmillis` not implemented |
