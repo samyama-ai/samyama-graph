@@ -249,6 +249,47 @@ fn extract_agg_inner(
                 map_expr: map_expr.clone(),
             }
         }
+        // `ALL(ok IN collect(x) WHERE ok)`. The same class as the collection
+        // literal above, in the sibling that fix did not reach: the aggregate
+        // sits in the *list* a predicate iterates, so leaving it here handed
+        // `collect` to the scalar evaluator and produced "Unknown function:
+        // collect" — the identical error #670 was raised for, one variant
+        // over (#997).
+        //
+        // The predicate itself is left alone, for the same reason a
+        // comprehension's body is: it runs once per element with the loop
+        // variable bound, so an aggregate there is a different question and
+        // must not be silently hoisted out of the loop.
+        Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+            Expression::PredicateFunction {
+                name: name.clone(),
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                predicate: predicate.clone(),
+            }
+        }
+        // `reduce(t = 0, x IN collect(n.v) | t + x)`. The seed and the list are
+        // evaluated once, so both hoist; the body is per-element and does not.
+        Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+            Expression::Reduce {
+                accumulator: accumulator.clone(),
+                init: Box::new(extract_agg_inner(init, counter, aggs)),
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                expression: expression.clone(),
+            }
+        }
+        // `collect(x)[0]`, `collect(x)[1..3]` — structurally the same as the
+        // binary arm above, and missed for the same reason.
+        Expression::Index { expr, index } => Expression::Index {
+            expr: Box::new(extract_agg_inner(expr, counter, aggs)),
+            index: Box::new(extract_agg_inner(index, counter, aggs)),
+        },
+        Expression::ListSlice { expr, start, end } => Expression::ListSlice {
+            expr: Box::new(extract_agg_inner(expr, counter, aggs)),
+            start: start.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+            end: end.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+        },
         // Leaf expressions and others — no aggregates possible
         other => other.clone(),
     }
@@ -433,6 +474,38 @@ fn expression_has_aggregate(expr: &Expression) -> bool {
             expression_has_aggregate(left) || expression_has_aggregate(right)
         }
         Expression::Unary { expr, .. } => expression_has_aggregate(expr),
+        // The detector has to agree with `extract_agg_inner` above, arm for
+        // arm. It decides whether an `AggregateOperator` is planned at all,
+        // so a shape the extractor can rewrite but this cannot see is never
+        // given the chance (#997).
+        //
+        // Loop bodies are excluded on both sides for the same reason.
+        Expression::Case { operand, when_clauses, else_result } => {
+            operand.as_ref().is_some_and(|e| expression_has_aggregate(e))
+                || when_clauses.iter().any(|(c, t)| {
+                    expression_has_aggregate(c) || expression_has_aggregate(t)
+                })
+                || else_result.as_ref().is_some_and(|e| expression_has_aggregate(e))
+        }
+        Expression::ListExpr(items) => items.iter().any(expression_has_aggregate),
+        Expression::MapExpr(entries) => {
+            entries.iter().any(|(_, e)| expression_has_aggregate(e))
+        }
+        Expression::ListComprehension { list_expr, .. }
+        | Expression::PredicateFunction { list_expr, .. } => {
+            expression_has_aggregate(list_expr)
+        }
+        Expression::Reduce { init, list_expr, .. } => {
+            expression_has_aggregate(init) || expression_has_aggregate(list_expr)
+        }
+        Expression::Index { expr, index } => {
+            expression_has_aggregate(expr) || expression_has_aggregate(index)
+        }
+        Expression::ListSlice { expr, start, end } => {
+            expression_has_aggregate(expr)
+                || start.as_ref().is_some_and(|e| expression_has_aggregate(e))
+                || end.as_ref().is_some_and(|e| expression_has_aggregate(e))
+        }
         _ => false,
     }
 }
