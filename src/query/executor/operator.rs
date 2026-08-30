@@ -13279,6 +13279,14 @@ pub struct MergeOperator {
     /// The same for `ON MATCH SET`.
     on_match_entity_set: Vec<(String, bool, Expression)>,
     executed: bool,
+    /// Rows this MERGE still owes its caller.
+    ///
+    /// MERGE binds **every** match, not the first one. `MATCH (a) MERGE (b)`
+    /// over a two-node graph is four rows, and `MERGE (b)` on its own is two;
+    /// taking the first match and stopping made both of them one per input row
+    /// (#956). So one input row can produce many output rows and they queue
+    /// here.
+    pending: std::collections::VecDeque<Record>,
 }
 
 impl MergeOperator {
@@ -13313,6 +13321,7 @@ impl MergeOperator {
             on_create_entity_set: Vec::new(),
             on_match_entity_set: Vec::new(),
             executed: false,
+            pending: std::collections::VecDeque::new(),
         }
     }
 
@@ -13780,6 +13789,12 @@ impl PhysicalOperator for MergeOperator {
         // seeds the merge; without one it is a leaf that runs exactly once.
         // Taking the input out first keeps the borrow checker happy while the
         // merge body holds `&mut store`.
+        // One input row can owe several output rows: MERGE binds every match,
+        // not the first (#956).
+        if let Some(r) = self.pending.pop_front() {
+            return Ok(Some(r));
+        }
+
         let base = match self.input.take() {
             Some(mut input) => {
                 let row = input.next_mut(store, tenant_id)?;
@@ -13838,19 +13853,29 @@ impl PhysicalOperator for MergeOperator {
         // Through `Self::node_matches` rather than a third copy of the same
         // comparison: this was the second, and it drifted from the first by
         // exactly this gap.
-        let mut matched_node_id = Self::bound_node(&base, start.variable.as_ref());
-        if matched_node_id.is_none() {
-            let candidates: Vec<&crate::graph::Node> = match labels.first() {
-                Some(first_label) => store.get_nodes_by_label(first_label),
-                None => store.all_nodes(),
-            };
-            for node in candidates {
-                if Self::node_matches(node, labels, props) {
-                    matched_node_id = Some(node.id);
-                    break;
-                }
+        // **Every** match, not the first. MERGE is match-or-create, and when it
+        // matches it binds each match as its own row -- `MATCH (a) MERGE (b)`
+        // over two nodes is four rows. Taking the first and stopping made it
+        // one per input row, silently, with the extra rows simply absent
+        // (#956).
+        let bound = Self::bound_node(&base, start.variable.as_ref());
+        let matched: Vec<NodeId> = match bound {
+            // A variable the row already bound is not a search: it is that one
+            // node.
+            Some(id) => vec![id],
+            None => {
+                let candidates: Vec<&crate::graph::Node> = match labels.first() {
+                    Some(first_label) => store.get_nodes_by_label(first_label),
+                    None => store.all_nodes(),
+                };
+                candidates
+                    .into_iter()
+                    .filter(|node| Self::node_matches(node, labels, props))
+                    .map(|node| node.id)
+                    .collect()
             }
-        }
+        };
+        let matched_node_id = matched.first().copied();
 
         let node_id;
         let mut record = base;
@@ -13868,6 +13893,23 @@ impl PhysicalOperator for MergeOperator {
                 }
             }
             Self::apply_labels(&self.on_match_labels, &record, store, tenant_id);
+
+            // The rest of the matches, each its own row. ON MATCH SET applies
+            // to every one of them, not only the first.
+            for extra in matched.iter().skip(1) {
+                let mut r = record.clone();
+                r.bind(start_var.clone(), Value::NodeRef(*extra));
+                for (var, prop, expr) in &self.on_match_set {
+                    if var == &start_var {
+                        let val = eval_expression(expr, &r, store)?;
+                        if let Value::Property(pv) = val {
+                            let _ = store.set_node_property(tenant_id, *extra, prop.clone(), pv);
+                        }
+                    }
+                }
+                Self::apply_labels(&self.on_match_labels, &r, store, tenant_id);
+                self.pending.push_back(r);
+            }
         } else {
             node_id = store.create_node_with_labels(labels.iter().cloned());
 
