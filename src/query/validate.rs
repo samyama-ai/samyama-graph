@@ -2894,7 +2894,18 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         check(&path.start.variable)?;
                         for seg in &path.segments {
                             check(&seg.node.variable)?;
-                            check(&seg.edge.variable)?;
+                            // ...but *not* a var-length segment's variable. A
+                            // list is exactly what `[rs*]` binds, so
+                            // `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` is
+                            // legal openCypher and means "the walk is
+                            // precisely `rs`". The rule below is about a
+                            // single-hop `[rs]`, where a list genuinely is
+                            // not a relationship; applied to the var-length
+                            // form it rejected three TCK scenarios outright
+                            // (#984).
+                            if seg.edge.length.is_none() {
+                                check(&seg.edge.variable)?;
+                            }
                         }
                     }
                 }
@@ -2937,7 +2948,14 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                     check(&path.start.variable)?;
                     for seg in &path.segments {
                         check(&seg.node.variable)?;
-                        check(&seg.edge.variable)?;
+                        // The same var-length exemption as the pipeline copy
+                        // above. `MATCH ... WITH ... MATCH` is the by-kind
+                        // shape, and it is the shape all three affected TCK
+                        // scenarios are written in, so fixing only the
+                        // pipeline copy would have changed nothing at all.
+                        if seg.edge.length.is_none() {
+                            check(&seg.edge.variable)?;
+                        }
                     }
                 }
             }
