@@ -2319,7 +2319,8 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 pub const KNOWN_FUNCTIONS: &[&str] = &[
     "abs", "acos", "asin", "atan", "atan2", "bfs", "breadthfirstsearch", "cdlp", "ceil",
     "coalesce", "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
-    "date.truncate", "datetime", "datetime.truncate", "degrees", "dijkstra", "duration",
+    "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
+    "datetime.truncate", "degrees", "dijkstra", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
     "duration_between", "e", "elementid", "endnode", "exists", "exp", "false", "floor",
     "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
@@ -3489,6 +3490,43 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // `<type>.truncate(unit, value, map)` for all five namespaces (#769).
         // The namespace names the *result* type, so `date.truncate` over a
         // datetime returns a Date.
+        // `datetime.fromepoch(seconds, nanoseconds)` and
+        // `datetime.fromepochmillis(millis)`. Both name an instant in UTC, so
+        // the result is a `ZonedDateTime` at offset 0 with no zone id --
+        // an epoch has no locality to attach.
+        //
+        // Nanoseconds are carried whole rather than folded into the seconds:
+        // `datetime.fromepoch(416779, 999999999)` is
+        // 1970-01-05T19:46:19.999999999Z, which no millisecond-based
+        // representation can express (#1003).
+        "datetime.fromepoch" | "datetime.fromepochmillis" => {
+            let want = if lowered == "datetime.fromepoch" { 2 } else { 1 };
+            if args.len() != want {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{name}() requires {want} argument(s)"
+                )));
+            }
+            let (secs, nanos) = if want == 2 {
+                (extract_int(&args[0])?, extract_int(&args[1])?)
+            } else {
+                let millis = extract_int(&args[0])?;
+                // `div_euclid`, not `/`: a negative epoch millisecond is a real
+                // instant before 1970, and truncating toward zero would place
+                // it in the wrong second with a negative nanosecond remainder.
+                (millis.div_euclid(1_000), millis.rem_euclid(1_000) * 1_000_000)
+            };
+            if !(0..1_000_000_000).contains(&nanos) {
+                return Err(ExecutionError::RuntimeError(
+                    "nanoseconds must be in 0..1000000000".to_string(),
+                ));
+            }
+            Ok(Value::Property(PropertyValue::ZonedDateTime {
+                secs,
+                nanos: nanos as u32,
+                offset_seconds: 0,
+                zone: None,
+            }))
+        }
         "date.truncate" | "time.truncate" | "localtime.truncate"
         | "localdatetime.truncate" | "datetime.truncate" => {
             if args.len() < 2 {
