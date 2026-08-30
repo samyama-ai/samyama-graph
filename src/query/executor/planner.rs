@@ -1541,7 +1541,20 @@ impl QueryPlanner {
             // predicate is part of the optional pattern, so a row failing it
             // must still emit nulls, and a filter above the expand would
             // delete exactly that row.
-            if operator.is_some() && per_match_where[match_idx].is_none() {
+            //
+            // `per_match_where` is not the only place that `WHERE` can land.
+            // A predicate spanning the optional side and an outer variable --
+            // `OPTIONAL MATCH (b)-[r2]-(c) WHERE r <> r2` -- is classified as
+            // a *join* predicate above, which leaves `per_match_where` empty.
+            // Checking only `per_match_where` let exactly those clauses push
+            // down, and the pushdown has nowhere to put a join predicate, so
+            // it was dropped: `r <> r2` stopped being applied at all and the
+            // relationship a row was matched on came back as its own
+            // `r2` (#982). Both stores have to be empty to push down.
+            if operator.is_some()
+                && per_match_where[match_idx].is_none()
+                && optional_join_predicates[match_idx].is_none()
+            {
                 if let Some(null_vars) =
                     Self::optional_pushdown_vars(match_clause, &known_vars)
                 {
