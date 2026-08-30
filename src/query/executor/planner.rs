@@ -7559,6 +7559,7 @@ mod tests {
             foreach_clause: None,
             unwind_clause: None,
             unwind_leading: false,
+            star_expanded_to_nothing: false,
             merge_clause: None,
             union_queries: vec![],
             explain: false,
