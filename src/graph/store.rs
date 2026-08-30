@@ -1395,6 +1395,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // true (#952) -- the engine disagreeing with itself across two paths
         // to the same state.
         if matches!(val, PropertyValue::Null) {
+            // Still checked for existence. The early return skipped the
+            // `NodeNotFound` the non-null path raises, so setting a property
+            // to null on a node that does not exist silently succeeded --
+            // caught by `test_set_node_property`, which uses exactly that
+            // case. A removal is still a write, and a write to nothing is
+            // still an error.
+            if self.get_node(node_id).is_none() {
+                return Err(GraphError::NodeNotFound(node_id));
+            }
             self.remove_node_property(node_id, &key_str);
             return Ok(());
         }
@@ -1513,8 +1522,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
-        // Null removes, as on the node path above (#952).
+        // Null removes, as on the node path above (#952) -- and, as there,
+        // a write to an edge that does not exist is still an error.
         if matches!(val, PropertyValue::Null) {
+            if self.get_edge(edge_id).is_none() {
+                return Err(GraphError::EdgeNotFound(edge_id));
+            }
             self.remove_edge_property(edge_id, &key_str);
             return Ok(());
         }
