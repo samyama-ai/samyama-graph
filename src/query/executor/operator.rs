@@ -263,6 +263,17 @@ fn normalized_duration(months: i64, days: i64, seconds: i128, nanos: i128) -> Pr
 }
 
 
+/// Whole-graph shape metrics. Separate from `Centrality` because two of them
+/// return a single scalar rather than a score per node.
+#[derive(Debug, Clone, Copy)]
+enum Metric {
+    Eccentricity,
+    Diameter,
+    Radius,
+    AvgNeighbourDegree,
+    Assortativity,
+}
+
 /// Which centrality `execute_centrality` should compute.
 #[derive(Debug, Clone, Copy)]
 enum Centrality {
@@ -2329,29 +2340,30 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
     "abs", "acos", "adamicadar", "articulationpoints", "asin", "atan", "atan2",
-    "betweenness", "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp",
-    "ceil", "closeness", "closenesscentrality", "coalesce", "commonneighbors",
-    "commonneighbours", "components", "connectedcomponents", "corenumber", "cos", "cosh",
-    "cosine", "cot", "cycledetection", "date", "date.truncate", "datetime",
-    "datetime.fromepoch", "datetime.fromepochmillis", "datetime.truncate", "degree",
-    "degreecentrality", "degrees", "dijkstra", "duration", "duration.between",
+    "averageneighbordegree", "averageneighbourdegree", "betweenness",
+    "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp", "ceil",
+    "closeness", "closenesscentrality", "coalesce", "commonneighbors", "commonneighbours",
+    "components", "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot",
+    "cycledetection", "date", "date.truncate", "datetime", "datetime.fromepoch",
+    "datetime.fromepochmillis", "datetime.truncate", "degree", "degreeassortativity",
+    "degreecentrality", "degrees", "diameter", "dijkstra", "duration", "duration.between",
     "duration.indays", "duration.inmonths", "duration.inseconds", "duration_between", "e",
-    "eigenvector", "eigenvectorcentrality", "elementid", "endnode", "exists", "exp",
-    "false", "findcycle", "floor", "harmonic", "harmoniccentrality", "haslabels",
-    "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan",
-    "jaccard", "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left",
-    "length", "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate",
-    "log", "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
-    "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "propagationranking",
-    "properties", "radians", "rand", "randomuuid", "range", "relationships", "rels",
-    "replace", "reverse", "right", "round", "rtrim", "scc", "shortestpath",
-    "shortestpathweighted", "sign", "sin", "sinh", "size", "split", "sqrt", "startnode",
-    "stdev", "stdevp", "substring", "subsumes", "symptomexplanation", "tail", "tan", "tanh",
-    "temporalreachability", "temporalshortestpath", "time", "time.truncate", "timestamp",
-    "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint", "tointeger",
-    "tointegerornull", "tolower", "tolowercase", "topologicalsort", "toposort", "tostring",
-    "tostringornull", "toupper", "touppercase", "trianglecount", "trim", "true", "type",
-    "valuetype", "wcc", "weightedpath",
+    "eccentricity", "eigenvector", "eigenvectorcentrality", "elementid", "endnode",
+    "exists", "exp", "false", "findcycle", "floor", "harmonic", "harmoniccentrality",
+    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
+    "isnan", "jaccard", "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc",
+    "left", "length", "localdatetime", "localdatetime.truncate", "localtime",
+    "localtime.truncate", "log", "log10", "louvain", "ltrim", "maxflow", "mst", "nodes",
+    "or.solve", "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
+    "propagationranking", "properties", "radians", "radius", "rand", "randomuuid", "range",
+    "relationships", "rels", "replace", "reverse", "right", "round", "rtrim", "scc",
+    "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size", "split", "sqrt",
+    "startnode", "stdev", "stdevp", "substring", "subsumes", "symptomexplanation", "tail",
+    "tan", "tanh", "temporalreachability", "temporalshortestpath", "time", "time.truncate",
+    "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
+    "tointeger", "tointegerornull", "tolower", "tolowercase", "topologicalsort", "toposort",
+    "tostring", "tostringornull", "toupper", "touppercase", "trianglecount", "trim", "true",
+    "type", "valuetype", "wcc", "weightedpath",
 ];
 
 /// Is `name` a function this engine implements?
@@ -13093,6 +13105,94 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.diameter()`, `algo.eccentricity()` and friends.
+    ///
+    /// Two result shapes. Eccentricity and average neighbour degree are a
+    /// score per node; diameter, radius and assortativity are one number about
+    /// the whole graph, and come back as a single row.
+    ///
+    /// A disconnected graph has no diameter or radius, and that is an error
+    /// rather than the diameter of the largest component. The latter is a
+    /// smaller number indistinguishable from a real one, and a caller sizing a
+    /// traversal budget from it would under-provision.
+    fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        // Undirected by default, as every one of these is a statement about
+        // graph shape rather than about flow.
+        let mut und = true;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Boolean(b)) = m.get("undirected") {
+                    und = *b;
+                }
+            }
+        }
+
+        let scalar = |v: Option<i64>, what: &str| -> ExecutionResult<Value> {
+            v.map(|x| Value::Property(PropertyValue::Integer(x))).ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "the graph is not connected, so it has no {what}. Use \
+                     algo.wcc() to find the components, then ask about one."
+                ))
+            })
+        };
+
+        match which {
+            Metric::Diameter | Metric::Radius => {
+                let (v, what) = match which {
+                    Metric::Diameter => (crate::algo::diameter(&view, und), "diameter"),
+                    _ => (crate::algo::radius(&view, und), "radius"),
+                };
+                let mut rec = Record::new();
+                rec.bind(what.to_string(), scalar(v, what)?);
+                self.results.push(rec);
+            }
+            Metric::Assortativity => {
+                let r = crate::algo::degree_assortativity(&view, und).ok_or_else(|| {
+                    // Not NaN and not 0.0. Every edge joining nodes of equal
+                    // degree makes the correlation 0/0, and reporting 0.0
+                    // would claim "no assortativity" about a perfectly regular
+                    // graph -- a real answer to a question with none.
+                    ExecutionError::RuntimeError(
+                        "degree assortativity is undefined: every edge joins nodes of \
+                         the same degree, so the correlation has no denominator"
+                            .to_string(),
+                    )
+                })?;
+                let mut rec = Record::new();
+                rec.bind("assortativity".to_string(), Value::Property(PropertyValue::Float(r)));
+                self.results.push(rec);
+            }
+            Metric::Eccentricity => {
+                for (id, e) in crate::algo::ranked_opt(&view, &crate::algo::eccentricity(&view, und)) {
+                    let mut rec = Record::new();
+                    self.bind_node(store, &mut rec, "node", id);
+                    // Null, not omitted: a node that cannot reach the whole
+                    // graph has no eccentricity, and dropping its row would
+                    // silently shorten a result a caller is joining on.
+                    rec.bind(
+                        "eccentricity".to_string(),
+                        match e {
+                            Some(v) => Value::Property(PropertyValue::Integer(v)),
+                            None => Value::Property(PropertyValue::Null),
+                        },
+                    );
+                    self.results.push(rec);
+                }
+            }
+            Metric::AvgNeighbourDegree => {
+                let scores = crate::algo::average_neighbour_degree(&view, und);
+                for (id, s) in crate::algo::ranked(&view, &scores) {
+                    let mut rec = Record::new();
+                    self.bind_node(store, &mut rec, "node", id);
+                    rec.bind("score".to_string(), Value::Property(PropertyValue::Float(s)));
+                    self.results.push(rec);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13572,6 +13672,13 @@ impl AlgorithmOperator {
                 | "findcycle"
                 | "bridges"
                 | "articulationpoints"
+                // Whole-graph shape.
+                | "eccentricity"
+                | "diameter"
+                | "radius"
+                | "averageneighbordegree"
+                | "averageneighbourdegree"
+                | "degreeassortativity"
         )
     }
 }
@@ -13607,6 +13714,11 @@ impl PhysicalOperator for AlgorithmOperator {
                 "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
                 "bridges" => self.execute_structural(store, true)?,
                 "articulationpoints" => self.execute_structural(store, false)?,
+                "eccentricity" => self.execute_metric(store, Metric::Eccentricity)?,
+                "diameter" => self.execute_metric(store, Metric::Diameter)?,
+                "radius" => self.execute_metric(store, Metric::Radius)?,
+                "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
+                "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13661,6 +13773,11 @@ impl PhysicalOperator for AlgorithmOperator {
                 "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
                 "bridges" => self.execute_structural(store, true)?,
                 "articulationpoints" => self.execute_structural(store, false)?,
+                "eccentricity" => self.execute_metric(store, Metric::Eccentricity)?,
+                "diameter" => self.execute_metric(store, Metric::Diameter)?,
+                "radius" => self.execute_metric(store, Metric::Radius)?,
+                "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
+                "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;

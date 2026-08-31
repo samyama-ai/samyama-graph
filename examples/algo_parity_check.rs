@@ -25,6 +25,7 @@ use samyama_graph_algorithms::{
     betweenness_centrality, closeness_centrality, core_number, count_triangles,
     degree_centrality, eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     local_clustering_coefficient, local_clustering_coefficient_directed, page_rank, prim_mst,
     strongly_connected_components, weakly_connected_components, GraphView, NodeId,
     PageRankConfig,
@@ -110,6 +111,57 @@ fn main() {
             .collect();
         let view = view_of(nodes, &edges, directed);
         let want = &g["networkx"];
+
+        // Whole-graph shape, on a singly-stored view as the engine builds one.
+        {
+            let single = view_single(nodes, &edges);
+            let ecc = eccentricity(&single, true);
+            let te = &want["eccentricity"];
+            let ok_e = if te.is_null() {
+                ecc.iter().any(|x| x.is_none())
+            } else {
+                (0..nodes).all(|i| ecc[i] == te[i.to_string()].as_i64())
+            };
+            checks += 1;
+            if !ok_e { failures.push(format!("{name} eccentricity disagrees")); }
+
+            for (algo, ours) in [("diameter", diameter(&single, true)),
+                                 ("radius", radius(&single, true))] {
+                checks += 1;
+                if ours != want[algo].as_i64() {
+                    failures.push(format!("{name} {algo}: ours {ours:?} vs {:?}", want[algo]));
+                }
+            }
+
+            let and = average_neighbour_degree(&single, true);
+            let ta = &want["average_neighbor_degree"];
+            let mut d = 0.0f64;
+            for i in 0..nodes {
+                d = d.max((and[i] - ta[i.to_string()].as_f64().unwrap_or(f64::NAN)).abs());
+                checks += 1;
+            }
+            if d > TOL_CENTRALITY {
+                failures.push(format!("{name} average_neighbor_degree max |delta| {d:.3e}"));
+            }
+
+            // `null` here means NetworkX returned NaN -- every edge joins
+            // equal degrees -- and the engine returns None. Compared as
+            // equals rather than skipped: agreeing that a value is undefined
+            // is a real agreement.
+            let ours_a = degree_assortativity(&single, true);
+            let theirs_a = want["degree_assortativity"].as_f64();
+            checks += 1;
+            let ok_a = match (ours_a, theirs_a) {
+                (None, None) => true,
+                (Some(x), Some(y)) => (x - y).abs() < TOL_CENTRALITY,
+                _ => false,
+            };
+            if !ok_a {
+                failures.push(format!("{name} degree_assortativity: ours {ours_a:?} vs {theirs_a:?}"));
+            }
+            println!("  {}    {name:14} {:12} ecc/diam/rad/avgnbr/assort",
+                     if ok_e && ok_a && d <= TOL_CENTRALITY { "ok" } else { "FAIL" }, "shape");
+        }
 
         // Link prediction, over the same unconnected pairs the recorder used.
         // Keyed `"u-v"` with u < v; the key set *is* the pair list, so a pair

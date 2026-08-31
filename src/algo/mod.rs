@@ -27,6 +27,7 @@ pub use samyama_graph_algorithms::{
     eigenvector_centrality, harmonic_centrality, ranked,
     predict_links, score_one, LinkScore, PairScore,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
 };
 
 /// Build a GraphView from the store for algorithm execution

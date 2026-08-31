@@ -14,6 +14,7 @@ pub mod lcc;
 pub mod pca;
 pub mod centrality;
 pub mod link_prediction;
+pub mod metrics;
 pub mod traversal;
 pub mod temporal;
 
@@ -35,6 +36,10 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use metrics::{
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
+    ranked_opt,
+};
 pub use traversal::{
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
 };
