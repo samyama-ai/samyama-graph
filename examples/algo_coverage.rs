@@ -59,7 +59,8 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// many aliases we felt like adding -- a measurement that improves when
 /// nothing is built.
 const ALIASES: &[&str] = &[
-    "betweennessCentrality", "closenessCentrality", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "harmonicCentrality",
+    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber",
+    "degreeCentrality", "eigenvectorCentrality", "harmonicCentrality",
 ];
 
 /// Every candidate, with a call that would work if the algorithm existed.
@@ -101,9 +102,10 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("kCore", "CALL algo.kCore() YIELD node, core RETURN count(*)"),
     ("kMeans", "CALL algo.kMeans() YIELD node, cluster RETURN count(*)"),
     ("nodeSimilarity", "CALL algo.nodeSimilarity() YIELD node1, node2, similarity RETURN count(*)"),
-    ("jaccard", "CALL algo.jaccard({a}, {b}) YIELD similarity RETURN count(*)"),
-    ("adamicAdar", "CALL algo.adamicAdar({a}, {b}) YIELD score RETURN count(*)"),
-    ("commonNeighbors", "CALL algo.commonNeighbors({a}, {b}) YIELD score RETURN count(*)"),
+    ("jaccard", "CALL algo.jaccard({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
+    ("adamicAdar", "CALL algo.adamicAdar({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
+    ("commonNeighbors", "CALL algo.commonNeighbors({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
+    ("commonNeighbours", "CALL algo.commonNeighbours({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
     ("allShortestPaths", "CALL algo.allShortestPaths({a}, {b}) YIELD path RETURN count(*)"),
     ("aStar", "CALL algo.aStar({a}, {b}, 'weight') YIELD path RETURN count(*)"),
     ("yens", "CALL algo.yens({a}, {b}, 3) YIELD path RETURN count(*)"),

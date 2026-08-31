@@ -25,6 +25,7 @@ pub use samyama_graph_algorithms::{
     TemporalEdges, Explanation, TemporalPath,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
     eigenvector_centrality, harmonic_centrality, ranked,
+    predict_links, score_one, LinkScore, PairScore,
 };
 
 /// Build a GraphView from the store for algorithm execution

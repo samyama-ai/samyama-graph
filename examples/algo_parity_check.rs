@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use samyama_graph_algorithms::{
     betweenness_centrality, closeness_centrality, core_number, count_triangles,
     degree_centrality, eigenvector_centrality, harmonic_centrality,
+    link_prediction::{score_one, LinkScore},
     local_clustering_coefficient, local_clustering_coefficient_directed, page_rank, prim_mst,
     strongly_connected_components, weakly_connected_components, GraphView, NodeId,
     PageRankConfig,
@@ -109,6 +110,36 @@ fn main() {
             .collect();
         let view = view_of(nodes, &edges, directed);
         let want = &g["networkx"];
+
+        // Link prediction, over the same unconnected pairs the recorder used.
+        // Keyed `"u-v"` with u < v; the key set *is* the pair list, so a pair
+        // the recorder excluded is never asked about here either.
+        for (algo, which) in [
+            ("common_neighbours", LinkScore::CommonNeighbours),
+            ("jaccard", LinkScore::Jaccard),
+            ("adamic_adar", LinkScore::AdamicAdar),
+        ] {
+            let Some(theirs) = want.get(algo).and_then(|v| v.as_object()) else { continue };
+            let single = view_single(nodes, &edges);
+            let (mut worst, mut at) = (0.0f64, String::new());
+            for (key, t) in theirs {
+                let Some((a, b)) = key.split_once('-') else { continue };
+                let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else { continue };
+                let ours = score_one(&single, which, a, b).unwrap_or(f64::NAN);
+                let t = t.as_f64().unwrap_or(f64::NAN);
+                checks += 1;
+                let d = (ours - t).abs();
+                if d > worst {
+                    worst = d;
+                    at = key.clone();
+                }
+                if d > TOL_CENTRALITY {
+                    failures.push(format!("{name} {algo} pair {key}: ours {ours} vs networkx {t}"));
+                }
+            }
+            println!("  {}    {name:14} {algo:12} max |delta| {worst:.3e} at pair {at} \
+                      ({} pairs)", if worst <= TOL_CENTRALITY { "ok" } else { "FAIL" }, theirs.len());
+        }
 
         // Centrality is checked against a view built the way the *engine*
         // builds one -- each edge stored once -- rather than against `view_of`,

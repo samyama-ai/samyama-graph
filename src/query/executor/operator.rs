@@ -2328,18 +2328,19 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// reachability test fail, and narrowing an existing guard to keep a new check
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "asin", "atan", "atan2", "betweenness", "betweennesscentrality", "bfs",
-    "breadthfirstsearch", "cdlp", "ceil", "closeness", "closenesscentrality", "coalesce",
-    "components", "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot",
-    "date", "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
+    "abs", "acos", "adamicadar", "asin", "atan", "atan2", "betweenness",
+    "betweennesscentrality", "bfs", "breadthfirstsearch", "cdlp", "ceil", "closeness",
+    "closenesscentrality", "coalesce", "commonneighbors", "commonneighbours", "components",
+    "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot", "date",
+    "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
     "datetime.truncate", "degree", "degreecentrality", "degrees", "dijkstra", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
     "duration_between", "e", "eigenvector", "eigenvectorcentrality", "elementid", "endnode",
     "exists", "exp", "false", "floor", "harmonic", "harmoniccentrality", "haslabels",
     "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan",
-    "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
-    "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
-    "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
+    "jaccard", "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left",
+    "length", "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate",
+    "log", "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
     "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "propagationranking",
     "properties", "radians", "rand", "randomuuid", "range", "relationships", "rels",
     "replace", "reverse", "right", "round", "rtrim", "scc", "shortestpath",
@@ -12905,6 +12906,87 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.jaccard({limit: 10})` and friends.
+    ///
+    /// Two shapes in one entry point, because a caller wants one of two
+    /// questions answered and they take different arguments:
+    ///
+    ///   * with two node ids -- *how similar are these two?* -- one row.
+    ///   * without -- *which unconnected pairs are most likely?* -- the top
+    ///     `limit`, default 100.
+    ///
+    /// The ranking form excludes pairs that are **already connected**. Link
+    /// prediction predicts links, and a list whose top entries are pairs
+    /// already joined answers a question nobody asked.
+    fn execute_link_prediction(
+        &mut self,
+        store: &GraphStore,
+        which: crate::algo::LinkScore,
+    ) -> ExecutionResult<()> {
+        let (mut label, mut edge_type, mut limit) = (None, None, 100usize);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
+                if let Some(PropertyValue::Integer(n)) = m.get("limit") {
+                    limit = (*n).max(0) as usize;
+                }
+            }
+        }
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+
+        let ids: Vec<u64> = self
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Expression::Literal(PropertyValue::Integer(n)) => Some(*n as u64),
+                _ => None,
+            })
+            .collect();
+
+        let mut bind = |rec: &mut Record, key: &str, id: u64| {
+            let nid = NodeId::new(id);
+            match store.get_node(nid) {
+                Some(n) => rec.bind(key.to_string(), Value::Node(nid, Box::new(n.clone()))),
+                None => rec.bind(key.to_string(), Value::NodeRef(nid)),
+            }
+        };
+
+        if ids.len() >= 2 {
+            let idx = |raw: u64| -> ExecutionResult<usize> {
+                view.node_to_index.get(&raw).copied().ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!(
+                        "node {raw} is not in the projected graph -- check the \
+                         `label` and `edgeType` filters"
+                    ))
+                })
+            };
+            let (u, v) = (idx(ids[0])?, idx(ids[1])?);
+            let score = crate::algo::score_one(&view, which, u, v).ok_or_else(|| {
+                ExecutionError::RuntimeError("node index out of range".to_string())
+            })?;
+            let mut rec = Record::new();
+            bind(&mut rec, "node1", ids[0]);
+            bind(&mut rec, "node2", ids[1]);
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+            self.results.push(rec);
+            return Ok(());
+        }
+
+        for p in crate::algo::predict_links(&view, which, limit) {
+            let mut rec = Record::new();
+            bind(&mut rec, "node1", p.a);
+            bind(&mut rec, "node2", p.b);
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(p.score)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13371,6 +13453,12 @@ impl AlgorithmOperator {
                 | "eigenvectorcentrality"
                 | "kcore"
                 | "corenumber"
+                // Link prediction: a score over a *pair*, so these yield
+                // `node1, node2, score` rather than a column beside the nodes.
+                | "commonneighbors"
+                | "commonneighbours"
+                | "jaccard"
+                | "adamicadar"
         )
     }
 }
@@ -13399,6 +13487,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
                 "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
                 "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
+                "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
+                "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
+                "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13446,6 +13537,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
                 "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
                 "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
+                "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
+                "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
+                "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
