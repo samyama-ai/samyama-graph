@@ -14,7 +14,9 @@ pub mod lcc;
 pub mod pca;
 pub mod centrality;
 pub mod link_prediction;
+pub mod community_detect;
 pub mod metrics;
+pub mod pathfinding_extra;
 pub mod traversal;
 pub mod temporal;
 
@@ -36,6 +38,12 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use community_detect::{
+    louvain, modularity, with_ids, Communities,
+};
+pub use pathfinding_extra::{
+    a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,
+};
 pub use metrics::{
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     ranked_opt,

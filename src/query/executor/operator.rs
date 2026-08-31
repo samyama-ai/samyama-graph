@@ -274,6 +274,34 @@ enum Metric {
     Assortativity,
 }
 
+/// A float column as something orderable, for the deterministic sort.
+///
+/// `f64` is not `Ord` because of NaN. A missing or non-numeric column sorts
+/// last rather than panicking: an algorithm that failed to bind a score has a
+/// bug, and crashing the sort would hide which row it was.
+fn ordered_float(r: &Record, column: &str) -> ordered_float_shim::F {
+    ordered_float_shim::F(
+        r.get(column)
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_float())
+            .unwrap_or(f64::NEG_INFINITY),
+    )
+}
+
+/// A tiny `PartialOrd` wrapper so `Reverse` can be used on a float key.
+mod ordered_float_shim {
+    #[derive(PartialEq, PartialOrd)]
+    pub struct F(pub f64);
+}
+
+/// Which path enumeration `execute_path_enum` should run.
+#[derive(Debug, Clone, Copy)]
+enum PathKind {
+    All,
+    AStar,
+    Yens,
+}
+
 /// Which centrality `execute_centrality` should compute.
 #[derive(Debug, Clone, Copy)]
 enum Centrality {
@@ -2339,31 +2367,33 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// reachability test fail, and narrowing an existing guard to keep a new check
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "adamicadar", "articulationpoints", "asin", "atan", "atan2",
-    "averageneighbordegree", "averageneighbourdegree", "betweenness",
-    "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp", "ceil",
-    "closeness", "closenesscentrality", "coalesce", "commonneighbors", "commonneighbours",
-    "components", "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot",
-    "cycledetection", "date", "date.truncate", "datetime", "datetime.fromepoch",
-    "datetime.fromepochmillis", "datetime.truncate", "degree", "degreeassortativity",
-    "degreecentrality", "degrees", "diameter", "dijkstra", "duration", "duration.between",
-    "duration.indays", "duration.inmonths", "duration.inseconds", "duration_between", "e",
-    "eccentricity", "eigenvector", "eigenvectorcentrality", "elementid", "endnode",
-    "exists", "exp", "false", "findcycle", "floor", "harmonic", "harmoniccentrality",
-    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
-    "isnan", "jaccard", "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc",
-    "left", "length", "localdatetime", "localdatetime.truncate", "localtime",
-    "localtime.truncate", "log", "log10", "louvain", "ltrim", "maxflow", "mst", "nodes",
-    "or.solve", "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
-    "propagationranking", "properties", "radians", "radius", "rand", "randomuuid", "range",
-    "relationships", "rels", "replace", "reverse", "right", "round", "rtrim", "scc",
-    "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size", "split", "sqrt",
-    "startnode", "stdev", "stdevp", "substring", "subsumes", "symptomexplanation", "tail",
-    "tan", "tanh", "temporalreachability", "temporalshortestpath", "time", "time.truncate",
-    "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
-    "tointeger", "tointegerornull", "tolower", "tolowercase", "topologicalsort", "toposort",
-    "tostring", "tostringornull", "toupper", "touppercase", "trianglecount", "trim", "true",
-    "type", "valuetype", "wcc", "weightedpath",
+    "abs", "acos", "adamicadar", "allshortestpaths", "articlerank", "articulationpoints",
+    "asin", "astar", "atan", "atan2", "averageneighbordegree", "averageneighbourdegree",
+    "betweenness", "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp",
+    "ceil", "closeness", "closenesscentrality", "coalesce", "commonneighbors",
+    "commonneighbours", "components", "connectedcomponents", "corenumber", "cos", "cosh",
+    "cosine", "cot", "cycledetection", "date", "date.truncate", "datetime",
+    "datetime.fromepoch", "datetime.fromepochmillis", "datetime.truncate", "degree",
+    "degreeassortativity", "degreecentrality", "degrees", "diameter", "dijkstra",
+    "duration", "duration.between", "duration.indays", "duration.inmonths",
+    "duration.inseconds", "duration_between", "e", "eccentricity", "eigenvector",
+    "eigenvectorcentrality", "elementid", "endnode", "exists", "exp", "false", "findcycle",
+    "floor", "harmonic", "harmoniccentrality", "haslabels", "haversin", "head",
+    "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan", "jaccard", "kcore",
+    "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
+    "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
+    "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
+    "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
+    "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
+    "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
+    "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
+    "split", "sqrt", "startnode", "stdev", "stdevp", "substring", "subsumes",
+    "symptomexplanation", "tail", "tan", "tanh", "temporalreachability",
+    "temporalshortestpath", "time", "time.truncate", "timestamp", "toboolean",
+    "tobooleanornull", "tofloat", "tofloatornull", "toint", "tointeger", "tointegerornull",
+    "tolower", "tolowercase", "topologicalsort", "toposort", "tostring", "tostringornull",
+    "toupper", "touppercase", "trianglecount", "trim", "true", "type", "valuetype", "wcc",
+    "weightedpath", "yens",
 ];
 
 /// Is `name` a function this engine implements?
@@ -12468,7 +12498,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "bfs" | "breadthfirstsearch" => " -- for an unweighted path, use algo.shortestPath",
             "dijkstra" | "shortestpathweighted" => " -- for a weighted path, use algo.weightedPath",
             "pagerank2" | "prank" => " -- did you mean algo.pageRank?",
-            "louvain" | "labelpropagation" => " -- for community detection, use algo.cdlp",
+            // `louvain` and `labelPropagation` used to be redirected here.
+            // Both now dispatch -- louvain is implemented, labelPropagation
+            // routes to cdlp -- so the redirect is dead and would be wrong:
+            // it would tell a caller that a procedure they can call does not
+            // exist. A hint outlives the gap it was written for unless it is
+            // removed with the fix.
             "connectedcomponents" | "components" => " -- use algo.wcc or algo.scc",
             _ => "",
         };
@@ -12532,11 +12567,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
         
-        // Sort by score descending
-        self.results.sort_by(|a, b| {
-            let score_a = a.get("score").unwrap().as_property().unwrap().as_float().unwrap();
-            let score_b = b.get("score").unwrap().as_property().unwrap().as_float().unwrap();
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        // Score descending, then node id -- see `sort_results_deterministically`.
+        self.sort_results_deterministically(|r| {
+            std::cmp::Reverse(ordered_float(r, "score"))
         });
 
         Ok(())
@@ -12626,11 +12659,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
         
-        // Sort by componentId
-        self.results.sort_by(|a, b| {
-            let cid_a = a.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
-            let cid_b = b.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
-            cid_a.cmp(&cid_b)
+        // Component id, then node id.
+        self.sort_results_deterministically(|r| {
+            r.get("componentId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+                .unwrap_or(i64::MAX)
         });
 
         Ok(())
@@ -12845,6 +12877,36 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             self.results.push(record);
         }
         Ok(())
+    }
+
+    /// Sort results by a key, always breaking ties on the node id.
+    ///
+    /// Every algorithm here sorts its output, and every one of them sorted on
+    /// a key that is **not unique**: a component id, a community id, a score
+    /// that ties. `sort_by` is free to leave equal keys in any arrangement, so
+    /// the order within a tie came from whatever map iteration produced the
+    /// rows, and two runs of the same query over the same graph returned the
+    /// same answers in a different order.
+    ///
+    /// A single run always *looks* sorted, which is why five algorithms
+    /// carried this and a comment saying "for deterministic output" (#1019).
+    ///
+    /// LANG-14 is "same query + same data => identical ordered output". This
+    /// is the one place that has to be right for all of them.
+    fn sort_results_deterministically<K, F>(&mut self, key: F)
+    where
+        K: PartialOrd,
+        F: Fn(&Record) -> K,
+    {
+        self.results.sort_by(|a, b| {
+            let node = |r: &Record| -> u64 {
+                r.get("node").and_then(|v| v.node_id()).map(|n| n.as_u64()).unwrap_or(0)
+            };
+            key(a)
+                .partial_cmp(&key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| node(a).cmp(&node(b)))
+        });
     }
 
     /// Which centrality to compute. One dispatch, three algorithms, because
@@ -13193,6 +13255,227 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.louvain()` -- community per node, ids renumbered from zero.
+    fn execute_louvain(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let comms = crate::algo::louvain(&view, 20);
+        // Modularity of the partition just found, on every row. A community
+        // id alone tells a caller nothing about whether the partition is any
+        // good, and the score is what says so.
+        let q = crate::algo::modularity(&view, &comms);
+        for (id, c) in crate::algo::with_ids(&view, &comms) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            // `communityId`, matching `cdlp` and GDS. Two community algorithms
+            // yielding differently-named columns for the same concept makes a
+            // caller rewrite the query to switch between them.
+            rec.bind("communityId".to_string(), Value::Property(PropertyValue::Integer(c as i64)));
+            rec.bind(
+                "modularity".to_string(),
+                match q {
+                    Some(v) => Value::Property(PropertyValue::Float(v)),
+                    None => Value::Property(PropertyValue::Null),
+                },
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.modularity([[nodeId, community], ...])` -- score a partition.
+    ///
+    /// Scores whoever's partition, not just Louvain's, which is the point: a
+    /// caller wants to know whether the communities they already have --
+    /// teams, tenants, regions -- describe the graph's structure better or
+    /// worse than the ones an algorithm finds.
+    fn execute_modularity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let list = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Array(a))) => a.clone(),
+            _ => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{}() requires a list of [nodeId, community] pairs. To score \
+                     Louvain's own partition, use algo.louvain(), which returns it.",
+                    self.name
+                )))
+            }
+        };
+        // Every node needs an assignment: a partition with a node missing is
+        // not a partition, and defaulting the absentees into one community
+        // would silently score a different partition than the caller gave.
+        let mut comms = vec![usize::MAX; view.node_count];
+        for item in &list {
+            let PropertyValue::Array(pair) = item else {
+                return Err(ExecutionError::RuntimeError(
+                    "each entry must be a [nodeId, community] pair".to_string(),
+                ));
+            };
+            let (Some(PropertyValue::Integer(id)), Some(PropertyValue::Integer(c))) =
+                (pair.first(), pair.get(1))
+            else {
+                return Err(ExecutionError::RuntimeError(
+                    "each entry must be a [nodeId, community] pair of integers".to_string(),
+                ));
+            };
+            let idx = view.node_to_index.get(&(*id as u64)).copied().ok_or_else(|| {
+                ExecutionError::RuntimeError(format!("node {id} is not in the projected graph"))
+            })?;
+            comms[idx] = *c as usize;
+        }
+        if let Some(missing) = comms.iter().position(|&c| c == usize::MAX) {
+            return Err(ExecutionError::RuntimeError(format!(
+                "node {} has no community. Modularity is a property of a *complete* \
+                 partition; scoring one with nodes missing would answer about a \
+                 different partition than the one given.",
+                view.index_to_node[missing]
+            )));
+        }
+        let q = crate::algo::modularity(&view, &comms).ok_or_else(|| {
+            ExecutionError::RuntimeError(
+                "modularity is undefined on a graph with no edges: the score is a \
+                 fraction of edges, and there are none"
+                    .to_string(),
+            )
+        })?;
+        let mut rec = Record::new();
+        rec.bind("modularity".to_string(), Value::Property(PropertyValue::Float(q)));
+        self.results.push(rec);
+        Ok(())
+    }
+
+    /// `algo.allShortestPaths(src, dst)`, `algo.aStar(...)`, `algo.yens(src, dst, k)`.
+    ///
+    /// One row per path, with its position and cost, because the *set* of
+    /// paths is the answer. A pair joined by one route and a pair joined by
+    /// forty look identical through `shortestPath`, and in a resilience review
+    /// they are not.
+    fn execute_path_enum(&mut self, store: &GraphStore, kind: PathKind) -> ExecutionResult<()> {
+        let (mut label, mut edge_type, mut weight, mut heuristic) = (None, None, None, None);
+        let mut k = 3usize;
+        let mut limit = 1000usize;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") { label = Some(v.clone()); }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") { edge_type = Some(v.clone()); }
+                if let Some(PropertyValue::String(v)) = m.get("weightProperty") { weight = Some(v.clone()); }
+                if let Some(PropertyValue::String(v)) = m.get("heuristicProperty") { heuristic = Some(v.clone()); }
+                if let Some(PropertyValue::Integer(v)) = m.get("k") { k = (*v).max(1) as usize; }
+                if let Some(PropertyValue::Integer(v)) = m.get("limit") { limit = (*v).max(1) as usize; }
+            }
+        }
+        let view = crate::algo::build_view(
+            store, label.as_deref(), edge_type.as_deref(), weight.as_deref());
+        let ids: Vec<u64> = self.args.iter().filter_map(|a| match a {
+            Expression::Literal(PropertyValue::Integer(n)) => Some(*n as u64),
+            _ => None,
+        }).collect();
+        if ids.len() < 2 {
+            return Err(ExecutionError::RuntimeError(format!(
+                "{}() requires a source and a target node id", self.name)));
+        }
+        let idx = |raw: u64| -> ExecutionResult<usize> {
+            view.node_to_index.get(&raw).copied().ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "node {raw} is not in the projected graph -- check the `label` \
+                     and `edgeType` filters"))
+            })
+        };
+        let (s, t) = (idx(ids[0])?, idx(ids[1])?);
+        // A third positional integer is `k`, so `algo.yens(a, b, 5)` reads the
+        // way a user writes it rather than forcing a config map.
+        if ids.len() >= 3 { k = (ids[2] as usize).max(1); }
+
+        let paths: Vec<(Vec<u64>, Option<f64>)> = match kind {
+            PathKind::All => crate::algo::all_shortest_paths(&view, s, t, limit)
+                .into_iter().map(|p| (p, None)).collect(),
+            PathKind::Yens => crate::algo::yens_k_shortest(&view, s, t, k)
+                .into_iter().map(|(p, c)| (p, Some(c))).collect(),
+            PathKind::AStar => {
+                // An absent heuristic is all zeros, which makes this exactly
+                // Dijkstra. Stated in the docs rather than hidden: A* without
+                // an estimate *is* Dijkstra, and a name is not an algorithm.
+                let h: Vec<f64> = (0..view.node_count).map(|i| {
+                    heuristic.as_deref().and_then(|prop| {
+                        store.get_node(NodeId::new(view.index_to_node[i]))
+                            .and_then(|n| n.get_property(prop))
+                            .and_then(|v| match v {
+                                PropertyValue::Integer(x) => Some(*x as f64),
+                                PropertyValue::Float(x) => Some(*x),
+                                _ => None,
+                            })
+                    }).unwrap_or(0.0)
+                }).collect();
+                crate::algo::a_star(&view, s, t, &h)
+                    .map(|(p, c)| vec![(p, Some(c))]).unwrap_or_default()
+            }
+        };
+
+        for (i, (path, cost)) in paths.into_iter().enumerate() {
+            let mut rec = Record::new();
+            rec.bind("path".to_string(), Value::Property(PropertyValue::Array(
+                path.iter().map(|n| PropertyValue::Integer(*n as i64)).collect())));
+            rec.bind("rank".to_string(), Value::Property(PropertyValue::Integer(i as i64 + 1)));
+            rec.bind("cost".to_string(), match cost {
+                Some(c) => Value::Property(PropertyValue::Float(c)),
+                None => Value::Property(PropertyValue::Integer(
+                    path.len().saturating_sub(1) as i64)),
+            });
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.randomWalk(source, {steps, seed})`.
+    ///
+    /// The seed is a parameter, not the clock. A sampled result nobody can
+    /// reproduce is not a result: someone who sees something surprising in a
+    /// walk has to be able to get the same walk back.
+    fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (mut steps, mut seed) = (10usize, 42u64);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Integer(v)) = m.get("steps") { steps = (*v).max(0) as usize; }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") { seed = *v as u64; }
+            }
+        }
+        let view = self.structural_view(store);
+        let src = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => *n as u64,
+            _ => return Err(ExecutionError::RuntimeError(format!(
+                "{}() requires a source node id", self.name))),
+        };
+        let s = view.node_to_index.get(&src).copied().ok_or_else(|| {
+            ExecutionError::RuntimeError(format!("node {src} is not in the projected graph"))
+        })?;
+        for (i, id) in crate::algo::random_walk(&view, s, steps, seed).into_iter().enumerate() {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
+    fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (mut damping, mut iters) = (0.85f64, 20usize);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") { damping = *v; }
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+            }
+        }
+        let view = self.structural_view(store);
+        let scores = crate::algo::article_rank(&view, damping, iters);
+        for (id, s) in crate::algo::ranked(&view, &scores) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(s)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13233,11 +13516,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
 
-        // Sort by communityId for deterministic output.
-        self.results.sort_by(|a, b| {
-            let ca = a.get("communityId").unwrap().as_property().unwrap().as_integer().unwrap();
-            let cb = b.get("communityId").unwrap().as_property().unwrap().as_integer().unwrap();
-            ca.cmp(&cb)
+        // Sort by communityId **and then by node**, which is what makes the
+        // output deterministic. Sorting on the community alone leaves the
+        // order *within* a community to the map iteration that produced it, so
+        // two runs of the same query over the same graph returned the same
+        // communities with the rows shuffled -- n2,n1,n0 one time and n1,n2,n0
+        // the next.
+        //
+        // That is a LANG-14 violation ("same query + same data => identical
+        // ordered output") and it was invisible until two algorithms were
+        // compared against each other, because a single run always looks
+        // sorted (#1019).
+        self.sort_results_deterministically(|r| {
+            r.get("communityId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+                .unwrap_or(i64::MAX)
         });
 
         Ok(())
@@ -13279,11 +13571,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
 
-        // Sort by coefficient descending.
-        self.results.sort_by(|a, b| {
-            let ca = a.get("coefficient").unwrap().as_property().unwrap().as_float().unwrap();
-            let cb = b.get("coefficient").unwrap().as_property().unwrap().as_float().unwrap();
-            cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+        // Coefficient descending, then node id.
+        self.sort_results_deterministically(|r| {
+            std::cmp::Reverse(ordered_float(r, "coefficient"))
         });
 
         Ok(())
@@ -13591,11 +13881,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
         
-        // Sort by componentId
-        self.results.sort_by(|a, b| {
-            let cid_a = a.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
-            let cid_b = b.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap();
-            cid_a.cmp(&cid_b)
+        // Component id, then node id.
+        self.sort_results_deterministically(|r| {
+            r.get("componentId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+                .unwrap_or(i64::MAX)
         });
 
         Ok(())
@@ -13679,6 +13968,19 @@ impl AlgorithmOperator {
                 | "averageneighbordegree"
                 | "averageneighbourdegree"
                 | "degreeassortativity"
+                // Community detection. `labelpropagation` routes to cdlp:
+                // that *is* label propagation, LDBC's, and a second
+                // deterministic one collapses every connected graph to a
+                // single community.
+                | "louvain"
+                | "modularity"
+                | "labelpropagation"
+                // Path enumeration and a PageRank variant.
+                | "allshortestpaths"
+                | "astar"
+                | "yens"
+                | "randomwalk"
+                | "articlerank"
         )
     }
 }
@@ -13719,6 +14021,14 @@ impl PhysicalOperator for AlgorithmOperator {
                 "radius" => self.execute_metric(store, Metric::Radius)?,
                 "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
                 "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
+                "louvain" => self.execute_louvain(store)?,
+                "modularity" => self.execute_modularity(store)?,
+                "labelpropagation" => self.execute_cdlp(store)?,
+                "allshortestpaths" => self.execute_path_enum(store, PathKind::All)?,
+                "astar" => self.execute_path_enum(store, PathKind::AStar)?,
+                "yens" => self.execute_path_enum(store, PathKind::Yens)?,
+                "randomwalk" => self.execute_random_walk(store)?,
+                "articlerank" => self.execute_article_rank(store)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13778,6 +14088,14 @@ impl PhysicalOperator for AlgorithmOperator {
                 "radius" => self.execute_metric(store, Metric::Radius)?,
                 "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
                 "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
+                "louvain" => self.execute_louvain(store)?,
+                "modularity" => self.execute_modularity(store)?,
+                "labelpropagation" => self.execute_cdlp(store)?,
+                "allshortestpaths" => self.execute_path_enum(store, PathKind::All)?,
+                "astar" => self.execute_path_enum(store, PathKind::AStar)?,
+                "yens" => self.execute_path_enum(store, PathKind::Yens)?,
+                "randomwalk" => self.execute_random_walk(store)?,
+                "articlerank" => self.execute_article_rank(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
