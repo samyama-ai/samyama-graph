@@ -90,6 +90,61 @@ pub enum ValidationError {
     InvalidAggregation,
 }
 
+impl ValidationError {
+    /// The stable code for this rejection (LANG-12).
+    ///
+    /// Every validation failure used to reach the caller as
+    /// `ParseError::SemanticError`, so unknown-function, unbound-variable,
+    /// a malformed literal, a list used as a node and an aggregate in the
+    /// wrong place all arrived under one string. A caller could not tell them
+    /// apart, which is the objection LANG-12 exists to answer.
+    ///
+    /// Grouped by what the caller would *do*, not by which check fired: an
+    /// untyped CREATE relationship and an undirected one are both "fix the
+    /// write pattern", while a list used as a node and a property read on a
+    /// path are both "that variable is not the kind you think".
+    pub fn code(&self) -> &'static str {
+        use crate::query::error_code as c;
+        match self {
+            Self::UnboundVariable { .. } => c::VARIABLE_NOT_BOUND,
+            Self::UnboundPatternVariable { .. } => c::VARIABLE_NOT_BOUND,
+            Self::OrderByUndefinedVariable { .. } => c::VARIABLE_NOT_BOUND,
+            Self::NoVariablesInScope { .. } => c::VARIABLE_NOT_BOUND,
+            Self::VariableTypeConflict { .. } => c::VARIABLE_KIND,
+            Self::VariableKindConflict { .. } => c::VARIABLE_KIND,
+            Self::PropertyAccessOnNonMap { .. } => c::VARIABLE_KIND,
+            Self::SizeOfNonCollection { .. } => c::VARIABLE_KIND,
+            Self::PropertyOnPath { .. } => c::VARIABLE_KIND,
+            Self::InvalidDeleteTarget { .. } => c::VARIABLE_KIND,
+            Self::FunctionArgumentKind { .. } => c::BAD_ARGUMENT,
+            Self::NonBooleanOperand { .. } => c::TYPE_MISMATCH,
+            Self::UnknownFunction { .. } => c::UNKNOWN_FUNCTION,
+            Self::AggregateNotAllowed { .. } => c::AGGREGATE_MISUSE,
+            Self::InvalidAggregation { .. } => c::AGGREGATE_MISUSE,
+            Self::AmbiguousAggregationExpression { .. } => c::AGGREGATE_MISUSE,
+            Self::AmbiguousGroupingExpression { .. } => c::AGGREGATE_MISUSE,
+            Self::DuplicateColumn { .. } => c::CLAUSE_CONFLICT,
+            Self::UnionColumnMismatch { .. } => c::CLAUSE_CONFLICT,
+            Self::MixedUnionAndUnionAll { .. } => c::CLAUSE_CONFLICT,
+            Self::UnaliasedWithItem { .. } => c::CLAUSE_CONFLICT,
+            Self::PatternInProjection { .. } => c::CLAUSE_CONFLICT,
+            Self::PatternInSetValue { .. } => c::CLAUSE_CONFLICT,
+            Self::InvalidPredicatePattern { .. } => c::CLAUSE_CONFLICT,
+            Self::RelationshipUniquenessViolation { .. } => c::CLAUSE_CONFLICT,
+            Self::CreateOnBoundVariable { .. } => c::INVALID_WRITE_PATTERN,
+            Self::CreateRelationshipWithoutType { .. } => c::INVALID_WRITE_PATTERN,
+            Self::CreateUndirectedRelationship { .. } => c::INVALID_WRITE_PATTERN,
+            Self::CreateVariableLengthRelationship { .. } => c::INVALID_WRITE_PATTERN,
+            Self::CreateOnBoundRelationship { .. } => c::INVALID_WRITE_PATTERN,
+            Self::MergeRelationshipWithoutType { .. } => c::INVALID_WRITE_PATTERN,
+            Self::MergeVariableLengthRelationship { .. } => c::INVALID_WRITE_PATTERN,
+            Self::MergeOnBoundVariable { .. } => c::INVALID_WRITE_PATTERN,
+            Self::MergeRelationshipWithNullProperty { .. } => c::INVALID_WRITE_PATTERN,
+            Self::MergeNullProperty { .. } => c::INVALID_WRITE_PATTERN,
+        }
+    }
+}
+
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

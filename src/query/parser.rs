@@ -108,16 +108,53 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
 #[derive(Error, Debug)]
 pub enum ParseError {
     /// Pest parsing error
-    #[error("Parse error: {0}")]
+    #[error("[{}] Parse error: {0}", crate::query::error_code::SYNTAX)]
     PestError(#[from] pest::error::Error<Rule>),
 
     /// Semantic error
-    #[error("Semantic error: {0}")]
+    #[error("[{}] Semantic error: {0}", crate::query::error_code::SEMANTIC)]
     SemanticError(String),
 
     /// Unsupported feature
-    #[error("Unsupported feature: {0}")]
+    /// A rejection that carries its own code.
+    ///
+    /// `SemanticError` is where every validation failure landed, so a caller
+    /// saw one string for unknown-function, unbound-variable, a malformed
+    /// literal and an aggregate in the wrong place alike. This lets a site
+    /// that knows which fault it found say so.
+    #[error("[{code}] {message}")]
+    Coded { code: &'static str, message: String },
+
+    #[error("[{}] Unsupported feature: {0}", crate::query::error_code::UNSUPPORTED)]
     UnsupportedFeature(String),
+}
+
+impl ParseError {
+    /// Did the grammar recognise this query and something later refuse it?
+    ///
+    /// The distinction the parser's fallback turns on: a *grammar* failure
+    /// means the general rule could not read the clause order at all, and its
+    /// message points at a token; anything else means the shape was understood
+    /// and a specific obstacle was found, which is the more useful thing to
+    /// report.
+    ///
+    /// A predicate rather than a match on one variant, because the set of
+    /// "not a grammar failure" variants grows -- it just did -- and every
+    /// place that matched the old single variant would have to be found again.
+    pub fn is_semantic(&self) -> bool {
+        !matches!(self, ParseError::PestError(_))
+    }
+
+    /// The stable code a client can branch on (LANG-12).
+    pub fn code(&self) -> &'static str {
+        use crate::query::error_code as c;
+        match self {
+            ParseError::PestError(_) => c::SYNTAX,
+            ParseError::SemanticError(_) => c::SEMANTIC,
+            ParseError::UnsupportedFeature(_) => c::UNSUPPORTED,
+            ParseError::Coded { code, .. } => code,
+        }
+    }
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
@@ -247,7 +284,7 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
     }
     crate::query::star::expand_stars(&mut query);
     crate::query::validate::validate(&query)
-        .map_err(|e| ParseError::SemanticError(e.to_string()))?;
+        .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
     Ok(query)
 }
 
@@ -276,11 +313,17 @@ fn parse_integer_literal(text: &str) -> ParseResult<i64> {
     // i64::MAX -- can be represented before the sign is applied. Without this,
     // `-9223372036854775808` has no valid intermediate form.
     let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
-        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+        ParseError::Coded {
+            code: crate::query::error_code::INVALID_LITERAL,
+            message: format!("integer literal out of range: `{text}`"),
+        }
     })?;
     let value = if negative { -magnitude } else { magnitude };
     i64::try_from(value).map_err(|_| {
-        ParseError::SemanticError(format!("integer literal out of range: `{text}`"))
+        ParseError::Coded {
+            code: crate::query::error_code::INVALID_LITERAL,
+            message: format!("integer literal out of range: `{text}`"),
+        }
     })
 }
 
@@ -361,7 +404,19 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
             // clause order and then refused to lower one of the clauses. That
             // names the actual obstacle, so it wins; a plain parse failure
             // does not, and the original error is kept instead.
-            Err(e @ ParseError::SemanticError(_)) => return Err(e),
+            //
+            // Asked as a question rather than matched against one variant.
+            // This arm was `Err(e @ ParseError::SemanticError(_))`, and giving
+            // validation failures their own codes moved them to `Coded` -- so
+            // they stopped matching, fell through to the arm below, and the
+            // caller got the raw grammar error again. `WITH [1] AS xs MATCH
+            // (xs)-->()` went from "`xs` is bound to a collection and cannot
+            // be used as a node" back to "expected where_clause at 1:16".
+            //
+            // Nothing failed. The query still errored, the message was still a
+            // real message, and only a probe comparing error *classes* noticed
+            // that it had become the wrong one.
+            Err(e) if e.is_semantic() => return Err(e),
             Err(_) => return Err(original.into()),
         },
     };
@@ -419,7 +474,7 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
     // failure because that is what they are to a caller: the query was never
     // well-formed, and running it would answer a question nobody asked.
     crate::query::validate::validate(&query)
-        .map_err(|e| ParseError::SemanticError(e.to_string()))?;
+        .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
 
     Ok(query)
 }
@@ -891,9 +946,12 @@ fn unescape_string_literal(literal: &str) -> ParseResult<String> {
                 match decoded {
                     Some(c) => out.push(c),
                     None => {
-                        return Err(ParseError::SemanticError(format!(
-                            "InvalidUnicodeLiteral: `\\u{hex}` is not four hex digits"
-                        )))
+                        return Err(ParseError::Coded {
+                            code: crate::query::error_code::INVALID_LITERAL,
+                            message: format!(
+                                "InvalidUnicodeLiteral: `\\u{hex}` is not four hex digits"
+                            ),
+                        })
                     }
                 }
             }

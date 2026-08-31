@@ -41,13 +41,42 @@ const CASES: &[(&str, &str)] = &[
     ("bad-argument", "RETURN range(1, 10, 0)"),
     ("bad-argument", "RETURN substring('abc')"),
     ("collection-in-pattern", "WITH [1] AS xs MATCH (xs)-->() RETURN 1"),
-    ("aggregate-misuse", "RETURN count(*) + n"),
+    // `RETURN count(*) + n` was the case here, and it does not test what it
+    // says: it fails because `n` is unbound, which is correct and has nothing
+    // to do with aggregation. It reported an aggregate-misuse code identical
+    // to unbound-variable's -- a collision that looked like a coding gap and
+    // was a corpus bug. Bind the variable so the aggregate is the only fault
+    // left.
+    ("aggregate-misuse", "MATCH (n) WHERE count(*) > 1 RETURN n"),
     ("write-in-read", "MATCH (n) DELETE n RETURN n"),
 ];
 
 /// Does the text carry something a client could branch on that is not just
 /// English prose? A code is a token like `Neo.ClientError.Statement.SyntaxError`
 /// or `SG-1042` — stable, greppable, documented.
+/// The code itself, if there is one, so distinctness can be checked.
+///
+/// Presence is the easy half of LANG-12 and the half that can be satisfied
+/// without helping anyone: give every error the same code and 100% of them
+/// "carry a code". The requirement says a caller can branch on it, and a
+/// constant is not something to branch on -- which is exactly the objection
+/// the scorecard already records against using the Rust variant name.
+///
+/// So the probe reads the code out and reports how many *distinct* ones the
+/// fault classes produce. That number is the one that cannot be gamed by
+/// adding a prefix.
+fn extract_code(msg: &str) -> Option<String> {
+    msg.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-'))
+        .find(|t| {
+            (t.contains('.') && t.split('.').count() >= 3
+                && t.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+                || (t.contains('-') && t.split('-').next().is_some_and(
+                    |p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_uppercase())))
+        })
+        .map(str::to_string)
+}
+
 fn has_code(msg: &str) -> bool {
     // Deliberately generous: any bracketed or dotted uppercase token, or an
     // explicit `code` field, counts. Being generous matters — a strict test
@@ -96,6 +125,7 @@ fn main() {
             "query": q,
             "errored": !msg.is_empty(),
             "has_code": !msg.is_empty() && has_code(&msg),
+            "code": extract_code(&msg),
             "has_span": !msg.is_empty() && has_span(&msg),
             "message": msg.chars().take(160).collect::<String>(),
         }));
@@ -109,11 +139,49 @@ fn main() {
         .map(|r| r["query"].as_str().unwrap_or("").to_string())
         .collect();
 
+    // Distinctness, per fault class. Two probes of the *same* class sharing a
+    // code is right and expected; two different classes sharing one means a
+    // caller cannot tell them apart, which is the whole point of the
+    // requirement.
+    let mut class_codes: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for r in &errored {
+        if let Some(c) = r["code"].as_str() {
+            class_codes
+                .entry(r["class"].as_str().unwrap_or("?").to_string())
+                .or_default()
+                .insert(c.to_string());
+        }
+    }
+    let distinct_codes: std::collections::BTreeSet<&String> =
+        class_codes.values().flatten().collect();
+    // A class whose code is shared with a different class. Reported by name,
+    // because "3 collisions" tells nobody which two faults look alike.
+    let mut collisions: Vec<String> = Vec::new();
+    for (class, codes) in &class_codes {
+        for code in codes {
+            let others: Vec<&String> = class_codes
+                .iter()
+                .filter(|(o, cs)| *o != class && cs.contains(code))
+                .map(|(o, _)| o)
+                .collect();
+            if !others.is_empty() {
+                collisions.push(format!("{class} shares {code} with {others:?}"));
+            }
+        }
+    }
+    collisions.sort();
+    collisions.dedup();
+
     let json = serde_json::json!({
         "probed": rows.len(),
         "errored": errored.len(),
         "with_code": with_code,
         "with_span": with_span,
+        "fault_classes": class_codes.len(),
+        "distinct_codes": distinct_codes.len(),
+        "code_collisions": collisions,
+        "codes_by_class": class_codes,
         "did_not_error": did_not_error,
         "cases": rows,
     });
@@ -123,6 +191,9 @@ fn main() {
         Some(p) => std::fs::write(p, &text).unwrap(),
         None => println!("{text}"),
     }
-    eprintln!("{} errored; {} carry a code, {} a span (LANG-12 wants 100% of both)",
-              errored.len(), with_code, with_span);
+    eprintln!(
+        "{} errored; {} carry a code, {} a span; {} distinct codes over {} fault classes \
+         (LANG-12 wants 100% of both, and one code per class)",
+        errored.len(), with_code, with_span, distinct_codes.len(), class_codes.len()
+    );
 }
