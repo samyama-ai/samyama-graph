@@ -893,6 +893,24 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
 /// the `Value::Map` case to one of them fixed nothing, because the projection
 /// path uses a different copy — which is how `WITH {k: collect(a)} AS m RETURN
 /// m.k` still answered null after the "fix" (#670).
+/// `VariableNotFound`, naming what the record does bind.
+///
+/// The list is what turns "you asked for something that is not there" into
+/// "you asked for `node`; this row has `arrival`, `path`, `times`" -- which
+/// for a procedure call is the difference between a five-second fix and a
+/// run-long investigation.
+fn unbound(record: &Record, name: &str) -> ExecutionError {
+    let in_scope = record.bound_variables();
+    if in_scope.is_empty() {
+        ExecutionError::VariableNotFound(name.to_string())
+    } else {
+        ExecutionError::VariableNotFoundInScope {
+            name: name.to_string(),
+            in_scope: in_scope.join(", "),
+        }
+    }
+}
+
 fn read_property(
     record: &Record,
     variable: &str,
@@ -903,7 +921,7 @@ fn read_property(
     let val = match record.get(variable) {
         Some(v) => v,
         None if missing_is_null => &Value::Null,
-        None => return Err(ExecutionError::VariableNotFound(variable.to_string())),
+        None => return Err(unbound(record, variable)),
     };
     // A map holding entities cannot answer through `resolve_property`, which
     // returns a `PropertyValue` and so would degrade a node to null.
@@ -931,8 +949,7 @@ fn read_property(
 pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
     match expr {
         Expression::Variable(var) => {
-            record.get(var).cloned()
-                .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            record.get(var).cloned().ok_or_else(|| unbound(record, var))
         }
         Expression::Property { variable, property } => {
             read_property(record, variable, property, store, false)
@@ -997,8 +1014,7 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
             eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
         }
         Expression::PathVariable(var) => {
-            record.get(var).cloned()
-                .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+            record.get(var).cloned().ok_or_else(|| unbound(record, var))
         }
         Expression::Parameter(name) => {
             // Parameters are resolved by substituting them with bound variables prefixed with `$`
@@ -5801,9 +5817,7 @@ impl FilterOperator {
                 eval_expression(expr, record, store)
             }
             Expression::Variable(var) => {
-                record.get(var)
-                    .cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Property { variable, property } => {
                 return read_property(record, variable, property, store, false);
@@ -5880,8 +5894,7 @@ impl FilterOperator {
                 eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
             }
             Expression::PathVariable(var) => {
-                record.get(var).cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Parameter(name) => {
                 record.get(&format!("${}", name)).cloned()
@@ -7812,9 +7825,7 @@ impl ProjectOperator {
                 eval_expression(expr, record, store)
             }
             Expression::Variable(var) => {
-                let val = record.get(var)
-                    .cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))?;
+                let val = record.get(var).cloned().ok_or_else(|| unbound(record, var))?;
                 // Materialize refs at projection time (RETURN n)
                 // A reference the store can no longer resolve is kept as a
                 // reference rather than refused. It still carries the
@@ -7886,8 +7897,7 @@ impl ProjectOperator {
                 eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
             }
             Expression::PathVariable(var) => {
-                record.get(var).cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Parameter(name) => {
                 record.get(&format!("${}", name)).cloned()
@@ -8536,8 +8546,7 @@ impl AggregateOperator {
                 eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
             }
             Expression::PathVariable(var) => {
-                record.get(var).cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Parameter(name) => {
                 record.get(&format!("${}", name)).cloned()
@@ -9862,9 +9871,7 @@ impl SortOperator {
                 eval_expression(expr, record, store)
             }
             Expression::Variable(var) => {
-                record.get(var)
-                    .cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Property { variable, property } => {
                 return read_property(record, variable, property, store, false);
@@ -9917,8 +9924,7 @@ impl SortOperator {
                 eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
             }
             Expression::PathVariable(var) => {
-                record.get(var).cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Parameter(name) => {
                 record.get(&format!("${}", name)).cloned()
@@ -16223,8 +16229,7 @@ impl WithBarrierOperator {
                 eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
             }
             Expression::PathVariable(var) => {
-                record.get(var).cloned()
-                    .ok_or_else(|| ExecutionError::VariableNotFound(var.clone()))
+                record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Parameter(name) => {
                 record.get(&format!("${}", name)).cloned()
