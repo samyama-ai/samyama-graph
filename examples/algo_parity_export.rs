@@ -18,7 +18,17 @@ use samyama_graph_algorithms::{
     bfs, cdlp, count_triangles, dijkstra, edmonds_karp, local_clustering_coefficient,
     local_clustering_coefficient_directed, page_rank, prim_mst, strongly_connected_components,
     weakly_connected_components, CdlpConfig, GraphView, NodeId, PageRankConfig,
+    all_shortest_paths, a_star, yens_k_shortest, modularity,
+    betweenness_centrality, closeness_centrality, core_number, degree_centrality,
+    eigenvector_centrality, harmonic_centrality,
+    link_prediction::{score_one, LinkScore},
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
 };
+
+/// How many shortest paths to enumerate per pair before stopping. The count is
+/// exponential in the worst case; the reference recorder uses the same cap, so
+/// a graph that hits it is not the thing being compared.
+const PATH_ENUM_CAP: usize = 64;
 
 /// A fixed sequence, so every run builds the same graphs.
 struct Lcg(u64);
@@ -65,6 +75,29 @@ fn build(name: &str, directed: bool, n: usize, m: usize, seed: u64) -> Reference
         edges.push((key.0, key.1, w));
     }
     Reference { name: name.to_string(), directed, n, edges }
+}
+
+/// The same graph with each edge stored once, weights kept.
+///
+/// `view_of` doubles an undirected edge so both endpoints see it. The
+/// statistics defined on the undirected *collapse* — the shape metrics,
+/// modularity — need to be told which convention they are reading, because
+/// the totals they divide by are twice as large in a doubled view. Getting
+/// that backwards halves or doubles the answer without failing anything.
+fn view_single(r: &Reference) -> GraphView {
+    let index_to_node: Vec<NodeId> = (0..r.n).map(|i| i as NodeId).collect();
+    let node_to_index: HashMap<NodeId, usize> = (0..r.n).map(|i| (i as NodeId, i)).collect();
+    let mut outgoing = vec![Vec::new(); r.n];
+    let mut incoming = vec![Vec::new(); r.n];
+    let mut weights = vec![Vec::new(); r.n];
+    for &(a, b, w) in &r.edges {
+        outgoing[a].push(b);
+        weights[a].push(w);
+        incoming[b].push(a);
+    }
+    GraphView::from_adjacency_list(
+        r.n, index_to_node, node_to_index, outgoing, incoming, Some(weights),
+    )
 }
 
 fn view_of(r: &Reference) -> GraphView {
@@ -152,6 +185,104 @@ fn main() {
         let cd = cdlp(&view, &CdlpConfig::default());
         let communities: std::collections::HashSet<_> = cd.labels.values().collect();
 
+        // Everything below is defined on the undirected collapse or takes the
+        // convention as an argument, so it reads the singly-stored view and
+        // says which it is. The families here mirror what
+        // `record_reference.py` computes; the live check was capped at the
+        // eleven the export happened to emit, which is a limit of this file
+        // rather than of what NetworkX can answer.
+        let single = view_single(r);
+        let bidir = !r.directed;
+        let idx = |v: &Vec<f64>| -> HashMap<String, f64> {
+            v.iter().enumerate().map(|(i, x)| (i.to_string(), *x)).collect()
+        };
+
+        let ecc: HashMap<String, Option<i64>> = eccentricity(&single, true)
+            .into_iter().enumerate().map(|(i, e)| (i.to_string(), e)).collect();
+
+        // Every unconnected pair, which is what link prediction is for: a
+        // ranking whose top entries are pairs already joined answers a
+        // question nobody asked.
+        let mut joined: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        for &(a, b, _) in &r.edges {
+            joined.insert((a.min(b), a.max(b)));
+        }
+        let mut jaccard = HashMap::new();
+        let mut adamic = HashMap::new();
+        let mut common = HashMap::new();
+        for a in 0..r.n {
+            for b in (a + 1)..r.n {
+                if joined.contains(&(a, b)) {
+                    continue;
+                }
+                let key = format!("{a}-{b}");
+                jaccard.insert(key.clone(), score_one(&single, LinkScore::Jaccard, a, b));
+                adamic.insert(key.clone(), score_one(&single, LinkScore::AdamicAdar, a, b));
+                common.insert(key, score_one(&single, LinkScore::CommonNeighbours, a, b));
+            }
+        }
+
+        // Paths over every ordered reachable pair. Three separate facts,
+        // because three separate algorithms read them: the hop distance, the
+        // *number* of shortest paths, and the weighted distance. The count is
+        // the one a single-path API cannot show — a pair joined by one route
+        // and a pair joined by forty look identical without it.
+        let mut hop = HashMap::new();
+        let mut count = HashMap::new();
+        let mut wdist = HashMap::new();
+        let zero = vec![0.0; r.n];
+        for sv in 0..r.n {
+            for tv in 0..r.n {
+                if sv == tv {
+                    continue;
+                }
+                let paths = all_shortest_paths(&view, sv, tv, PATH_ENUM_CAP);
+                if paths.is_empty() {
+                    continue; // unreachable: no distance to record
+                }
+                let key = format!("{sv}-{tv}");
+                hop.insert(key.clone(), paths[0].len() - 1);
+                count.insert(key.clone(), paths.len());
+                // A* with a zero heuristic is Dijkstra, which is what the
+                // reference runs. A heuristic of our own would make this a
+                // test of the heuristic rather than of the search.
+                if let Some((_, cost)) = a_star(&view, sv, tv, &zero) {
+                    wdist.insert(key, cost);
+                }
+            }
+        }
+        // Yen's on the widest-separated pair only: it is O(k n) shortest-path
+        // runs per pair, and the file is read by a human.
+        let mut simple: HashMap<String, Vec<f64>> = HashMap::new();
+        // Greatest hop distance, ties broken by the smallest (s, t) -- stated
+        // rather than left to whatever the iterator yields first, because the
+        // reference has to pick the *same* pair. "Widest-separated" alone is
+        // not a rule when several pairs share the maximum, and the two sides
+        // silently ran Yen's on different pairs.
+        let far = hop
+            .iter()
+            .map(|(k, &h)| {
+                let mut it = k.split('-').map(|x| x.parse::<usize>().unwrap());
+                (std::cmp::Reverse(h), it.next().unwrap(), it.next().unwrap(), k.clone())
+            })
+            .min();
+        if let Some((_, _, _, far)) = far {
+            let mut it = far.split('-').map(|x| x.parse::<usize>().unwrap());
+            let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
+            simple.insert(
+                far.clone(),
+                yens_k_shortest(&view, sv, tv, 5).into_iter().map(|(_, c)| c).collect(),
+            );
+        }
+
+        // Modularity of a partition fixed by node index, so both sides score
+        // the *same* partition. Louvain is stochastic and seeded differently
+        // in the two implementations, so comparing the partitions themselves
+        // would say nothing about either modularity function.
+        let parts: Vec<usize> = (0..r.n).map(|i| i % 3).collect();
+        let q = modularity(&single, &parts);
+
         graphs.push(serde_json::json!({
             "name": r.name,
             "directed": r.directed,
@@ -169,6 +300,34 @@ fn main() {
                 "dijkstra_cost": dij_costs.iter().cloned().collect::<HashMap<_, _>>(),
                 "max_flow_0_to_last": flow,
                 "cdlp_community_count": communities.len(),
+
+                "degree_centrality": idx(&degree_centrality(&single, bidir)),
+                "closeness_centrality": idx(&closeness_centrality(&single, bidir)),
+                "betweenness_centrality": idx(&betweenness_centrality(&single, bidir)),
+                "harmonic_centrality": idx(&harmonic_centrality(&single, bidir)),
+                "core_number": idx(&core_number(&single, bidir)
+                    .iter().map(|&c| c as f64).collect::<Vec<f64>>()),
+                // `None` means power iteration did not converge, which is a
+                // different statement from a vector of zeros and is recorded
+                // as such.
+                "eigenvector_centrality": eigenvector_centrality(&single, bidir, 1000, 1e-10)
+                    .map(|v| idx(&v)),
+
+                "eccentricity": ecc,
+                "diameter": diameter(&single, true),
+                "radius": radius(&single, true),
+                "average_neighbour_degree": idx(&average_neighbour_degree(&single, true)),
+                "degree_assortativity": degree_assortativity(&single, true),
+
+                "jaccard": jaccard,
+                "adamic_adar": adamic,
+                "common_neighbours": common,
+
+                "hop_distance": hop,
+                "shortest_path_count": count,
+                "weighted_distance": wdist,
+                "simple_path_lengths": simple,
+                "modularity_of_index_mod_3": q,
             }
         }));
     }
