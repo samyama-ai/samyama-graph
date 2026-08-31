@@ -13,6 +13,7 @@ pub mod cdlp;
 pub mod lcc;
 pub mod pca;
 pub mod centrality;
+pub mod link_prediction;
 pub mod temporal;
 
 pub use common::{GraphView, NodeId};
@@ -32,6 +33,7 @@ pub use centrality::{
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
+pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
 pub use temporal::{
     earliest_arrival, propagation_ranking, symptom_explanation, temporal_reachability,
     temporal_shortest_path, ArrivalTimes, Explanation, TemporalEdges, TemporalError,
