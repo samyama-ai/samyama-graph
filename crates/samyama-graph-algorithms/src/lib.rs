@@ -14,6 +14,7 @@ pub mod lcc;
 pub mod pca;
 pub mod centrality;
 pub mod link_prediction;
+pub mod traversal;
 pub mod temporal;
 
 pub use common::{GraphView, NodeId};
@@ -34,6 +35,9 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use traversal::{
+    articulation_points, bridges, find_cycle, topological_sort, TopoResult,
+};
 pub use temporal::{
     earliest_arrival, propagation_ranking, symptom_explanation, temporal_reachability,
     temporal_shortest_path, ArrivalTimes, Explanation, TemporalEdges, TemporalError,

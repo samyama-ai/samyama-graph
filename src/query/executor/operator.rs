@@ -2328,15 +2328,16 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// reachability test fail, and narrowing an existing guard to keep a new check
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "adamicadar", "asin", "atan", "atan2", "betweenness",
-    "betweennesscentrality", "bfs", "breadthfirstsearch", "cdlp", "ceil", "closeness",
-    "closenesscentrality", "coalesce", "commonneighbors", "commonneighbours", "components",
-    "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot", "date",
-    "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
-    "datetime.truncate", "degree", "degreecentrality", "degrees", "dijkstra", "duration",
-    "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "eigenvector", "eigenvectorcentrality", "elementid", "endnode",
-    "exists", "exp", "false", "floor", "harmonic", "harmoniccentrality", "haslabels",
+    "abs", "acos", "adamicadar", "articulationpoints", "asin", "atan", "atan2",
+    "betweenness", "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp",
+    "ceil", "closeness", "closenesscentrality", "coalesce", "commonneighbors",
+    "commonneighbours", "components", "connectedcomponents", "corenumber", "cos", "cosh",
+    "cosine", "cot", "cycledetection", "date", "date.truncate", "datetime",
+    "datetime.fromepoch", "datetime.fromepochmillis", "datetime.truncate", "degree",
+    "degreecentrality", "degrees", "dijkstra", "duration", "duration.between",
+    "duration.indays", "duration.inmonths", "duration.inseconds", "duration_between", "e",
+    "eigenvector", "eigenvectorcentrality", "elementid", "endnode", "exists", "exp",
+    "false", "findcycle", "floor", "harmonic", "harmoniccentrality", "haslabels",
     "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan",
     "jaccard", "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left",
     "length", "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate",
@@ -2348,9 +2349,9 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "stdev", "stdevp", "substring", "subsumes", "symptomexplanation", "tail", "tan", "tanh",
     "temporalreachability", "temporalshortestpath", "time", "time.truncate", "timestamp",
     "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint", "tointeger",
-    "tointegerornull", "tolower", "tolowercase", "tostring", "tostringornull", "toupper",
-    "touppercase", "trianglecount", "trim", "true", "type", "valuetype", "wcc",
-    "weightedpath",
+    "tointegerornull", "tolower", "tolowercase", "topologicalsort", "toposort", "tostring",
+    "tostringornull", "toupper", "touppercase", "trianglecount", "trim", "true", "type",
+    "valuetype", "wcc", "weightedpath",
 ];
 
 /// Is `name` a function this engine implements?
@@ -12987,6 +12988,111 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// The label/edgeType projection every structural algorithm shares.
+    fn structural_view(&self, store: &GraphStore) -> crate::algo::GraphView {
+        let (mut label, mut edge_type) = (None, None);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
+            }
+        }
+        if label.is_none() {
+            if let Some(Expression::Literal(PropertyValue::String(v))) = self.args.first() {
+                label = Some(v.clone());
+            }
+        }
+        crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None)
+    }
+
+    fn bind_node(&self, store: &GraphStore, rec: &mut Record, key: &str, id: u64) {
+        let nid = NodeId::new(id);
+        match store.get_node(nid) {
+            Some(n) => rec.bind(key.to_string(), Value::Node(nid, Box::new(n.clone()))),
+            None => rec.bind(key.to_string(), Value::NodeRef(nid)),
+        }
+    }
+
+    /// `algo.topologicalSort()` -- one row per node, in dependency order.
+    ///
+    /// A cyclic graph has no topological order, and that is an **error**
+    /// naming the nodes the cycle runs through rather than a partial order.
+    /// Returning the part that could be sorted would be a plausible answer to
+    /// a question with no answer, and a build system acting on it would run
+    /// steps out of order.
+    fn execute_topological_sort(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        match crate::algo::topological_sort(&view) {
+            crate::algo::TopoResult::Order(order) => {
+                for (i, id) in order.into_iter().enumerate() {
+                    let mut rec = Record::new();
+                    self.bind_node(store, &mut rec, "node", id);
+                    rec.bind(
+                        "position".to_string(),
+                        Value::Property(PropertyValue::Integer(i as i64)),
+                    );
+                    self.results.push(rec);
+                }
+                Ok(())
+            }
+            crate::algo::TopoResult::Cyclic(stuck) => Err(ExecutionError::RuntimeError(format!(
+                "no topological order: the graph has a cycle through {} node(s), \
+                 starting at {:?}. Use algo.findCycle() to see one.",
+                stuck.len(),
+                stuck.iter().take(5).collect::<Vec<_>>()
+            ))),
+        }
+    }
+
+    /// `algo.findCycle()` -- the nodes of one cycle, in order, or no rows.
+    ///
+    /// A witness rather than a boolean. "There is a cycle somewhere in your
+    /// 200,000-node dependency graph" is not actionable; the four services in
+    /// it are.
+    fn execute_find_cycle(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        if let Some(cycle) = crate::algo::find_cycle(&view) {
+            for (i, id) in cycle.into_iter().enumerate() {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", id);
+                rec.bind(
+                    "position".to_string(),
+                    Value::Property(PropertyValue::Integer(i as i64)),
+                );
+                self.results.push(rec);
+            }
+        }
+        Ok(())
+    }
+
+    /// `algo.bridges()` and `algo.articulationPoints()`.
+    ///
+    /// The single points of failure in a topology, from an edge and from a
+    /// node. Both are defined on the undirected graph: what breaks if this
+    /// fails does not care which way the dependency was written down.
+    fn execute_structural(&mut self, store: &GraphStore, want_bridges: bool) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        if want_bridges {
+            for (a, b) in crate::algo::bridges(&view) {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "source", a);
+                self.bind_node(store, &mut rec, "target", b);
+                self.results.push(rec);
+            }
+        } else {
+            for id in crate::algo::articulation_points(&view) {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", id);
+                self.results.push(rec);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13459,6 +13565,13 @@ impl AlgorithmOperator {
                 | "commonneighbours"
                 | "jaccard"
                 | "adamicadar"
+                // Structural: one DFS answers all four.
+                | "topologicalsort"
+                | "toposort"
+                | "cycledetection"
+                | "findcycle"
+                | "bridges"
+                | "articulationpoints"
         )
     }
 }
@@ -13490,6 +13603,10 @@ impl PhysicalOperator for AlgorithmOperator {
                 "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
                 "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
                 "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
+                "topologicalsort" | "toposort" => self.execute_topological_sort(store)?,
+                "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
+                "bridges" => self.execute_structural(store, true)?,
+                "articulationpoints" => self.execute_structural(store, false)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13540,6 +13657,10 @@ impl PhysicalOperator for AlgorithmOperator {
                 "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
                 "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
                 "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
+                "topologicalsort" | "toposort" => self.execute_topological_sort(store)?,
+                "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
+                "bridges" => self.execute_structural(store, true)?,
+                "articulationpoints" => self.execute_structural(store, false)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;

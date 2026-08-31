@@ -60,7 +60,7 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// nothing is built.
 const ALIASES: &[&str] = &[
     "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber",
-    "degreeCentrality", "eigenvectorCentrality", "harmonicCentrality",
+    "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality",
 ];
 
 /// Every candidate, with a call that would work if the algorithm existed.
@@ -113,8 +113,9 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("node2vec", "CALL algo.node2vec() YIELD node, embedding RETURN count(*)"),
     ("fastRP", "CALL algo.fastRP() YIELD node, embedding RETURN count(*)"),
     ("graphSage", "CALL algo.graphSage() YIELD node, embedding RETURN count(*)"),
-    ("topologicalSort", "CALL algo.topologicalSort() YIELD node, order RETURN count(*)"),
-    ("cycleDetection", "CALL algo.cycleDetection() YIELD cycle RETURN count(*)"),
+    ("topologicalSort", "CALL algo.topologicalSort() YIELD node, position RETURN count(*)"),
+    ("cycleDetection", "CALL algo.cycleDetection() YIELD node, position RETURN count(*)"),
+    ("findCycle", "CALL algo.findCycle() YIELD node, position RETURN count(*)"),
     ("bridges", "CALL algo.bridges() YIELD source, target RETURN count(*)"),
     ("articulationPoints", "CALL algo.articulationPoints() YIELD node RETURN count(*)"),
     ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
