@@ -59,8 +59,7 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// many aliases we felt like adding -- a measurement that improves when
 /// nothing is built.
 const ALIASES: &[&str] = &[
-    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber",
-    "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality",
+    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality",
 ];
 
 /// Every candidate, with a call that would work if the algorithm existed.
@@ -95,6 +94,14 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
     ("eigenvectorCentrality", "CALL algo.eigenvectorCentrality() YIELD node, score RETURN count(*)"),
     ("coreNumber", "CALL algo.coreNumber() YIELD node, score RETURN count(*)"),
+    // Whole-graph shape. Two of these return a single scalar rather than a
+    // score per node, which is why they are separate algorithms rather than
+    // readings of one -- a caller wants a number or a column, not both.
+    ("eccentricity", "CALL algo.eccentricity() YIELD node, eccentricity RETURN count(*)"),
+    ("diameter", "CALL algo.diameter() YIELD diameter RETURN count(*)"),
+    ("radius", "CALL algo.radius() YIELD radius RETURN count(*)"),
+    ("averageNeighborDegree", "CALL algo.averageNeighborDegree() YIELD node, score RETURN count(*)"),
+    ("degreeAssortativity", "CALL algo.degreeAssortativity() YIELD assortativity RETURN count(*)"),
     ("articleRank", "CALL algo.articleRank() YIELD node, score RETURN count(*)"),
     ("louvain", "CALL algo.louvain() YIELD node, community RETURN count(*)"),
     ("labelPropagation", "CALL algo.labelPropagation() YIELD node, community RETURN count(*)"),
@@ -118,7 +125,6 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("findCycle", "CALL algo.findCycle() YIELD node, position RETURN count(*)"),
     ("bridges", "CALL algo.bridges() YIELD source, target RETURN count(*)"),
     ("articulationPoints", "CALL algo.articulationPoints() YIELD node RETURN count(*)"),
-    ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
     // The four temporal/causal primitives ALGO-15 names, and which ALGO-01's
     // target of 40 counts explicitly.
     ("temporalReachability", "CALL algo.temporalReachability({a}) YIELD node RETURN count(*)"),
