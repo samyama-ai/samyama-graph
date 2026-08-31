@@ -7,13 +7,19 @@
 //! what it filtered out.
 //!
 //! So each name is *called*. A name is counted only if `CALL <name>(…)` plans
-//! and executes against a real graph. Three outcomes are distinguished, and
+//! and executes against a real graph. Four outcomes are distinguished, and
 //! the distinction is the useful part:
 //!
 //! * **callable** — planned and ran.
-//! * **rejected** — reached the operator and was refused, which means the
-//!   dispatcher knows the name but the algorithm is not there.
-//! * **unknown** — no dispatch at all.
+//! * **rejected** — reached the operator and was refused *for a reason of its
+//!   own*: a graph with a cycle has no topological order, a disconnected graph
+//!   has no diameter. Refusing is the correct answer, so these count toward
+//!   coverage; excluding them would make the count a property of the fixture.
+//! * **redirected** — no dispatch under this name, but the dispatcher named
+//!   the spelling that does work (`algo.bfs` → `algo.shortestPath`). A user
+//!   who follows the message gets their answer, so this is not a gap either.
+//! * **unknown** — no dispatch and nowhere to go. This is the only bucket
+//!   that means an algorithm is missing.
 //!
 //! The candidate list deliberately includes algorithms we do **not** have, so
 //! the output measures the distance to 40 rather than confirming what is
@@ -147,6 +153,7 @@ fn main() {
     let mut callable = Vec::new();
     let mut rejected = Vec::new();
     let mut unknown = Vec::new();
+    let mut redirected = Vec::new();
 
     for (name, template) in CANDIDATES {
         let cypher = template.replace("{a}", &a.to_string()).replace("{b}", &b.to_string());
@@ -170,7 +177,17 @@ fn main() {
             // refused there rather than at the planner. Classifying on the
             // planner's message alone put every missing algorithm in the
             // "known" bucket, which flattered the count.
-            unknown.push(*name);
+            // A refusal that names a replacement is not the same answer as a
+            // refusal that does not. `algo.bfs` is refused because we spell it
+            // `algo.shortestPath`, and reporting it beside `node2vec` -- which
+            // does not exist under any spelling -- says a user cannot do
+            // something they can do. Split on whether the dispatcher offered
+            // somewhere to go.
+            if outcome.contains("use algo.") {
+                redirected.push(format!("{name}: {}", &outcome[..outcome.len().min(120)]));
+            } else {
+                unknown.push(*name);
+            }
         } else {
             // Known to the dispatcher and not callable *here* -- a write-only
             // algorithm under a read executor, or one that this fixture does
@@ -188,6 +205,7 @@ fn main() {
         "callable": callable,
         "known_but_not_callable": rejected,
         "unknown_to_the_dispatcher": unknown,
+        "refused_with_a_redirect": redirected,
         "candidates_probed": CANDIDATES.len(),
     });
     let out = std::env::args().collect::<Vec<_>>();
