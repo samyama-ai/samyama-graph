@@ -22,9 +22,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use samyama_graph_algorithms::{
-    count_triangles, local_clustering_coefficient, local_clustering_coefficient_directed,
-    page_rank, prim_mst, strongly_connected_components, weakly_connected_components, GraphView,
-    NodeId, PageRankConfig,
+    betweenness_centrality, closeness_centrality, count_triangles, degree_centrality,
+    local_clustering_coefficient, local_clustering_coefficient_directed, page_rank, prim_mst,
+    strongly_connected_components, weakly_connected_components, GraphView, NodeId,
+    PageRankConfig,
 };
 
 /// Per-algorithm, and documented rather than one global epsilon: "within
@@ -32,6 +33,7 @@ use samyama_graph_algorithms::{
 const TOL_PAGERANK: f64 = 1e-9;
 const TOL_CLUSTERING: f64 = 1e-9;
 const TOL_MST: f64 = 1e-9;
+const TOL_CENTRALITY: f64 = 1e-9;
 
 fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> GraphView {
     let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
@@ -50,6 +52,19 @@ fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> Graph
         }
     }
     GraphView::from_adjacency_list(nodes, index_to_node, node_to_index, outgoing, incoming, Some(weights))
+}
+
+/// A view storing each edge exactly once, as `build_view` does in the engine.
+fn view_single(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphView {
+    let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
+    let node_to_index: HashMap<NodeId, usize> = (0..nodes).map(|i| (i as NodeId, i)).collect();
+    let mut outgoing = vec![Vec::new(); nodes];
+    let mut incoming = vec![Vec::new(); nodes];
+    for &(a, b, _) in edges {
+        outgoing[a].push(b);
+        incoming[b].push(a);
+    }
+    GraphView::from_adjacency_list(nodes, index_to_node, node_to_index, outgoing, incoming, None)
 }
 
 fn main() {
@@ -90,6 +105,52 @@ fn main() {
             .collect();
         let view = view_of(nodes, &edges, directed);
         let want = &g["networkx"];
+
+        // Centrality is checked against a view built the way the *engine*
+        // builds one -- each edge stored once -- rather than against `view_of`,
+        // which writes an undirected edge into both directions for the older
+        // algorithms.
+        //
+        // The two conventions cannot share a call. On the doubled view,
+        // `out + in` is twice the degree, while walking both directions
+        // double-counts every shortest path and breaks betweenness alone,
+        // leaving degree and closeness looking right. Detecting which view one
+        // has is not possible either: equal in- and out-degree everywhere is
+        // also true of a balanced directed graph. So the caller states it, and
+        // this states it by building the view it means.
+        let single = view_single(nodes, &edges);
+        let bidir = !directed;
+        for (algo, ours, tol) in [
+            ("degree_centrality", degree_centrality(&single, bidir), TOL_CENTRALITY),
+            ("closeness_centrality", closeness_centrality(&single, bidir), TOL_CENTRALITY),
+            ("betweenness_centrality", betweenness_centrality(&single, bidir), TOL_CENTRALITY),
+        ] {
+            let Some(theirs) = want.get(algo) else { continue };
+            let (mut worst, mut at) = (0.0f64, 0usize);
+            for i in 0..nodes {
+                let t = theirs[i.to_string()].as_f64().unwrap_or(f64::NAN);
+                checks += 1;
+                let d = (ours[i] - t).abs();
+                if d > worst {
+                    worst = d;
+                    at = i;
+                }
+                if d > tol {
+                    failures.push(format!(
+                        "{name} {algo} node {i}: ours {:.12} vs networkx {t:.12}",
+                        ours[i]
+                    ));
+                }
+            }
+            // Printed like the others: 600 silent checks are indistinguishable
+            // from 600 skipped ones, which is the whole reason the count is
+            // reported at the end.
+            println!(
+                "  {}    {name:14} {:12} max |delta| {worst:.3e} at node {at}",
+                if worst <= tol { "ok" } else { "FAIL" },
+                algo.trim_end_matches("_centrality"),
+            );
+        }
 
         let mut check_map = |label: &str, ours: &HashMap<NodeId, f64>, tol: f64| {
             checks += 1;

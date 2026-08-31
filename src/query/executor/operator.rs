@@ -263,6 +263,14 @@ fn normalized_duration(months: i64, days: i64, seconds: i128, nanos: i128) -> Pr
 }
 
 
+/// Which centrality `execute_centrality` should compute.
+#[derive(Debug, Clone, Copy)]
+enum Centrality {
+    Degree,
+    Closeness,
+    Betweenness,
+}
+
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
@@ -2317,24 +2325,27 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// reachability test fail, and narrowing an existing guard to keep a new check
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "asin", "atan", "atan2", "bfs", "breadthfirstsearch", "cdlp", "ceil",
-    "coalesce", "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
+    "abs", "acos", "asin", "atan", "atan2", "betweenness", "betweennesscentrality", "bfs",
+    "breadthfirstsearch", "cdlp", "ceil", "closeness", "closenesscentrality", "coalesce",
+    "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
     "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
-    "datetime.truncate", "degrees", "dijkstra", "duration",
+    "datetime.truncate", "degree", "degreecentrality", "degrees", "dijkstra", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
     "duration_between", "e", "elementid", "endnode", "exists", "exp", "false", "floor",
     "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
     "isnan", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
-    "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "properties", "radians",
-    "rand", "randomuuid", "range", "relationships", "rels", "replace", "reverse", "right",
-    "round", "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh",
-    "size", "split", "sqrt", "startnode", "stdev", "stdevp", "substring", "subsumes", "tail",
-    "tan", "tanh", "time", "time.truncate", "timestamp", "toboolean", "tobooleanornull",
-    "tofloat", "tofloatornull", "toint", "tointeger", "tointegerornull", "tolower",
-    "tolowercase", "tostring", "tostringornull", "toupper", "touppercase", "trianglecount",
-    "trim", "true", "type", "valuetype", "wcc", "weightedpath",
+    "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "propagationranking",
+    "properties", "radians", "rand", "randomuuid", "range", "relationships", "rels",
+    "replace", "reverse", "right", "round", "rtrim", "scc", "shortestpath",
+    "shortestpathweighted", "sign", "sin", "sinh", "size", "split", "sqrt", "startnode",
+    "stdev", "stdevp", "substring", "subsumes", "symptomexplanation", "tail", "tan", "tanh",
+    "temporalreachability", "temporalshortestpath", "time", "time.truncate", "timestamp",
+    "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint", "tointeger",
+    "tointegerornull", "tolower", "tolowercase", "tostring", "tostringornull", "toupper",
+    "touppercase", "trianglecount", "trim", "true", "type", "valuetype", "wcc",
+    "weightedpath",
 ];
 
 /// Is `name` a function this engine implements?
@@ -12818,6 +12829,59 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// Which centrality to compute. One dispatch, three algorithms, because
+    /// they differ only in the scoring function and sharing the projection
+    /// keeps them from disagreeing about what the graph is.
+    fn execute_centrality(
+        &mut self,
+        store: &GraphStore,
+        which: Centrality,
+    ) -> ExecutionResult<()> {
+        let (mut label, mut edge_type, mut undirected) = (None, None, None);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
+                if let Some(PropertyValue::Boolean(b)) = m.get("undirected") {
+                    undirected = Some(*b);
+                }
+            }
+        }
+        // The first positional string is a label, as the other algorithms take
+        // it, so `algo.betweenness('Person')` works like `algo.pageRank('Person')`.
+        if label.is_none() {
+            if let Some(Expression::Literal(PropertyValue::String(s))) = self.args.first() {
+                label = Some(s.clone());
+            }
+        }
+        let view = crate::algo::build_view(store, label.as_deref(), edge_type.as_deref(), None);
+        // Undirected by default: centrality on a social or dependency graph is
+        // almost always asked of the undirected reading, and a caller who
+        // wants the directed one says so. Stated here because the two give
+        // different answers and neither is wrong.
+        let und = undirected.unwrap_or(true);
+        let scores = match which {
+            Centrality::Degree => crate::algo::degree_centrality(&view, und),
+            Centrality::Closeness => crate::algo::closeness_centrality(&view, und),
+            Centrality::Betweenness => crate::algo::betweenness_centrality(&view, und),
+        };
+        for (node_id, score) in crate::algo::ranked(&view, &scores) {
+            let mut record = Record::new();
+            let nid = NodeId::new(node_id);
+            match store.get_node(nid) {
+                Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
+                None => record.bind("node".to_string(), Value::NodeRef(nid)),
+            }
+            record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13267,6 +13331,17 @@ impl AlgorithmOperator {
                 | "temporalshortestpath"
                 | "propagationranking"
                 | "symptomexplanation"
+                // Centrality. Three different answers to "which nodes matter":
+                // degree is local, closeness finds the well-placed node, and
+                // betweenness finds the bottleneck -- often a low-degree node
+                // the other two miss, since the single bridge between two
+                // clusters has degree 2.
+                | "degree"
+                | "degreecentrality"
+                | "closeness"
+                | "closenesscentrality"
+                | "betweenness"
+                | "betweennesscentrality"
         )
     }
 }
@@ -13289,6 +13364,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
                 "symptomexplanation" => self.execute_symptom_explanation(store)?,
+                "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
+                "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
+                "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13330,6 +13408,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
                 "symptomexplanation" => self.execute_symptom_explanation(store)?,
+                "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
+                "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
+                "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;

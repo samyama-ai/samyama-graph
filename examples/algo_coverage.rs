@@ -51,6 +51,15 @@ fn fixture() -> (GraphStore, Vec<u64>) {
     (s, ids)
 }
 
+/// Aliases: a second spelling of an algorithm already counted.
+///
+/// ALGO-01 counts **algorithms**, not names. `algo.betweenness` and
+/// `algo.betweennessCentrality` are one algorithm with two spellings, and
+/// counting both would inflate the number against a target of 40 by however
+/// many aliases we felt like adding -- a measurement that improves when
+/// nothing is built.
+const ALIASES: &[&str] = &["betweennessCentrality", "closenessCentrality", "degreeCentrality"];
+
 /// Every candidate, with a call that would work if the algorithm existed.
 /// `{a}` and `{b}` are node ids.
 const CANDIDATES: &[(&str, &str)] = &[
@@ -75,6 +84,9 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("betweenness", "CALL algo.betweenness() YIELD node, score RETURN count(*)"),
     ("closeness", "CALL algo.closeness() YIELD node, score RETURN count(*)"),
     ("degree", "CALL algo.degree() YIELD node, score RETURN count(*)"),
+    ("betweennessCentrality", "CALL algo.betweennessCentrality() YIELD node, score RETURN count(*)"),
+    ("closenessCentrality", "CALL algo.closenessCentrality() YIELD node, score RETURN count(*)"),
+    ("degreeCentrality", "CALL algo.degreeCentrality() YIELD node, score RETURN count(*)"),
     ("eigenvector", "CALL algo.eigenvector() YIELD node, score RETURN count(*)"),
     ("articleRank", "CALL algo.articleRank() YIELD node, score RETURN count(*)"),
     ("louvain", "CALL algo.louvain() YIELD node, community RETURN count(*)"),
@@ -150,9 +162,12 @@ fn main() {
         }
     }
 
+    let distinct: Vec<&&str> = callable.iter().filter(|n| !ALIASES.contains(n)).collect();
     let json = serde_json::json!({
         "target_h1": 40,
-        "callable_count": callable.len(),
+        "callable_count": distinct.len(),
+        "callable_names_including_aliases": callable.len(),
+        "aliases_not_counted": callable.iter().filter(|n| ALIASES.contains(n)).collect::<Vec<_>>(),
         "callable": callable,
         "known_but_not_callable": rejected,
         "unknown_to_the_dispatcher": unknown,
@@ -166,7 +181,8 @@ fn main() {
         None => println!("{text}"),
     }
     eprintln!(
-        "{} of {} probed names are callable from Cypher (ALGO-01 H1 target: 40)",
-        callable.len(), CANDIDATES.len()
+        "{} distinct algorithms callable from Cypher ({} names incl. aliases), \
+         of {} probed. ALGO-01 H1 target: 40",
+        distinct.len(), callable.len(), CANDIDATES.len()
     );
 }

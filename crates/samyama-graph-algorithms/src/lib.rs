@@ -12,6 +12,7 @@ pub mod topology;
 pub mod cdlp;
 pub mod lcc;
 pub mod pca;
+pub mod centrality;
 pub mod temporal;
 
 pub use common::{GraphView, NodeId};
@@ -27,6 +28,9 @@ pub use lcc::{
     local_clustering_coefficient_with, DirectedLcc, LccResult,
 };
 pub use pca::{pca, PcaConfig, PcaResult, PcaSolver};
+pub use centrality::{
+    betweenness_centrality, closeness_centrality, degree_centrality, ranked, Scores,
+};
 pub use temporal::{
     earliest_arrival, propagation_ranking, symptom_explanation, temporal_reachability,
     temporal_shortest_path, ArrivalTimes, Explanation, TemporalEdges, TemporalError,
