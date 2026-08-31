@@ -329,6 +329,28 @@ impl Record {
             .map(|(_, value)| value)
     }
 
+    /// The variables this record binds, sorted, for an error message.
+    ///
+    /// "Variable not found: node" names the thing that is missing and not one
+    /// of the things that are there, which leaves a caller guessing. It is
+    /// worst after a procedure call: `YIELD` accepts any name, the operator
+    /// binds whatever it binds, and the mismatch only surfaces downstream as a
+    /// variable error that says nothing about the procedure.
+    ///
+    /// `algo.temporalShortestPath` yields `path, times, arrival` while its
+    /// three sibling primitives yield `node, time`. Guessing `node, time` for
+    /// it fails on every scenario that *found* a path and succeeds on every
+    /// one that did not -- because no route means no rows, and no rows means
+    /// nothing ever reads the binding. That reads like a flaky procedure. It
+    /// cost a 40-scenario run to diagnose, and the answer was in the record
+    /// the whole time.
+    pub fn bound_variables(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.bindings.iter().map(|(n, _)| n.to_string()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// All bindings, in binding order.
     /// Drop every binding whose name the predicate rejects.
     ///

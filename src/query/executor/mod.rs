@@ -125,6 +125,15 @@ pub enum ExecutionError {
     #[error("Variable not found: {0}")]
     VariableNotFound(String),
 
+    /// Variable not found, with the variables that *are* in scope.
+    ///
+    /// Separate from `VariableNotFound` rather than replacing it: not every
+    /// site that raises it has a record in hand, and a message that says
+    /// "in scope: " with an empty list is worse than one that does not claim
+    /// to know.
+    #[error("Variable not found: {name} (in scope: {in_scope})")]
+    VariableNotFoundInScope { name: String, in_scope: String },
+
     /// A read of an entity that is no longer in the graph.
     ///
     /// Distinct from `RuntimeError` because the *caller* can tell these apart
