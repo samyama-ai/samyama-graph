@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use samyama_graph_algorithms::{
-    betweenness_centrality, closeness_centrality, count_triangles, degree_centrality,
+    betweenness_centrality, closeness_centrality, core_number, count_triangles,
+    degree_centrality, eigenvector_centrality, harmonic_centrality,
     local_clustering_coefficient, local_clustering_coefficient_directed, page_rank, prim_mst,
     strongly_connected_components, weakly_connected_components, GraphView, NodeId,
     PageRankConfig,
@@ -34,6 +35,9 @@ const TOL_PAGERANK: f64 = 1e-9;
 const TOL_CLUSTERING: f64 = 1e-9;
 const TOL_MST: f64 = 1e-9;
 const TOL_CENTRALITY: f64 = 1e-9;
+/// Power iteration, not a closed form: looser than the exact scores and still
+/// three orders tighter than any difference that would change a ranking.
+const TOL_EIGENVECTOR: f64 = 1e-6;
 
 fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> GraphView {
     let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
@@ -124,7 +128,29 @@ fn main() {
             ("degree_centrality", degree_centrality(&single, bidir), TOL_CENTRALITY),
             ("closeness_centrality", closeness_centrality(&single, bidir), TOL_CENTRALITY),
             ("betweenness_centrality", betweenness_centrality(&single, bidir), TOL_CENTRALITY),
+            ("harmonic_centrality", harmonic_centrality(&single, bidir), TOL_CENTRALITY),
+            // Integers, so exact. A core number off by one is a different
+            // answer, not a rounding difference.
+            ("core_number", core_number(&single, bidir).iter().map(|&c| c as f64).collect(), 0.0),
+            // Power iteration, so looser than the exact ones but far tighter
+            // than the differences that matter. `None` here means it did not
+            // converge, which is reported rather than compared -- see below.
+            ("eigenvector_centrality",
+             eigenvector_centrality(&single, bidir, 1000, 1e-10).unwrap_or_default(),
+             TOL_EIGENVECTOR),
         ] {
+            // A recorded `null` means NetworkX itself declined to answer, and
+            // there is nothing to compare against. Skipping is right; scoring
+            // it as agreement would be a check that cannot fail.
+            if want.get(algo).is_some_and(|v| v.is_null()) {
+                println!("  skip  {name:14} {:12} networkx did not converge",
+                         algo.trim_end_matches("_centrality"));
+                continue;
+            }
+            if ours.is_empty() {
+                failures.push(format!("{name} {algo}: did not converge"));
+                continue;
+            }
             let Some(theirs) = want.get(algo) else { continue };
             let (mut worst, mut at) = (0.0f64, 0usize);
             for i in 0..nodes {

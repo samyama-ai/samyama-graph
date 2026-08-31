@@ -29,7 +29,8 @@ pub use lcc::{
 };
 pub use pca::{pca, PcaConfig, PcaResult, PcaSolver};
 pub use centrality::{
-    betweenness_centrality, closeness_centrality, degree_centrality, ranked, Scores,
+    betweenness_centrality, closeness_centrality, core_number, degree_centrality,
+    eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use temporal::{
     earliest_arrival, propagation_ranking, symptom_explanation, temporal_reachability,

@@ -58,7 +58,9 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// counting both would inflate the number against a target of 40 by however
 /// many aliases we felt like adding -- a measurement that improves when
 /// nothing is built.
-const ALIASES: &[&str] = &["betweennessCentrality", "closenessCentrality", "degreeCentrality"];
+const ALIASES: &[&str] = &[
+    "betweennessCentrality", "closenessCentrality", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "harmonicCentrality",
+];
 
 /// Every candidate, with a call that would work if the algorithm existed.
 /// `{a}` and `{b}` are node ids.
@@ -88,6 +90,10 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("closenessCentrality", "CALL algo.closenessCentrality() YIELD node, score RETURN count(*)"),
     ("degreeCentrality", "CALL algo.degreeCentrality() YIELD node, score RETURN count(*)"),
     ("eigenvector", "CALL algo.eigenvector() YIELD node, score RETURN count(*)"),
+    ("harmonic", "CALL algo.harmonic() YIELD node, score RETURN count(*)"),
+    ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
+    ("eigenvectorCentrality", "CALL algo.eigenvectorCentrality() YIELD node, score RETURN count(*)"),
+    ("coreNumber", "CALL algo.coreNumber() YIELD node, score RETURN count(*)"),
     ("articleRank", "CALL algo.articleRank() YIELD node, score RETURN count(*)"),
     ("louvain", "CALL algo.louvain() YIELD node, community RETURN count(*)"),
     ("labelPropagation", "CALL algo.labelPropagation() YIELD node, community RETURN count(*)"),

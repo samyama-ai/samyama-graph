@@ -269,6 +269,9 @@ enum Centrality {
     Degree,
     Closeness,
     Betweenness,
+    Harmonic,
+    Eigenvector,
+    CoreNumber,
 }
 
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
@@ -2327,13 +2330,14 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 pub const KNOWN_FUNCTIONS: &[&str] = &[
     "abs", "acos", "asin", "atan", "atan2", "betweenness", "betweennesscentrality", "bfs",
     "breadthfirstsearch", "cdlp", "ceil", "closeness", "closenesscentrality", "coalesce",
-    "components", "connectedcomponents", "cos", "cosh", "cosine", "cot", "date",
-    "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
+    "components", "connectedcomponents", "corenumber", "cos", "cosh", "cosine", "cot",
+    "date", "date.truncate", "datetime", "datetime.fromepoch", "datetime.fromepochmillis",
     "datetime.truncate", "degree", "degreecentrality", "degrees", "dijkstra", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "false", "floor",
-    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty",
-    "isnan", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
+    "duration_between", "e", "eigenvector", "eigenvectorcentrality", "elementid", "endnode",
+    "exists", "exp", "false", "floor", "harmonic", "harmoniccentrality", "haslabels",
+    "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan",
+    "kcore", "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "mst", "nodes", "or.solve", "pagerank",
     "pagerank2", "percentilecont", "percentiledisc", "pi", "prank", "propagationranking",
@@ -12868,6 +12872,25 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             Centrality::Degree => crate::algo::degree_centrality(&view, und),
             Centrality::Closeness => crate::algo::closeness_centrality(&view, und),
             Centrality::Betweenness => crate::algo::betweenness_centrality(&view, und),
+            Centrality::Harmonic => crate::algo::harmonic_centrality(&view, und),
+            Centrality::CoreNumber => {
+                crate::algo::core_number(&view, und).iter().map(|&c| c as f64).collect()
+            }
+            Centrality::Eigenvector => {
+                // No convergence is an error, not a plausible vector. A
+                // non-converged iterate is still normalised and the right
+                // shape, so returning it would publish a number that means
+                // nothing -- and a graph with no edges has no principal
+                // eigenvector at all.
+                crate::algo::eigenvector_centrality(&view, und, 1000, 1e-10).ok_or_else(|| {
+                    ExecutionError::RuntimeError(
+                        "eigenvector centrality did not converge in 1000 iterations; \
+                         the graph may have no principal eigenvector (no edges, or a \
+                         disconnected structure). Try algo.pageRank, which damps."
+                            .to_string(),
+                    )
+                })?
+            }
         };
         for (node_id, score) in crate::algo::ranked(&view, &scores) {
             let mut record = Record::new();
@@ -13342,6 +13365,12 @@ impl AlgorithmOperator {
                 | "closenesscentrality"
                 | "betweenness"
                 | "betweennesscentrality"
+                | "harmonic"
+                | "harmoniccentrality"
+                | "eigenvector"
+                | "eigenvectorcentrality"
+                | "kcore"
+                | "corenumber"
         )
     }
 }
@@ -13367,6 +13396,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
                 "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
                 "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
+                "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
+                "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
+                "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -13411,6 +13443,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
                 "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
                 "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
+                "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
+                "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
+                "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
