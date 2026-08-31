@@ -265,3 +265,161 @@ pub fn ranked(view: &GraphView, scores: &Scores) -> Vec<(NodeId, f64)> {
     out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     out
 }
+
+/// Harmonic centrality: the sum of reciprocal distances to every other node.
+///
+/// The repair for closeness on a disconnected graph. Closeness divides by a
+/// *total* distance, so an unreachable node makes the sum infinite and the
+/// whole score collapses -- which is why [`closeness_centrality`] needs
+/// NetworkX's reachable-fraction convention to say anything at all. Harmonic
+/// sums `1/d` instead, and an unreachable node contributes `1/inf = 0`. No
+/// convention needed, and no special case.
+///
+/// Unnormalised, as NetworkX leaves it: the raw sum, not divided by `n - 1`.
+///
+/// Direction follows closeness: distances *into* the node on a directed graph.
+pub fn harmonic_centrality(view: &GraphView, bidirectional: bool) -> Scores {
+    let n = view.node_count;
+    let mut out = vec![0.0; n];
+    for v in 0..n {
+        let s = bfs_sssp_reversed(view, v, bidirectional);
+        out[v] = s
+            .dist
+            .iter()
+            .enumerate()
+            .filter(|(u, &d)| *u != v && d > 0)
+            .map(|(_, &d)| 1.0 / d as f64)
+            .sum();
+    }
+    out
+}
+
+/// Core number: the largest `k` for which a node survives in the k-core.
+///
+/// Computed by peeling. Repeatedly remove the lowest-degree node; its core
+/// number is the highest degree seen so far, which is what makes this O(E)
+/// rather than a search over `k`. The running maximum is the subtle part: a
+/// node removed later cannot have a *lower* core number than one removed
+/// earlier, so the value is the max of its degree-at-removal and everything
+/// peeled before it.
+///
+/// Undirected by definition: a k-core is defined on degree, and NetworkX takes
+/// that as in- **plus** out-degree even on a directed graph. So both
+/// directions are always walked, and `bidirectional` is not consulted at all.
+///
+/// Following the flag instead -- successors only, on a directed view -- gave a
+/// core number three too low on the reference graph. The doc comment said
+/// "undirected by definition" while the code branched on direction anyway,
+/// which is the sort of disagreement a parity check exists to find.
+///
+/// Like `degree_centrality`, this counts `out + in` without deduplicating, so
+/// the caller's storage convention matters: a view holding each undirected
+/// edge twice would double every degree. `build_view` stores each edge once.
+pub fn core_number(view: &GraphView, _bidirectional: bool) -> Vec<usize> {
+    let n = view.node_count;
+    let neighbours = |i: usize| -> Vec<usize> {
+        let mut v: Vec<usize> = view.successors(i).to_vec();
+        v.extend_from_slice(view.predecessors(i));
+        // **Not** deduplicated. NetworkX's degree on a directed graph is
+        // in-degree *plus* out-degree, so a reciprocal pair `a -> b` and
+        // `b -> a` counts as two, not one. Collapsing them to a single
+        // neighbour gave a core number one too low on the directed reference
+        // graph while agreeing on both undirected ones -- exactly the shape of
+        // a bug that a single-graph check would have missed.
+        //
+        // The peel is consistent with that: a multi-edge neighbour appears
+        // twice in this list and is decremented twice when the far end is
+        // removed, which is what it means for two edges to disappear.
+        //
+        // A self-loop is not a neighbour under any reading, and NetworkX
+        // refuses a graph containing one outright.
+        v.retain(|&u| u != i);
+        v
+    };
+
+    let mut deg: Vec<usize> = (0..n).map(|i| neighbours(i).len()).collect();
+    let mut core = vec![0usize; n];
+    let mut removed = vec![false; n];
+
+    // Batagelj-Zaversnik, exactly. Repeatedly remove a node of minimum current
+    // degree; its core number is the running maximum of the degrees at
+    // removal. Because the minimum is always taken, that sequence is
+    // non-decreasing, and the running maximum is what makes a node peeled
+    // later inherit the level rather than reporting its own reduced degree.
+    //
+    // An earlier version also pushed `core[v]` onto each surviving neighbour.
+    // That is not part of the algorithm, and it inflated the answer on a
+    // directed graph while agreeing on every undirected one -- so the
+    // undirected reference agreed and only the directed graph disagreed.
+    let mut k = 0usize;
+    for _ in 0..n {
+        let Some(v) = (0..n).filter(|&i| !removed[i]).min_by_key(|&i| deg[i]) else {
+            break;
+        };
+        k = k.max(deg[v]);
+        core[v] = k;
+        removed[v] = true;
+        for u in neighbours(v) {
+            if !removed[u] {
+                deg[u] = deg[u].saturating_sub(1);
+            }
+        }
+    }
+    core
+}
+
+/// Eigenvector centrality by power iteration.
+///
+/// A node is important in proportion to the importance of what points at it,
+/// which is PageRank without the damping factor or the teleport. That makes it
+/// sharper on a well-connected graph and undefined on some others -- a graph
+/// with no edges has no principal eigenvector, and power iteration on it
+/// simply does not converge.
+///
+/// Returns `None` rather than a plausible-looking vector when it does not
+/// converge in `max_iter`. A non-converged iterate is still a normalised
+/// vector of the right shape, and handing it back is how a number that means
+/// nothing gets published.
+///
+/// Normalised to unit L2 norm, as NetworkX does.
+pub fn eigenvector_centrality(
+    view: &GraphView,
+    bidirectional: bool,
+    max_iter: usize,
+    tol: f64,
+) -> Option<Scores> {
+    let n = view.node_count;
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    let mut x = vec![1.0 / (n as f64).sqrt(); n];
+    for _ in 0..max_iter {
+        let mut next = vec![0.0; n];
+        // x[v] gets the mass of everything pointing *at* v, which is the
+        // convention NetworkX uses for a directed graph.
+        for u in 0..n {
+            for &v in view.successors(u) {
+                next[v] += x[u];
+            }
+            if bidirectional {
+                for &v in view.predecessors(u) {
+                    next[v] += x[u];
+                }
+            }
+        }
+        let norm = next.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            return None;
+        }
+        for v in next.iter_mut() {
+            *v /= norm;
+        }
+        let delta: f64 = next.iter().zip(&x).map(|(a, b)| (a - b).abs()).sum();
+        x = next;
+        // NetworkX's test is `sum |x_i - x_last_i| < n * tol`.
+        if delta < n as f64 * tol {
+            return Some(x);
+        }
+    }
+    None
+}

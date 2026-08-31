@@ -23,7 +23,8 @@ pub use samyama_graph_algorithms::{
     pca, PcaConfig, PcaResult, PcaSolver,
     temporal_reachability, temporal_shortest_path, symptom_explanation,
     TemporalEdges, Explanation, TemporalPath,
-    betweenness_centrality, closeness_centrality, degree_centrality, ranked,
+    betweenness_centrality, closeness_centrality, core_number, degree_centrality,
+    eigenvector_centrality, harmonic_centrality, ranked,
 };
 
 /// Build a GraphView from the store for algorithm execution

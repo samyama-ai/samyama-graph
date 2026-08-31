@@ -129,3 +129,77 @@ fn an_isolated_node_scores_zero_rather_than_being_omitted() {
         assert_eq!(v.last().unwrap().1, 0.0, "{algo}: isolated node should score 0: {v:?}");
     }
 }
+
+#[test]
+fn harmonic_survives_a_disconnected_graph_where_closeness_needs_a_convention() {
+    // The reason harmonic exists. Add an isolated pair: closeness has to
+    // divide by a total distance that is now infinite for some pairs, and
+    // leans on NetworkX's reachable-fraction convention to say anything.
+    // Harmonic sums 1/d, so an unreachable node contributes zero and no
+    // convention is needed.
+    let mut s = barbell();
+    let a = s.create_node_with_labels([Label::new("N")]);
+    let b = s.create_node_with_labels([Label::new("N")]);
+    s.set_node_property("default", a, "name", PropertyValue::String("x1".into())).unwrap();
+    s.set_node_property("default", b, "name", PropertyValue::String("x2".into())).unwrap();
+    s.create_edge(a, b, "R").unwrap();
+
+    let h = run(&s, "harmonic");
+    assert_eq!(h.len(), 9);
+    // The isolated pair scores exactly 1.0 each -- one neighbour at distance
+    // 1, and every unreachable node contributing 1/inf = 0. An implementation
+    // that dropped unreachable nodes instead of scoring them zero would give
+    // the same 1.0 here, so the discriminating half is below.
+    let x1 = h.iter().find(|(n, _)| n == "x1").unwrap().1;
+    assert!((x1 - 1.0).abs() < 1e-9, "{h:?}");
+    // The main component all outranks the isolated pair, which is the whole
+    // point: closeness without its reachable-fraction correction would rank a
+    // perfectly-central node of a two-node component *above* these.
+    assert!(h.iter().take(7).all(|(_, v)| *v > x1), "{h:?}");
+    // Harmonic favours the node with most neighbours at distance 1, not the
+    // bridge -- unlike betweenness. n2 has three, n3 has two.
+    assert_eq!(h[0].0, "n2", "{h:?}");
+}
+
+#[test]
+fn core_number_separates_a_pendant_from_the_core() {
+    // The bare barbell is *entirely* a 2-core -- even the bridge has two
+    // neighbours that both survive the peel -- so it cannot discriminate.
+    // A pendant leaf can: it has degree 1 and is peeled first.
+    let mut s = barbell();
+    let leaf = s.create_node_with_labels([Label::new("N")]);
+    s.set_node_property("default", leaf, "name", PropertyValue::String("leaf".into())).unwrap();
+    let n0 = s.all_nodes()[0].id;
+    s.create_edge(n0, leaf, "R").unwrap();
+
+    let c = run(&s, "kCore");
+    assert_eq!(c.len(), 8);
+    let leaf_core = c.iter().find(|(n, _)| n == "leaf").unwrap().1;
+    assert_eq!(leaf_core, 1.0, "a pendant is a 1-core: {c:?}");
+    assert_eq!(c.iter().filter(|(_, v)| *v >= 2.0).count(), 7, "{c:?}");
+}
+
+#[test]
+fn eigenvector_refuses_rather_than_returning_a_meaningless_vector() {
+    // A graph with no edges has no principal eigenvector. Power iteration
+    // still produces a normalised vector of the right shape every round, so
+    // returning it would publish a number that means nothing.
+    let mut s = GraphStore::new();
+    for i in 0..3 {
+        let n = s.create_node_with_labels([Label::new("N")]);
+        s.set_node_property("default", n, "name", PropertyValue::String(format!("z{i}"))).unwrap();
+    }
+    let q = parse_query(&Q.replace('%', "eigenvector")).unwrap();
+    let e = QueryExecutor::new(&s).execute(&q).unwrap_err();
+    assert!(format!("{e:?}").contains("converge"), "{e:?}");
+}
+
+#[test]
+fn eigenvector_ranks_the_well_connected_core() {
+    let s = barbell();
+    let e = run(&s, "eigenvector");
+    assert_eq!(e.len(), 7);
+    // Every score is positive and normalised to unit length.
+    let norm: f64 = e.iter().map(|(_, v)| v * v).sum::<f64>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-6, "not unit-normalised: {norm}");
+}
