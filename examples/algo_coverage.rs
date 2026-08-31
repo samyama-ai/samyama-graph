@@ -59,7 +59,7 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// many aliases we felt like adding -- a measurement that improves when
 /// nothing is built.
 const ALIASES: &[&str] = &[
-    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality",
+    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality", "labelPropagation",
 ];
 
 /// Every candidate, with a call that would work if the algorithm existed.
@@ -103,9 +103,11 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("averageNeighborDegree", "CALL algo.averageNeighborDegree() YIELD node, score RETURN count(*)"),
     ("degreeAssortativity", "CALL algo.degreeAssortativity() YIELD assortativity RETURN count(*)"),
     ("articleRank", "CALL algo.articleRank() YIELD node, score RETURN count(*)"),
-    ("louvain", "CALL algo.louvain() YIELD node, community RETURN count(*)"),
-    ("labelPropagation", "CALL algo.labelPropagation() YIELD node, community RETURN count(*)"),
-    ("modularity", "CALL algo.modularity() YIELD community, score RETURN count(*)"),
+    ("louvain", "CALL algo.louvain() YIELD node, communityId, modularity RETURN count(*)"),
+    // Routed to cdlp -- that *is* label propagation, LDBC's -- so it is an
+    // alias rather than a distinct algorithm and is not counted.
+    ("labelPropagation", "CALL algo.labelPropagation() YIELD node, communityId RETURN count(*)"),
+    ("modularity", "CALL algo.modularity([[{a}, 0], [{b}, 0]]) YIELD modularity RETURN count(*)"),
     ("kCore", "CALL algo.kCore() YIELD node, core RETURN count(*)"),
     ("kMeans", "CALL algo.kMeans() YIELD node, cluster RETURN count(*)"),
     ("nodeSimilarity", "CALL algo.nodeSimilarity() YIELD node1, node2, similarity RETURN count(*)"),
@@ -113,10 +115,10 @@ const CANDIDATES: &[(&str, &str)] = &[
     ("adamicAdar", "CALL algo.adamicAdar({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
     ("commonNeighbors", "CALL algo.commonNeighbors({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
     ("commonNeighbours", "CALL algo.commonNeighbours({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
-    ("allShortestPaths", "CALL algo.allShortestPaths({a}, {b}) YIELD path RETURN count(*)"),
-    ("aStar", "CALL algo.aStar({a}, {b}, 'weight') YIELD path RETURN count(*)"),
-    ("yens", "CALL algo.yens({a}, {b}, 3) YIELD path RETURN count(*)"),
-    ("randomWalk", "CALL algo.randomWalk({a}, 5) YIELD node RETURN count(*)"),
+    ("allShortestPaths", "CALL algo.allShortestPaths({a}, {b}) YIELD path, rank, cost RETURN count(*)"),
+    ("aStar", "CALL algo.aStar({a}, {b}) YIELD path, cost RETURN count(*)"),
+    ("yens", "CALL algo.yens({a}, {b}, 3) YIELD path, rank, cost RETURN count(*)"),
+    ("randomWalk", "CALL algo.randomWalk({a}, {steps: 5, seed: 7}) YIELD node, step RETURN count(*)"),
     ("node2vec", "CALL algo.node2vec() YIELD node, embedding RETURN count(*)"),
     ("fastRP", "CALL algo.fastRP() YIELD node, embedding RETURN count(*)"),
     ("graphSage", "CALL algo.graphSage() YIELD node, embedding RETURN count(*)"),

@@ -28,6 +28,8 @@ pub use samyama_graph_algorithms::{
     predict_links, score_one, LinkScore, PairScore,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
+    louvain, modularity, with_ids,
+    a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,
 };
 
 /// Build a GraphView from the store for algorithm execution
