@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use samyama_graph_algorithms::{
+    all_shortest_paths, a_star, louvain, modularity, yens_k_shortest,
     betweenness_centrality, closeness_centrality, core_number, count_triangles,
     degree_centrality, eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
@@ -40,6 +41,17 @@ const TOL_CENTRALITY: f64 = 1e-9;
 /// Power iteration, not a closed form: looser than the exact scores and still
 /// three orders tighter than any difference that would change a ranking.
 const TOL_EIGENVECTOR: f64 = 1e-6;
+/// Path costs are sums of the recorded edge weights, so the two sides do the
+/// same additions in possibly different orders. A few ULPs, not a tolerance
+/// for a different answer.
+const TOL_PATH: f64 = 1e-9;
+/// Modularity is a sum over every edge and every pair of community degrees;
+/// on these graphs that is a few hundred terms.
+const TOL_MODULARITY: f64 = 1e-9;
+/// How many shortest paths the recorder enumerated per pair before stopping.
+/// The engine is given the same cap, so a graph with an exponential number of
+/// them is not the thing being compared.
+const PATH_ENUM_CAP: usize = 64;
 
 fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> GraphView {
     let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
@@ -61,6 +73,35 @@ fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> Graph
 }
 
 /// A view storing each edge exactly once, as `build_view` does in the engine.
+/// `view_single`, but carrying the edge weights.
+///
+/// Kept apart from `view_single` rather than folded into it. The shape metrics
+/// that use `view_single` are hop-counted by definition -- a diameter is a
+/// number of edges -- so handing them weights would say something the metric
+/// does not mean. Modularity, by contrast, is weighted whenever the graph is,
+/// and NetworkX's `weight="weight"` is the convention recorded.
+///
+/// Passing the unweighted view to modularity was worth 0.013 of Q on the
+/// 40-node graph and disagreed on all three: ours scored the graph as if every
+/// edge were 1.0 while the recorded answer used the weights. Nothing about the
+/// disagreement said "you compared two different graphs" -- it looked exactly
+/// like a formula that was slightly wrong.
+fn view_single_weighted(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphView {
+    let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
+    let node_to_index: HashMap<NodeId, usize> = (0..nodes).map(|i| (i as NodeId, i)).collect();
+    let mut outgoing = vec![Vec::new(); nodes];
+    let mut incoming = vec![Vec::new(); nodes];
+    let mut weights = vec![Vec::new(); nodes];
+    for &(a, b, w) in edges {
+        outgoing[a].push(b);
+        weights[a].push(w);
+        incoming[b].push(a);
+    }
+    GraphView::from_adjacency_list(
+        nodes, index_to_node, node_to_index, outgoing, incoming, Some(weights),
+    )
+}
+
 fn view_single(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphView {
     let index_to_node: Vec<NodeId> = (0..nodes).map(|i| i as NodeId).collect();
     let node_to_index: HashMap<NodeId, usize> = (0..nodes).map(|i| (i as NodeId, i)).collect();
@@ -319,6 +360,116 @@ fn main() {
             check_exact("scc_count", strongly_connected_components(&view).components.len() as i64);
         }
         check_exact("triangles", count_triangles(&view) as i64);
+
+        // ---- Paths and community, on the singly-stored view.
+        //
+        // `view_of` doubles an undirected edge so both endpoints see it;
+        // `view_single` stores it once. Path search wants the doubled one --
+        // it has to be able to walk in either direction -- and modularity
+        // wants to be told which convention it is reading, because the
+        // denominator is the total edge weight and a doubled view has twice
+        // as much of it. Getting that backwards halves or doubles Q without
+        // failing anything.
+        {
+            let paths = &want["hop_distance"];
+            let counts = &want["shortest_path_count"];
+            let wdist = &want["weighted_distance"];
+            if let Some(obj) = paths.as_object() {
+                for (key, hops) in obj {
+                    let mut it = key.split('-').map(|x| x.parse::<usize>().unwrap());
+                    let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
+
+                    // Enumerated shortest paths: every one must have the
+                    // recorded hop count, and there must be the recorded
+                    // number of them. Checking only the count would pass a
+                    // routine that returned the right number of wrong paths.
+                    let ours = all_shortest_paths(&view, sv, tv, PATH_ENUM_CAP);
+                    let want_hops = hops.as_u64().unwrap() as usize;
+                    let want_n = counts[key].as_u64().unwrap() as usize;
+                    checks += 1;
+                    let lengths_ok = ours.iter().all(|p| p.len() == want_hops + 1);
+                    if !(ours.len() == want_n && lengths_ok) {
+                        failures.push(format!(
+                            "{name}/all_shortest_paths {key}: ours={} paths (hops ok: {lengths_ok}), \
+                             recorded={want_n} at {want_hops} hops",
+                            ours.len()
+                        ));
+                    }
+
+                    // A* with a zero heuristic is Dijkstra, which is what the
+                    // recorder ran. A heuristic of our own would make this a
+                    // test of the heuristic.
+                    let zero = vec![0.0; nodes];
+                    checks += 1;
+                    let want_w = wdist[key].as_f64().unwrap();
+                    match a_star(&view, sv, tv, &zero) {
+                        Some((_, cost)) if (cost - want_w).abs()
+                            / want_w.abs().max(1e-12) <= TOL_PATH => {}
+                        Some((_, cost)) => failures.push(format!(
+                            "{name}/a_star {key}: ours={cost} recorded={want_w}")),
+                        None => failures.push(format!(
+                            "{name}/a_star {key}: no path, recorded={want_w}")),
+                    }
+                }
+            }
+
+            // Yen's, on the one pair the recorder ran it for. Lengths in
+            // non-decreasing order, not the paths: two implementations break
+            // ties between equal-length paths differently, and requiring the
+            // same order would fail on a difference that is not an error.
+            if let Some(obj) = want["simple_path_lengths"].as_object() {
+                for (key, lens) in obj {
+                    let mut it = key.split('-').map(|x| x.parse::<usize>().unwrap());
+                    let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
+                    let want_lens: Vec<f64> =
+                        lens.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+                    let ours = yens_k_shortest(&view, sv, tv, want_lens.len());
+                    checks += 1;
+                    let ok = ours.len() == want_lens.len()
+                        && ours.iter().zip(&want_lens).all(|((_, c), w)| {
+                            (c - w).abs() / w.abs().max(1e-12) <= TOL_PATH
+                        });
+                    if !ok {
+                        failures.push(format!(
+                            "{name}/yens {key}: ours={:?} recorded={want_lens:?}",
+                            ours.iter().map(|(_, c)| *c).collect::<Vec<_>>()
+                        ));
+                    }
+                }
+            }
+
+            // Modularity of a partition fixed by node index. Both sides score
+            // the *same* partition, which is the only way this tests the
+            // formula: Louvain is stochastic and seeded differently in the two
+            // implementations, so comparing partitions would say nothing.
+            if let Some(want_q) = want["modularity_of_index_mod_3"].as_f64() {
+                let single = view_single_weighted(nodes, &edges);
+                let parts: Vec<usize> = (0..nodes).map(|i| i % 3).collect();
+                checks += 1;
+                match modularity(&single, &parts) {
+                    Some(q) if (q - want_q).abs() <= TOL_MODULARITY => {}
+                    Some(q) => failures.push(format!(
+                        "{name}/modularity: ours={q} recorded={want_q}")),
+                    None => failures.push(format!(
+                        "{name}/modularity: refused, recorded={want_q}")),
+                }
+
+                // Louvain's own answer is not compared to NetworkX's -- see
+                // above -- but it must not be *worse* than an arbitrary
+                // partition. A Louvain that scores below `i % 3` has stopped
+                // maximising anything, which is the failure that a
+                // partition-by-partition comparison could never state.
+                checks += 1;
+                let found = louvain(&single, 10);
+                match modularity(&single, &found) {
+                    Some(q) if q >= want_q - TOL_MODULARITY => {}
+                    Some(q) => failures.push(format!(
+                        "{name}/louvain: Q={q} is worse than the arbitrary \
+                         partition's {want_q}")),
+                    None => failures.push(format!("{name}/louvain: partition incomplete")),
+                }
+            }
+        }
 
         checks += 1;
         let ours_mst = prim_mst(&view).total_weight;
