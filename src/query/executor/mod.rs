@@ -106,23 +106,23 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum ExecutionError {
     /// Graph store error
-    #[error("Graph error: {0}")]
+    #[error("[{}] Graph error: {0}", crate::query::error_code::GRAPH_ACCESS)]
     GraphError(String),
 
     /// Planning error
-    #[error("Planning error: {0}")]
+    #[error("[{}] Planning error: {0}", crate::query::error_code::PLANNING)]
     PlanningError(String),
 
     /// Runtime error
-    #[error("Runtime error: {0}")]
+    #[error("[{}] Runtime error: {0}", crate::query::error_code::RUNTIME)]
     RuntimeError(String),
 
     /// Type error
-    #[error("Type error: {0}")]
+    #[error("[{}] Type error: {0}", crate::query::error_code::TYPE_MISMATCH)]
     TypeError(String),
 
     /// Variable not found
-    #[error("Variable not found: {0}")]
+    #[error("[{}] Variable not found: {0}", crate::query::error_code::VARIABLE_NOT_BOUND)]
     VariableNotFound(String),
 
     /// Variable not found, with the variables that *are* in scope.
@@ -131,7 +131,7 @@ pub enum ExecutionError {
     /// site that raises it has a record in hand, and a message that says
     /// "in scope: " with an empty list is worse than one that does not claim
     /// to know.
-    #[error("Variable not found: {name} (in scope: {in_scope})")]
+    #[error("[{}] Variable not found: {name} (in scope: {in_scope})", crate::query::error_code::VARIABLE_NOT_BOUND)]
     VariableNotFoundInScope { name: String, in_scope: String },
 
     /// A read of an entity that is no longer in the graph.
@@ -140,8 +140,19 @@ pub enum ExecutionError {
     /// and a null cannot: an unset property and a deleted node both answered
     /// `null`, so a query that read a node it had already deleted looked
     /// exactly like a query reading a property nobody set.
-    #[error("{0} was deleted in this query and cannot be read")]
+    #[error("[{}] {0} was deleted in this query and cannot be read", crate::query::error_code::ENTITY_DELETED)]
     EntityNotFound(String),
+
+    /// A runtime fault that carries its own code.
+    ///
+    /// `RuntimeError` is a catch-all with 144 construction sites, and one code
+    /// across all of them would reproduce the exact problem LANG-12 names: a
+    /// code a caller cannot branch on. This variant exists so a site that
+    /// *does* represent a distinct fault -- an unknown function, a bad
+    /// argument, a write attempted through a read path -- can say so without
+    /// every one of the 144 needing its own variant.
+    #[error("[{code}] {message}")]
+    Coded { code: &'static str, message: String },
 
     /// A write refused because it would break an invariant the graph
     /// guarantees, as distinct from one that is merely wrong.
@@ -149,8 +160,59 @@ pub enum ExecutionError {
     /// Its own variant because the caller's response differs: a `TypeError` is
     /// a bug in the query, while this is the engine declining to do something
     /// destructive the query did not say it wanted (#946).
-    #[error("Constraint verification failed: {0}")]
+    #[error("[{}] Constraint verification failed: {0}", crate::query::error_code::CONSTRAINT)]
     ConstraintVerificationFailed(String),
+}
+
+impl ExecutionError {
+    /// The stable code a client can branch on.
+    ///
+    /// Published as part of the API surface, so it is derived here once rather
+    /// than parsed back out of the message by anyone who needs it.
+    pub fn code(&self) -> &'static str {
+        use crate::query::error_code as c;
+        match self {
+            Self::GraphError(_) => c::GRAPH_ACCESS,
+            Self::PlanningError(_) => c::PLANNING,
+            Self::RuntimeError(_) => c::RUNTIME,
+            Self::TypeError(_) => c::TYPE_MISMATCH,
+            Self::VariableNotFound(_) | Self::VariableNotFoundInScope { .. } => {
+                c::VARIABLE_NOT_BOUND
+            }
+            Self::EntityNotFound(_) => c::ENTITY_DELETED,
+            Self::ConstraintVerificationFailed(_) => c::CONSTRAINT,
+            Self::Coded { code, .. } => code,
+        }
+    }
+
+    /// A fault with a code finer than the variant it would otherwise use.
+    pub fn coded(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Coded { code, message: message.into() }
+    }
+
+    pub fn unknown_function(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::UNKNOWN_FUNCTION, message)
+    }
+
+    pub fn unknown_procedure(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::UNKNOWN_PROCEDURE, message)
+    }
+
+    pub fn unknown_algorithm(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::UNKNOWN_ALGORITHM, message)
+    }
+
+    pub fn bad_argument(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::BAD_ARGUMENT, message)
+    }
+
+    pub fn aggregate_misuse(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::AGGREGATE_MISUSE, message)
+    }
+
+    pub fn write_in_read(message: impl Into<String>) -> Self {
+        Self::coded(crate::query::error_code::WRITE_IN_READ, message)
+    }
 }
 
 pub type ExecutionResult<T> = Result<T, ExecutionError>;
@@ -378,7 +440,7 @@ impl<'a> QueryExecutor<'a> {
 
         // Check if this is a write query - if so, error out
         if plan.is_write {
-            return Err(ExecutionError::RuntimeError(
+            return Err(ExecutionError::write_in_read(
                 "Cannot execute write query with read-only executor. Use MutQueryExecutor instead.".to_string()
             ));
         }

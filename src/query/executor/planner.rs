@@ -3256,7 +3256,11 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
             )))
         } else {
-            Err(ExecutionError::PlanningError(format!("Unknown procedure: {}", call_clause.procedure_name)))
+            // Its own code: the procedure surface is fine and this name is not
+            // on it, which is a different recovery from "the planner could not
+            // build a plan".
+            Err(ExecutionError::unknown_procedure(format!(
+                "Unknown procedure: {}", call_clause.procedure_name)))
         }
     }
 

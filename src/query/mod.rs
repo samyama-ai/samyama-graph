@@ -70,6 +70,7 @@
 //! graph.
 
 pub mod ast;
+pub mod error_code;
 pub mod parser;
 pub mod star;
 pub mod validate;

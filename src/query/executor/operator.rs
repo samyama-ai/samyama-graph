@@ -2458,12 +2458,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let store = store.ok_or_else(|| ExecutionError::RuntimeError(
                 "subsumes() requires graph context".to_string()))?;
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError(
+                return Err(ExecutionError::bad_argument(
                     "subsumes(child, ancestor[, index]) takes 2 or 3 arguments".to_string()));
             }
-            let x = value_node_id(&args[0]).ok_or_else(|| ExecutionError::RuntimeError(
+            let x = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
                 "subsumes(): first argument must be a node".to_string()))?;
-            let y = value_node_id(&args[1]).ok_or_else(|| ExecutionError::RuntimeError(
+            let y = value_node_id(&args[1]).ok_or_else(|| ExecutionError::bad_argument(
                 "subsumes(): second argument must be a node".to_string()))?;
             let entry = match args.get(2) {
                 Some(v) => {
@@ -2496,10 +2496,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let store = store.ok_or_else(|| ExecutionError::RuntimeError(
                 "hierarchy_rollup() requires graph context".to_string()))?;
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError(
+                return Err(ExecutionError::bad_argument(
                     "hierarchy_rollup(root, op[, index]) takes 2 or 3 arguments".to_string()));
             }
-            let root = value_node_id(&args[0]).ok_or_else(|| ExecutionError::RuntimeError(
+            let root = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
                 "hierarchy_rollup(): first argument must be a node".to_string()))?;
             let op_name = extract_string(&args[1])?;
             let op = crate::index::hierarchy::RollupOp::parse(&op_name).ok_or_else(|| {
@@ -2538,12 +2538,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let store = store.ok_or_else(|| ExecutionError::RuntimeError(
                 "hierarchy_lca() requires graph context".to_string()))?;
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError(
+                return Err(ExecutionError::bad_argument(
                     "hierarchy_lca(a, b[, index]) takes 2 or 3 arguments".to_string()));
             }
-            let a = value_node_id(&args[0]).ok_or_else(|| ExecutionError::RuntimeError(
+            let a = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
                 "hierarchy_lca(): first argument must be a node".to_string()))?;
-            let b = value_node_id(&args[1]).ok_or_else(|| ExecutionError::RuntimeError(
+            let b = value_node_id(&args[1]).ok_or_else(|| ExecutionError::bad_argument(
                 "hierarchy_lca(): second argument must be a node".to_string()))?;
             let entry = match args.get(2) {
                 Some(v) => {
@@ -2625,7 +2625,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::String(s.replace(&from, &to))))
         }
         "substring" => {
-            if args.len() < 2 { return Err(ExecutionError::RuntimeError("substring() requires at least 2 arguments".to_string())); }
+            if args.len() < 2 { return Err(ExecutionError::bad_argument("substring() requires at least 2 arguments".to_string())); }
             let s = extract_string(&args[0])?;
             let start = extract_int(&args[1])? as usize;
             let chars: Vec<char> = s.chars().collect();
@@ -3083,11 +3083,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         // range() — generate integer list
         "range" => {
-            if args.len() < 2 { return Err(ExecutionError::RuntimeError("range() requires at least 2 arguments".to_string())); }
+            if args.len() < 2 { return Err(ExecutionError::bad_argument("range() requires at least 2 arguments".to_string())); }
             let start = extract_int(&args[0])?;
             let end = extract_int(&args[1])?;
             let step = if args.len() >= 3 { extract_int(&args[2])? } else { 1 };
-            if step == 0 { return Err(ExecutionError::RuntimeError("range() step cannot be 0".to_string())); }
+            if step == 0 { return Err(ExecutionError::bad_argument("range() step cannot be 0".to_string())); }
             let mut result = Vec::new();
             let mut i = start;
             if step > 0 {
@@ -12513,7 +12513,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "connectedcomponents" | "components" => " -- use algo.wcc or algo.scc",
             _ => "",
         };
-        ExecutionError::RuntimeError(format!(
+        ExecutionError::unknown_algorithm(format!(
             "Unknown algorithm: {name}{hint}. Available: {}",
             Self::available()
         ))
@@ -12835,7 +12835,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let list = match self.args.first() {
             Some(Expression::Literal(PropertyValue::Array(a))) => a.clone(),
             _ => {
-                return Err(ExecutionError::RuntimeError(format!(
+                return Err(ExecutionError::bad_argument(format!(
                     "{}() requires a list of [nodeId, seenAt] pairs as its first argument",
                     self.name
                 )))
@@ -13299,7 +13299,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let list = match self.args.first() {
             Some(Expression::Literal(PropertyValue::Array(a))) => a.clone(),
             _ => {
-                return Err(ExecutionError::RuntimeError(format!(
+                return Err(ExecutionError::bad_argument(format!(
                     "{}() requires a list of [nodeId, community] pairs. To score \
                      Louvain's own partition, use algo.louvain(), which returns it.",
                     self.name
@@ -13376,7 +13376,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             _ => None,
         }).collect();
         if ids.len() < 2 {
-            return Err(ExecutionError::RuntimeError(format!(
+            return Err(ExecutionError::bad_argument(format!(
                 "{}() requires a source and a target node id", self.name)));
         }
         let idx = |raw: u64| -> ExecutionResult<usize> {
@@ -13447,7 +13447,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let view = self.structural_view(store);
         let src = match self.args.first() {
             Some(Expression::Literal(PropertyValue::Integer(n))) => *n as u64,
-            _ => return Err(ExecutionError::RuntimeError(format!(
+            _ => return Err(ExecutionError::bad_argument(format!(
                 "{}() requires a source node id", self.name))),
         };
         let s = view.node_to_index.get(&src).copied().ok_or_else(|| {
@@ -13629,7 +13629,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
-             return Err(ExecutionError::RuntimeError("algo.or.solve requires a config map".to_string()));
+             return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
         }
 
         let config_map = match &self.args[0] {
