@@ -2257,8 +2257,17 @@ fn common_wrong_names_are_redirected_to_the_right_procedure() {
         .contains("use algo.shortestPath"));
     assert!(algo_error("CALL algo.dijkstra() YIELD nodeId RETURN count(*) AS v")
         .contains("use algo.weightedPath"));
-    assert!(algo_error("CALL algo.louvain() YIELD nodeId RETURN count(*) AS v")
-        .contains("use algo.cdlp"));
+    // `algo.louvain` used to be redirected to cdlp because it did not exist.
+    // It does now, so the redirect was removed and asserting it would pin the
+    // engine to a gap that has been closed. `bfs` and `dijkstra` above are
+    // different: those are *deliberately* routed to shortestPath and
+    // weightedPath and the redirect is the permanent answer.
+    assert!(
+        QueryEngine::new()
+            .execute("CALL algo.louvain() YIELD communityId RETURN count(*) AS v", &GraphStore::new())
+            .is_ok(),
+        "louvain is implemented and must not be redirected",
+    );
 }
 
 // ---------------------------------------------------------------------------

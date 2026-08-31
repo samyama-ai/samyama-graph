@@ -12498,7 +12498,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "bfs" | "breadthfirstsearch" => " -- for an unweighted path, use algo.shortestPath",
             "dijkstra" | "shortestpathweighted" => " -- for a weighted path, use algo.weightedPath",
             "pagerank2" | "prank" => " -- did you mean algo.pageRank?",
-            "louvain" | "labelpropagation" => " -- for community detection, use algo.cdlp",
+            // `louvain` and `labelPropagation` used to be redirected here.
+            // Both now dispatch -- louvain is implemented, labelPropagation
+            // routes to cdlp -- so the redirect is dead and would be wrong:
+            // it would tell a caller that a procedure they can call does not
+            // exist. A hint outlives the gap it was written for unless it is
+            // removed with the fix.
             "connectedcomponents" | "components" => " -- use algo.wcc or algo.scc",
             _ => "",
         };
