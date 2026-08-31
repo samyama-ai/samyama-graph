@@ -29,7 +29,12 @@ const CASES: &[(&str, &str)] = &[
     ("syntax", "MATCH (n) RETURN"),
     ("unknown-function", "RETURN lenght('abc')"),
     ("unknown-procedure", "CALL nosuch.procedure()"),
-    ("unknown-algorithm", "CALL algo.betweenness()"),
+    // `algo.betweenness` was the case here and it stopped erroring: betweenness
+    // centrality was implemented for ALGO-01, so the probe was asserting the
+    // absence of something we now ship. A corpus written against today's gaps
+    // decays into a corpus asserting yesterday's -- and this one reported it
+    // honestly, as a probe that did not error, rather than quietly passing.
+    ("unknown-algorithm", "CALL algo.noSuchAlgorithmExists()"),
     ("unbound-variable", "RETURN x"),
     ("unbound-variable", "MATCH (n) RETURN m.name"),
     ("type-error", "RETURN 1 + {a: 1}"),
