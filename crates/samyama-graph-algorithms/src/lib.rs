@@ -6,6 +6,9 @@ mod gpu_parity_tests;
 pub mod pagerank;
 pub mod community;
 pub mod pathfinding;
+pub mod paths_extra;
+pub mod structure_extra;
+pub mod similarity_extra;
 pub mod flow;
 pub mod mst;
 pub mod topology;
@@ -13,6 +16,7 @@ pub mod cdlp;
 pub mod lcc;
 pub mod pca;
 pub mod centrality;
+pub mod centrality_extra;
 pub mod link_prediction;
 pub mod community_detect;
 pub mod metrics;
@@ -38,6 +42,21 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use similarity_extra::{
+    constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
+    reciprocity,
+};
+pub use structure_extra::{
+    biconnected_components, global_efficiency, rich_club_coefficient, square_clustering,
+    bipartite_sets, dominating_set, greedy_colouring, k_truss, maximal_matching,
+    transitivity, undirected_degree,
+};
+pub use paths_extra::{
+    all_pairs_hops, bellman_ford, dag_longest_path, transitive_closure, wiener_index,
+};
+pub use centrality_extra::{
+    hits, index_of, katz_centrality, personalised_page_rank, ranked_scores, vote_rank,
+};
 pub use community_detect::{
     louvain, modularity, with_ids, Communities,
 };

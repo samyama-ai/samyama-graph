@@ -2384,6 +2384,15 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// green is the wrong way round.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
     "abs", "acos", "adamicadar", "allshortestpaths", "articlerank", "articulationpoints",
+    "hits", "hubsandauthorities", "katz", "katzcentrality", "personalisedpagerank",
+    "personalizedpagerank", "voterank", "bellmanford", "allpairsshortestpath", "allpairs",
+    "wienerindex", "daglongestpath", "longestpath", "transitiveclosure", "bipartite",
+    "bipartitesets", "maximalmatching", "matching", "colouring", "coloring",
+    "greedycolouring", "dominatingset", "ktruss", "truss", "transitivity",
+    "globalefficiency", "squareclustering", "richclub", "richclubcoefficient",
+    "biconnectedcomponents", "biconnected", "nodesimilarity", "overlap",
+    "overlapcoefficient", "cosine", "cosinesimilarity", "effectivesize", "constraint",
+    "burtconstraint", "reciprocity",
     "asin", "astar", "atan", "atan2", "averageneighbordegree", "averageneighbourdegree",
     "betweenness", "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp",
     "ceil", "closeness", "closenesscentrality", "coalesce", "commonneighbors",
@@ -13482,6 +13491,480 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.katz({alpha, beta, iterations, tolerance})`.
+    fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Float(v)) = m.get("alpha") { alpha = *v; }
+                if let Some(PropertyValue::Float(v)) = m.get("beta") { beta = *v; }
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+                if let Some(PropertyValue::Float(v)) = m.get("tolerance") { tol = *v; }
+            }
+        }
+        let view = self.structural_view(store);
+        // Non-convergence is refused, not rounded off. `alpha` above the
+        // reciprocal of the largest eigenvalue makes the sum diverge, and the
+        // last iterate is still a well-formed vector -- returning it would
+        // hand back a plausible ranking computed from a divergent series.
+        let Some(scores) = crate::algo::katz_centrality(&view, alpha, beta, iters, tol) else {
+            return Err(ExecutionError::bad_argument(format!(
+                "algo.katz() did not converge in {iters} iterations at alpha={alpha}. \
+                 Katz needs alpha below 1/lambda_max; try a smaller alpha."
+            )));
+        };
+        for (id, sc) in crate::algo::ranked_scores(&view, &scores) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(sc)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.hits({iterations, tolerance})` yielding `node, hub, authority`.
+    ///
+    /// Both scores from one call, because neither means anything alone: a hub
+    /// is defined by the authorities it points at and vice versa. Two
+    /// procedures would run the same fixed point twice and invite a caller to
+    /// compare hubs from one run with authorities from another.
+    fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let (mut iters, mut tol) = (500usize, 1e-8f64);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+                if let Some(PropertyValue::Float(v)) = m.get("tolerance") { tol = *v; }
+            }
+        }
+        let view = self.structural_view(store);
+        let Some((hubs, auth)) = crate::algo::hits(&view, iters, tol) else {
+            return Err(ExecutionError::bad_argument(format!(
+                "algo.hits() did not converge in {iters} iterations"
+            )));
+        };
+        let mut order: Vec<usize> = (0..view.node_count).collect();
+        order.sort_by(|&a, &b| {
+            auth[b].partial_cmp(&auth[a]).unwrap_or(std::cmp::Ordering::Equal)
+                .then(view.index_to_node[a].cmp(&view.index_to_node[b]))
+        });
+        for i in order {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
+            rec.bind("hub".to_string(), Value::Property(PropertyValue::Float(hubs[i])));
+            rec.bind("authority".to_string(), Value::Property(PropertyValue::Float(auth[i])));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.personalizedPageRank([sourceIds], {dampingFactor, iterations})`.
+    fn execute_personalised_page_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let mut sources: Vec<usize> = Vec::new();
+        let (mut damping, mut iters) = (0.85f64, 100usize);
+        for arg in &self.args {
+            match arg {
+                Expression::Literal(PropertyValue::Array(a)) => {
+                    for v in a {
+                        if let PropertyValue::Integer(id) = v {
+                            if let Some(ix) = crate::algo::index_of(&view, *id as u64) {
+                                sources.push(ix);
+                            }
+                        }
+                    }
+                }
+                Expression::Literal(PropertyValue::Integer(id)) => {
+                    if let Some(ix) = crate::algo::index_of(&view, *id as u64) {
+                        sources.push(ix);
+                    }
+                }
+                Expression::Literal(PropertyValue::Map(m)) => {
+                    if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") { damping = *v; }
+                    if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+                }
+                _ => {}
+            }
+        }
+        let scores = crate::algo::personalised_page_rank(&view, &sources, damping, iters, 1e-10);
+        for (id, sc) in crate::algo::ranked_scores(&view, &scores) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(sc)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.voteRank({k})` yielding the elected nodes in election order.
+    fn execute_vote_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let mut k = 10usize;
+        for arg in &self.args {
+            match arg {
+                Expression::Literal(PropertyValue::Integer(v)) => k = (*v).max(0) as usize,
+                Expression::Literal(PropertyValue::Map(m)) => {
+                    if let Some(PropertyValue::Integer(v)) = m.get("k") { k = (*v).max(0) as usize; }
+                }
+                _ => {}
+            }
+        }
+        let view = self.structural_view(store);
+        // Election order is the result, not a detail: the second choice is
+        // second *because* the first suppressed its neighbourhood, so
+        // re-sorting by any score would destroy the thing that makes VoteRank
+        // different from top-k by degree.
+        for (rank, ix) in crate::algo::vote_rank(&view, k).into_iter().enumerate() {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
+            rec.bind("rank".to_string(), Value::Property(PropertyValue::Integer(rank as i64 + 1)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// One `usize` config value, or a default.
+    fn usize_arg(&self, key: &str, default: usize) -> usize {
+        for arg in &self.args {
+            match arg {
+                Expression::Literal(PropertyValue::Integer(v)) => return (*v).max(0) as usize,
+                Expression::Literal(PropertyValue::Map(m)) => {
+                    if let Some(PropertyValue::Integer(v)) = m.get(key) {
+                        return (*v).max(0) as usize;
+                    }
+                }
+                _ => {}
+            }
+        }
+        default
+    }
+
+    /// `true` when the projected view stores each undirected edge once.
+    ///
+    /// Always true for `structural_view`, which builds from the store's edges
+    /// as written. Named rather than passed as a bare `true` at fifteen call
+    /// sites, because a bare boolean at a call site is the thing that gets
+    /// flipped by accident and halves or doubles an answer without failing.
+    const COLLAPSE: bool = true;
+
+    /// `algo.bellmanFord(source)` — shortest paths with negative weights.
+    fn execute_bellman_ford(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        // Weighted, because Bellman-Ford exists precisely for the weights.
+        // `structural_view` carries `weights` when a `weightProperty` is given
+        // and unit weights otherwise, which is the right default: an
+        // unweighted graph has no negative edges and Bellman-Ford degenerates
+        // to BFS, correctly.
+        let view = self.structural_view(store);
+        let src = self.temporal_node_arg(&view, 0, "a source")?;
+        let Some(dist) = crate::algo::bellman_ford(&view, src) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.bellmanFord(): a negative cycle is reachable from this source, \
+                 so no shortest path exists. Any distance returned would be arbitrary.",
+            ));
+        };
+        for (i, d) in dist.iter().enumerate() {
+            let Some(d) = d else { continue };
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
+            rec.bind("distance".to_string(), Value::Property(PropertyValue::Float(*d)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.allPairsShortestPath()` — hop distance for every reachable pair.
+    fn execute_all_pairs(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let mut pairs: Vec<((usize, usize), usize)> =
+            crate::algo::all_pairs_hops(&view).into_iter().collect();
+        pairs.sort();
+        for ((a, b), d) in pairs {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "source", view.index_to_node[a]);
+            self.bind_node(store, &mut rec, "target", view.index_to_node[b]);
+            rec.bind("hops".to_string(), Value::Property(PropertyValue::Integer(d as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.wienerIndex()` — one number for how spread out the graph is.
+    fn execute_wiener(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some(w) = crate::algo::wiener_index(&view) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.wienerIndex(): some pair is unreachable, so the sum over all \
+                 pairs is infinite. Use algo.wcc() to find the components, or \
+                 algo.globalEfficiency() which stays finite on a disconnected graph.",
+            ));
+        };
+        let mut rec = Record::new();
+        rec.bind("wienerIndex".to_string(), Value::Property(PropertyValue::Float(w)));
+        self.results.push(rec);
+        Ok(())
+    }
+
+    /// `algo.dagLongestPath()`.
+    fn execute_dag_longest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some(path) = crate::algo::dag_longest_path(&view) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.dagLongestPath(): the graph has a cycle, so there is no longest \
+                 path -- going round again is always longer. Use algo.findCycle() to \
+                 see where.",
+            ));
+        };
+        for (i, ix) in path.iter().enumerate() {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[*ix]);
+            rec.bind("position".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.transitiveClosure()` — every reachable ordered pair.
+    fn execute_transitive_closure(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        for (a, b) in crate::algo::transitive_closure(&view) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "source", view.index_to_node[a]);
+            self.bind_node(store, &mut rec, "target", view.index_to_node[b]);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.bipartite()` yielding `node, side`.
+    fn execute_bipartite(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some((left, right)) = crate::algo::bipartite_sets(&view, Self::COLLAPSE) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.bipartite(): the graph has an odd cycle, so it cannot be split \
+                 into two sides. Use algo.findCycle() to see one.",
+            ));
+        };
+        for (side, group) in [(0i64, left), (1i64, right)] {
+            for ix in group {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
+                rec.bind("side".to_string(), Value::Property(PropertyValue::Integer(side)));
+                self.results.push(rec);
+            }
+        }
+        Ok(())
+    }
+
+    /// `algo.maximalMatching()` yielding `source, target`.
+    fn execute_matching(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        for (a, b) in crate::algo::maximal_matching(&view, Self::COLLAPSE) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "source", view.index_to_node[a]);
+            self.bind_node(store, &mut rec, "target", view.index_to_node[b]);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.colouring()` yielding `node, colour`.
+    fn execute_colouring(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let colours = crate::algo::greedy_colouring(&view, Self::COLLAPSE);
+        for (i, c) in colours.iter().enumerate() {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
+            rec.bind("colour".to_string(), Value::Property(PropertyValue::Integer(*c as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.dominatingSet()`.
+    fn execute_dominating_set(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        for ix in crate::algo::dominating_set(&view, Self::COLLAPSE) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.kTruss({k})`.
+    fn execute_k_truss(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let k = self.usize_arg("k", 3);
+        let view = self.structural_view(store);
+        for ix in crate::algo::k_truss(&view, k, Self::COLLAPSE) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.transitivity()` — the global clustering coefficient.
+    fn execute_transitivity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some(t) = crate::algo::transitivity(&view, Self::COLLAPSE) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.transitivity(): no connected triple exists, so the ratio is 0/0. \
+                 A graph with no triples and one whose triples never close are \
+                 different graphs and this cannot report them as the same number.",
+            ));
+        };
+        let mut rec = Record::new();
+        rec.bind("transitivity".to_string(), Value::Property(PropertyValue::Float(t)));
+        self.results.push(rec);
+        Ok(())
+    }
+
+    /// `algo.globalEfficiency()`.
+    fn execute_global_efficiency(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some(e) = crate::algo::global_efficiency(&view, Self::COLLAPSE) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.globalEfficiency() needs at least two nodes",
+            ));
+        };
+        let mut rec = Record::new();
+        rec.bind("efficiency".to_string(), Value::Property(PropertyValue::Float(e)));
+        self.results.push(rec);
+        Ok(())
+    }
+
+    /// `algo.squareClustering()` — clustering for graphs with no triangles.
+    fn execute_square_clustering(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        for i in 0..view.node_count {
+            let Some(sc) = crate::algo::square_clustering(&view, i, Self::COLLAPSE) else {
+                continue; // fewer than two neighbours: no square to close
+            };
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
+            rec.bind("coefficient".to_string(), Value::Property(PropertyValue::Float(sc)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.richClub({k})`.
+    fn execute_rich_club(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let k = self.usize_arg("k", 1);
+        let view = self.structural_view(store);
+        let Some(c) = crate::algo::rich_club_coefficient(&view, k, Self::COLLAPSE) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                format!("algo.richClub(): fewer than two nodes have degree above {k}, \
+                         and fewer than two members is not a club"),
+            ));
+        };
+        let mut rec = Record::new();
+        rec.bind("coefficient".to_string(), Value::Property(PropertyValue::Float(c)));
+        self.results.push(rec);
+        Ok(())
+    }
+
+    /// `algo.biconnectedComponents()` yielding `node, componentId`.
+    fn execute_biconnected(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        for (cid, comp) in crate::algo::biconnected_components(&view, Self::COLLAPSE)
+            .into_iter().enumerate()
+        {
+            for ix in comp {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
+                rec.bind("componentId".to_string(),
+                         Value::Property(PropertyValue::Integer(cid as i64)));
+                self.results.push(rec);
+            }
+        }
+        Ok(())
+    }
+
+    /// `algo.nodeSimilarity({topK, cutoff})`.
+    fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let k = self.usize_arg("topK", 10);
+        let mut cutoff = 0.0f64;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::Float(v)) = m.get("cutoff") { cutoff = *v; }
+            }
+        }
+        let view = self.structural_view(store);
+        for (a, b, s) in crate::algo::node_similarity(&view, k, cutoff) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[a]);
+            self.bind_node(store, &mut rec, "other", view.index_to_node[b]);
+            rec.bind("similarity".to_string(), Value::Property(PropertyValue::Float(s)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.overlap()` / `algo.cosine()` over every pair that has one.
+    fn execute_pair_similarity(&mut self, store: &GraphStore, overlap: bool)
+        -> ExecutionResult<()>
+    {
+        let view = self.structural_view(store);
+        for a in 0..view.node_count {
+            for b in (a + 1)..view.node_count {
+                let s = if overlap {
+                    crate::algo::overlap_coefficient(&view, a, b)
+                } else {
+                    crate::algo::cosine_similarity(&view, a, b)
+                };
+                let Some(s) = s else { continue };
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", view.index_to_node[a]);
+                self.bind_node(store, &mut rec, "other", view.index_to_node[b]);
+                rec.bind("similarity".to_string(), Value::Property(PropertyValue::Float(s)));
+                self.results.push(rec);
+            }
+        }
+        Ok(())
+    }
+
+    /// `algo.effectiveSize()` / `algo.constraint()` — Burt's structural holes.
+    fn execute_structural_holes(&mut self, store: &GraphStore, effective: bool)
+        -> ExecutionResult<()>
+    {
+        let view = self.structural_view(store);
+        for i in 0..view.node_count {
+            let v = if effective {
+                crate::algo::effective_size(&view, i)
+            } else {
+                crate::algo::constraint(&view, i)
+            };
+            let Some(v) = v else { continue }; // isolated: nothing to broker
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
+            rec.bind("value".to_string(), Value::Property(PropertyValue::Float(v)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.reciprocity()`.
+    fn execute_reciprocity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let view = self.structural_view(store);
+        let Some(r) = crate::algo::reciprocity(&view) else {
+            return Err(ExecutionError::coded(
+                crate::query::error_code::BAD_ARGUMENT,
+                "algo.reciprocity(): the graph has no directed edges, so there is no \
+                 ratio to report",
+            ));
+        };
+        let mut rec = Record::new();
+        rec.bind("reciprocity".to_string(), Value::Property(PropertyValue::Float(r)));
+        self.results.push(rec);
+        Ok(())
+    }
+
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
@@ -13987,6 +14470,31 @@ impl AlgorithmOperator {
                 | "yens"
                 | "randomwalk"
                 | "articlerank"
+                // Ranking beyond PageRank: influence that decays with
+                // distance, the hub/authority pair, a source-biased rank, and
+                // a seed set chosen to spread out rather than cluster.
+                | "katz" | "katzcentrality"
+                | "hits" | "hubsandauthorities"
+                | "personalizedpagerank" | "personalisedpagerank"
+                | "voterank"
+                // Paths: negative weights, all-pairs, DAG longest, closure.
+                | "bellmanford" | "allpairsshortestpath" | "allpairs"
+                | "wienerindex" | "daglongestpath" | "longestpath"
+                | "transitiveclosure"
+                // Structure and cohesion.
+                | "bipartite" | "bipartitesets"
+                | "maximalmatching" | "matching"
+                | "colouring" | "coloring" | "greedycolouring"
+                | "dominatingset" | "ktruss" | "truss"
+                | "transitivity" | "globalefficiency" | "squareclustering"
+                | "richclub" | "richclubcoefficient"
+                | "biconnectedcomponents" | "biconnected"
+                // Similarity and structural holes.
+                | "nodesimilarity"
+                | "overlap" | "overlapcoefficient"
+                | "cosine" | "cosinesimilarity"
+                | "effectivesize" | "constraint" | "burtconstraint"
+                | "reciprocity"
         )
     }
 }
@@ -14035,6 +14543,31 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
+                "katz" | "katzcentrality" => self.execute_katz(store)?,
+                "hits" | "hubsandauthorities" => self.execute_hits(store)?,
+                "personalizedpagerank" | "personalisedpagerank" => self.execute_personalised_page_rank(store)?,
+                "voterank" => self.execute_vote_rank(store)?,
+                "bellmanford" => self.execute_bellman_ford(store)?,
+                "allpairsshortestpath" | "allpairs" => self.execute_all_pairs(store)?,
+                "wienerindex" => self.execute_wiener(store)?,
+                "daglongestpath" | "longestpath" => self.execute_dag_longest_path(store)?,
+                "transitiveclosure" => self.execute_transitive_closure(store)?,
+                "bipartite" | "bipartitesets" => self.execute_bipartite(store)?,
+                "maximalmatching" | "matching" => self.execute_matching(store)?,
+                "colouring" | "coloring" | "greedycolouring" => self.execute_colouring(store)?,
+                "dominatingset" => self.execute_dominating_set(store)?,
+                "ktruss" | "truss" => self.execute_k_truss(store)?,
+                "transitivity" => self.execute_transitivity(store)?,
+                "globalefficiency" => self.execute_global_efficiency(store)?,
+                "squareclustering" => self.execute_square_clustering(store)?,
+                "richclub" | "richclubcoefficient" => self.execute_rich_club(store)?,
+                "biconnectedcomponents" | "biconnected" => self.execute_biconnected(store)?,
+                "nodesimilarity" => self.execute_node_similarity(store)?,
+                "overlap" | "overlapcoefficient" => self.execute_pair_similarity(store, true)?,
+                "cosine" | "cosinesimilarity" => self.execute_pair_similarity(store, false)?,
+                "effectivesize" => self.execute_structural_holes(store, true)?,
+                "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
+                "reciprocity" => self.execute_reciprocity(store)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
@@ -14102,6 +14635,31 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
+                "katz" | "katzcentrality" => self.execute_katz(store)?,
+                "hits" | "hubsandauthorities" => self.execute_hits(store)?,
+                "personalizedpagerank" | "personalisedpagerank" => self.execute_personalised_page_rank(store)?,
+                "voterank" => self.execute_vote_rank(store)?,
+                "bellmanford" => self.execute_bellman_ford(store)?,
+                "allpairsshortestpath" | "allpairs" => self.execute_all_pairs(store)?,
+                "wienerindex" => self.execute_wiener(store)?,
+                "daglongestpath" | "longestpath" => self.execute_dag_longest_path(store)?,
+                "transitiveclosure" => self.execute_transitive_closure(store)?,
+                "bipartite" | "bipartitesets" => self.execute_bipartite(store)?,
+                "maximalmatching" | "matching" => self.execute_matching(store)?,
+                "colouring" | "coloring" | "greedycolouring" => self.execute_colouring(store)?,
+                "dominatingset" => self.execute_dominating_set(store)?,
+                "ktruss" | "truss" => self.execute_k_truss(store)?,
+                "transitivity" => self.execute_transitivity(store)?,
+                "globalefficiency" => self.execute_global_efficiency(store)?,
+                "squareclustering" => self.execute_square_clustering(store)?,
+                "richclub" | "richclubcoefficient" => self.execute_rich_club(store)?,
+                "biconnectedcomponents" | "biconnected" => self.execute_biconnected(store)?,
+                "nodesimilarity" => self.execute_node_similarity(store)?,
+                "overlap" | "overlapcoefficient" => self.execute_pair_similarity(store, true)?,
+                "cosine" | "cosinesimilarity" => self.execute_pair_similarity(store, false)?,
+                "effectivesize" => self.execute_structural_holes(store, true)?,
+                "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
+                "reciprocity" => self.execute_reciprocity(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.executed = true;
