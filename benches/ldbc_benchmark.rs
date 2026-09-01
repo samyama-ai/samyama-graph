@@ -948,6 +948,14 @@ async fn main() -> Result<(), Error> {
     // *id* of the same label. The six unused entries are kept: they cost load
     // time and nothing else, and dropping an index is a separate decision from
     // adding the ones the queries need.
+    //
+    // SF10 verdict on the above: the name indexes moved IC1 2.73x -> 2.63x and
+    // IC11 2.80x -> 2.54x, both still over SLT-2's 2x clause. They are kept
+    // because they are derived correctly and cost only load time, but they are
+    // not what closes those two queries. IC1's plan filters on the name *after*
+    // the expansion, so nothing scans by name; 88% of the query is
+    // VarLengthExpand, which emits 505,660 path rows to reach 5,218 endpoints.
+    // See #1054 and examples/ic1_anchor_probe.rs.
     let idx_start = Instant::now();
     for (label, prop) in &[
         ("Person", "id"),
