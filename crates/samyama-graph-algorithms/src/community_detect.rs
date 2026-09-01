@@ -105,8 +105,16 @@ pub fn modularity(view: &GraphView, communities: &[usize]) -> Option<f64> {
             }
         }
     }
+    // Summed over communities in id order, not `HashMap` order. Rust seeds its
+    // hasher per process, floating-point addition is not associative, and the
+    // 120-node reference graph produced a Q differing in the last bit between
+    // runs. Q is compared against a recorded reference with a 1e-9 tolerance,
+    // so nothing was going to catch this by comparing answers -- only by
+    // running the same input twice and diffing bit for bit.
+    let mut communities: Vec<(usize, f64)> = tot.into_iter().collect();
+    communities.sort_unstable_by_key(|&(c, _)| c);
     let q: f64 = inside / two_m
-        - tot.values().map(|&t| (t / two_m) * (t / two_m)).sum::<f64>();
+        - communities.iter().map(|&(_, t)| (t / two_m) * (t / two_m)).sum::<f64>();
     Some(q)
 }
 
