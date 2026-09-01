@@ -31,6 +31,13 @@ pub struct QueryResponse {
     edges: Vec<serde_json::Value>,
     columns: Vec<String>,
     records: Vec<Vec<serde_json::Value>>,
+    /// The build that produced this result (TRUST-06).
+    engine_version: &'static str,
+    /// The MVCC version the read saw, so a result can be tied to the data that
+    /// produced it. Named `_version` and not `_hash` deliberately: it
+    /// identifies the snapshot, it is not a content hash of it, and calling it
+    /// a hash would claim a property it does not have.
+    snapshot_version: u64,
 }
 
 /// Handler for Cypher queries
@@ -101,9 +108,11 @@ pub async fn query_handler(
                      query_upper.ends_with(" CREATE") || query_upper.ends_with(" SET") ||
                      query_upper.ends_with(" DELETE") || query_upper.ends_with(" MERGE")));
 
+    let snapshot_version: u64;
     let (result, full_props) = if is_write {
         let mut store_guard = state.store.write().await;
         let result = state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph);
+        snapshot_version = store_guard.current_version;
         let props = result
             .as_ref()
             .map(|b| merged_node_properties(b, &store_guard))
@@ -112,6 +121,10 @@ pub async fn query_handler(
     } else {
         let store_guard = state.store.read().await;
         let result = state.engine.execute(&payload.query, &*store_guard);
+        // Read while the guard is still held: taken afterwards it could name a
+        // version this result was not computed against, which is worse than
+        // no provenance at all.
+        snapshot_version = store_guard.current_version;
         let props = result
             .as_ref()
             .map(|b| merged_node_properties(b, &store_guard))
@@ -227,12 +240,24 @@ pub async fn query_handler(
                 records.push(row);
             }
 
-            Json(json!({
-                "nodes": nodes.values().collect::<Vec<_>>(),
-                "edges": edges.values().collect::<Vec<_>>(),
-                "columns": batch.columns,
-                "records": records,
-            })).into_response()
+            // Sorted by numeric id, not `HashMap` order. Rust seeds its hasher
+            // per process, so the `nodes` and `edges` arrays came back in a
+            // different order in every process -- the same defect class as
+            // samyama-graph#610, on the HTTP surface, where a client diffing two
+            // responses sees a change that did not happen.
+            let mut node_list: Vec<_> = nodes.into_iter().collect();
+            node_list.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(u64::MAX));
+            let mut edge_list: Vec<_> = edges.into_iter().collect();
+            edge_list.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(u64::MAX));
+
+            Json(QueryResponse {
+                nodes: node_list.into_iter().map(|(_, v)| v).collect(),
+                edges: edge_list.into_iter().map(|(_, v)| v).collect(),
+                columns: batch.columns,
+                records,
+                engine_version: crate::VERSION,
+                snapshot_version,
+            }).into_response()
         }
         Err(e) => {
             (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response()
@@ -1080,6 +1105,56 @@ mod tests {
 
         assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("String"), "{json}");
         assert_eq!(props.get("age").and_then(|v| v.as_str()), Some("Integer"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn query_results_are_ordered_and_carry_provenance() {
+        use crate::graph::Label;
+        // Twelve nodes, because with two the `HashMap` order this replaced
+        // would come out ascending half the time and the test would flake
+        // green rather than fail.
+        let mut store = GraphStore::new();
+        for _ in 0..12 {
+            store.create_node_with_labels([Label::new("Row")]);
+        }
+        let state = AppState {
+            store: Arc::new(RwLock::new(store)),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        };
+        let app = Router::new()
+            .route("/api/query", axum::routing::post(query_handler))
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/query")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"query":"MATCH (n:Row) RETURN n","graph":"default"}"#))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let ids: Vec<u64> = json["nodes"]
+            .as_array()
+            .expect("nodes array")
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().parse::<u64>().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 12, "{json}");
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "nodes came back unordered, so two identical queries can differ: {ids:?}"
+        );
+
+        // TRUST-06: a result names the build and the snapshot it came from.
+        assert_eq!(json["engine_version"].as_str(), Some(crate::VERSION), "{json}");
+        assert!(json["snapshot_version"].is_u64(), "{json}");
     }
 
     #[test]
