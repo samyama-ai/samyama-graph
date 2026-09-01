@@ -5107,6 +5107,25 @@ pub trait PhysicalOperator: Send {
         false
     }
 
+    /// Can this operator produce substantially more rows than it consumes?
+    ///
+    /// Only these are subject to the per-operator row budget
+    /// (`executor::budget`), and the distinction is the whole design. A scan
+    /// of a 187M-node graph produces 187M rows and is not exploding -- it is
+    /// reading the data it was asked for, and refusing it would break
+    /// `MATCH (n) RETURN count(n)` on graphs we ship ourselves. Amplification
+    /// is the thing worth bounding: an operator whose output is the *product*
+    /// of its inputs turns a large graph into an impossible one.
+    ///
+    /// Defaults to `false`, so an operator added later is not silently
+    /// enrolled into a guard nobody considered for it. That trades a missed
+    /// explosion for never inventing a false refusal, which is the right way
+    /// round: a false refusal breaks a working query, while a missed one
+    /// leaves today's behaviour.
+    fn amplifies_rows(&self) -> bool {
+        false
+    }
+
     /// Describe this operator for EXPLAIN output
     /// Returns (operator_name, details, children)
     fn describe(&self) -> OperatorDescription {
@@ -10456,6 +10475,13 @@ impl PhysicalOperator for CartesianProductOperator {
         self.left_index = 0;
         self.current_right = None;
         self.left_materialized = false;
+    }
+
+    /// The one operator whose output is the *product* of its inputs, and the
+    /// source of every unbounded intermediate this guard exists for. Two
+    /// scans of 2,000 nodes is four million rows; three is eight billion.
+    fn amplifies_rows(&self) -> bool {
+        true
     }
 
     fn describe(&self) -> OperatorDescription {
