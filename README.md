@@ -105,7 +105,31 @@ docker logs -f samyama-graph
 
 You should see `samyama-graph` with status `Up`.
 
-**Step 6 — Samyama Visualizer**
+**Step 6 — Run your first query**
+
+```bash
+curl -X POST http://localhost:8080/api/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"CREATE (a:Person {name: \"Alice\"})-[:KNOWS]->(b:Person {name: \"Bob\"}) RETURN a.name, b.name","graph":"default"}'
+```
+
+```json
+{"columns":["a.name","b.name"],"edges":[],"nodes":[],"records":[["Alice","Bob"]]}
+```
+
+Then read it back:
+
+```bash
+curl -X POST http://localhost:8080/api/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
+```
+
+> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
+> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
+> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
+
+**Step 7 — Samyama Visualizer**
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
 
@@ -116,9 +140,9 @@ Visualize your imported graph data using the Samyama cloud visualizer at https:/
 5. Click **Connect** — the status will change to **Connected**.
 
 <details>
-<summary><strong>Step 7 — Optional: Load sample dataset</strong> <sub>Optional</sub></summary>
+<summary><strong>Step 8 — Optional: Load sample dataset</strong> <sub>Optional</sub></summary>
 
-**7a — Download snapshot**
+**8a — Download snapshot**
 
 | Dataset | Description | File |
 |---------|-------------|------|
@@ -128,7 +152,7 @@ Tip: Save the file in the same folder as `docker-compose.yml` to avoid path erro
 - Windows: `C:\samyama-graph\dbms-research.sgsnap`
 - Linux / Mac: `./samyama-graph/dbms-research.sgsnap`
 
-**7b — Create tenant**
+**8b — Create tenant**
 
 Linux & Mac:
 
@@ -146,7 +170,7 @@ curl.exe -X POST http://localhost:8080/api/tenants `
   -d '{"id": "dbms-research", "name": "dbms-research"}'
 ```
 
-**7c — Import snapshot**
+**8c — Import snapshot**
 
 Linux & Mac:
 
