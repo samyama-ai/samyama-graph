@@ -28,6 +28,7 @@ use samyama_graph_algorithms::{
     eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
+    pathfinding_extra::random_walk,
 };
 
 /// How many shortest paths to enumerate per pair before stopping. The count is
@@ -345,6 +346,14 @@ fn main() {
             serde_json::to_value(biconnected_components(&single, true).len()).unwrap());
         put("effective_size", serde_json::to_value(&eff).unwrap());
         put("constraint", serde_json::to_value(&cons).unwrap());
+        // A seeded algorithm. The other 48 families are unseeded and
+        // deterministic by construction; ALGO-11 asks for reproducibility
+        // *given a seed*, and nothing in this export exercised a seed until
+        // this line. It is the clause most likely to rot, because a caller
+        // switching to an unseeded RNG breaks nothing that compiles.
+        put("random_walk_seeded",
+            serde_json::to_value(random_walk(&view, 0, 32, 0x5A_4D)
+                .to_vec()).unwrap());
         put("reciprocity",
             serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
 
