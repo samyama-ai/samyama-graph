@@ -6920,6 +6920,27 @@ pub struct VarLengthExpandOperator {
     /// Marks the first expand of a MATCH clause, which starts with a clean
     /// history rather than inheriting one from an earlier clause.
     starts_clause: bool,
+    /// Inline property constraints on the *target* node pattern, applied before
+    /// a record is built rather than by a `Filter` above.
+    ///
+    /// `emit_ok` has always pruned on target labels. It never pruned on target
+    /// properties, so `(p)-[:KNOWS*1..3]-(f:Person {firstName: "..."})` walked
+    /// the neighbourhood and built a record for every node in it, for a filter
+    /// above to discard all but a handful. On LDBC IC1 that is 9,118 records to
+    /// keep 2, and emission is where the operator's time goes: walking the same
+    /// neighbourhood while emitting nothing costs 1.48 ms against 17.55 ms to
+    /// walk and emit, so **92% of this operator is building records** (#1063,
+    /// `examples/varlen_emit_cost.rs`).
+    ///
+    /// `ExpandOperator` has done this since #656; this is the path that did not
+    /// inherit it — the third time that has been the finding in this file.
+    target_props: Vec<(String, PropertyValue)>,
+    /// The exact set of nodes the target may be, resolved once at plan time.
+    ///
+    /// Preferred over `target_props`, which costs a `get_node` and a property
+    /// compare per emitted candidate; membership is a hash lookup. Same
+    /// resolution the plain expand uses (#665).
+    target_ids: Option<std::collections::HashSet<NodeId>>,
 }
 
 impl VarLengthExpandOperator {
@@ -6953,6 +6974,8 @@ impl VarLengthExpandOperator {
             pinned_target: None,
             target_reach: None,
             enumerate_trails: false,
+            target_props: Vec::new(),
+            target_ids: None,
             track_edges: false,
             starts_clause: false,
         }
@@ -7248,6 +7271,19 @@ impl VarLengthExpandOperator {
     /// can observe how many times a node is reached. See `enumerate_trails`.
     pub fn with_trail_enumeration(mut self) -> Self {
         self.enumerate_trails = true;
+        self
+    }
+
+    /// Inline properties on the target node pattern, tested before a record is
+    /// built. See `target_props`.
+    pub fn with_target_props(mut self, props: Vec<(String, PropertyValue)>) -> Self {
+        self.target_props = props;
+        self
+    }
+
+    /// The resolved set of nodes the target may be. See `target_ids`.
+    pub fn with_target_ids(mut self, ids: std::collections::HashSet<NodeId>) -> Self {
+        self.target_ids = Some(ids);
         self
     }
 
@@ -7613,11 +7649,27 @@ impl VarLengthExpandOperator {
 
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
-        if self.target_labels.is_empty() {
+        // Cheapest discriminator first: a plan-time set settles it without
+        // touching the node at all.
+        if let Some(ids) = &self.target_ids {
+            if !ids.contains(&node) {
+                return false;
+            }
+        }
+        if self.target_labels.is_empty() && self.target_props.is_empty() {
             return true;
         }
         match store.get_node(node) {
-            Some(n) => self.target_labels.iter().all(|l| n.has_label(l)),
+            Some(n) => {
+                self.target_labels.iter().all(|l| n.has_label(l))
+                    // Same comparison `ExpandOperator` applies to its own
+                    // `target_props`: a node without the property does not
+                    // match, which is what `Filter` above concludes for a null.
+                    && self
+                        .target_props
+                        .iter()
+                        .all(|(k, v)| n.get_property(k).is_some_and(|p| p == v))
+            }
             None => false,
         }
     }
