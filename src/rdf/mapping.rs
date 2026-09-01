@@ -34,6 +34,17 @@ pub enum MappingError {
     /// Missing base IRI
     #[error("Missing base IRI")]
     MissingBaseIri,
+
+    /// The mapping exists as an API and has no implementation behind it.
+    ///
+    /// Its own variant because the alternative was worse: these functions used
+    /// to return `Ok(())` and `Ok(Vec::new())`, so a caller importing RDF got
+    /// success and an empty graph, and could not distinguish "this worked" from
+    /// "this did nothing" -- indistinguishable from a successful round trip over
+    /// input that happened to hold no triples. Failing loudly is strictly better
+    /// than succeeding falsely, and stays correct when the bodies are written.
+    #[error("{0} is not implemented: RDF mapping is declared but has no implementation (samyama-graph#1043)")]
+    NotImplemented(&'static str),
 }
 
 pub type MappingResult<T> = Result<T, MappingError>;
@@ -87,8 +98,7 @@ impl GraphToRdfMapper {
     /// - Add rdf:type triples for labels
     /// - Add property triples
     pub fn map_node(&self, _node: &Node) -> MappingResult<Vec<Triple>> {
-        // TODO: Implement node mapping
-        Ok(Vec::new())
+        Err(MappingError::NotImplemented("map_node"))
     }
 
     /// Map an edge to RDF triples
@@ -97,16 +107,14 @@ impl GraphToRdfMapper {
     /// - Create triple for edge relationship
     /// - Optionally reify edge properties
     pub fn map_edge(&self, _edge: &Edge) -> MappingResult<Vec<Triple>> {
-        // TODO: Implement edge mapping
-        Ok(Vec::new())
+        Err(MappingError::NotImplemented("map_edge"))
     }
 
     /// Synchronize property graph to RDF store
     ///
     /// TODO: Full implementation
     pub fn sync_to_rdf(&self, _graph: &GraphStore, _rdf: &mut RdfStore) -> MappingResult<()> {
-        // TODO: Implement full sync
-        Ok(())
+        Err(MappingError::NotImplemented("sync_to_rdf"))
     }
 }
 
@@ -127,8 +135,7 @@ impl RdfToGraphMapper {
     ///
     /// TODO: Full implementation
     pub fn map_to_graph(&self, _rdf: &RdfStore, _graph: &mut GraphStore) -> MappingResult<()> {
-        // TODO: Implement RDF to graph mapping
-        Ok(())
+        Err(MappingError::NotImplemented("map_to_graph"))
     }
 }
 
@@ -142,16 +149,24 @@ mod tests {
         assert_eq!(mapper.config.base_iri, "http://example.org/");
     }
 
+    /// The previous version of this test asserted `triples.is_empty()` -- it
+    /// encoded the defect, so implementing the mapping correctly would have
+    /// broken it and the failure would have looked like a regression. It now
+    /// asserts the refusal, which is the behaviour we actually want today, and
+    /// it will fail when the mapping is implemented, which is the right moment
+    /// to be told.
     #[test]
-    fn test_node_mapping_stub() {
+    fn mapping_refuses_rather_than_silently_returning_nothing() {
         let mapper = GraphToRdfMapper::new("http://example.org/");
         let mut graph = GraphStore::new();
         let node_id = graph.create_node("Person");
+        let node = graph.get_node(node_id).expect("the node just created");
 
-        if let Some(node) = graph.get_node(node_id) {
-            let triples = mapper.map_node(node).unwrap();
-            // TODO: Add assertions once implemented
-            assert!(triples.is_empty()); // Stub returns empty
-        }
+        let err = mapper.map_node(node).expect_err(
+            "an unimplemented mapping must not report success: a caller cannot \
+             tell an empty result from a no-op",
+        );
+        assert!(matches!(err, MappingError::NotImplemented("map_node")), "{err}");
+        assert!(err.to_string().contains("not implemented"), "{err}");
     }
 }
