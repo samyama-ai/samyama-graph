@@ -2,9 +2,12 @@
 //!
 //! Uses the samyama-sdk RemoteClient to connect to a running server.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use comfy_table::{Table, ContentArrangement};
 use samyama_sdk::{RemoteClient, SamyamaClient};
+
+mod doctor;
 
 #[derive(Parser)]
 #[command(name = "samyama", version, about = "Samyama Graph Database CLI")]
@@ -53,6 +56,20 @@ enum Commands {
         #[arg(long, default_value = "default")]
         graph: String,
     },
+    /// Check environment, server, memory and permissions (DX-09)
+    Doctor {
+        /// Data directory to test for writability
+        #[arg(long, default_value = "./samyama_data", env = "SAMYAMA_DATA")]
+        data_dir: std::path::PathBuf,
+    },
+    /// Print a shell completion script to stdout
+    ///
+    /// Install with e.g. `samyama-cli completions bash > \
+    /// /etc/bash_completion.d/samyama-cli`.
+    Completions {
+        /// Shell to generate for
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
@@ -65,12 +82,42 @@ async fn main() {
             run_query(&client, &graph, &cypher, readonly, &cli.format).await
         }
         Commands::Status => run_status(&client, &cli.format).await,
-        Commands::Ping => run_ping(&client).await,
+        Commands::Ping => run_ping(&client, &cli.format).await,
         Commands::Shell { graph } => run_shell(&client, &graph, &cli.format).await,
+        Commands::Doctor { data_dir } => {
+            // `doctor` reports its findings and exits on its own code: an
+            // unreachable server is a finding, not a CLI error, and routing it
+            // through the error path below would print it twice and lose the
+            // checks that did run.
+            let code = run_doctor(&client, &cli.url, &data_dir, &cli.format).await;
+            std::process::exit(code);
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            // `CARGO_BIN_NAME`, not `cmd.get_name()`. The clap command is named
+            // "samyama" while the installed binary is `samyama-cli`, so
+            // generating for the command name emits `complete ... samyama` --
+            // a completion script that binds to a name the user does not type
+            // and therefore never fires. It looks shipped and does nothing,
+            // which is worse than not shipping it.
+            let name = option_env!("CARGO_BIN_NAME").unwrap_or("samyama-cli");
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            Ok(())
+        }
     };
 
     if let Err(e) = result {
-        eprintln!("Error: {}", e);
+        // API-14 asks for `--json` output *everywhere*. An error printed as
+        // prose while the caller asked for JSON is the case that breaks a
+        // script, because the failure is exactly when it is parsing output.
+        match cli.format {
+            OutputFormat::Json => {
+                let body = serde_json::json!({"error": e.to_string()});
+                eprintln!("{}", serde_json::to_string_pretty(&body)
+                    .unwrap_or_else(|_| format!("{{\"error\": \"{e}\"}}")));
+            }
+            _ => eprintln!("Error: {}", e),
+        }
         std::process::exit(1);
     }
 }
@@ -145,9 +192,19 @@ async fn run_status(
     Ok(())
 }
 
-async fn run_ping(client: &RemoteClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_ping(
+    client: &RemoteClient,
+    format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     let result = client.ping().await?;
-    println!("{}", result);
+    // `ping` used to print its reply as bare text whatever `--format` said,
+    // so `--format json` produced output no JSON parser could read. It was the
+    // only subcommand that ignored the flag.
+    match format {
+        OutputFormat::Json => println!("{}",
+            serde_json::to_string_pretty(&serde_json::json!({"ping": result}))?),
+        _ => println!("{}", result),
+    }
     Ok(())
 }
 
@@ -190,7 +247,7 @@ async fn run_shell(
                 }
             }
             ":ping" => {
-                if let Err(e) = run_ping(client).await {
+                if let Err(e) = run_ping(client, format).await {
                     eprintln!("Error: {}", e);
                 }
             }
@@ -243,6 +300,89 @@ fn format_csv_value(v: &serde_json::Value) -> String {
         _ => {
             let json = serde_json::to_string(v).unwrap_or_default();
             format!("\"{}\"", json.replace('"', "\"\""))
+        }
+    }
+}
+
+/// Run the doctor checks and print them. Returns the process exit code.
+async fn run_doctor(
+    client: &RemoteClient,
+    url: &str,
+    data_dir: &std::path::Path,
+    format: &OutputFormat,
+) -> i32 {
+    let mut checks = doctor::local_checks(url, data_dir);
+    // The server's own version, or the error that came back instead. Both are
+    // findings; neither aborts the local checks, which is the point of running
+    // `doctor` when the server is the thing that is broken.
+    let status = client
+        .status()
+        .await
+        .map(|s| s.version)
+        .map_err(|e| e.to_string());
+    checks.extend(doctor::server_checks(status, env!("CARGO_PKG_VERSION")));
+
+    let report = doctor::report(checks);
+    match format {
+        OutputFormat::Json => {
+            match serde_json::to_string_pretty(&report) {
+                Ok(j) => println!("{j}"),
+                Err(e) => {
+                    eprintln!("{{\"error\": \"could not serialise report: {e}\"}}");
+                    return 1;
+                }
+            }
+        }
+        _ => {
+            for c in &report.checks {
+                println!("  {:<7} {:<18} {}", c.verdict.to_string(), c.name, c.detail);
+            }
+            println!(
+                "\n{} check(s): {} failed, {} warned, {} skipped",
+                report.checks.len(), report.failed, report.warned, report.skipped
+            );
+        }
+    }
+    report.exit_code()
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn the_argument_parser_is_internally_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn completions_bind_to_the_installed_binary_name() {
+        // The clap command is named "samyama" while the binary is
+        // `samyama-cli`. Generating for the command name produced
+        // `complete ... samyama`, which binds to a name nobody types: the
+        // script installs, reports success, and never fires. Assert on the
+        // name the shell will actually match against.
+        let bin = option_env!("CARGO_BIN_NAME").unwrap_or("samyama-cli");
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut out = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), bin, &mut out);
+            let script = String::from_utf8(out).expect("completion script is not UTF-8");
+            assert!(!script.is_empty(), "{shell} produced an empty script");
+            assert!(script.contains(bin), "{shell} script never mentions `{bin}`");
+        }
+    }
+
+    #[test]
+    fn every_subcommand_is_reachable_by_name() {
+        // A subcommand that exists in the enum but is not registered would be
+        // invisible; `doctor` and `completions` are the new ones and the two
+        // this test was written for.
+        let names: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        for want in ["query", "status", "ping", "shell", "doctor", "completions"] {
+            assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
     }
 }
