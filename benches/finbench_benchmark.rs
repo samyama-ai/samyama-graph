@@ -588,6 +588,27 @@ async fn main() -> Result<(), Error> {
         format_num(load_result.total_nodes),
         format_num(load_result.total_edges),
         format_duration(load_time));
+    // Build property indexes on `id` for the labels the queries anchor on.
+    //
+    // Without these every `MATCH (a:Account {id: ...})` is a full label scan.
+    // On SF10 that is the difference between a seek and a walk over millions
+    // of accounts, and it is what `SR-1 Account by ID` -- one row, one
+    // predicate -- was actually measuring at 753 ms.
+    //
+    // `ldbc_benchmark.rs` has done this since it was written; this bench never
+    // did. Both competitor runners create exactly these indexes before timing
+    // (`CREATE INDEX FOR (n:L) ON (n.id)` over Account, Person, Company, Loan,
+    // Medium), so the published FinBench comparison had us scanning while they
+    // seeked. That is our harness understating our engine, not the engine.
+    let idx_start = Instant::now();
+    for label in ["Account", "Person", "Company", "Loan", "Medium"] {
+        let stmt = format!("CREATE INDEX ON :{label}(id)");
+        if let Err(e) = client.query("default", &stmt).await {
+            eprintln!("  WARN: index {label}(id) failed: {e}");
+        }
+    }
+    eprintln!("Indexes built in {} (Account/Person/Company/Loan/Medium on id)",
+        format_duration(idx_start.elapsed()));
     eprintln!("Runs per query: {}", runs);
     eprintln!();
 
