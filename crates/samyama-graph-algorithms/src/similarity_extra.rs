@@ -133,10 +133,18 @@ pub fn constraint(view: &GraphView, u: usize) -> Option<f64> {
         }
         1.0 / na.len() as f64
     };
+    // Sorted, not `HashSet` order. Floating-point addition is not associative
+    // and Rust seeds its hasher per process, so the same graph gave answers
+    // differing in the last bit between runs -- 6 to 12 of the nodes on these
+    // graphs, worst 2.9e-16 relative. Harmless as a number and still a
+    // determinism bug: LANG-14 and ALGO-11 ask for identical output, and a
+    // parity check with a 1e-9 tolerance is exactly wide enough to hide it.
+    let mut ordered: Vec<usize> = ego.iter().copied().collect();
+    ordered.sort_unstable();
     let mut total = 0.0;
-    for &j in &ego {
+    for &j in &ordered {
         // (p_uj + sum_q p_uq * p_qj)^2, q over u's other neighbours
-        let indirect: f64 = ego.iter().filter(|&&q| q != j && q != u)
+        let indirect: f64 = ordered.iter().filter(|&&q| q != j && q != u)
             .map(|&q| p(u, q) * p(q, j))
             .sum();
         let c = p(u, j) + indirect;

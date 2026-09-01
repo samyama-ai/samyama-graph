@@ -78,9 +78,25 @@ fn score_pair(sets: &[HashSet<usize>], u: usize, v: usize, which: LinkScore) -> 
                 a.intersection(b).count() as f64 / union as f64
             }
         }
-        LinkScore::AdamicAdar => a
-            .intersection(b)
-            .map(|&w| {
+        LinkScore::AdamicAdar => {
+            // Summed in **sorted** order, not `HashSet` order.
+            //
+            // Floating-point addition is not associative, and Rust's `HashSet`
+            // seeds its hasher per process, so the same graph in two processes
+            // summed these terms in different orders and produced answers
+            // differing in the last bit. Measured across three runs of the
+            // parity export: 3 of 6,840 pairs on the 120-node graph, worst
+            // 4.4e-16 relative.
+            //
+            // Numerically that is nothing. It is still a determinism bug --
+            // LANG-14 and ALGO-11 ask for *identical* output, and the parity
+            // check's 1e-9 tolerance is exactly wide enough to hide it, so
+            // nothing was ever going to catch this by comparing answers.
+            let mut shared: Vec<usize> = a.intersection(b).copied().collect();
+            shared.sort_unstable();
+            shared
+            .into_iter()
+            .map(|w| {
                 let d = sets[w].len() as f64;
                 // A degree-1 shared neighbour gives ln(1) = 0 and would
                 // divide by zero. NetworkX's convention is to skip it, and
@@ -89,7 +105,8 @@ fn score_pair(sets: &[HashSet<usize>], u: usize, v: usize, which: LinkScore) -> 
                 // graph -- but a self-loop or a stale index could.
                 if d > 1.0 { 1.0 / d.ln() } else { 0.0 }
             })
-            .sum(),
+            .sum()
+        }
     }
 }
 
