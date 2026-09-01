@@ -50,7 +50,21 @@ pub struct PcaConfig {
     pub scale: bool,
     /// Solver strategy (default: Auto)
     pub solver: PcaSolver,
+    /// Seed for the randomized solver's projection matrix.
+    ///
+    /// The randomized solver draws a random projection, so without a fixed
+    /// seed the same data gives a different answer every call. That is not a
+    /// wrong answer -- randomized SVD is approximate by construction and the
+    /// spread sits inside its error budget -- but it is not reproducible, and
+    /// ALGO-11 asks for reproducible. Defaults to a constant so determinism is
+    /// what a caller gets without asking; set it to vary the draw deliberately.
+    pub seed: u64,
 }
+
+/// The default projection seed. Any value would do; it is fixed so that two
+/// runs agree.
+pub const DEFAULT_PCA_SEED: u64 = 0x5A_4D_59_4D_41; // "SAMYA"
+
 
 impl Default for PcaConfig {
     fn default() -> Self {
@@ -61,6 +75,7 @@ impl Default for PcaConfig {
             center: true,
             scale: false,
             solver: PcaSolver::Auto,
+            seed: DEFAULT_PCA_SEED,
         }
     }
 }
@@ -205,7 +220,8 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
 
     if use_randomized {
         // ── Randomized SVD path ──
-        let (components, singular_values) = randomized_svd(&mat, k, n_oversamples, n_power_iters);
+        let (components, singular_values) =
+            randomized_svd(&mat, k, n_oversamples, n_power_iters, config.seed);
 
         // Eigenvalues (variance) = σ² / (n-1)
         let denom = if n > 1 { (n - 1) as f64 } else { 1.0 };
@@ -327,13 +343,17 @@ fn randomized_svd(
     k: usize,                // number of components
     n_oversamples: usize,    // oversampling parameter
     n_power_iters: usize,    // power iterations for accuracy
+    seed: u64,               // fixes the projection so two runs agree
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
     let n = mat.nrows();
     let d = mat.ncols();
     let l = (k + n_oversamples).min(n).min(d); // sketch width
 
     // Stage 1: Random projection
-    let mut rng = rand::thread_rng();
+    // Seeded, not `thread_rng()`. `Auto` only reaches this branch above 500
+    // rows, so an unseeded draw is deterministic in every small fixture and
+    // nondeterministic in production -- the tests cannot see it.
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
     let omega_flat: Vec<f64> = (0..d * l).map(|_| rng.sample::<f64, _>(rand::distributions::Standard)).collect();
     let omega = Array2::from_shape_vec((d, l), omega_flat).unwrap();
 
@@ -510,6 +530,44 @@ fn power_iteration(
     let eigenvalue = v.dot(&cv);
 
     (v.to_vec(), eigenvalue, iters)
+}
+
+#[cfg(test)]
+mod determinism_tests {
+    use super::*;
+
+    /// Deterministic input: any spread in the output is the solver's, not the
+    /// data's.
+    fn data(n: usize, d: usize) -> Vec<Vec<f64>> {
+        (0..n)
+            .map(|i| (0..d).map(|j| ((i * 31 + j * 17) % 97) as f64 + (i as f64) * 0.01).collect())
+            .collect()
+    }
+
+    fn first_component(n: usize, seed: u64) -> Vec<f64> {
+        let cfg = PcaConfig { n_components: 3, seed, ..Default::default() };
+        pca(&data(n, 20), cfg).components[0].clone()
+    }
+
+    /// The row count matters. `Auto` only reaches the randomized solver above
+    /// 500 rows, so this test is worthless at the fixture sizes used elsewhere
+    /// in this file -- which is exactly why the bug survived: every existing
+    /// PCA test was under the threshold and passed.
+    #[test]
+    fn randomized_solver_gives_the_same_answer_twice() {
+        assert!(600 > 500, "n must cross the Auto threshold or this tests power iteration");
+        assert_eq!(first_component(600, DEFAULT_PCA_SEED), first_component(600, DEFAULT_PCA_SEED));
+    }
+
+    /// Without this, the test above would still pass if `seed` were dropped on
+    /// the floor and the projection hard-coded. It asserts the seed is load
+    /// bearing, not merely present.
+    #[test]
+    fn a_different_seed_draws_a_different_projection() {
+        let a = first_component(600, DEFAULT_PCA_SEED);
+        let b = first_component(600, DEFAULT_PCA_SEED ^ 0xFFFF);
+        assert_ne!(a, b, "seed is ignored: two seeds gave byte-identical output");
+    }
 }
 
 #[cfg(test)]
