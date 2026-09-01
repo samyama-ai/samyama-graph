@@ -23,6 +23,11 @@ use std::path::PathBuf;
 
 use samyama_graph_algorithms::{
     all_shortest_paths, a_star, louvain, modularity, yens_k_shortest,
+    hits, katz_centrality, personalised_page_rank,
+    bellman_ford, dag_longest_path, transitive_closure, wiener_index,
+    biconnected_components, bipartite_sets, global_efficiency, k_truss,
+    rich_club_coefficient, square_clustering, transitivity,
+    constraint, effective_size, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, count_triangles,
     degree_centrality, eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
@@ -484,6 +489,103 @@ fn main() {
         );
         if !ok {
             failures.push(format!("{name}/mst_weight: ours={ours_mst} recorded={want_mst}"));
+        }
+        // ---- The twenty-five added for H2.
+        //
+        // Recorded in the same shapes `record_reference.py` writes. The greedy
+        // ones -- matching, dominating set, colouring, VoteRank -- are absent
+        // on purpose and named in that file: their result depends on which
+        // edge each side visited first, so a check on them would pass by luck.
+        {
+            let single = view_single_weighted(nodes, &edges);
+            let bidir = true;
+            let mut cmp_scalar = |label: &str, ours: Option<f64>, key: &str| {
+                let want = want[key].as_f64();
+                checks += 1;
+                let ok = match (ours, want) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * b.abs().max(1.0),
+                    _ => false,
+                };
+                if !ok {
+                    failures.push(format!("{name}/{label}: ours={ours:?} recorded={want:?}"));
+                }
+            };
+            cmp_scalar("wiener_index", wiener_index(&view), "wiener_index");
+            cmp_scalar("transitivity", transitivity(&single, bidir), "transitivity");
+            cmp_scalar("global_efficiency", global_efficiency(&single, bidir), "global_efficiency");
+            cmp_scalar("rich_club_1", rich_club_coefficient(&single, 1, bidir), "rich_club_1");
+            cmp_scalar("reciprocity", if directed { reciprocity(&view) } else { None }, "reciprocity");
+
+            checks += 1;
+            let ours_bip = bipartite_sets(&single, bidir).is_some();
+            if Some(ours_bip) != want["is_bipartite"].as_bool() {
+                failures.push(format!("{name}/is_bipartite: ours={ours_bip}"));
+            }
+
+            checks += 1;
+            let ours_bcc = biconnected_components(&single, bidir).len() as u64;
+            if Some(ours_bcc) != want["biconnected_component_count"].as_u64() {
+                failures.push(format!("{name}/biconnected_component_count: ours={ours_bcc}"));
+            }
+
+            checks += 1;
+            let ours_tc = transitive_closure(&view).into_iter()
+                .filter(|(a, b)| a != b).count() as u64;
+            if Some(ours_tc) != want["transitive_closure_pairs"].as_u64() {
+                failures.push(format!("{name}/transitive_closure_pairs: ours={ours_tc}"));
+            }
+
+            checks += 1;
+            let ours_dag = dag_longest_path(&view).map(|p| p.len() as i64 - 1);
+            if ours_dag != want["dag_longest_path_length"].as_i64() {
+                failures.push(format!("{name}/dag_longest_path_length: ours={ours_dag:?}"));
+            }
+
+            checks += 1;
+            let mut ours_truss = k_truss(&single, 3, bidir);
+            ours_truss.sort_unstable();
+            let want_truss: Vec<usize> = want["k_truss_3_nodes"].as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|v| v as usize)).collect())
+                .unwrap_or_default();
+            if ours_truss != want_truss {
+                failures.push(format!("{name}/k_truss_3_nodes: ours={ours_truss:?}"));
+            }
+
+            // Per-node vectors, compared over the keys the reference carries.
+            let mut cmp_vec = |label: &str, ours: &dyn Fn(usize) -> Option<f64>, key: &str, tol: f64| {
+                let Some(obj) = want[key].as_object() else { return };
+                for (k, v) in obj {
+                    let Ok(i) = k.parse::<usize>() else { continue };
+                    checks += 1;
+                    let (a, b) = (ours(i), v.as_f64());
+                    let ok = match (a, b) {
+                        (Some(x), Some(y)) => (x - y).abs() <= tol * y.abs().max(1.0),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !ok {
+                        failures.push(format!("{name}/{label}[{i}]: ours={a:?} recorded={b:?}"));
+                    }
+                }
+            };
+            let sq: Vec<Option<f64>> = (0..nodes).map(|i| square_clustering(&single, i, bidir)).collect();
+            cmp_vec("square_clustering", &|i| sq[i], "square_clustering", 1e-9);
+            let es: Vec<Option<f64>> = (0..nodes).map(|i| effective_size(&single, i)).collect();
+            cmp_vec("effective_size", &|i| es[i], "effective_size", 1e-9);
+            let co: Vec<Option<f64>> = (0..nodes).map(|i| constraint(&single, i)).collect();
+            cmp_vec("constraint", &|i| co[i], "constraint", 1e-9);
+
+            let kz = katz_centrality(&view, 0.05, 1.0, 5000, 1e-12);
+            cmp_vec("katz", &|i| kz.as_ref().map(|v| v[i]), "katz", 1e-6);
+            let hp = hits(&view, 5000, 1e-12);
+            cmp_vec("hits_hubs", &|i| hp.as_ref().map(|(h, _)| h[i]), "hits_hubs", 1e-6);
+            cmp_vec("hits_authorities", &|i| hp.as_ref().map(|(_, a)| a[i]), "hits_authorities", 1e-6);
+            let ppr = personalised_page_rank(&view, &[0], 0.85, 500, 1e-12);
+            cmp_vec("personalised_pagerank", &|i| Some(ppr[i]), "personalised_pagerank", 1e-6);
+            let bf = bellman_ford(&view, 0);
+            cmp_vec("bellman_ford_from_0", &|i| bf.as_ref().and_then(|d| d[i]),
+                    "bellman_ford_from_0", 1e-9);
         }
     }
 

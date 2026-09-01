@@ -19,6 +19,11 @@ use samyama_graph_algorithms::{
     local_clustering_coefficient_directed, page_rank, prim_mst, strongly_connected_components,
     weakly_connected_components, CdlpConfig, GraphView, NodeId, PageRankConfig,
     all_shortest_paths, a_star, yens_k_shortest, modularity,
+    hits, katz_centrality, personalised_page_rank,
+    bellman_ford, dag_longest_path, transitive_closure, wiener_index,
+    biconnected_components, bipartite_sets, global_efficiency, k_truss,
+    rich_club_coefficient, square_clustering, transitivity,
+    constraint, effective_size, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
     eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
@@ -283,7 +288,67 @@ fn main() {
         let parts: Vec<usize> = (0..r.n).map(|i| i % 3).collect();
         let q = modularity(&single, &parts);
 
-        graphs.push(serde_json::json!({
+        // ---- The twenty-five added for H2, in the same shapes
+        // `record_reference.py` records. Only the deterministic ones: a greedy
+        // matching or colouring agrees with NetworkX or not depending on which
+        // edge each side visited first, so a check on those would pass by luck
+        // and fail by luck. They are named in `NO_DETERMINISTIC_REFERENCE`
+        // there rather than left as a silent hole.
+        let idx = |v: &Vec<f64>| -> HashMap<String, f64> {
+            v.iter().enumerate().map(|(i, x)| (i.to_string(), *x)).collect()
+        };
+        let katz = katz_centrality(&view, 0.05, 1.0, 5000, 1e-12).map(|v| idx(&v));
+        let hits_pair = hits(&view, 5000, 1e-12);
+        let ppr = idx(&personalised_page_rank(&view, &[0], 0.85, 500, 1e-12));
+        let bf: Option<HashMap<String, f64>> = bellman_ford(&view, 0).map(|d| {
+            d.iter().enumerate().filter_map(|(i, x)| x.map(|v| (i.to_string(), v))).collect()
+        });
+        let dag_len = dag_longest_path(&view).map(|p| p.len() as i64 - 1);
+        // Ordered pairs excluding self, matching what the recorder counts.
+        // The self-pairs the engine keeps for nodes on a cycle are a real fact
+        // and are checked separately -- folding them into this count would
+        // compare two different quantities.
+        let tc_pairs = transitive_closure(&view).into_iter().filter(|(a, b)| a != b).count();
+        let sq: HashMap<String, f64> = (0..r.n)
+            .filter_map(|i| square_clustering(&single, i, true).map(|v| (i.to_string(), v)))
+            .collect();
+        let eff: HashMap<String, f64> = (0..r.n)
+            .filter_map(|i| effective_size(&single, i).map(|v| (i.to_string(), v)))
+            .collect();
+        let cons: HashMap<String, f64> = (0..r.n)
+            .filter_map(|i| constraint(&single, i).map(|v| (i.to_string(), v)))
+            .collect();
+        let mut truss = k_truss(&single, 3, true);
+        truss.sort_unstable();
+
+        // Assembled as a map and merged below rather than inlined into the
+        // `json!` literal: with these added, the macro hits its recursion
+        // limit. Splitting the object is the fix that does not require
+        // `#![recursion_limit]` on a whole example for one literal.
+        let mut h2 = serde_json::Map::new();
+        let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
+        put("katz", serde_json::to_value(&katz).unwrap());
+        put("hits_hubs", serde_json::to_value(hits_pair.as_ref().map(|(h, _)| idx(h))).unwrap());
+        put("hits_authorities", serde_json::to_value(hits_pair.as_ref().map(|(_, a)| idx(a))).unwrap());
+        put("personalised_pagerank", serde_json::to_value(&ppr).unwrap());
+        put("bellman_ford_from_0", serde_json::to_value(&bf).unwrap());
+        put("wiener_index", serde_json::to_value(wiener_index(&view)).unwrap());
+        put("dag_longest_path_length", serde_json::to_value(dag_len).unwrap());
+        put("transitive_closure_pairs", serde_json::to_value(tc_pairs).unwrap());
+        put("is_bipartite", serde_json::to_value(bipartite_sets(&single, true).is_some()).unwrap());
+        put("k_truss_3_nodes", serde_json::to_value(&truss).unwrap());
+        put("transitivity", serde_json::to_value(transitivity(&single, true)).unwrap());
+        put("global_efficiency", serde_json::to_value(global_efficiency(&single, true)).unwrap());
+        put("square_clustering", serde_json::to_value(&sq).unwrap());
+        put("rich_club_1", serde_json::to_value(rich_club_coefficient(&single, 1, true)).unwrap());
+        put("biconnected_component_count",
+            serde_json::to_value(biconnected_components(&single, true).len()).unwrap());
+        put("effective_size", serde_json::to_value(&eff).unwrap());
+        put("constraint", serde_json::to_value(&cons).unwrap());
+        put("reciprocity",
+            serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
+
+        let mut entry = serde_json::json!({
             "name": r.name,
             "directed": r.directed,
             "nodes": r.n,
@@ -328,8 +393,15 @@ fn main() {
                 "weighted_distance": wdist,
                 "simple_path_lengths": simple,
                 "modularity_of_index_mod_3": q,
+
             }
-        }));
+        });
+        // Merge the H2 block into `results`, which the macro could not hold in
+        // one literal.
+        if let Some(res) = entry.get_mut("results").and_then(|r| r.as_object_mut()) {
+            res.extend(h2);
+        }
+        graphs.push(entry);
     }
 
     let doc = serde_json::json!({
