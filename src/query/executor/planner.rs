@@ -3580,10 +3580,29 @@ impl QueryPlanner {
                             op,
                             val,
                         )),
-                        None => Box::new(NodeScanOperator::new(
-                            target_var.clone(),
-                            last_segment.node.labels.clone(),
-                        )),
+                        // Then an indexed **inline** property. `#584` taught
+                        // the `WHERE` form to use the index and left this one
+                        // behind, so `shortestPath((a {id: 1})-[*]-(b {id: 2}))`
+                        // -- which is how the pattern is actually written --
+                        // planned `IndexScan(a) x NodeScan(b)`: the source
+                        // seeked and the target scanned the whole label.
+                        //
+                        // On FinBench SF10 that scan was the entire cost of
+                        // CR-3. Making the BFS bidirectional first (#1050)
+                        // moved it 541 ms -> 547 ms, because the search was
+                        // never what the query was spending its time on.
+                        None => match inline_index_scan(
+                            &target_var,
+                            &last_segment.node.labels,
+                            last_segment.node.properties.as_ref(),
+                            store,
+                        ) {
+                            Some(op) => op,
+                            None => Box::new(NodeScanOperator::new(
+                                target_var.clone(),
+                                last_segment.node.labels.clone(),
+                            )),
+                        },
                     },
                 };
                 // Add property filter for target node
@@ -5506,6 +5525,42 @@ fn find_id_predicate(var: &str, preds: &[Expression]) -> Option<(usize, Vec<crat
                 }
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// An `IndexScan` for an inline property, when one of the node's labels has an
+/// index on it.
+///
+/// The property filter stays above this regardless: an index answers one
+/// equality, and a pattern may carry several inline properties. Narrowing the
+/// scan is the win; the filter still decides correctness.
+fn inline_index_scan(
+    var: &str,
+    labels: &[Label],
+    properties: Option<&HashMap<String, PropertyValue>>,
+    store: &GraphStore,
+) -> Option<OperatorBox> {
+    let props = properties?;
+    if props.is_empty() || labels.is_empty() {
+        return None;
+    }
+    // Deterministic: a pattern with two indexed properties must plan the same
+    // way on every run, and `HashMap` iteration order does not.
+    let mut keys: Vec<&String> = props.keys().collect();
+    keys.sort();
+    for label in labels {
+        for key in &keys {
+            if store.property_index.has_index(label, key) {
+                return Some(Box::new(IndexScanOperator::new(
+                    var.to_string(),
+                    label.clone(),
+                    (*key).clone(),
+                    BinaryOp::Eq,
+                    props[*key].clone(),
+                )) as OperatorBox);
+            }
         }
     }
     None
