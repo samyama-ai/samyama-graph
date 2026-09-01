@@ -138,6 +138,9 @@ pub struct QueryEngine {
     stats: CacheStats,
     /// Per-query timeout in seconds (0 = no timeout)
     query_timeout_secs: u64,
+    /// Rows a single operator may produce before the query is refused
+    /// (0 = unlimited). See `executor::budget`.
+    row_budget: u64,
 }
 
 impl QueryEngine {
@@ -154,7 +157,23 @@ impl QueryEngine {
             stats: CacheStats::new(),
             query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
+            row_budget: executor::budget::configured_budget(),
         }
+    }
+
+    /// Set the per-operator row budget; `0` disables enforcement entirely.
+    ///
+    /// Present so a caller that knows its query is legitimately enormous can
+    /// raise the bound for that engine, rather than having to unset a
+    /// process-wide environment variable and lose the guard everywhere.
+    pub fn with_row_budget(mut self, rows: u64) -> Self {
+        self.row_budget = rows;
+        self
+    }
+
+    /// The per-operator row budget in force.
+    pub fn row_budget(&self) -> u64 {
+        self.row_budget
     }
 
     /// Return a reference to the cache statistics (hits/misses).
@@ -211,7 +230,7 @@ impl QueryEngine {
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
             );
         }
-        let result = executor.execute(&query)?;
+        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
 
         Ok(result)
     }
@@ -227,7 +246,7 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
-        let result = executor.execute(&query)?;
+        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
 
         Ok(result)
     }

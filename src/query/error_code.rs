@@ -78,6 +78,14 @@ pub const PLANNING: &str = "Samyama.ClientError.Statement.PlanningFailed";
 /// that no error is left without a code at all; every site that a caller would
 /// genuinely handle differently should get its own constant above, and the
 /// count of errors still landing here is worth watching.
+/// A query refused because one operator exceeded the per-operator row budget.
+///
+/// A client error rather than a database error: the engine is working, the
+/// query asked for more intermediate rows than the budget allows -- almost
+/// always an unintended cartesian product. Its own code so a caller can
+/// branch on it and retry with a narrower pattern.
+pub const ROW_BUDGET_EXCEEDED: &str = "Samyama.ClientError.Statement.RowBudgetExceeded";
+
 pub const RUNTIME: &str = "Samyama.ClientError.Statement.RuntimeError";
 /// The store or the engine failed. The query is not necessarily wrong.
 pub const GRAPH_ACCESS: &str = "Samyama.DatabaseError.Statement.GraphAccessFailed";

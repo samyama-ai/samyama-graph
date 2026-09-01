@@ -86,6 +86,7 @@ pub mod logical_optimizer;
 pub mod logical_plan;
 pub mod temporal;
 pub mod operator;
+pub mod budget;
 pub mod profile;
 pub mod physical_planner;
 pub mod plan_enumerator;
@@ -223,6 +224,7 @@ pub struct QueryExecutor<'a> {
     planner: QueryPlanner,
     params: HashMap<String, crate::graph::PropertyValue>,
     deadline: Option<std::time::Instant>,
+    row_budget: u64,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -233,6 +235,7 @@ impl<'a> QueryExecutor<'a> {
             planner: QueryPlanner::new(),
             params: HashMap::new(),
             deadline: None,
+            row_budget: 0,
         }
     }
 
@@ -243,12 +246,25 @@ impl<'a> QueryExecutor<'a> {
             planner,
             params: HashMap::new(),
             deadline: None,
+            row_budget: 0,
         }
     }
 
     /// Set a query execution deadline
     pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
         self.deadline = deadline.into();
+        self
+    }
+
+    /// Refuse the query if any single operator produces more than `rows`.
+    ///
+    /// Defaults to `0` (off) on a directly-constructed executor rather than to
+    /// the configured budget: the many tests and callers that build an
+    /// executor by hand should get exactly the engine they asked for, and the
+    /// policy decision belongs to `QueryEngine`, which is the surface a real
+    /// caller goes through.
+    pub fn with_row_budget(mut self, rows: u64) -> Self {
+        self.row_budget = rows;
         self
     }
 
@@ -435,7 +451,7 @@ impl<'a> QueryExecutor<'a> {
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
-            return Ok(Self::explain_plan_with_stats(&plan, Some(self.store)));
+            return Ok(Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget));
         }
 
         // Check if this is a write query - if so, error out
@@ -495,11 +511,16 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
+    #[cfg(test)]
     fn explain_plan(plan: &ExecutionPlan) -> RecordBatch {
-        Self::explain_plan_with_stats(plan, None)
+        Self::explain_plan_with_stats(plan, None, 0)
     }
 
-    fn explain_plan_with_stats(plan: &ExecutionPlan, store: Option<&GraphStore>) -> RecordBatch {
+    fn explain_plan_with_stats(
+        plan: &ExecutionPlan,
+        store: Option<&GraphStore>,
+        row_budget: u64,
+    ) -> RecordBatch {
         use crate::graph::PropertyValue;
         use crate::query::executor::planner::PLAN_DIAGNOSTICS;
 
@@ -532,6 +553,24 @@ impl<'a> QueryExecutor<'a> {
             }
         }
 
+        // The bound in force, named in the plan. PERF-05 asks for "budget +
+        // EXPLAIN exposure" and the second half is not decoration: a query
+        // refused for exceeding a limit the plan never mentioned looks like a
+        // bug in the engine rather than a limit the caller can raise.
+        plan_text.push_str("\n--- Row budget ---\n");
+        if row_budget == 0 {
+            plan_text.push_str(
+                "per-operator row budget: disabled (SAMYAMA_ROW_BUDGET=0); an \
+                 exploding intermediate will run rather than be refused\n",
+            );
+        } else {
+            plan_text.push_str(&format!(
+                "per-operator row budget: {row_budget} rows; an operator producing \
+                 more is refused with {}\n",
+                crate::query::error_code::ROW_BUDGET_EXCEEDED
+            ));
+        }
+
         // Append statistics summary if store is available
         if let Some(store) = store {
             let stats = store.statistics();
@@ -551,6 +590,9 @@ impl<'a> QueryExecutor<'a> {
     fn execute_plan(&self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
         // Set thread-local deadline so operators can check it during materialization
         operator::set_query_deadline(self.deadline);
+
+        // A no-op at budget 0, so the ordinary path allocates nothing.
+        budget::enforce(&mut plan.root, self.row_budget);
 
         let mut records = Vec::new();
         let batch_size = 1024;
@@ -589,6 +631,7 @@ pub struct MutQueryExecutor<'a> {
     planner: QueryPlanner,
     tenant_id: String,
     params: HashMap<String, crate::graph::PropertyValue>,
+    row_budget: u64,
 }
 
 impl<'a> MutQueryExecutor<'a> {
@@ -599,7 +642,15 @@ impl<'a> MutQueryExecutor<'a> {
             planner: QueryPlanner::new(),
             tenant_id,
             params: HashMap::new(),
+            row_budget: 0,
         }
+    }
+
+    /// Refuse the query if any single operator produces more than `rows`.
+    /// `0` is off. See `QueryExecutor::with_row_budget`.
+    pub fn with_row_budget(mut self, rows: u64) -> Self {
+        self.row_budget = rows;
+        self
     }
 
     /// Set query parameters
@@ -642,7 +693,7 @@ impl<'a> MutQueryExecutor<'a> {
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref)));
+            return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget));
         }
 
         // Execute the plan with mutable access.
@@ -679,6 +730,9 @@ impl<'a> MutQueryExecutor<'a> {
     }
 
     fn execute_plan_mut(&mut self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
+        // A no-op at budget 0, so the ordinary path allocates nothing.
+        budget::enforce(&mut plan.root, self.row_budget);
+
         let mut records = Vec::new();
         let batch_size = 1024;
 
