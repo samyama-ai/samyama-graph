@@ -22,6 +22,13 @@ use tower::ServiceExt;
 /// The three fields TRUST-06 names, in the order the requirement names them.
 const PROVENANCE_FIELDS: [&str; 3] = ["engine_version", "snapshot_hash", "plan_hash"];
 
+/// The nearest thing the response actually carries, where it is not the field
+/// the requirement names. `snapshot_version` is the MVCC version the read saw:
+/// it identifies the snapshot, which is what the requirement is *for*, but it
+/// is not a content hash of it. Reported as a proxy rather than counted, so
+/// the headline number cannot be improved by renaming a field.
+const PROVENANCE_PROXIES: [(&str, &str); 1] = [("snapshot_hash", "snapshot_version")];
+
 async fn post_query(server: &HttpServer, cypher: &str) -> (axum::http::HeaderMap, serde_json::Value) {
     let req = Request::builder()
         .method("POST")
@@ -65,6 +72,13 @@ async fn main() {
         .filter(|f| serialized.contains(&format!("\"{f}\"")))
         .collect();
     println!("TRUST-06 provenance fields present: {}/3 {present:?}", present.len());
+    let proxies: Vec<String> = PROVENANCE_PROXIES
+        .iter()
+        .filter(|(named, _)| !present.contains(named))
+        .filter(|(_, actual)| serialized.contains(&format!("\"{actual}\"")))
+        .map(|(named, actual)| format!("{named}<-{actual}"))
+        .collect();
+    println!("TRUST-06 proxies: {}/3 {proxies:?}", proxies.len());
     println!("  response keys: {top:?}");
 
     // API-07 -- streamed or buffered. A `Content-Length` means the whole body
