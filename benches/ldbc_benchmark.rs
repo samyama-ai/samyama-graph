@@ -930,16 +930,39 @@ async fn main() -> Result<(), Error> {
     // anchor on. Without these, `MATCH (m:Post {id: ...})` triggers a
     // full label scan (1.19M Posts on SF1, ~5–9s per IS4–7). With them
     // the inline-property MATCH lowers to an IndexScan.
+    // Derived from what the 21 queries actually filter on, not from a guess and
+    // not copied from a competitor's script.
+    //
+    // The previous list indexed six properties no query in the corpus anchors
+    // on -- Comment.id, Forum.id, Place.id, Organisation.id, Tag.id,
+    // TagClass.id -- and missed five that queries do:
+    //
+    //   Person.firstName   IC1    was 2.73x the best competitor
+    //   Organisation.name  IC11   was 2.80x
+    //   Tag.name           IC6
+    //   Place.name         IC3
+    //   TagClass.name      IC12
+    //
+    // Both SNB-I queries above SLT-2's "no single query > 2x" clause were in
+    // that missing set, and both anchor on a *name* while we had indexed the
+    // *id* of the same label. The six unused entries are kept: they cost load
+    // time and nothing else, and dropping an index is a separate decision from
+    // adding the ones the queries need.
     let idx_start = Instant::now();
     for (label, prop) in &[
         ("Person", "id"),
+        ("Person", "firstName"),
         ("Post", "id"),
         ("Comment", "id"),
         ("Forum", "id"),
         ("Place", "id"),
+        ("Place", "name"),
         ("Organisation", "id"),
+        ("Organisation", "name"),
         ("Tag", "id"),
+        ("Tag", "name"),
         ("TagClass", "id"),
+        ("TagClass", "name"),
     ] {
         let stmt = format!("CREATE INDEX ON :{}({})", label, prop);
         if let Err(e) = client.query("default", &stmt).await {
@@ -947,7 +970,8 @@ async fn main() -> Result<(), Error> {
         }
     }
     eprintln!(
-        "Indexes built in {} (Person/Post/Comment/Forum/Place/Org/Tag/TagClass on id)",
+        "Indexes built in {} (id for the 8 anchor labels, plus Person.firstName, \
+Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on)",
         format_duration(idx_start.elapsed())
     );
 
