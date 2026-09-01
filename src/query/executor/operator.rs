@@ -16467,6 +16467,146 @@ impl ShortestPathOperator {
     /// Neighbours come from the allocation-free visitor with the edge type
     /// filtered on its interned id, so an incident edge of the wrong type
     /// costs a comparison rather than an `Edge` clone (#520).
+    /// Neighbours as seen from the *target* end, for the backward half of a
+    /// bidirectional search.
+    ///
+    /// The reversal is the whole correctness of that search. Walking backwards
+    /// from the target of `(a)-[:R*]->(b)` means following edges that point
+    /// *into* the current node, so `Outgoing` and `Incoming` swap. `Both` is
+    /// its own mirror and does not.
+    fn for_each_neighbor_reverse(
+        &self,
+        node: NodeId,
+        type_ids: Option<&[u16]>,
+        store: &GraphStore,
+        mut visit: impl FnMut(NodeId, crate::graph::EdgeId),
+    ) {
+        match self.direction {
+            Direction::Outgoing => store.for_each_incoming_neighbor(node, type_ids, &mut visit),
+            Direction::Incoming => store.for_each_outgoing_neighbor(node, type_ids, &mut visit),
+            Direction::Both => {
+                store.for_each_outgoing_neighbor(node, type_ids, &mut visit);
+                store.for_each_incoming_neighbor(node, type_ids, &mut visit);
+            }
+        }
+    }
+
+    /// Bidirectional BFS for the single-shortest-path case.
+    ///
+    /// A one-sided BFS explores on the order of `b^d` nodes; searching from
+    /// both ends and meeting in the middle explores `2 * b^(d/2)`. On LDBC
+    /// FinBench SF10 -- 6.2M TRANSFER edges, high fan-out --
+    /// `shortestPath((a1)-[:TRANSFER*]-(a2))` took 541 ms one-sided against
+    /// Neo4j's 14 ms, which is that exponent difference and nothing else.
+    ///
+    /// Only for `shortestPath`, not `allShortestPaths`. Enumerating *every*
+    /// shortest path from a two-sided search means stitching two predecessor
+    /// DAGs at every meeting point, and getting that subtly wrong yields
+    /// missing paths rather than slow ones. `all_paths` keeps the one-sided
+    /// walk, which is already correct.
+    ///
+    /// Termination is the part worth reading. It does **not** stop at the
+    /// first meeting: an alternating level-synchronous search can meet on a
+    /// node that is not on any shortest path. It tracks the best total seen
+    /// and keeps expanding while `depth_f + depth_b < best`, which is the
+    /// point past which no shorter path can still exist.
+    fn bfs_shortest_bidirectional(
+        &self,
+        store: &GraphStore,
+        source: NodeId,
+        target: NodeId,
+        type_ids: Option<&[u16]>,
+    ) -> Option<(Vec<NodeId>, Vec<crate::graph::EdgeId>)> {
+        use rustc_hash::FxHashMap;
+
+        let mut dist_f: FxHashMap<NodeId, u32> = FxHashMap::default();
+        let mut dist_b: FxHashMap<NodeId, u32> = FxHashMap::default();
+        // (predecessor, edge that reached this node)
+        let mut pred_f: FxHashMap<NodeId, (NodeId, crate::graph::EdgeId)> = FxHashMap::default();
+        let mut pred_b: FxHashMap<NodeId, (NodeId, crate::graph::EdgeId)> = FxHashMap::default();
+        dist_f.insert(source, 0);
+        dist_b.insert(target, 0);
+
+        let mut frontier_f = vec![source];
+        let mut frontier_b = vec![target];
+        let (mut depth_f, mut depth_b) = (0u32, 0u32);
+        let mut best: Option<(u32, NodeId)> = None;
+
+        while !frontier_f.is_empty() && !frontier_b.is_empty() {
+            if let Some((b, _)) = best {
+                if depth_f + depth_b >= b {
+                    break;
+                }
+            }
+            // Expand the cheaper side, which is what keeps the exponent halved
+            // on graphs whose fan-out differs by direction.
+            let forward = frontier_f.len() <= frontier_b.len();
+            let mut next = Vec::new();
+            if forward {
+                depth_f += 1;
+                for &current in &frontier_f {
+                    self.for_each_neighbor(current, type_ids, store, |nb, eid| {
+                        if !dist_f.contains_key(&nb) {
+                            dist_f.insert(nb, depth_f);
+                            pred_f.insert(nb, (current, eid));
+                            next.push(nb);
+                        }
+                        if let Some(&db) = dist_b.get(&nb) {
+                            let total = depth_f + db;
+                            if best.is_none_or(|(b, _)| total < b) {
+                                best = Some((total, nb));
+                            }
+                        }
+                    });
+                }
+                frontier_f = next;
+            } else {
+                depth_b += 1;
+                for &current in &frontier_b {
+                    self.for_each_neighbor_reverse(current, type_ids, store, |nb, eid| {
+                        if !dist_b.contains_key(&nb) {
+                            dist_b.insert(nb, depth_b);
+                            pred_b.insert(nb, (current, eid));
+                            next.push(nb);
+                        }
+                        if let Some(&df) = dist_f.get(&nb) {
+                            let total = df + depth_b;
+                            if best.is_none_or(|(b, _)| total < b) {
+                                best = Some((total, nb));
+                            }
+                        }
+                    });
+                }
+                frontier_b = next;
+            }
+        }
+
+        let (_, meet) = best?;
+
+        // source -> meet, walking `pred_f` back and reversing.
+        let mut nodes = vec![meet];
+        let mut edges: Vec<crate::graph::EdgeId> = Vec::new();
+        let mut cur = meet;
+        while cur != source {
+            let (parent, eid) = *pred_f.get(&cur)?;
+            nodes.push(parent);
+            edges.push(eid);
+            cur = parent;
+        }
+        nodes.reverse();
+        edges.reverse();
+
+        // meet -> target, walking `pred_b` forward; it already points that way.
+        let mut cur = meet;
+        while cur != target {
+            let (nextn, eid) = *pred_b.get(&cur)?;
+            nodes.push(nextn);
+            edges.push(eid);
+            cur = nextn;
+        }
+        Some((nodes, edges))
+    }
+
     fn bfs_shortest(
         &self,
         store: &GraphStore,
@@ -16476,6 +16616,12 @@ impl ShortestPathOperator {
     ) -> Vec<(Vec<NodeId>, Vec<crate::graph::EdgeId>)> {
         if source == target {
             return vec![(vec![source], vec![])];
+        }
+        if !self.all_paths {
+            return self
+                .bfs_shortest_bidirectional(store, source, target, type_ids)
+                .into_iter()
+                .collect();
         }
 
         // Phase 1: level BFS building the shortest-path DAG.
