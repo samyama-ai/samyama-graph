@@ -14,6 +14,10 @@ path = "src/main.rs"
 [dependencies]
 samyama-sdk = { path = "../crates/samyama-sdk", version = "1.7.1" }
 clap = { version = "4", features = ["derive"] }
+# `completions` (API-14 asks for shell completion) and `doctor` (DX-09).
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+url = "2"
 tokio = { version = "1.35", features = ["full"] }
 serde_json = "1.0"
 comfy-table = ">=7, <7.2"
