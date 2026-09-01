@@ -511,11 +511,6 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
-    #[cfg(test)]
-    fn explain_plan(plan: &ExecutionPlan) -> RecordBatch {
-        Self::explain_plan_with_stats(plan, None, 0)
-    }
-
     fn explain_plan_with_stats(
         plan: &ExecutionPlan,
         store: Option<&GraphStore>,
