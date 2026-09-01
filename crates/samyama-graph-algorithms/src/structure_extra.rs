@@ -266,18 +266,25 @@ pub fn square_clustering(view: &GraphView, u: usize, bidirectional: bool) -> Opt
     if nu.len() < 2 {
         return None; // no pair of neighbours, so no square to close
     }
+    // Lind et al.'s definition, which is the one NetworkX implements. The
+    // denominator is not "degrees minus the shared neighbours" -- the first
+    // version here was that, and it agreed on low-degree nodes and diverged
+    // everywhere else, which is the most misleading way for a formula to be
+    // wrong. Each pair contributes
+    //
+    //     (deg(a) - m) + (deg(b) - m) + q,   m = q + 1 + [a adjacent to b]
+    //
+    // where `q` is the number of nodes other than `u` adjacent to both.
     let mut squares = 0.0;
     let mut denom = 0.0;
     for (i, &v) in nu.iter().enumerate() {
         let nv: HashSet<usize> = neighbours(view, v, bidirectional).into_iter().collect();
         for &w in nu.iter().skip(i + 1) {
             let nw: HashSet<usize> = neighbours(view, w, bidirectional).into_iter().collect();
-            // Nodes other than u adjacent to both v and w close a square.
-            let common: usize = nv.intersection(&nw).filter(|&&x| x != u).count();
-            squares += common as f64;
-            let deg_v = nv.len() - if nv.contains(&u) { 1 } else { 0 };
-            let deg_w = nw.len() - if nw.contains(&u) { 1 } else { 0 };
-            denom += (deg_v + deg_w) as f64 - common as f64;
+            let q = nv.intersection(&nw).filter(|&&x| x != u).count();
+            squares += q as f64;
+            let m = q + 1 + usize::from(nv.contains(&w));
+            denom += (nv.len().saturating_sub(m) + nw.len().saturating_sub(m) + q) as f64;
         }
     }
     if denom == 0.0 {
