@@ -3720,6 +3720,16 @@ impl QueryPlanner {
                                 expand = expand.with_pinned_target(pinned);
                             }
                         }
+                        // Prune non-matching endpoints before a record is
+                        // built. The filter below stays: this is pruning, not a
+                        // replacement (#1063).
+                        expand = self.push_varlen_target_props(
+                            expand,
+                            &target_var,
+                            &segment.node.labels,
+                            segment.node.properties.as_ref(),
+                            store,
+                        );
                         path_operator = if !segment.node.labels.is_empty() {
                             Box::new(expand.with_target_labels(segment.node.labels.clone()))
                         } else {
@@ -3919,6 +3929,50 @@ impl QueryPlanner {
     /// plan time against a small label — 7,955 Organisations against 29,000
     /// edge candidates. The scan is capped for that reason: above the cap the
     /// per-candidate check is the cheaper of the two (#665).
+    /// Push a var-length target's inline properties into the operator so a
+    /// non-matching endpoint never becomes a record.
+    ///
+    /// The `Filter` above is deliberately **left in place**. This is pruning,
+    /// not a replacement: if the operator's test is ever narrower than the
+    /// filter's the filter still decides, so the worst case is wasted work
+    /// rather than a dropped row. Every other pushdown in this file that
+    /// removed its filter had to be reasoned about for null and type
+    /// coercion; this one does not.
+    fn push_varlen_target_props(
+        &self,
+        expand: VarLengthExpandOperator,
+        target_var: &str,
+        labels: &[Label],
+        properties: Option<&HashMap<String, PropertyValue>>,
+        store: &GraphStore,
+    ) -> VarLengthExpandOperator {
+        let _ = target_var;
+        // An off switch, so the two arms can be measured in one binary on one
+        // host. Comparing a build from before this change against one after it
+        // means comparing two runs, and on this machine the host calibration
+        // moved from 29 ms to 75 ms between them -- a 2.6x difference in the
+        // ruler, which is larger than anything being measured.
+        if std::env::var("SAMYAMA_VARLEN_TARGET_PRUNING").as_deref() == Ok("0") {
+            return expand;
+        }
+        let Some(props) = properties else { return expand };
+        if props.is_empty() {
+            return expand;
+        }
+        // Deterministic: `HashMap` iteration order is not, and the resolved
+        // set depends on which property is consulted first.
+        let mut pairs: Vec<(String, PropertyValue)> =
+            props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // An id set answers without touching a node; the property compare is
+        // the fallback when nothing resolves it.
+        if let Some(ids) = self.resolve_target_ids(labels, &pairs, store) {
+            return expand.with_target_ids(ids);
+        }
+        expand.with_target_props(pairs)
+    }
+
     fn resolve_target_ids(
         &self,
         labels: &[Label],
@@ -4233,6 +4287,17 @@ impl QueryPlanner {
                         expand = expand.with_pinned_target(pinned);
                     }
                 }
+                // Prune non-matching endpoints before a record is built; the
+                // filter above stays (#1063). Applied at all three sites that
+                // build a var-length expand, because `Query` has two AST
+                // shapes and a rule added to one silently no-ops the other.
+                let expand = self.push_varlen_target_props(
+                    expand,
+                    &target.var,
+                    &target.labels,
+                    target.properties.as_ref(),
+                    store,
+                );
                 if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
                 } else {
@@ -4357,6 +4422,17 @@ impl QueryPlanner {
                 if let Some(ref rv) = segment.edge.variable {
                     expand = expand.with_rel_variable(rv.clone());
                 }
+                // Prune non-matching endpoints before a record is built; the
+                // filter above stays (#1063). Applied at all three sites that
+                // build a var-length expand, because `Query` has two AST
+                // shapes and a rule added to one silently no-ops the other.
+                let expand = self.push_varlen_target_props(
+                    expand,
+                    &target.var,
+                    &target.labels,
+                    target.properties.as_ref(),
+                    store,
+                );
                 if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone())) as OperatorBox
                 } else {
