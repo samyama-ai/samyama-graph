@@ -383,6 +383,20 @@ impl FrozenAdjacencyStore {
     }
 
     /// Collect all neighbors across all segments for a node. Returns a Vec.
+    /// Every frozen entry for `node_idx`, across all segments, **sorted by
+    /// neighbour id**.
+    ///
+    /// The sort is what makes the name honest. Each segment is sorted as it is
+    /// built, but concatenating two sorted lists does not give a sorted list,
+    /// and this used to return the bare concatenation while
+    /// `frozen_outgoing_neighbors` advertised it as "sorted ... for LeapFrog
+    /// joins". `AdjacencyIterator::seek` binary-searches those entries, and a
+    /// leapfrog intersection over a mis-seeked iterator does not fail -- it
+    /// returns the wrong set of matches (#1071).
+    ///
+    /// The single-segment case is the common one after a full compaction and
+    /// still copies the slice as-is; only a store compacted more than once pays
+    /// for the sort. Callers that merely iterate are indifferent to the order.
     fn neighbors_collected(&self, node_idx: usize) -> Vec<(NodeId, EdgeId)> {
         match self.segments.len() {
             0 => Vec::new(),
@@ -392,6 +406,7 @@ impl FrozenAdjacencyStore {
                 for seg in &self.segments {
                     result.extend_from_slice(seg.neighbors(node_idx));
                 }
+                result.sort_unstable_by_key(|&(nid, _)| nid);
                 result
             }
         }
@@ -542,6 +557,27 @@ impl FrozenAdjacency {
         match neighbors.binary_search_by_key(&search_key, |(nid, _)| *nid) {
             Ok(pos) => Some(neighbors[pos]),
             Err(_) => None,
+        }
+    }
+
+    /// The entries whose neighbour is `search_key`, as a slice of this segment.
+    ///
+    /// Binary search is only valid *within* a segment: `from_vec_of_vec` sorts
+    /// each one as it is built, but `FrozenAdjacencyStore` holds a list of them
+    /// and concatenating two sorted lists does not give a sorted list. Callers
+    /// must therefore search segment by segment rather than over a collected
+    /// run of them all (#1071).
+    fn neighbor_range(&self, node_idx: usize, search_key: NodeId) -> &[(NodeId, EdgeId)] {
+        let neighbors = self.neighbors(node_idx);
+        match neighbors.binary_search_by_key(&search_key, |(nid, _)| *nid) {
+            Ok(pos) => {
+                let mut start = pos;
+                while start > 0 && neighbors[start - 1].0 == search_key { start -= 1; }
+                let mut end = pos + 1;
+                while end < neighbors.len() && neighbors[end].0 == search_key { end += 1; }
+                &neighbors[start..end]
+            }
+            Err(_) => &[],
         }
     }
 
@@ -2502,80 +2538,93 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.get_incoming_edge_sources_owned(node_id)
     }
 
-    /// Helper: search a sorted slice for edges between source and target
-    fn search_adjacency_slice(
-        &self, entries: &[(NodeId, EdgeId)], search_key: NodeId,
-        source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
-    ) -> Vec<EdgeId> {
-        let start = match entries.binary_search_by_key(&search_key, |(nid, _)| *nid) {
-            Ok(pos) => {
-                let mut p = pos;
-                while p > 0 && entries[p - 1].0 == search_key { p -= 1; }
-                p
+    /// Does `eid`, reached as an adjacency entry from `source` towards
+    /// `target`, satisfy the type filter?
+    ///
+    /// A stub edge has no `Edge` record, so its endpoints are implicit in the
+    /// direction of the adjacency list that produced the entry and only the
+    /// type can be re-checked.
+    fn edge_between_matches(
+        &self, eid: EdgeId, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
+    ) -> bool {
+        match self.get_edge(eid) {
+            Some(e) => {
+                e.source == source
+                    && e.target == target
+                    && edge_type.is_none_or(|et| &e.edge_type == et)
             }
-            Err(_) => return Vec::new(),
-        };
+            None => match edge_type {
+                Some(et) => self.get_edge_type(eid).is_some_and(|actual| &actual == et),
+                None => true,
+            },
+        }
+    }
 
-        let mut result = Vec::new();
-        for i in start..entries.len() {
-            let (nid, eid) = entries[i];
-            if nid != search_key { break; }
-            // Try full Edge first, fall back to edge_type_ids for stubs
-            if let Some(e) = self.get_edge(eid) {
-                if e.source == source && e.target == target {
-                    match edge_type {
-                        Some(et) if &e.edge_type != et => {}
-                        _ => result.push(eid),
-                    }
-                }
-            } else {
-                // Stub edge: adjacency entry (nid, eid) tells us the neighbor.
-                // The source/target are implicit from the adjacency list direction.
-                // For outgoing[source], neighbor = target. Check edge type via compact array.
-                match edge_type {
-                    Some(et) => {
-                        if let Some(actual_et) = self.get_edge_type(eid) {
-                            if &actual_et == et { result.push(eid); }
-                        }
-                    }
-                    None => result.push(eid), // No type filter — match all
+    /// Every edge from `source` to `target`, without walking `source`'s
+    /// adjacency list.
+    ///
+    /// Two things here are deliberate and were both wrong before (#1071):
+    ///
+    /// * Each frozen segment is searched **on its own**. The old code collected
+    ///   every segment's entries into one Vec and binary-searched that. Each
+    ///   part was sorted; their concatenation was not, so a store compacted
+    ///   twice could report no edge where one existed.
+    /// * The write buffer is **scanned**, not searched. It is appended to in
+    ///   creation order and never sorted -- sorting happens on the way into a
+    ///   frozen segment, which is exactly why the buffer it reads from need
+    ///   not be. Binary-searching it found edges only when they happened to
+    ///   have been created in ascending target order, which is what test
+    ///   fixtures do and real workloads do not.
+    ///
+    /// Answering by lookup rather than by walking also makes an existence test
+    /// between two known nodes independent of their degree, which is what
+    /// LDBC BI-11 needs: its anti-join asks whether a specific Post carries a
+    /// tag, and walking the *Tag* to find out costs the tag's whole
+    /// popularity.
+    fn for_each_edge_between(
+        &self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
+        mut visit: impl FnMut(EdgeId) -> bool,
+    ) {
+        let idx = source.as_u64() as usize;
+        for seg in &self.frozen_outgoing.segments {
+            for &(_nid, eid) in seg.neighbor_range(idx, target) {
+                if self.edge_between_matches(eid, source, target, edge_type) && visit(eid) {
+                    return;
                 }
             }
         }
-        result
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(nid, eid) in entries {
+                if nid == target
+                    && self.edge_between_matches(eid, source, target, edge_type)
+                    && visit(eid)
+                {
+                    return;
+                }
+            }
+        }
     }
 
     /// Check if an edge exists between source and target, optionally filtered by edge type.
     /// Checks both frozen tier (CSR) and write buffer.
     /// Returns the first matching EdgeId, or None.
     pub fn edge_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Option<EdgeId> {
-        let src_idx = source.as_u64() as usize;
-        let tgt_idx = target.as_u64() as usize;
-
-        // Check write buffer first (likely has recent edges)
-        let buffer_entries = self.outgoing.get(src_idx).map(|v| v.as_slice()).unwrap_or(&[]);
-        let found = self.search_adjacency_slice(buffer_entries, target, source, target, edge_type);
-        if let Some(&eid) = found.first() { return Some(eid); }
-
-        // Check frozen tier
-        let frozen_entries = &self.frozen_outgoing.neighbors_collected(src_idx);
-        let found = self.search_adjacency_slice(frozen_entries, target, source, target, edge_type);
-        found.first().copied()
+        let mut found = None;
+        self.for_each_edge_between(source, target, edge_type, |eid| {
+            found = Some(eid);
+            true
+        });
+        found
     }
 
     /// Get all edges between source and target, optionally filtered by edge type.
     /// Merges results from frozen tier and write buffer.
     pub fn edges_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Vec<EdgeId> {
-        let src_idx = source.as_u64() as usize;
-
-        // Frozen tier
-        let mut result = self.search_adjacency_slice(
-            &self.frozen_outgoing.neighbors_collected(src_idx), target, source, target, edge_type
-        );
-        // Write buffer
-        if let Some(entries) = self.outgoing.get(src_idx) {
-            result.extend(self.search_adjacency_slice(entries, target, source, target, edge_type));
-        }
+        let mut result = Vec::new();
+        self.for_each_edge_between(source, target, edge_type, |eid| {
+            result.push(eid);
+            false
+        });
         result
     }
 
@@ -5877,6 +5926,100 @@ mod tests {
         let stats = store.adjacency_stats();
         assert_eq!(stats.frozen_edges, 5);
         assert_eq!(stats.buffer_edges, 0);
+    }
+
+    /// Two compactions leave two frozen segments. Each is sorted by neighbour
+    /// id *within itself*, but `neighbors_collected` concatenates them, and
+    /// `search_adjacency_slice` binary-searches the result. A concatenation of
+    /// sorted lists is not sorted, so the search can miss an edge that is
+    /// present -- and `edge_between` reports "no such edge" rather than
+    /// failing, which is a wrong answer no caller can detect.
+    #[test]
+    fn test_edge_between_finds_edge_across_two_frozen_segments() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let targets: Vec<NodeId> = (0..3).map(|_| store.create_node("T")).collect();
+        let (n1, n2, n3) = (targets[0], targets[1], targets[2]);
+
+        // Segment one holds the two higher neighbour ids ...
+        store.create_edge_stub(a, n2, "R").unwrap();
+        store.create_edge_stub(a, n3, "R").unwrap();
+        store.compact_adjacency();
+        // ... segment two the lowest, so the concatenation runs [n2, n3, n1].
+        let e1 = store.create_edge_stub(a, n1, "R").unwrap();
+        store.compact_adjacency();
+        assert_eq!(store.frozen_outgoing.segments.len(), 2, "two segments is the premise");
+
+        // Every edge is still reachable by walking adjacency ...
+        let mut walked = Vec::new();
+        store.for_each_outgoing_neighbor(a, None, |t, _| walked.push(t));
+        walked.sort();
+        assert_eq!(walked, vec![n1, n2, n3], "the walk sees all three");
+
+        // ... so a lookup that claims to answer the same question must agree.
+        assert_eq!(
+            store.edge_between(a, n1, Some(&EdgeType::new("R"))),
+            Some(e1),
+            "edge_between missed an edge the adjacency walk finds"
+        );
+        assert_eq!(store.edges_between(a, n1, Some(&EdgeType::new("R"))), vec![e1]);
+    }
+
+    /// The same binary search also runs over the **write buffer**, which is
+    /// appended to in creation order and never sorted -- `from_vec_of_vec`
+    /// sorts on the way into a frozen segment, which is precisely why the
+    /// buffer it reads from need not be. So this needs no compaction at all:
+    /// create two edges in descending target order and the search can miss one.
+    ///
+    /// Tests create nodes and then edges in ascending id order, which leaves
+    /// the buffer accidentally sorted and the search accidentally correct.
+    #[test]
+    fn test_edge_between_finds_edge_in_unsorted_write_buffer() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let targets: Vec<NodeId> = (0..4).map(|_| store.create_node("T")).collect();
+
+        // Descending target order: the buffer holds [t3, t2, t1, t0].
+        let mut made = Vec::new();
+        for t in targets.iter().rev() {
+            made.push((*t, store.create_edge_stub(a, *t, "R").unwrap()));
+        }
+
+        for (t, eid) in made {
+            assert_eq!(
+                store.edge_between(a, t, Some(&EdgeType::new("R"))),
+                Some(eid),
+                "edge_between missed a->{t:?}, present in the write buffer"
+            );
+        }
+    }
+
+    /// `frozen_outgoing_neighbors` is documented "sorted ... for LeapFrog
+    /// joins", and `AdjacencyIterator::seek` binary-searches what it returns.
+    /// Across two segments it used to return the bare concatenation, so the
+    /// contract the joiner is written against did not hold and a mis-seeked
+    /// iterator silently dropped matches (#1071).
+    #[test]
+    fn test_frozen_neighbors_are_sorted_across_segments() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let targets: Vec<NodeId> = (0..6).map(|_| store.create_node("T")).collect();
+
+        for t in &targets[3..] {
+            store.create_edge_stub(a, *t, "R").unwrap();
+        }
+        store.compact_adjacency();
+        for t in &targets[..3] {
+            store.create_edge_stub(a, *t, "R").unwrap();
+        }
+        store.compact_adjacency();
+        assert_eq!(store.frozen_outgoing.segments.len(), 2, "two segments is the premise");
+
+        let got = store.frozen_outgoing_neighbors(a.0 as usize);
+        assert_eq!(got.len(), 6);
+        for w in got.windows(2) {
+            assert!(w[0].0 <= w[1].0, "frozen_outgoing_neighbors returned {got:?}, not sorted");
+        }
     }
 
     #[test]
