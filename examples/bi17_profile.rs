@@ -12,6 +12,41 @@
 #[path = "../benches/ldbc_bi_common/mod.rs"]
 mod ldbc_bi_common;
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Counting allocator.
+///
+/// The per-row cost is ~600-900 ns and flat across hop count (#1078), which
+/// points at per-row machinery rather than traversal. `Record::clone_with_capacity`
+/// allocates **twice** per emitted row -- once for the bindings vector, once for
+/// `used_edges` -- so the question is whether those allocations are the cost or
+/// merely present. Counting them is the difference between knowing and assuming,
+/// and four assumptions about this query have already been wrong.
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+
+struct Counting;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
+        System.alloc(l)
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        System.dealloc(p, l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        System.realloc(p, l, n)
+    }
+}
+
+#[global_allocator]
+static A: Counting = Counting;
+
 use samyama::graph::GraphStore;
 use samyama::query::executor::QueryExecutor;
 use samyama::query::parser::parse_query;
@@ -35,6 +70,25 @@ fn one_hop(limit: u64) -> String {
         "MATCH (a:Person)-[:KNOWS]-(b:Person)
          WHERE a.id < {limit} AND a.id < b.id
          RETURN count(a) AS pairs"
+    )
+}
+
+/// Two hops with **no predicates at all**, to price the `WHERE` clause.
+///
+/// The allocation count killed the hypothesis it was written to test: two hops
+/// allocate 6.2 times per row against one hop's 1.05, yet cost only ~18% more
+/// per row, which puts an allocation at ~23 ns and all six at a sixth of the
+/// row. So the ~600 ns is something else, and property comparison is the next
+/// candidate -- `a.id < b.id` reads two properties through the store per row,
+/// and this query has two such comparisons.
+///
+/// Row counts differ from `open_path` (no predicate filters them), so only
+/// ns/row is comparable between the two, never total time.
+fn open_path_no_pred(limit: u64) -> String {
+    format!(
+        "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)
+         WHERE a.id < {limit}
+         RETURN count(a) AS candidates"
     )
 }
 
@@ -82,6 +136,14 @@ fn run(graph: &GraphStore, label: &str, cypher: &str) -> Option<(i64, f64)> {
         times.push(t0.elapsed().as_secs_f64());
     }
     let secs_med = median(times);
+    // One extra execution, measured for allocations rather than time. Kept
+    // separate from the timed trials so the counter's own atomics do not
+    // appear in the timings.
+    let a0 = ALLOCS.load(Ordering::Relaxed);
+    let b0 = BYTES.load(Ordering::Relaxed);
+    let _ = QueryExecutor::new(graph).execute(&q);
+    let allocs = ALLOCS.load(Ordering::Relaxed) - a0;
+    let abytes = BYTES.load(Ordering::Relaxed) - b0;
     let t = std::time::Instant::now();
     match last.unwrap() {
         Ok(out) => {
@@ -96,8 +158,12 @@ fn run(graph: &GraphStore, label: &str, cypher: &str) -> Option<(i64, f64)> {
             let secs = secs_med;
             let rate = n.map(|v| v as f64 / secs).unwrap_or(0.0);
             println!(
-                "{label:<26} {secs:>8.3}s  rows={:>9}  {:>10.0} rows/s  {:>6.0} ns/row",
-                n.unwrap_or(-1), rate, if rate > 0.0 { 1e9 / rate } else { 0.0 }
+                "{label:<26} {secs:>8.3}s  rows={:>9}  {:>6.0} ns/row   allocs={:>10}  {:>6.1} allocs/row  {:>5} B/alloc",
+                n.unwrap_or(-1),
+                if rate > 0.0 { 1e9 / rate } else { 0.0 },
+                allocs,
+                allocs as f64 / n.unwrap_or(1).max(1) as f64,
+                if allocs > 0 { abytes / allocs } else { 0 },
             );
             n.map(|v| (v, secs))
         }
@@ -125,6 +191,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Growing bounds, so the scaling is visible rather than assumed: if the
     // cost per candidate is flat, time tracks the candidate count exactly, and
     // a departure from that is itself the finding.
+    // What type is `Person.id` actually stored as? The predicates add ~3
+    // allocations per row, and `Column::String::get` clones the String on every
+    // read while `Column::Int::get` copies an i64 and allocates nothing. Which
+    // one this is decides whether the cost is inherent to property reads or a
+    // loader storing a number as text -- and it is one line to check rather
+    // than infer from an allocation count.
+    {
+        use samyama::query::executor::QueryExecutor as QE;
+        let q = parse_query("MATCH (a:Person) RETURN a.id AS v LIMIT 1").unwrap();
+        match QE::new(&graph).execute(&q) {
+            Ok(out) => {
+                let v = out.records.first().and_then(|r| r.get("v")).cloned();
+                println!("Person.id is stored as: {v:?}");
+            }
+            Err(e) => println!("Person.id probe failed: {e}"),
+        }
+    }
+
     // `perf` is unavailable here (perf_event_paranoid=4, and sysctl is not
     // ours to change), so the attribution has to come from the shape of the
     // numbers rather than from a profile. Rows per second at one, two and
@@ -135,6 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("--- a.id < {limit} ---");
         let pairs = run(&graph, "  1 hop  (a-b)", &one_hop(limit));
         let cands = run(&graph, "  2 hops (a-b-c)", &open_path(limit));
+        run(&graph, "  2 hops, no id preds", &open_path_no_pred(limit));
         let tris = run(&graph, "  3 hops (triangle)", &bounded(limit));
         // The triangle line's own `ns/row` is per *emitted triangle*, which is
         // one output per ~23 candidates and therefore reads as an alarming
