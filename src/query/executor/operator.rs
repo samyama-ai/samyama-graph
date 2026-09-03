@@ -1144,6 +1144,17 @@ fn exists_node_matches(
     true
 }
 
+/// Is the pinned-endpoint lookup in `exists_for_each_neighbor` on?
+///
+/// A kill switch, not a tuning knob. It exists so the change can be measured
+/// against its own absence on one binary and one loaded graph, rather than
+/// against a second build on a second load where the difference could be
+/// anything. `SAMYAMA_EXISTS_PIN_LOOKUP=0` takes the walk.
+fn pinned_lookup_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SAMYAMA_EXISTS_PIN_LOOKUP").as_deref() != Ok("0"))
+}
+
 /// Visit the neighbours of `node` reachable by an edge matching `edge_pat`.
 ///
 /// This used to build a `Vec<(Edge, NodeId)>`: it fetched **every** edge
@@ -1223,6 +1234,39 @@ fn exists_for_each_neighbor(
             Err(e) => *err = Some(e),
         }
     };
+
+    // A pinned far end makes this hop an existence test between two nodes that
+    // are both already known, and such a test should not cost the degree of
+    // either one. The walk below reads every neighbour of `node` and discards
+    // all but `target`, which for BI-11 means reading a Tag's entire
+    // popularity -- millions of HAS_TAG edges at SF10 -- to answer whether one
+    // specific Post is among them. Looking the edge up instead makes the
+    // answer independent of how popular either endpoint is (#1071).
+    //
+    // Direction is written relative to `node`, so an outgoing hop is looked up
+    // from `node` and an incoming one from `target`.
+    if let Some(target) = pinned_target.filter(|_| pinned_lookup_enabled()) {
+        let mut probe = |from: NodeId, to: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
+            store.for_each_edge_between_typed(from, to, type_filter, |eid| {
+                keep(eid, target, stop, err);
+                *stop || err.is_some()
+            });
+        };
+        if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
+            probe(node, target, &mut stop, &mut err);
+        }
+        // A self-relationship is incident to its node twice; under `Both` the
+        // outgoing probe has already taken it, exactly as in the walk below.
+        if matches!(edge_pat.direction, Direction::Incoming | Direction::Both)
+            && !(matches!(edge_pat.direction, Direction::Both) && target == node)
+        {
+            probe(target, node, &mut stop, &mut err);
+        }
+        return match err {
+            Some(e) => Err(e),
+            None => Ok(stop),
+        };
+    }
 
     if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
         store.for_each_outgoing_neighbor(node, type_filter, |target, eid| {
