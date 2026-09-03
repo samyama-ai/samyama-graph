@@ -73,6 +73,21 @@ fn one_hop(limit: u64) -> String {
     )
 }
 
+/// Two hops with exactly **one** id comparison, to test whether the predicate
+/// cost is linear per comparison.
+///
+/// Two comparisons cost ~536 ns/row over the no-predicate baseline. If one
+/// costs ~268 ns the cost is per-comparison; if it costs ~536 ns the cost is
+/// per-`WHERE`-clause and the second comparison is nearly free, which points at
+/// fixed overhead in the filter rather than at evaluating the expression.
+fn open_path_one_pred(limit: u64) -> String {
+    format!(
+        "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)
+         WHERE a.id < {limit} AND a.id < b.id
+         RETURN count(a) AS candidates"
+    )
+}
+
 /// Two hops with **no predicates at all**, to price the `WHERE` clause.
 ///
 /// The allocation count killed the hypothesis it was written to test: two hops
@@ -191,6 +206,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Growing bounds, so the scaling is visible rather than assumed: if the
     // cost per candidate is flat, time tracks the candidate count exactly, and
     // a departure from that is itself the finding.
+    // Price the two halves of a property read directly.
+    //
+    // The predicates cost ~536 ns/row for four reads, so ~134 ns each, and the
+    // read path has two suspects visible in the code:
+    //
+    //   * `ColumnStore::get_property` hashes the property **name** on every
+    //     read -- the same cost `Record`'s docstring gives as its reason for
+    //     abandoning `HashMap` bindings, still present on the column path.
+    //   * `read_property` calls `store.get_node(id).is_none()` on every read to
+    //     tell a deleted entity from an unset property (#905). It returns a
+    //     reference, so it does not allocate, but it is a Vec-of-Vec chase and
+    //     a `.rev().find()` over the version list.
+    //
+    // Timing them in a loop over real ids is cheaper than reasoning about which
+    // one matters, and the last two things I reasoned about here were both
+    // wrong.
+    {
+        use samyama::graph::NodeId;
+        let ids: Vec<NodeId> = {
+            let q = parse_query("MATCH (a:Person) RETURN a LIMIT 20000").unwrap();
+            QueryExecutor::new(&graph)
+                .execute(&q)
+                .ok()
+                .map(|o| {
+                    o.records.iter()
+                        .filter_map(|r| r.values().next().and_then(|v| v.node_id()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+            println!(
+            "  size_of Value={} PropertyValue={}  (each eval_expression returns one by value)",
+            std::mem::size_of::<samyama::query::executor::Value>(),
+            std::mem::size_of::<samyama::graph::PropertyValue>(),
+        );
+    println!("--- property-read microbenchmark ({} ids) ---", ids.len());
+        if !ids.is_empty() {
+            let reps = 20usize;
+
+            let t = std::time::Instant::now();
+            let mut sink = 0u64;
+            for _ in 0..reps {
+                for id in &ids {
+                    let v = graph.node_columns.get_property(id.as_u64() as usize, "id");
+                    if !v.is_null() { sink += 1; }
+                }
+            }
+            let per = t.elapsed().as_secs_f64() / (reps * ids.len()) as f64 * 1e9;
+            println!("  columnar get_property(\"id\")   {per:>8.1} ns   (hit {sink})");
+
+            let t = std::time::Instant::now();
+            let mut found = 0u64;
+            for _ in 0..reps {
+                for id in &ids {
+                    if graph.get_node(*id).is_some() { found += 1; }
+                }
+            }
+            let per = t.elapsed().as_secs_f64() / (reps * ids.len()) as f64 * 1e9;
+            println!("  get_node (the #905 check)     {per:>8.1} ns   (found {found})");
+        }
+    }
+
     // What type is `Person.id` actually stored as? The predicates add ~3
     // allocations per row, and `Column::String::get` clones the String on every
     // read while `Column::Int::get` copies an i64 and allocates nothing. Which
@@ -209,6 +286,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Stage isolation, with **no predicates anywhere**, so nothing filters and
+    // the row counts are the work itself.
+    //
+    // Everything else has been eliminated by measurement: the closing hop
+    // (~55-70 ns/candidate), allocations (~23 ns each), property reads (~7 ns),
+    // and the predicates (~25% of total time -- not the 60% I first reported by
+    // dividing two arms that emit different numbers of rows). What is left is
+    // the plain expansion.
+    //
+    // Each line adds exactly one operator, so the difference between two
+    // consecutive lines is that operator's cost. **Totals, never ns/row**: these
+    // arms emit wildly different row counts, and reading the per-row column
+    // across arms whose denominators differ is exactly the error that produced
+    // the withdrawn 60% figure.
+    println!("--- stage isolation (no predicates) ---");
+    {
+        let stages = [
+            ("scan only", "MATCH (a:Person) RETURN count(a) AS n"),
+            ("scan + 1 expand", "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(a) AS n"),
+            ("scan + 2 expands",
+             "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person) RETURN count(a) AS n"),
+        ];
+        let mut prev: Option<(f64, i64)> = None;
+        for (label, cypher) in stages {
+            if let Some((n, secs)) = run(&graph, &format!("  {label}"), cypher) {
+                if let Some((psecs, pn)) = prev {
+                    let extra = n - pn;
+                    if extra > 0 {
+                        println!(
+                            "      -> this stage adds {:+.3}s over {:>12} extra rows = {:>6.0} ns/row",
+                            secs - psecs, extra, (secs - psecs) / extra as f64 * 1e9
+                        );
+                    }
+                }
+                prev = Some((secs, n));
+            }
+        }
+    }
+
     // `perf` is unavailable here (perf_event_paranoid=4, and sysctl is not
     // ours to change), so the attribution has to come from the shape of the
     // numbers rather than from a profile. Rows per second at one, two and
@@ -220,6 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pairs = run(&graph, "  1 hop  (a-b)", &one_hop(limit));
         let cands = run(&graph, "  2 hops (a-b-c)", &open_path(limit));
         run(&graph, "  2 hops, no id preds", &open_path_no_pred(limit));
+        run(&graph, "  2 hops, ONE id pred", &open_path_one_pred(limit));
         let tris = run(&graph, "  3 hops (triangle)", &bounded(limit));
         // The triangle line's own `ns/row` is per *emitted triangle*, which is
         // one output per ~23 candidates and therefore reads as an alarming
