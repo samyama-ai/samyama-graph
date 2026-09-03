@@ -2340,6 +2340,46 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// Every edge from `source` to `target` accepted by `type_ids`, found by
+    /// lookup rather than by walking `source`'s adjacency list.
+    ///
+    /// `type_ids` follows [`GraphStore::for_each_outgoing_neighbor`]: `None`
+    /// is any type and `Some(&[])` is none. `visit` returns `true` to stop.
+    ///
+    /// This exists because an existence test between two *known* nodes should
+    /// not cost the degree of either one. Walking one endpoint and discarding
+    /// every neighbour but the other is how LDBC BI-11's anti-join came to
+    /// cost a Tag's entire popularity: `(reply)-[:HAS_TAG]->(t)<-[:HAS_TAG]-
+    /// (post)` arrives at `t` with `post` already bound, and at SF10 a popular
+    /// tag carries millions of `HAS_TAG` edges, all but one of them discarded.
+    ///
+    /// Each frozen segment is searched on its own and the write buffer is
+    /// scanned -- see `for_each_edge_between` for why neither may be treated
+    /// as one sorted array (#1071).
+    pub fn for_each_edge_between_typed(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        type_ids: Option<&[u16]>,
+        mut visit: impl FnMut(EdgeId) -> bool,
+    ) {
+        let idx = source.as_u64() as usize;
+        for seg in &self.frozen_outgoing.segments {
+            for &(_n, eid) in seg.neighbor_range(idx, target) {
+                if self.edge_type_matches(eid, type_ids) && visit(eid) {
+                    return;
+                }
+            }
+        }
+        if let Some(entries) = self.outgoing.get(idx) {
+            for &(nid, eid) in entries {
+                if nid == target && self.edge_type_matches(eid, type_ids) && visit(eid) {
+                    return;
+                }
+            }
+        }
+    }
+
     /// Visit each incoming neighbour of `node`, without allocating.
     /// See [`GraphStore::for_each_outgoing_neighbor`].
     pub fn for_each_incoming_neighbor(
