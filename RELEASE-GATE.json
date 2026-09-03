@@ -1,9 +1,9 @@
 {
   "suite": "CH-REGRESS",
-  "status": "fail",
-  "measured_at": "2026-09-01T21:56:02Z",
-  "run_id": "2026-09-01T21:56:02Z-a7130fc",
+  "status": "partial",
+  "measured_at": "2026-09-03T10:11:17Z",
+  "run_id": "2026-09-03T10:11:17Z-95c7a6f",
   "host": "vm-1",
-  "engine_commit": "a7130fc",
+  "engine_commit": "95c7a6f",
   "note": "Compares against a stored baseline on the same host; refuses to compare across hosts."
 }
