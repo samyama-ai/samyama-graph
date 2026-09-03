@@ -6557,18 +6557,32 @@ impl ExpandOperator {
             (Some(Some(pair)), Some(_)) => Some(pair.clone()),
             _ => None,
         };
-        let empty: [(NodeId, crate::graph::EdgeId); 0] = [];
-        let out_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
-            match p { Some((Some(i), _)) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
-        };
-        let in_of = |p: &Option<TypeIndexPair>, n: NodeId| -> Vec<(NodeId, crate::graph::EdgeId)> {
-            match p { Some((_, Some(i))) => i.neighbors(n).to_vec(), _ => empty.to_vec() }
-        };
+        // Borrowed, not copied. These returned `Vec` and reached it with
+        // `.to_vec()`, so taking the type-index fast path allocated and
+        // memcpy'd the node's entire neighbour list once per input record --
+        // twice for `Direction::Both`, which calls both. The list is then read
+        // once, in order, and dropped.
+        //
+        // The copy bought nothing: `neighbors` already returns a slice, and the
+        // only reason for an owned value was that the `_` arm had nothing of
+        // the right lifetime to return. A `static` empty slice does, so both
+        // arms can borrow -- the fallback array was a local.
+        //
+        // This is also the walk a pinned closing hop uses (#195), where every
+        // input record pays for a copy of a neighbour list it visits once and
+        // keeps at most one entry from.
+        static EMPTY: [(NodeId, crate::graph::EdgeId); 0] = [];
+        fn out_of<'a>(p: &'a Option<TypeIndexPair>, n: NodeId) -> &'a [(NodeId, crate::graph::EdgeId)] {
+            match p { Some((Some(i), _)) => i.neighbors(n), _ => &EMPTY }
+        }
+        fn in_of<'a>(p: &'a Option<TypeIndexPair>, n: NodeId) -> &'a [(NodeId, crate::graph::EdgeId)] {
+            match p { Some((_, Some(i))) => i.neighbors(n), _ => &EMPTY }
+        }
 
         match self.direction {
             Direction::Outgoing => {
                 if typed.is_some() {
-                    for (target, eid) in out_of(&typed, node_id) {
+                    for &(target, eid) in out_of(&typed, node_id) {
                         if keeps(target, eid) {
                             collected.push((eid, node_id, target));
                         }
@@ -6583,7 +6597,7 @@ impl ExpandOperator {
             }
             Direction::Incoming => {
                 if typed.is_some() {
-                    for (source, eid) in in_of(&typed, node_id) {
+                    for &(source, eid) in in_of(&typed, node_id) {
                         if keeps(source, eid) {
                             collected.push((eid, source, node_id));
                         }
@@ -6597,12 +6611,12 @@ impl ExpandOperator {
                 }
             }
             Direction::Both if typed.is_some() => {
-                for (target, eid) in out_of(&typed, node_id) {
+                for &(target, eid) in out_of(&typed, node_id) {
                     if keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
                 }
-                for (source, eid) in in_of(&typed, node_id) {
+                for &(source, eid) in in_of(&typed, node_id) {
                     // Same self-loop rule as the walk below: an edge incident
                     // to its own node appears in both indexes and must be
                     // taken once (#640).
