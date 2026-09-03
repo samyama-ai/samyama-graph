@@ -32,6 +32,59 @@ pub struct GpuCdlpResult {
     pub iterations: usize,
 }
 
+/// The neighbour **multiset** CDLP counts labels over: every incident edge
+/// contributes, in both directions, with no deduplication.
+///
+/// The multiset is the whole algorithm. Label propagation gives a node the most
+/// frequent label among its neighbours, so how many times a neighbour is
+/// counted decides which label wins. The CPU implementation counts each
+/// successor and each predecessor separately:
+///
+/// ```ignore
+/// for &neighbor in view.successors(idx)   { *counts.entry(labels[neighbor]).or_insert(0) += 1; }
+/// for &neighbor in view.predecessors(idx) { *counts.entry(labels[neighbor]).or_insert(0) += 1; }
+/// ```
+///
+/// so a **reciprocal** neighbour votes twice and parallel edges vote once each.
+/// That is also what the wgpu shader sees, because it is handed the four raw
+/// CSR arrays. The CUDA path used to merge them through a `BTreeSet` first,
+/// which collapsed every one of those repeats into a single vote.
+///
+/// On three nodes with one reciprocal edge -- `0<->2` and `1->0`, labels
+/// starting at node ids -- the two disagree from the first iteration and
+/// converge to different communities:
+///
+/// ```text
+/// CPU + wgpu (multiset)   final labels = [2, 0, 0]
+/// CUDA       (deduped)    final labels = [1, 0, 0]
+/// ```
+///
+/// Deliberately **not** `crate::lcc::undirected_adjacency`, which dedups, drops
+/// self-loops and sorts. LCC's kernel binary-searches a neighbour *set*;
+/// CDLP's kernel counts over a range and needs the multiset. Two different
+/// questions -- unifying them would break one.
+pub(crate) fn incident_multiset(
+    node_count: usize,
+    out_offsets: &[usize],
+    out_targets: &[usize],
+    in_offsets: &[usize],
+    in_sources: &[usize],
+) -> (Vec<u32>, Vec<u32>) {
+    let mut offsets: Vec<u32> = Vec::with_capacity(node_count + 1);
+    let mut targets: Vec<u32> = Vec::new();
+    offsets.push(0);
+    for i in 0..node_count {
+        for idx in out_offsets[i]..out_offsets[i + 1] {
+            targets.push(out_targets[idx] as u32);
+        }
+        for idx in in_offsets[i]..in_offsets[i + 1] {
+            targets.push(in_sources[idx] as u32);
+        }
+        offsets.push(targets.len() as u32);
+    }
+    (offsets, targets)
+}
+
 /// Run CDLP on the GPU using raw CSR data
 ///
 /// `initial_labels` should contain the actual vertex IDs (as u32) for each
@@ -56,23 +109,9 @@ pub fn gpu_cdlp(
     // Try CUDA first
     #[cfg(feature = "cuda")]
     if let Some(cuda_ctx) = crate::runtime::GpuRuntime::get().and_then(|rt| rt.cuda()) {
-        // Build merged adjacency for CUDA
-        let mut merged_offsets: Vec<u32> = Vec::with_capacity(node_count + 1);
-        let mut merged_targets: Vec<u32> = Vec::new();
-        merged_offsets.push(0);
-        for i in 0..node_count {
-            let mut neighbors = std::collections::BTreeSet::new();
-            for idx in out_offsets[i]..out_offsets[i + 1] {
-                neighbors.insert(out_targets[idx] as u32);
-            }
-            for idx in in_offsets[i]..in_offsets[i + 1] {
-                neighbors.insert(in_sources[idx] as u32);
-            }
-            for n in &neighbors {
-                merged_targets.push(*n);
-            }
-            merged_offsets.push(merged_targets.len() as u32);
-        }
+        let (merged_offsets, merged_targets) = incident_multiset(
+            node_count, out_offsets, out_targets, in_offsets, in_sources,
+        );
         match crate::cuda::cdlp::cuda_cdlp(
             cuda_ctx,
             &merged_offsets,
@@ -225,4 +264,74 @@ pub fn gpu_cdlp(
     let labels = download_u32(ctx, final_buf, node_count)?;
 
     Ok(GpuCdlpResult { labels, iterations })
+}
+
+#[cfg(test)]
+mod multiset_tests {
+    use super::incident_multiset;
+
+    fn csr(rows: &[&[usize]]) -> (Vec<usize>, Vec<usize>) {
+        let mut offsets = vec![0usize];
+        let mut flat = Vec::new();
+        for r in rows {
+            flat.extend_from_slice(r);
+            offsets.push(flat.len());
+        }
+        (offsets, flat)
+    }
+
+    fn votes(offsets: &[u32], targets: &[u32], node: usize) -> Vec<u32> {
+        let mut v = targets[offsets[node] as usize..offsets[node + 1] as usize].to_vec();
+        v.sort_unstable();
+        v
+    }
+
+    /// A reciprocal neighbour votes twice. The CUDA path used to merge through
+    /// a `BTreeSet`, which gave it one vote and changed which label won -- see
+    /// `incident_multiset` for the three-node graph where CPU/wgpu converge to
+    /// `[2, 0, 0]` and the deduped version to `[1, 0, 0]`.
+    #[test]
+    fn a_reciprocal_neighbour_votes_twice() {
+        // 0 -> 2, 2 -> 0 (reciprocal), 1 -> 0
+        let (out_offsets, out_targets) = csr(&[&[2], &[0], &[0]]);
+        let (in_offsets, in_sources) = csr(&[&[1, 2], &[], &[0]]);
+
+        let (offsets, targets) =
+            incident_multiset(3, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        assert_eq!(
+            votes(&offsets, &targets, 0),
+            vec![1, 2, 2],
+            "node 2 is both a successor and a predecessor of node 0, so it votes twice"
+        );
+    }
+
+    /// Parallel edges vote once each, for the same reason.
+    #[test]
+    fn parallel_edges_each_get_a_vote() {
+        // Two distinct 0 -> 1 edges.
+        let (out_offsets, out_targets) = csr(&[&[1, 1], &[]]);
+        let (in_offsets, in_sources) = csr(&[&[], &[0, 0]]);
+
+        let (offsets, targets) =
+            incident_multiset(2, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        assert_eq!(votes(&offsets, &targets, 0), vec![1, 1]);
+        assert_eq!(votes(&offsets, &targets, 1), vec![0, 0]);
+    }
+
+    /// Every incident edge is represented exactly once per direction, so the
+    /// flat length is the total degree and the offsets stay monotonic.
+    #[test]
+    fn total_length_is_the_sum_of_both_degrees() {
+        let (out_offsets, out_targets) = csr(&[&[1, 2], &[2], &[]]);
+        let (in_offsets, in_sources) = csr(&[&[], &[0], &[0, 1]]);
+
+        let (offsets, targets) =
+            incident_multiset(3, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        assert_eq!(targets.len(), out_targets.len() + in_sources.len());
+        assert!(offsets.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(*offsets.last().unwrap() as usize, targets.len());
+    }
 }

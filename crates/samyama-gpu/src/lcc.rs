@@ -33,6 +33,54 @@ pub struct GpuLccResult {
     pub average: f64,
 }
 
+/// The undirected neighbour list each LCC backend binary-searches, as sorted,
+/// deduplicated CSR.
+///
+/// This is one function rather than one per backend because the two used to be
+/// two, and they disagreed. The wgpu path dropped self-loops with
+/// `if out_targets[idx] != i`; the CUDA path collected the same edges into a
+/// `BTreeSet` without that guard, so a node carrying a self-loop counted itself
+/// as its own neighbour. That inflates the node's degree, and the denominator
+/// is `d(d-1)` or `d(d-1)/2`, so the coefficient came out **different on the
+/// two backends for the same graph** -- with the CPU implementation, which
+/// excludes self-loops (`if s != idx`), agreeing with wgpu and not with CUDA.
+///
+/// A self-loop is not a neighbour: LCC asks what fraction of the possible edges
+/// *among a node's neighbours* exist, and an edge from a node to itself is
+/// neither a neighbour nor a candidate triangle side. Two of the three
+/// implementations already said so.
+///
+/// Neither backend can drift from the other again while they share this.
+pub(crate) fn undirected_adjacency(
+    node_count: usize,
+    out_offsets: &[usize],
+    out_targets: &[usize],
+    in_offsets: &[usize],
+    in_sources: &[usize],
+) -> (Vec<u32>, Vec<u32>) {
+    let mut offsets: Vec<u32> = Vec::with_capacity(node_count + 1);
+    let mut targets: Vec<u32> = Vec::new();
+    offsets.push(0);
+    for i in 0..node_count {
+        let mut neighbors: Vec<u32> = Vec::new();
+        for idx in out_offsets[i]..out_offsets[i + 1] {
+            if out_targets[idx] != i {
+                neighbors.push(out_targets[idx] as u32);
+            }
+        }
+        for idx in in_offsets[i]..in_offsets[i + 1] {
+            if in_sources[idx] != i {
+                neighbors.push(in_sources[idx] as u32);
+            }
+        }
+        neighbors.sort_unstable();
+        neighbors.dedup();
+        targets.extend_from_slice(&neighbors);
+        offsets.push(targets.len() as u32);
+    }
+    (offsets, targets)
+}
+
 /// Compute LCC on the GPU using raw CSR data
 ///
 /// When `directed` is false, builds undirected sorted adjacency internally
@@ -58,23 +106,9 @@ pub fn gpu_lcc(
     // Try CUDA first
     #[cfg(feature = "cuda")]
     if let Some(cuda_ctx) = crate::runtime::GpuRuntime::get().and_then(|rt| rt.cuda()) {
-        // Build merged sorted adjacency for CUDA
-        let mut merged_offsets: Vec<u32> = Vec::with_capacity(node_count + 1);
-        let mut merged_targets: Vec<u32> = Vec::new();
-        merged_offsets.push(0);
-        for i in 0..node_count {
-            let mut neighbors = std::collections::BTreeSet::new();
-            for idx in out_offsets[i]..out_offsets[i + 1] {
-                neighbors.insert(out_targets[idx] as u32);
-            }
-            for idx in in_offsets[i]..in_offsets[i + 1] {
-                neighbors.insert(in_sources[idx] as u32);
-            }
-            for n in &neighbors {
-                merged_targets.push(*n);
-            }
-            merged_offsets.push(merged_targets.len() as u32);
-        }
+        let (merged_offsets, merged_targets) = undirected_adjacency(
+            node_count, out_offsets, out_targets, in_offsets, in_sources,
+        );
         match crate::cuda::lcc::cuda_lcc(
             cuda_ctx,
             &merged_offsets,
@@ -116,32 +150,10 @@ pub fn gpu_lcc(
         });
     }
 
-    // Build undirected sorted adjacency (used for neighbor enumeration in both modes)
-    let mut sorted_offsets: Vec<u32> = Vec::with_capacity(node_count + 1);
-    let mut sorted_targets: Vec<u32> = Vec::new();
-
-    sorted_offsets.push(0);
-    for i in 0..node_count {
-        let mut neighbors: Vec<u32> = Vec::new();
-        let out_start = out_offsets[i];
-        let out_end = out_offsets[i + 1];
-        for idx in out_start..out_end {
-            if out_targets[idx] != i {
-                neighbors.push(out_targets[idx] as u32);
-            }
-        }
-        let in_start = in_offsets[i];
-        let in_end = in_offsets[i + 1];
-        for idx in in_start..in_end {
-            if in_sources[idx] != i {
-                neighbors.push(in_sources[idx] as u32);
-            }
-        }
-        neighbors.sort();
-        neighbors.dedup();
-        sorted_targets.extend(&neighbors);
-        sorted_offsets.push(sorted_targets.len() as u32);
-    }
+    // The same adjacency the CUDA path above builds, from the same function.
+    let (sorted_offsets, mut sorted_targets) = undirected_adjacency(
+        node_count, out_offsets, out_targets, in_offsets, in_sources,
+    );
 
     // Check max degree — O(d²) shader loop times out on high-degree nodes
     let max_degree = sorted_offsets
@@ -282,4 +294,101 @@ pub fn gpu_lcc(
         coefficients,
         average,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::undirected_adjacency;
+
+    /// Rows of a tiny CSR, as (offsets, flat targets).
+    fn csr(rows: &[&[usize]]) -> (Vec<usize>, Vec<usize>) {
+        let mut offsets = vec![0usize];
+        let mut flat = Vec::new();
+        for r in rows {
+            flat.extend_from_slice(r);
+            offsets.push(flat.len());
+        }
+        (offsets, flat)
+    }
+
+    fn neighbours_of(offsets: &[u32], targets: &[u32], node: usize) -> Vec<u32> {
+        targets[offsets[node] as usize..offsets[node + 1] as usize].to_vec()
+    }
+
+    /// A self-loop is not a neighbour. On the fixture below the two old
+    /// constructions gave node 0 different neighbourhoods, and so different
+    /// denominators for `d(d-1)/2`:
+    ///
+    /// ```text
+    /// node   CUDA (old)   wgpu/CPU    denominator
+    ///    0    [0, 1, 2]     [1, 2]       3 vs 1     <-- differ
+    ///    1       [0, 2]     [0, 2]       1 vs 1
+    ///    2       [0, 1]     [0, 1]       1 vs 1
+    /// ```
+    ///
+    /// A self-loop is not a neighbour. The CUDA path used to include one,
+    /// because it built its own adjacency with a `BTreeSet` and no guard, while
+    /// wgpu and the CPU implementation both excluded it -- so the same graph
+    /// got two different coefficients depending on which backend ran. The
+    /// degree feeds the `d(d-1)` denominator, so counting the node itself does
+    /// not merely add a neighbour, it changes every coefficient it touches.
+    #[test]
+    fn self_loops_are_not_neighbours() {
+        // 0 -> 0 (self), 0 -> 1, 0 -> 2, 1 -> 2
+        let (out_offsets, out_targets) = csr(&[&[0, 1, 2], &[2], &[]]);
+        let (in_offsets, in_sources) = csr(&[&[0], &[0], &[0, 1]]);
+
+        let (offsets, targets) =
+            undirected_adjacency(3, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        assert_eq!(
+            neighbours_of(&offsets, &targets, 0),
+            vec![1, 2],
+            "node 0 carries a self-loop and must not be its own neighbour"
+        );
+        assert_eq!(neighbours_of(&offsets, &targets, 1), vec![0, 2]);
+        assert_eq!(neighbours_of(&offsets, &targets, 2), vec![0, 1]);
+    }
+
+    /// The kernels binary-search these slices, so sortedness is a contract and
+    /// not a convenience -- see the `#1071` family of bugs, where a binary
+    /// search over an array nobody had sorted reported present data as absent.
+    #[test]
+    fn adjacency_is_sorted_and_deduplicated() {
+        // Node 0 reaches 3 twice (parallel edges) and its neighbours arrive
+        // out of order, both from the outgoing side and the incoming side.
+        let (out_offsets, out_targets) = csr(&[&[3, 1, 3], &[0], &[], &[0]]);
+        let (in_offsets, in_sources) = csr(&[&[1, 3], &[0], &[], &[0, 0]]);
+
+        let (offsets, targets) =
+            undirected_adjacency(4, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        let n0 = neighbours_of(&offsets, &targets, 0);
+        assert_eq!(n0, vec![1, 3], "sorted, and a parallel edge is one neighbour");
+        // Sortedness is per node: the ranges are laid out in node order, so a
+        // check across the whole flat array would be asserting the wrong thing.
+        for node in 0..4 {
+            let ns = neighbours_of(&offsets, &targets, node);
+            assert!(
+                ns.windows(2).all(|w| w[0] < w[1]),
+                "node {node} adjacency {ns:?} is not strictly ascending"
+            );
+        }
+    }
+
+    /// An isolated node contributes an empty range, and the offsets stay
+    /// monotonic so a range read of any node is well formed.
+    #[test]
+    fn isolated_nodes_keep_offsets_monotonic() {
+        let (out_offsets, out_targets) = csr(&[&[2], &[], &[]]);
+        let (in_offsets, in_sources) = csr(&[&[], &[], &[0]]);
+
+        let (offsets, targets) =
+            undirected_adjacency(3, &out_offsets, &out_targets, &in_offsets, &in_sources);
+
+        assert_eq!(offsets.len(), 4);
+        assert!(offsets.windows(2).all(|w| w[0] <= w[1]));
+        assert!(neighbours_of(&offsets, &targets, 1).is_empty());
+        assert_eq!(*offsets.last().unwrap() as usize, targets.len());
+    }
 }
