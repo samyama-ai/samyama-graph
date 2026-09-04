@@ -537,6 +537,18 @@ async fn run_benchmark(
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     bench_setup::init();
+    // Opening calibration, before anything else competes for the CPU. Closed
+    // out at the end of the suite so a host that changed speed mid-run says so
+    // rather than being read as a code change (#529).
+    //
+    // Every other bench in this directory did this and the BI bench did not,
+    // so `report_calibration` was compiled and never called from here -- the
+    // compiler said `function is never used` on each build, which is as close
+    // as a warning gets to naming the gap. The effect is that BI is the one
+    // LDBC suite whose numbers cannot be ruled comparable *or* incomparable
+    // against a run from another host, which is the whole point of #529.
+    // The BI adapter reads this line too (CH-BENCH-LDBC `params`).
+    let calibration = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -686,6 +698,10 @@ async fn main() -> Result<(), Error> {
     // Cache stats
     let stats = client.cache_stats();
     println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
+
+    // Before the exit below, so a run that ends in errors still reports
+    // whether the host it ran on held still.
+    bench_setup::report_drift(calibration);
 
     if errors > 0 {
         std::process::exit(1);
