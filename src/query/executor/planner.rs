@@ -3804,12 +3804,18 @@ impl QueryPlanner {
                     // full form (a sorted-merge intersection) measured a 170x
                     // ceiling (#1086).
                     //
-                    // Deliberately narrow. Both segments must be undirected
-                    // over the same edge types, so that "is a neighbour of the
-                    // closing variable" has one unambiguous meaning and the
-                    // sorted list the test binary-searches is the right one.
-                    // A directed close would need the matching half of the
-                    // index and is left to the operator #1082 asks for.
+                    // Directions are carried through rather than required to
+                    // be undirected. The closing segment runs
+                    // `target -> next_target`, so an `Outgoing` close is
+                    // proved by `next_target`'s *incoming* list. FinBench CR-4
+                    // -- `(a)-[:TRANSFER]->(b)-[:TRANSFER]->(c)-[:TRANSFER]->(a)`,
+                    // the money-laundering motif -- is exactly this shape, and
+                    // the first version refused it (#1090).
+                    //
+                    // Same edge types on both segments, and neither
+                    // variable-length: the test binary-searches one type's
+                    // sorted list, so it has to be the type the close will
+                    // traverse.
                     //
                     // This prunes and never widens: a row it rejects has no
                     // edge to close on, and a row it keeps still faces the
@@ -3837,10 +3843,11 @@ impl QueryPlanner {
                                 && same_types
                                 && next.edge.length.is_none()
                                 && segment.edge.length.is_none()
-                                && matches!(segment.edge.direction, Direction::Both)
-                                && matches!(next.edge.direction, Direction::Both)
                             {
-                                expand = expand.with_co_neighbour(next_target.clone());
+                                expand = expand.with_co_neighbour(
+                                    next_target.clone(),
+                                    next.edge.direction.clone(),
+                                );
                             }
                         }
                     }

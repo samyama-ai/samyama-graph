@@ -166,6 +166,46 @@ fn a_directed_close_answers_the_same_as_a_separate_match() {
     assert!(a > 0, "no directed triangle matched, so nothing was tested");
 }
 
+/// A directed close must search the *right* half of the index.
+///
+/// `(c)-[:R]->(a)` is proved by `a`'s **incoming** list, not its outgoing one.
+/// A graph where the two disagree is what makes that assertable: here every
+/// node has out-neighbours it is not an in-neighbour of, so searching the wrong
+/// list rejects rows that should survive and the count comes out short.
+///
+/// Verified by mutation: swapping the two arms of the direction mapping in
+/// `ExpandOperator` turns this test red while every other test in the file
+/// stays green. The undirected tests cannot catch it — they search both lists,
+/// so the two arms are indistinguishable there.
+#[test]
+fn a_directed_close_searches_the_incoming_list_not_the_outgoing_one() {
+    let mut store = GraphStore::new();
+    let n = 700usize;
+    let ns: Vec<NodeId> = (0..n).map(|_| store.create_node("N")).collect();
+    // Directed triangles i -> i+1 -> i+2 -> i, and nothing symmetric: the
+    // out-neighbourhood and in-neighbourhood of every node are disjoint.
+    for i in 0..n {
+        store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+        store.create_edge(ns[(i + 2) % n], ns[i], "R").unwrap();
+    }
+    let pruned = count(
+        &store,
+        "MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:R]->(a) RETURN count(a) AS n",
+    );
+    let unpruned = count(
+        &store,
+        "MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N) WITH a, b, c MATCH (c)-[:R]->(a) RETURN count(a) AS n",
+    );
+    assert_eq!(pruned, unpruned, "the directed prune lost answers");
+    assert!(pruned > 0, "no directed triangle matched, so nothing was tested");
+    // And the graph really is asymmetric, or searching either list would do.
+    let reversed = count(
+        &store,
+        "MATCH (a:N)<-[:R]-(b:N)<-[:R]-(c:N)<-[:R]-(a) RETURN count(a) AS n",
+    );
+    assert_eq!(reversed, pruned, "the reversed pattern is the same cycle read backwards");
+}
+
 /// Relationship isomorphism still holds: the three hops must be three edges.
 ///
 /// A two-node graph joined by one edge has a two-hop walk `a-b-a` only if the
