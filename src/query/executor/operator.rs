@@ -6241,6 +6241,29 @@ pub struct ExpandOperator {
     /// first. Isomorphism is per-clause — `MATCH (a)-[:R]-(b) MATCH (b)-[:R]-(c)`
     /// may legitimately reuse the edge.
     starts_clause: bool,
+    /// Restrict targets to nodes that are *also* neighbours of this variable.
+    ///
+    /// Set when the very next segment closes the pattern back onto an
+    /// already-bound variable — LDBC BI-17's
+    /// `(a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(a)`, where this expand binds
+    /// `c` and the next hop requires `c` to neighbour `a`. Without it every
+    /// `c` in `N(b)` becomes a row and the closing hop discards all but the
+    /// few that close a triangle: at SF1 that is ~3.2M rows built to keep
+    /// 387,573.
+    ///
+    /// This is the row-count half of #1082. The full idea is a sorted-merge
+    /// intersection replacing the walk; this tests membership in `N(a)` by
+    /// binary search *during* the walk, which needs the same sorted adjacency
+    /// and cuts the same rows without a new operator. The ceiling for the full
+    /// version measured 170x on BI-17 (#1086).
+    ///
+    /// **Pruning, never widening.** A row kept here still faces the closing
+    /// hop, which additionally enforces relationship isomorphism; a row
+    /// rejected here could not have closed at all, because closing requires an
+    /// edge between the two nodes and this asks exactly that. The planner sets
+    /// it only when both segments are undirected over the same edge type, so
+    /// "is a neighbour" has one unambiguous meaning.
+    co_neighbour_var: Option<Arc<str>>,
 }
 
 impl ExpandOperator {
@@ -6268,6 +6291,7 @@ impl ExpandOperator {
             emitted_for_current: false,
             track_edges: false,
             starts_clause: false,
+            co_neighbour_var: None,
             target_bound_var: None,
             direction,
             current_record: None,
@@ -6304,6 +6328,12 @@ impl ExpandOperator {
     /// Pin this expand's target to the node already bound to `var`.
     pub fn with_target_bound_var(mut self, var: String) -> Self {
         self.target_bound_var = Some(var.into());
+        self
+    }
+
+    /// Keep only targets that also neighbour `var`. See `co_neighbour_var`.
+    pub fn with_co_neighbour(mut self, var: String) -> Self {
+        self.co_neighbour_var = Some(var.into());
         self
     }
 
@@ -6472,55 +6502,6 @@ impl ExpandOperator {
         } else {
             &[]
         };
-        // Resolved once per input record: the node the pattern must close on.
-        let pinned_target: Option<NodeId> = self
-            .target_bound_var
-            .as_ref()
-            .and_then(|v| record.get(v))
-            .and_then(|v| v.node_id());
-        let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
-            // A closing hop can only land on the node it closes onto.
-            if let Some(p) = pinned_target {
-                if target != p {
-                    return false;
-                }
-            }
-            // Relationship isomorphism first: it is a comparison of a few u64s
-            // against a slice that is empty for every single-hop pattern, so it
-            // is cheaper than anything below and rejects the most rows on the
-            // patterns that need it.
-            if used_edges.contains(&eid) {
-                return false;
-            }
-            // Then the cheapest discriminator: if the planner resolved the
-            // target to a known set, membership settles it without touching the node.
-            if let Some(ids) = target_ids {
-                if !ids.contains(&target) {
-                    return false;
-                }
-            }
-            let label_ok = match &label_sets {
-                None => true,
-                // `Some(empty)` means a required label exists on no node.
-                Some(sets) if sets.len() < self.target_labels.len() => false,
-                Some(sets) => sets
-                    .iter()
-                    .all(|s| GraphStore::bitset_contains(s, target)),
-            };
-            if !label_ok {
-                return false;
-            }
-            if target_props.is_empty() {
-                return true;
-            }
-            match store.get_node(target) {
-                Some(node) => target_props
-                    .iter()
-                    .all(|(k, v)| node.get_property(k).map_or(false, |p| p == v)),
-                None => false,
-            }
-        };
-
         // A selective type against a high-degree node is the case #738 is
         // about: IC11 visits ~6.6M edges to use ~29,000, because an LDBC
         // `Person` has ~495 outgoing edges of which 2.2 are `WORK_AT`. Once
@@ -6578,6 +6559,94 @@ impl ExpandOperator {
         fn in_of<'a>(p: &'a Option<TypeIndexPair>, n: NodeId) -> &'a [(NodeId, crate::graph::EdgeId)] {
             match p { Some((_, Some(i))) => i.neighbors(n), _ => &EMPTY }
         }
+
+        // Resolved once per input record: the node the pattern must close on.
+        let pinned_target: Option<NodeId> = self
+            .target_bound_var
+            .as_ref()
+            .and_then(|v| record.get(v))
+            .and_then(|v| v.node_id());
+        // The node the *next* hop closes onto, when this expand feeds a cyclic
+        // close. Resolved per input record like `pinned_target`.
+        let co_node: Option<NodeId> = self
+            .co_neighbour_var
+            .as_ref()
+            .and_then(|v| record.get(v))
+            .and_then(|v| v.node_id());
+        // The sorted neighbour lists of `co_node`, or empty when the type index
+        // is not available. Resolved once per input record, not per candidate.
+        //
+        // Both directions, because the planner only sets `co_neighbour_var`
+        // for an undirected closing segment: "is a neighbour of `a`" then
+        // means an edge in either direction, which is exactly the pair of
+        // lists the index holds.
+        let co_lists: Vec<&[(NodeId, crate::graph::EdgeId)]> = match co_node {
+            Some(c) if typed.is_some() => [out_of(&typed, c), in_of(&typed, c)]
+                .into_iter()
+                .filter(|l| !l.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
+            // A closing hop can only land on the node it closes onto.
+            if let Some(p) = pinned_target {
+                if target != p {
+                    return false;
+                }
+            }
+            // Relationship isomorphism first: it is a comparison of a few u64s
+            // against a slice that is empty for every single-hop pattern, so it
+            // is cheaper than anything below and rejects the most rows on the
+            // patterns that need it.
+            if used_edges.contains(&eid) {
+                return false;
+            }
+            // Then the cheapest discriminator: if the planner resolved the
+            // target to a known set, membership settles it without touching the node.
+            if let Some(ids) = target_ids {
+                if !ids.contains(&target) {
+                    return false;
+                }
+            }
+            let label_ok = match &label_sets {
+                None => true,
+                // `Some(empty)` means a required label exists on no node.
+                Some(sets) if sets.len() < self.target_labels.len() => false,
+                Some(sets) => sets
+                    .iter()
+                    .all(|s| GraphStore::bitset_contains(s, target)),
+            };
+            if !label_ok {
+                return false;
+            }
+            // The cyclic close, applied here instead of two operators later.
+            //
+            // `co_lists` is empty when the type index is not built yet -- the
+            // first `TYPE_INDEX_AFTER_ROWS` rows, or a type the store declined
+            // to index -- and then this test is simply skipped. That is the
+            // correct fallback rather than a hole: the closing hop downstream
+            // still rejects the row, so skipping costs rows, never answers.
+            if !co_lists.is_empty() {
+                // Binary search, which is what `TypeAdjacency`'s sort is for.
+                // A linear scan here would replace one walk of `N(b)` with a
+                // walk of `N(a)` per candidate and be strictly worse.
+                let shared = co_lists
+                    .iter()
+                    .any(|l| l.binary_search_by_key(&target.as_u64(), |&(t, _)| t.as_u64()).is_ok());
+                if !shared {
+                    return false;
+                }
+            }
+            if target_props.is_empty() {
+                return true;
+            }
+            match store.get_node(target) {
+                Some(node) => target_props
+                    .iter()
+                    .all(|(k, v)| node.get_property(k).map_or(false, |p| p == v)),
+                None => false,
+            }
+        };
 
         match self.direction {
             Direction::Outgoing => {
