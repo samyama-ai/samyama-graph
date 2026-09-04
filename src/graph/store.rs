@@ -460,6 +460,23 @@ pub struct TypeAdjacency {
 
 impl TypeAdjacency {
     /// This node's neighbours of the indexed type, or empty.
+    ///
+    /// **Sorted by `(target, edge)`, ascending**, and both build paths sort.
+    /// That is a promise, not an accident of the walk: it makes a neighbour
+    /// list binary-searchable and two lists intersectable by sorted merge,
+    /// which is what a cyclic pattern's closing hop wants (#1082). The
+    /// measured ceiling for that is 170x on LDBC BI-17 (#1086), against which
+    /// one sort per type at build time does not register.
+    ///
+    /// Sorting *here* rather than through `compact_adjacency` is the point:
+    /// the frozen CSR sorts the whole store for every type and costs 7% across
+    /// the BI suite (competitor-benchmarks#131), while this sorts one type's
+    /// lists, in a structure that is already rebuilt from scratch whenever its
+    /// source changes.
+    ///
+    /// The contents still match the walk exactly -- `tests/type_adjacency.rs`
+    /// compares them as sets, and asserts the order separately, so neither
+    /// property can quietly stand in for the other.
     #[inline]
     pub fn neighbors(&self, node: NodeId) -> &[(NodeId, EdgeId)] {
         match self.index.get(&node) {
@@ -2830,6 +2847,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
             let len = entries.len() - start;
             if len > 0 {
+                // Sorted per node, by target and then edge id. See the
+                // `TypeAdjacency` doc comment: the order is now part of what
+                // this structure promises, because an intersection needs it.
+                //
+                // By `(target, edge)` rather than by target alone, so parallel
+                // edges between the same pair come out in a fixed order
+                // instead of whichever the walk happened to produce. A
+                // structure that is sorted except where it ties is one whose
+                // ties are a source of run-to-run difference nobody looks at.
+                entries[start..].sort_unstable_by_key(|&(t, e)| (t.as_u64(), e.as_u64()));
                 index.insert(node, (start as u32, len as u32));
             }
             if entries.len() > Self::TYPE_ADJ_MAX_ENTRIES {
@@ -2896,7 +2923,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 rows.push((tgt, src, eid));
             }
         }
-        rows.sort_unstable_by_key(|(owner, _, _)| owner.as_u64());
+        // By owner **and then target and edge**, so each owner's block comes
+        // out sorted rather than merely contiguous. Grouping alone was enough
+        // while `neighbors` promised nothing about order; it no longer is.
+        rows.sort_unstable_by_key(|&(owner, t, e)| (owner.as_u64(), t.as_u64(), e.as_u64()));
 
         let mut index: HashMap<NodeId, (u32, u32)> = HashMap::new();
         let mut entries: Vec<(NodeId, EdgeId)> = Vec::with_capacity(rows.len());

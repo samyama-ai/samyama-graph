@@ -302,6 +302,66 @@ fn an_edge_added_between_queries_is_visible() {
     assert_ne!(before, after, "a new edge must be visible through the index");
 }
 
+/// The order is now a promise, and both build paths must keep it.
+///
+/// `neighbors` returned whatever the walk produced. An intersection over two
+/// neighbour lists needs them sorted (#1082, measured ceiling 170x on BI-17 in
+/// #1086), and "sorted by construction" is a claim this repo has been wrong
+/// about before -- a list that happens to come out ascending on the fixture in
+/// front of you is not a sorted list. So: assert it, on a graph whose insertion
+/// order is deliberately not ascending.
+#[test]
+fn every_neighbour_list_is_sorted_by_target_then_edge() {
+    let (store, people) = mixed();
+    let mut checked = 0usize;
+    let mut nontrivial = 0usize;
+    for &type_name in &["LIKES", "WORKS_AT", "STUDIES_AT"] {
+        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else { continue };
+        for outgoing in [true, false] {
+            let Some(idx) = store.type_adjacency(t, outgoing) else { continue };
+            for &n in &people {
+                let list = idx.neighbors(n);
+                let keys: Vec<(u64, u64)> =
+                    list.iter().map(|&(t, e)| (t.as_u64(), e.as_u64())).collect();
+                let mut sorted = keys.clone();
+                sorted.sort_unstable();
+                assert_eq!(keys, sorted,
+                    "{type_name} outgoing={outgoing} node {n:?} is not sorted: {keys:?}");
+                checked += 1;
+                if keys.len() > 1 {
+                    nontrivial += 1;
+                }
+            }
+        }
+    }
+    // A list of length 0 or 1 is sorted for free, so the assertion above would
+    // pass on a store where nothing has two neighbours. This is the half that
+    // makes the check able to fail.
+    assert!(checked > 0, "no type index was built, so nothing was checked");
+    assert!(nontrivial > 20,
+        "only {nontrivial} lists had more than one entry — the sort assertion is nearly vacuous");
+}
+
+/// Sorting must not change *what* the index holds.
+///
+/// The set comparison and the order assertion are separate on purpose: an
+/// index that dropped half its entries would still be sorted, and one that
+/// kept them all in the walk's order would still match the walk as a set.
+/// Neither property can stand in for the other.
+#[test]
+fn sorting_did_not_change_the_contents() {
+    let (store, people) = mixed();
+    for &type_name in &["LIKES", "WORKS_AT", "STUDIES_AT"] {
+        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else { continue };
+        for outgoing in [true, false] {
+            for &n in &people {
+                assert_eq!(indexed(&store, n, t, outgoing), walked(&store, n, t, outgoing),
+                    "{type_name} outgoing={outgoing} node {n:?}");
+            }
+        }
+    }
+}
+
 fn _unused(store: &mut GraphStore) {
     let q = parse_query("RETURN 1").unwrap();
     let _ = MutQueryExecutor::new(store, "default".to_string()).execute(&q);
