@@ -30,6 +30,7 @@ use samyama_graph_algorithms::{
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::random_walk,
+    articulation_points, bridges, find_cycle, topological_sort, TopoResult,
 };
 
 /// How many shortest paths to enumerate per pair before stopping. The count is
@@ -126,6 +127,40 @@ fn view_of(r: &Reference) -> GraphView {
     GraphView::from_adjacency_list(r.n, index_to_node, node_to_index, outgoing, incoming, Some(weights))
 }
 
+/// A directed graph that is acyclic by construction: every edge runs from a
+/// lower index to a higher one.
+///
+/// The spec's reference set asks for one and this is the first. Without it
+/// `topologicalSort` could only ever be checked on its cyclic branch — the
+/// three graphs above all contain cycles, and an undirected graph read as a
+/// doubled view is cyclic at every edge — so the answer the algorithm exists
+/// to produce would never be compared to anything.
+fn build_dag(name: &str, n: usize, m: usize, seed: u64) -> Reference {
+    let mut rng = Lcg(seed);
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+    // A spanning chain, so the graph is connected and has a unique source.
+    for i in 1..n {
+        let w = 1.0 + (rng.below(9) as f64);
+        seen.insert((i - 1, i));
+        edges.push((i - 1, i, w));
+    }
+    while edges.len() < m {
+        let a = rng.below(n as u64) as usize;
+        let b = rng.below(n as u64) as usize;
+        if a == b {
+            continue;
+        }
+        let key = if a < b { (a, b) } else { (b, a) };
+        if !seen.insert(key) {
+            continue;
+        }
+        let w = 1.0 + (rng.below(9) as f64);
+        edges.push((key.0, key.1, w));
+    }
+    Reference { name: name.to_string(), directed: true, n, edges }
+}
+
 fn main() {
     let out_path = std::env::args().nth(1).unwrap_or_else(|| "algo-parity.json".to_string());
 
@@ -133,6 +168,7 @@ fn main() {
         build("undirected-40", false, 40, 90, 12345),
         build("directed-40", true, 40, 110, 777),
         build("undirected-120", false, 120, 300, 99),
+        build_dag("dag-40", 40, 110, 31337),
     ];
 
     let mut graphs = Vec::new();
@@ -354,9 +390,38 @@ fn main() {
         // `json!` literal: with these added, the macro hits its recursion
         // limit. Splitting the object is the fix that does not require
         // `#![recursion_limit]` on a whole example for one literal.
+        // Structural cut sets. Both are *unique* -- the articulation points and
+        // bridges of a graph are a property of the graph, not of a tie-break --
+        // so these are ordinary parity, not invariants. Read from the singly
+        // stored view, which is the undirected collapse the reference works on.
+        let mut artic = articulation_points(&single);
+        artic.sort_unstable();
+        let bridge_pairs: Vec<Vec<NodeId>> = bridges(&single)
+            .into_iter()
+            .map(|(a, b)| if a <= b { vec![a, b] } else { vec![b, a] })
+            .collect();
+
+        // Kahn's, ties broken by node index -- so the order *is* determined, and
+        // NetworkX's `lexicographical_topological_sort` breaks ties the same
+        // way. Comparable exactly, not merely as "some valid order". `null`
+        // means the graph has a cycle, which is itself the comparable fact.
+        let topo: Option<Vec<NodeId>> = match topological_sort(&view) {
+            TopoResult::Order(o) => Some(o),
+            TopoResult::Cyclic(_) => None,
+        };
+
+        // A witness, not a set: which cycle is found depends on the DFS order,
+        // so the comparable facts are whether one exists at all and whether the
+        // sequence returned really is a cycle.
+        let cycle: Option<Vec<NodeId>> = find_cycle(&view);
+
         let mut h2 = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
         put("katz", serde_json::to_value(&katz).unwrap());
+        put("articulation_points", serde_json::to_value(&artic).unwrap());
+        put("bridges", serde_json::to_value(&bridge_pairs).unwrap());
+        put("topological_order", serde_json::to_value(&topo).unwrap());
+        put("cycle_witness", serde_json::to_value(&cycle).unwrap());
         put("hits_hubs", serde_json::to_value(hits_pair.as_ref().map(|(h, _)| idx(h))).unwrap());
         put("hits_authorities", serde_json::to_value(hits_pair.as_ref().map(|(_, a)| idx(a))).unwrap());
         put("personalised_pagerank", serde_json::to_value(&ppr).unwrap());
