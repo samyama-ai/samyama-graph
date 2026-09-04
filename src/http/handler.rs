@@ -24,6 +24,114 @@ fn default_graph() -> String {
     "default".to_string()
 }
 
+/// Request for exporting a query result as Arrow or Parquet (#1097).
+#[derive(Deserialize)]
+pub struct ExportRequest {
+    pub query: String,
+    #[serde(default = "default_graph")]
+    pub graph: String,
+    /// `arrow` (IPC stream) or `parquet`. Defaults to `arrow`, which is the
+    /// one that needs no intermediate file at either end.
+    #[serde(default = "default_export_format")]
+    pub format: String,
+}
+
+fn default_export_format() -> String {
+    "arrow".to_string()
+}
+
+/// `POST /api/query/export` — a read query's result as Arrow IPC or Parquet.
+///
+/// Read-only on purpose. A write whose result is streamed to a column store is
+/// a shape nobody asked for and one where a partially consumed stream leaves
+/// the caller unable to say whether the write happened; `/api/query` remains
+/// the way to write.
+///
+/// The column types are inferred from the values in the result — see
+/// [`crate::export`] for the table and for why temporal values leave as
+/// ISO-8601 text rather than as Arrow timestamps.
+pub async fn export_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<ExportRequest>,
+) -> impl IntoResponse {
+    if payload.graph != default_graph() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "This build serves a single graph ('{}'); the requested graph '{}' does \
+                     not exist and the argument cannot be honoured.",
+                    default_graph(), payload.graph
+                ),
+            })),
+        )
+            .into_response();
+    }
+
+    let format = payload.format.to_lowercase();
+    if format != "arrow" && format != "parquet" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unknown format '{}'; use 'arrow' or 'parquet'", payload.format),
+            })),
+        )
+            .into_response();
+    }
+
+    let batch = {
+        let store_guard = state.store.read().await;
+        state.engine.execute(&payload.query, &*store_guard)
+    };
+    let batch = match batch {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    let (bytes, content_type, filename) = if format == "parquet" {
+        match crate::export::to_parquet(&batch) {
+            Ok(b) => (b, "application/vnd.apache.parquet", "result.parquet"),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        match crate::export::to_ipc(&batch) {
+            Ok(b) => (b, "application/vnd.apache.arrow.stream", "result.arrows"),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Response containing both graph data and raw tabular data
 #[derive(Serialize)]
 pub struct QueryResponse {

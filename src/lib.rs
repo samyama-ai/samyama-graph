@@ -128,6 +128,7 @@ pub mod index;
 pub mod sharding;
 pub mod http;
 pub mod embed;
+pub mod export;
 pub mod nlq;
 pub mod agent;
 pub mod snapshot;
