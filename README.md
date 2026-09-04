@@ -393,6 +393,26 @@ pip install samyama[mcp]
 samyama-mcp-serve --demo cricket    # Instant AI agent tools for any graph
 ```
 
+**Out to pandas** — Any read query as Arrow or Parquet, straight into a
+dataframe, with no intermediate file.
+
+```bash
+curl -X POST http://localhost:8080/api/query/export \
+  -H 'content-type: application/json' \
+  -d '{"query":"MATCH (d:Doc) RETURN d.id, d.title, d.embedding","format":"parquet"}' \
+  -o result.parquet
+```
+
+```python
+import pandas as pd
+pd.read_parquet("result.parquet")
+```
+
+`"format":"arrow"` streams the Arrow IPC format instead. Column types come from
+the values in the result — integers stay `Int64`, a vector arrives as
+`List<Float64>` — and temporal values leave as ISO-8601 text, because Arrow
+carries one time zone per column while Cypher carries one per value.
+
 ---
 
 ## Benchmarks

@@ -79,6 +79,17 @@ chrono = "0.4"
 chrono-tz = "0.10"
 sha2 = "0.10"
 
+# Arrow + Parquet export (INT-05 / ML-01, #1097). Version 53 matches what
+# samyama-graph-enterprise already vets and ships, so this adds no new licence
+# surface -- both are Apache-2.0.
+#
+# `arrow` is taken with default features off and only the two enabled that the
+# export needs: `ipc` for the streaming format the HTTP endpoint writes, and
+# `prettyprint` left off deliberately (it pulls comfy-table for a debug
+# rendering nothing here uses).
+arrow = { version = "53", default-features = false, features = ["ipc"] }
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+
 # High Availability (Phase 4)
 openraft = { version = "0.9", features = ["serde"] }
 async-trait = "0.1"
