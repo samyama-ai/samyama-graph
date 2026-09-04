@@ -23,7 +23,7 @@ use samyama_graph_algorithms::{
     bellman_ford, dag_longest_path, transitive_closure, wiener_index,
     biconnected_components, bipartite_sets, global_efficiency, k_truss,
     rich_club_coefficient, square_clustering, transitivity,
-    constraint, effective_size, reciprocity,
+    constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
     eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
@@ -229,6 +229,33 @@ fn main() {
             }
         }
 
+        // Overlap and cosine over **every** unordered pair, joined or not.
+        //
+        // Link prediction above skips joined pairs, because a ranking whose top
+        // entries are already-connected pairs answers a question nobody asked.
+        // These two are not link prediction: they ask how alike two
+        // neighbourhoods are, and the answer for a connected pair is as
+        // meaningful as for any other. Restricting them to unconnected pairs
+        // would have exported a different function from the one the engine
+        // ships.
+        //
+        // They were listed as having "no NetworkX equivalent" and therefore no
+        // deterministic reference (benchmarks#125). NetworkX indeed has
+        // neither, and that is not the same statement: both are closed-form set
+        // expressions over the neighbourhood, |A ∩ B| divided by min(|A|,|B|)
+        // and by sqrt(|A|·|B|), and a reference for them needs the graph, not a
+        // library. `None` where the engine returns one -- an isolated node
+        // resembles nothing -- so the reference has to agree about that too.
+        let mut overlap = HashMap::new();
+        let mut cosine = HashMap::new();
+        for a in 0..r.n {
+            for b in (a + 1)..r.n {
+                let key = format!("{a}-{b}");
+                overlap.insert(key.clone(), overlap_coefficient(&single, a, b));
+                cosine.insert(key, cosine_similarity(&single, a, b));
+            }
+        }
+
         // Paths over every ordered reachable pair. Three separate facts,
         // because three separate algorithms read them: the hop distance, the
         // *number* of shortest paths, and the weighted distance. The count is
@@ -396,6 +423,8 @@ fn main() {
                 "jaccard": jaccard,
                 "adamic_adar": adamic,
                 "common_neighbours": common,
+                "overlap": overlap,
+                "cosine": cosine,
 
                 "hop_distance": hop,
                 "shortest_path_count": count,
