@@ -6264,6 +6264,18 @@ pub struct ExpandOperator {
     /// it only when both segments are undirected over the same edge type, so
     /// "is a neighbour" has one unambiguous meaning.
     co_neighbour_var: Option<Arc<str>>,
+    /// Which of the closing variable's neighbour lists proves the close.
+    ///
+    /// The closing segment runs `target -> co_neighbour_var`, so an
+    /// `Outgoing` close means the target must be an *incoming* neighbour of
+    /// that variable, and vice versa. `Both` searches either.
+    ///
+    /// It has to be carried separately from `direction`, which is *this*
+    /// expand's. FinBench CR-4 --
+    /// `(a)-[:TRANSFER]->(b)-[:TRANSFER]->(c)-[:TRANSFER]->(a)` -- has an
+    /// outgoing middle hop and needs `a`'s incoming list; reading `direction`
+    /// would search the wrong one (#1090).
+    co_neighbour_dir: Direction,
 }
 
 impl ExpandOperator {
@@ -6292,6 +6304,7 @@ impl ExpandOperator {
             track_edges: false,
             starts_clause: false,
             co_neighbour_var: None,
+            co_neighbour_dir: Direction::Both,
             target_bound_var: None,
             direction,
             current_record: None,
@@ -6331,9 +6344,11 @@ impl ExpandOperator {
         self
     }
 
-    /// Keep only targets that also neighbour `var`. See `co_neighbour_var`.
-    pub fn with_co_neighbour(mut self, var: String) -> Self {
+    /// Keep only targets that also neighbour `var`, in the direction the
+    /// closing segment requires. See `co_neighbour_var`.
+    pub fn with_co_neighbour(mut self, var: String, closing: Direction) -> Self {
         self.co_neighbour_var = Some(var.into());
+        self.co_neighbour_dir = closing;
         self
     }
 
@@ -6521,11 +6536,33 @@ impl ExpandOperator {
                 // indexes or neither — half an index would mean half the walk
                 // takes the fast path and the accounting for self-loops below
                 // stops lining up.
-                let out = store.type_adjacency(t, true);
-                let inc = match self.direction {
-                    Direction::Outgoing => None,
-                    _ => store.type_adjacency(t, false),
+                //
+                // **The halves the walk needs and the halves the close needs
+                // are different questions.** This asked only the first, so a
+                // cyclic close whose direction wanted the other half found an
+                // empty list, skipped its test, and did nothing — an
+                // optimisation that compiles, looks implemented, and never
+                // runs. FinBench CR-4's middle hop is `Outgoing` and its close
+                // needs `a`'s *incoming* list, which is precisely that case
+                // (#1090). So the requirement is the union.
+                let (close_out, close_in) = match self.co_neighbour_var {
+                    None => (false, false),
+                    // The close runs `target -> co_var`, so an outgoing close
+                    // is proved by `co_var`'s incoming list.
+                    Some(_) => match self.co_neighbour_dir {
+                        Direction::Outgoing => (false, true),
+                        Direction::Incoming => (true, false),
+                        Direction::Both => (true, true),
+                    },
                 };
+                let want_out = !matches!(self.direction, Direction::Incoming) || close_out;
+                let want_in = !matches!(self.direction, Direction::Outgoing) || close_in;
+                let out = if want_out { store.type_adjacency(t, true) } else { None };
+                let inc = if want_in { store.type_adjacency(t, false) } else { None };
+                // Usability is still judged on what the *walk* needs: the
+                // close is an optimisation and its absence costs rows, never
+                // answers, so a missing close-half must not disable the walk's
+                // fast path.
                 let usable = match self.direction {
                     Direction::Outgoing => out.is_some(),
                     Direction::Incoming => inc.is_some(),
@@ -6576,15 +6613,26 @@ impl ExpandOperator {
         // The sorted neighbour lists of `co_node`, or empty when the type index
         // is not available. Resolved once per input record, not per candidate.
         //
-        // Both directions, because the planner only sets `co_neighbour_var`
-        // for an undirected closing segment: "is a neighbour of `a`" then
-        // means an edge in either direction, which is exactly the pair of
-        // lists the index holds.
+        // The half the *closing segment* requires, not the half this expand
+        // walks. `(c)-[:R]->(a)` is proved by `a`'s incoming list; `(c)<-[:R]-(a)`
+        // by its outgoing one; an undirected close by either.
         let co_lists: Vec<&[(NodeId, crate::graph::EdgeId)]> = match co_node {
-            Some(c) if typed.is_some() => [out_of(&typed, c), in_of(&typed, c)]
-                .into_iter()
-                .filter(|l| !l.is_empty())
-                .collect(),
+            Some(c) if typed.is_some() => {
+                let mut v: Vec<&[(NodeId, crate::graph::EdgeId)]> = Vec::new();
+                if !matches!(self.co_neighbour_dir, Direction::Outgoing) {
+                    let l = out_of(&typed, c);
+                    if !l.is_empty() {
+                        v.push(l);
+                    }
+                }
+                if !matches!(self.co_neighbour_dir, Direction::Incoming) {
+                    let l = in_of(&typed, c);
+                    if !l.is_empty() {
+                        v.push(l);
+                    }
+                }
+                v
+            }
             _ => Vec::new(),
         };
         let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
