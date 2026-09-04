@@ -3822,8 +3822,17 @@ impl QueryPlanner {
                                 && next.edge.types.len() == segment.edge.types.len()
                                 && next.edge.types.iter().zip(segment.edge.types.iter())
                                     .all(|(a, b)| a.as_str() == b.as_str());
+                            // Not `current_var`: `(a)-[:R]-(b)-[:R]-(c)-[:R]-(b)`
+                            // closes back onto this expand's *source*, and
+                            // every `c` it produces is a neighbour of `b` by
+                            // construction. The test would be satisfied by
+                            // every candidate and cost a binary search each
+                            // time to reject none. The closing hop still does
+                            // the real work there, which is finding a second,
+                            // distinct `b`-`c` edge.
                             let closes_onto_bound = bound.contains(next_target)
-                                && *next_target != target_var;
+                                && *next_target != target_var
+                                && *next_target != current_var;
                             if closes_onto_bound
                                 && same_types
                                 && next.edge.length.is_none()
