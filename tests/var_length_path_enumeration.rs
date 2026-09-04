@@ -10,11 +10,14 @@
 //! The scope is the same one #684 established for fixed-length patterns:
 //! relationships may not repeat within a clause, nodes may.
 //!
-//! Expectations below are openCypher's, matching Neo4j 5 on the same graphs,
-//! and three of the four fail today. They are `#[ignore]`d against #710 rather
-//! than deleted or weakened: the expected values are the specification's, and a
-//! test that asserts the current behaviour would have to be rewritten by
-//! whoever fixes it, which is the opposite of useful.
+//! Expectations below are openCypher's, matching Neo4j 5 on the same graphs.
+//! Three of the original four failed when this file was written and were
+//! `#[ignore]`d against #710 rather than weakened to match the engine. #710 is
+//! fixed and none of them are ignored now — the file grew to twelve as the fix
+//! landed — but the note claiming three still fail outlived the failures by
+//! several months, and a triage sweep read it as evidence the bug was open. A
+//! comment that describes a run nobody has repeated is the same hazard as a
+//! verdict that outlives its measurement: the suite is the statement, so run it.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
