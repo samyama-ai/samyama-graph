@@ -475,3 +475,137 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
     }
     Ok(buf)
 }
+
+/// Reading Parquet back in.
+///
+/// Deliberately the node direction only. Edges need identity resolution — a
+/// `source` column names *something*, and which property it names is a decision
+/// the file cannot make — and guessing it here would produce an importer whose
+/// meaning depends on which exporter wrote the file. `LOAD PARQUET` (#1098) is
+/// where that belongs, with the mapping written in the query.
+pub mod import {
+    use std::collections::HashMap;
+
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{DataType, Float64Type, Int64Type};
+
+    use crate::graph::{GraphStore, PropertyValue};
+
+    use super::ExportError;
+
+    /// What an import did, for the caller to check against what it sent.
+    #[derive(Debug, Default, serde::Serialize)]
+    pub struct ImportStats {
+        pub nodes_created: usize,
+        pub columns: Vec<String>,
+        /// Columns whose Arrow type has no `PropertyValue` and were skipped.
+        /// Named rather than dropped: a column that silently does not arrive is
+        /// the failure an importer is least able to notice.
+        pub skipped_columns: Vec<String>,
+    }
+
+    fn cell(col: &dyn Array, row: usize) -> Option<PropertyValue> {
+        if col.is_null(row) {
+            return None;
+        }
+        Some(match col.data_type() {
+            DataType::Boolean => PropertyValue::Boolean(col.as_boolean().value(row)),
+            DataType::Int64 => PropertyValue::Integer(col.as_primitive::<Int64Type>().value(row)),
+            DataType::Float64 => PropertyValue::Float(col.as_primitive::<Float64Type>().value(row)),
+            DataType::Utf8 => PropertyValue::String(col.as_string::<i32>().value(row).to_string()),
+            DataType::LargeUtf8 => {
+                PropertyValue::String(col.as_string::<i64>().value(row).to_string())
+            }
+            DataType::List(field) => {
+                let items = col.as_list::<i32>().value(row);
+                match field.data_type() {
+                    DataType::Int64 => PropertyValue::Array(
+                        items
+                            .as_primitive::<Int64Type>()
+                            .iter()
+                            .map(|v| v.map_or(PropertyValue::Null, PropertyValue::Integer))
+                            .collect(),
+                    ),
+                    DataType::Float64 => PropertyValue::Array(
+                        items
+                            .as_primitive::<Float64Type>()
+                            .iter()
+                            .map(|v| v.map_or(PropertyValue::Null, PropertyValue::Float))
+                            .collect(),
+                    ),
+                    DataType::Utf8 => PropertyValue::Array(
+                        items
+                            .as_string::<i32>()
+                            .iter()
+                            .map(|v| {
+                                v.map_or(PropertyValue::Null, |s| {
+                                    PropertyValue::String(s.to_string())
+                                })
+                            })
+                            .collect(),
+                    ),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Create one node per row, with the file's columns as its properties.
+    ///
+    /// A null cell sets no property at all, which is what a null means in
+    /// Cypher — there is no stored null — and is what makes the round-trip with
+    /// [`super::to_parquet`] exact rather than approximate.
+    pub fn parquet_to_nodes(
+        store: &mut GraphStore,
+        tenant: &str,
+        label: &str,
+        bytes: Vec<u8>,
+    ) -> Result<ImportStats, ExportError> {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+            .map_err(|e| ExportError::Parquet(e.to_string()))?
+            .build()
+            .map_err(|e| ExportError::Parquet(e.to_string()))?;
+
+        let mut stats = ImportStats::default();
+        let mut skipped: HashMap<String, ()> = HashMap::new();
+
+        for batch in reader {
+            let batch = batch.map_err(|e| ExportError::Parquet(e.to_string()))?;
+            if stats.columns.is_empty() {
+                stats.columns = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect();
+            }
+            for row in 0..batch.num_rows() {
+                let id = store.create_node(label);
+                for (i, field) in batch.schema().fields().iter().enumerate() {
+                    let col = batch.column(i);
+                    match cell(col.as_ref(), row) {
+                        Some(v) => {
+                            store
+                                .set_node_property(tenant, id, field.name().clone(), v)
+                                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                        }
+                        None if col.is_null(row) => {}
+                        None => {
+                            skipped.insert(field.name().clone(), ());
+                        }
+                    }
+                }
+                stats.nodes_created += 1;
+            }
+        }
+        stats.skipped_columns = {
+            let mut v: Vec<String> = skipped.into_keys().collect();
+            v.sort();
+            v
+        };
+        Ok(stats)
+    }
+}

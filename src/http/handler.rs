@@ -132,6 +132,90 @@ pub async fn export_handler(
         .into_response()
 }
 
+/// Query parameters for `POST /api/import/parquet`.
+#[derive(Deserialize)]
+pub struct ParquetImportParams {
+    /// The label every created node gets. Required: a Parquet file carries a
+    /// schema, not a label, and inventing one from the filename would make the
+    /// import depend on what the file was called.
+    pub label: String,
+    #[serde(default = "default_graph")]
+    pub graph: String,
+}
+
+/// `POST /api/import/parquet?label=Doc` — one node per row, columns as
+/// properties (#1098, the bulk-load half).
+///
+/// The node direction only. Edges need identity resolution — a `source` column
+/// names *something*, and which property it names is a decision the file cannot
+/// make — so guessing it here would produce an importer whose meaning depends
+/// on which exporter wrote the file. That belongs in `LOAD PARQUET`, where the
+/// mapping is written in the query.
+pub async fn import_parquet_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ParquetImportParams>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if params.graph != default_graph() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "This build serves a single graph ('{}'); '{}' does not exist.",
+                    default_graph(), params.graph
+                ),
+            })),
+        )
+            .into_response();
+    }
+    if params.label.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "label must not be empty" })),
+        )
+            .into_response();
+    }
+
+    let mut data: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name().unwrap_or("") == "file" {
+            match field.bytes().await {
+                Ok(b) => data = Some(b.to_vec()),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": format!("could not read the file: {e}") })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+    let Some(data) = data else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "no `file` field in the multipart request" })),
+        )
+            .into_response();
+    };
+
+    let mut store_guard = state.store.write().await;
+    match crate::export::import::parquet_to_nodes(
+        &mut store_guard,
+        &params.graph,
+        &params.label,
+        data,
+    ) {
+        Ok(stats) => (StatusCode::OK, Json(json!({ "status": "ok", "stats": stats })))
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// Response containing both graph data and raw tabular data
 #[derive(Serialize)]
 pub struct QueryResponse {

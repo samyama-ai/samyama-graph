@@ -254,3 +254,91 @@ fn an_empty_result_keeps_its_schema() {
         .expect("parquet")
         .is_empty());
 }
+
+/// Export and import are the same shape: what goes out comes back (#1098).
+///
+/// This is the claim INT-05 actually makes — *round-trip* tested — and it is the
+/// one an export alone cannot support. Every value is compared through a second
+/// export of the re-imported nodes, so the comparison is between two things the
+/// engine produced from the same data rather than between the engine and a
+/// hand-written expectation that could be wrong in the same direction.
+#[test]
+fn parquet_round_trips_back_into_nodes() {
+    use samyama::export::import::parquet_to_nodes;
+
+    let store = fixture();
+    let out = to_parquet(&query(&store, Q)).expect("export");
+
+    let mut fresh = GraphStore::new();
+    let stats = parquet_to_nodes(&mut fresh, "default", "Round", out.clone()).expect("import");
+    assert_eq!(stats.nodes_created, 3);
+    assert!(
+        stats.skipped_columns.is_empty(),
+        "nothing we wrote should be unreadable on the way back: {:?}",
+        stats.skipped_columns
+    );
+
+    let back = to_arrow(&query(
+        &fresh,
+        "MATCH (r:Round) RETURN r.ord AS ord, r.title AS title, r.score AS score, \
+         r.live AS live, r.tags AS tags, r.counts AS counts, r.embedding AS embedding \
+         ORDER BY ord",
+    ))
+    .expect("re-export");
+    let there = to_arrow(&query(&store, Q)).expect("first export");
+
+    assert_eq!(back.num_rows(), there.num_rows());
+    let back_schema = back.schema();
+    for field in there.schema().fields() {
+        let mirrored = back_schema
+            .field_with_name(field.name())
+            .unwrap_or_else(|_| panic!("{} survives the round trip", field.name()));
+        assert_eq!(
+            mirrored.data_type(),
+            field.data_type(),
+            "{} keeps its type",
+            field.name()
+        );
+        assert_eq!(
+            back.column_by_name(field.name()).unwrap().as_ref(),
+            there.column_by_name(field.name()).unwrap().as_ref(),
+            "{} keeps its values",
+            field.name()
+        );
+    }
+}
+
+/// A null cell sets no property, rather than a property set to null.
+///
+/// Cypher has no stored null, so "the column was null" and "the node has no
+/// such key" have to be the same state on the way back in — otherwise
+/// `keys(n)` and `properties(n)` report a key nobody set.
+#[test]
+fn a_null_cell_creates_no_property() {
+    use samyama::export::import::parquet_to_nodes;
+
+    let store = fixture();
+    let out = to_parquet(&query(&store, Q)).expect("export");
+    let mut fresh = GraphStore::new();
+    parquet_to_nodes(&mut fresh, "default", "Round", out).expect("import");
+
+    let batch = query(
+        &fresh,
+        "MATCH (r:Round) WHERE r.ord = 2 RETURN size(keys(r)) AS n, r.score AS score",
+    );
+    let rec = &batch.records[0];
+    assert!(
+        matches!(
+            rec.get("score"),
+            None | Some(samyama::query::executor::Value::Null)
+                | Some(samyama::query::executor::Value::Property(PropertyValue::Null))
+        ),
+        "the row that never had a score still has none"
+    );
+    match rec.get("n") {
+        Some(samyama::query::executor::Value::Property(PropertyValue::Integer(n))) => {
+            assert_eq!(*n, 3, "ord, title and live — not the three nulls beside them")
+        }
+        other => panic!("expected a count, got {other:?}"),
+    }
+}
