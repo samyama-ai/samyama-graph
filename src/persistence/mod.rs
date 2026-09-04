@@ -111,18 +111,29 @@ impl PersistenceManager {
         Arc::clone(&self.tenants)
     }
 
-    /// Start the background indexer for a store
-    pub fn start_indexer(&self, store: &GraphStore, receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>) {
-        let vector_index = Arc::clone(&store.vector_index);
-        let property_index = Arc::clone(&store.property_index);
+    /// Start the background indexer for a store.
+    ///
+    /// Takes the shared handle rather than a borrow so auto-embed can write the
+    /// embedding it computes back onto the node; without that the vector lives only in
+    /// the in-memory index and the next rebuild drops it (#310).
+    pub fn start_indexer(
+        &self,
+        store: Arc<tokio::sync::RwLock<GraphStore>>,
+        receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
+    ) {
         let tenant_manager = Arc::clone(&self.tenants);
 
         tokio::spawn(async move {
-            GraphStore::start_background_indexer(
+            let (vector_index, property_index) = {
+                let guard = store.read().await;
+                (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
+            };
+            GraphStore::start_background_indexer_with_store(
                 receiver,
                 vector_index,
                 property_index,
                 tenant_manager,
+                Some(store),
             ).await;
         });
     }

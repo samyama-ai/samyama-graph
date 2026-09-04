@@ -879,10 +879,32 @@ impl GraphStore {
 
     /// Start the background indexer loop
     pub async fn start_background_indexer(
+        receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
+        vector_index: Arc<VectorIndexManager>,
+        property_index: Arc<IndexManager>,
+        tenant_manager: Arc<crate::persistence::TenantManager>,
+    ) {
+        Self::start_background_indexer_with_store(
+            receiver,
+            vector_index,
+            property_index,
+            tenant_manager,
+            None,
+        )
+        .await
+    }
+
+    /// The indexer loop, with a handle back to the store it indexes.
+    ///
+    /// Only auto-embed needs it, and only so the embedding it computes can be written
+    /// onto the node — see [`spawn_auto_embed`]. Passing `None` keeps the old behaviour:
+    /// the vector goes into the in-memory index and nowhere else.
+    pub async fn start_background_indexer_with_store(
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
         vector_index: Arc<VectorIndexManager>,
         property_index: Arc<IndexManager>,
         tenant_manager: Arc<crate::persistence::TenantManager>,
+        store: Option<Arc<tokio::sync::RwLock<GraphStore>>>,
     ) {
         use crate::graph::event::IndexEvent::*;
         
@@ -905,57 +927,23 @@ impl GraphStore {
                             property_index.index_insert(label, key, value.clone(), id);
                         }
                         
-                        // Auto-Embed check
+                        // Auto-Embed check (#310)
                         if let PropertyValue::String(text) = value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                                 if let Some(config) = tenant.embed_config {
                                     for label in &labels {
-                                        if let Some(keys) = config.embedding_policies.get(label.as_str()) {
-                                            if keys.contains(key) {
-                                                // Trigger Auto-Embed
-                                                let vector_index_clone = Arc::clone(&vector_index);
-                                                let label_str = label.as_str().to_string();
-                                                // The vector is indexed under the
-                                                // *target* property, not the source text
-                                                // property it was generated from: an index
-                                                // is created on `Person.embedding`, never
-                                                // on `Person.headline`, so indexing under
-                                                // the source key put every vector in an
-                                                // index nobody queried (#310).
-                                                let target_key = config.embedding_property.clone();
-                                                let text_clone = text.clone();
-                                                let config_clone = config.clone();
-
-                                                tokio::spawn(async move {
-                                                    match crate::embed::EmbedPipeline::new(config_clone) {
-                                                        Ok(pipeline) => match pipeline.process_text(&text_clone).await {
-                                                            Ok(chunks) => {
-                                                                for chunk in chunks {
-                                                                    if let Err(e) = vector_index_clone.add_vector(
-                                                                        &label_str,
-                                                                        &target_key,
-                                                                        id,
-                                                                        &chunk.embedding,
-                                                                    ) {
-                                                                        tracing::warn!(
-                                                                            "auto-embed: could not index {}.{} for node {}: {}",
-                                                                            label_str, target_key, id.as_u64(), e
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => tracing::warn!(
-                                                                "auto-embed: embedding failed for {}.{}: {}",
-                                                                label_str, target_key, e
-                                                            ),
-                                                        },
-                                                        Err(e) => tracing::warn!(
-                                                            "auto-embed: pipeline unavailable for {}.{}: {}",
-                                                            label_str, target_key, e
-                                                        ),
-                                                    }
-                                                });
-                                            }
+                                        if config.embedding_policies.get(label.as_str())
+                                            .is_some_and(|keys| keys.contains(key))
+                                        {
+                                            spawn_auto_embed(
+                                                config.clone(),
+                                                label.as_str().to_string(),
+                                                id,
+                                                tenant_id.clone(),
+                                                text.clone(),
+                                                Arc::clone(&vector_index),
+                                                store.clone(),
+                                            );
                                         }
                                     }
                                 }
@@ -1017,48 +1005,23 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                         }
                     }
                     
-                    // Auto-Embed check
+                    // Auto-Embed check (#310)
                     if let PropertyValue::String(text) = &new_value {
                         if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                             if let Some(config) = tenant.embed_config {
                                 for label in &labels {
-                                    if let Some(keys) = config.embedding_policies.get(label.as_str()) {
-                                        if keys.contains(&key) {
-                                            let vector_index_clone = Arc::clone(&vector_index);
-                                            let label_str = label.as_str().to_string();
-                                            // Index under the target property, not the
-                                            // source text property -- see NodeCreated.
-                                            let target_key = config.embedding_property.clone();
-                                            let text_clone = text.clone();
-                                            let config_clone = config.clone();
-
-                                            tokio::spawn(async move {
-                                                match crate::embed::EmbedPipeline::new(config_clone) {
-                                                    Ok(pipeline) => match pipeline.process_text(&text_clone).await {
-                                                        Ok(chunks) => {
-                                                            if let Some(first) = chunks.first() {
-                                                                if let Err(e) = vector_index_clone.add_vector(
-                                                                    &label_str, &target_key, id, &first.embedding,
-                                                                ) {
-                                                                    tracing::warn!(
-                                                                        "auto-embed: could not index {}.{} for node {}: {}",
-                                                                        label_str, target_key, id.as_u64(), e
-                                                                    );
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => tracing::warn!(
-                                                            "auto-embed: embedding failed for {}.{}: {}",
-                                                            label_str, target_key, e
-                                                        ),
-                                                    },
-                                                    Err(e) => tracing::warn!(
-                                                        "auto-embed: pipeline unavailable for {}.{}: {}",
-                                                        label_str, target_key, e
-                                                    ),
-                                                }
-                                            });
-                                        }
+                                    if config.embedding_policies.get(label.as_str())
+                                        .is_some_and(|keys| keys.contains(&key))
+                                    {
+                                        spawn_auto_embed(
+                                            config.clone(),
+                                            label.as_str().to_string(),
+                                            id,
+                                            tenant_id.clone(),
+                                            text.clone(),
+                                            Arc::clone(&vector_index),
+                                            store.clone(),
+                                        );
                                     }
                                 }
                             }
@@ -1100,47 +1063,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                         }
                         property_index.index_insert(&label, &key, value.clone(), id);
                         
-                        // Auto-Embed check
+                        // Auto-Embed check (#310)
                         if let PropertyValue::String(text) = &value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                                 if let Some(config) = tenant.embed_config {
-                                    if let Some(keys) = config.embedding_policies.get(label.as_str()) {
-                                        if keys.contains(&key) {
-                                            let vector_index_clone = Arc::clone(&vector_index);
-                                            let label_str = label.as_str().to_string();
-                                            // Index under the target property, not the
-                                            // source text property -- see NodeCreated.
-                                            let target_key = config.embedding_property.clone();
-                                            let text_clone = text.clone();
-                                            let config_clone = config.clone();
-
-                                            tokio::spawn(async move {
-                                                match crate::embed::EmbedPipeline::new(config_clone) {
-                                                    Ok(pipeline) => match pipeline.process_text(&text_clone).await {
-                                                        Ok(chunks) => {
-                                                            if let Some(first) = chunks.first() {
-                                                                if let Err(e) = vector_index_clone.add_vector(
-                                                                    &label_str, &target_key, id, &first.embedding,
-                                                                ) {
-                                                                    tracing::warn!(
-                                                                        "auto-embed: could not index {}.{} for node {}: {}",
-                                                                        label_str, target_key, id.as_u64(), e
-                                                                    );
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => tracing::warn!(
-                                                            "auto-embed: embedding failed for {}.{}: {}",
-                                                            label_str, target_key, e
-                                                        ),
-                                                    },
-                                                    Err(e) => tracing::warn!(
-                                                        "auto-embed: pipeline unavailable for {}.{}: {}",
-                                                        label_str, target_key, e
-                                                    ),
-                                                }
-                                            });
-                                        }
+                                    if config.embedding_policies.get(label.as_str())
+                                        .is_some_and(|keys| keys.contains(&key))
+                                    {
+                                        spawn_auto_embed(
+                                            config.clone(),
+                                            label.as_str().to_string(),
+                                            id,
+                                            tenant_id.clone(),
+                                            text.clone(),
+                                            Arc::clone(&vector_index),
+                                            store.clone(),
+                                        );
                                     }
                                 }
                             }
@@ -4197,6 +4135,77 @@ impl Default for GraphStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One auto-embed trigger: embed `text`, then make the vector findable *after a rebuild*.
+///
+/// The vector used to go into the in-memory index and nowhere else.
+/// [`GraphStore::rebuild_vector_index`] rebuilds from node properties — and it runs on
+/// snapshot import, on the reindex endpoint, and implicitly on every restart — so every
+/// auto-embedded vector vanished and vector search went back to answering zero rows with
+/// a 200 (#310). Writing the embedding onto the node is what survives that: the
+/// `PropertySet` event it emits indexes the vector through the `to_vector` branch, and
+/// cannot re-trigger auto-embed, which fires only on a `String`.
+///
+/// With no store handle — the embedded and test wirings — it indexes directly, which is
+/// still lost on rebuild but is all that path can reach.
+fn spawn_auto_embed(
+    config: crate::persistence::tenant::AutoEmbedConfig,
+    label: String,
+    id: NodeId,
+    tenant_id: String,
+    text: String,
+    vector_index: Arc<VectorIndexManager>,
+    store: Option<Arc<tokio::sync::RwLock<GraphStore>>>,
+) {
+    // The vector is indexed under the *target* property, not the source text property it
+    // was generated from: an index is created on `Person.embedding`, never on
+    // `Person.headline`, so indexing under the source key put every vector in an index
+    // nobody queried (#310).
+    let target_key = config.embedding_property.clone();
+    tokio::spawn(async move {
+        let pipeline = match crate::embed::EmbedPipeline::new(config) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("auto-embed: pipeline unavailable for {}.{}: {}", label, target_key, e);
+                return;
+            }
+        };
+        // The first chunk only. Indexing every chunk put several vectors under one node id
+        // in an index keyed by node id, where they could only overwrite each other; the
+        // other two trigger sites already took the first.
+        let embedding = match pipeline.process_text(&text).await {
+            Ok(chunks) => match chunks.into_iter().next() {
+                Some(chunk) => chunk.embedding,
+                None => return,
+            },
+            Err(e) => {
+                tracing::warn!("auto-embed: embedding failed for {}.{}: {}", label, target_key, e);
+                return;
+            }
+        };
+        if let Some(store) = store {
+            let mut guard = store.write().await;
+            match guard.set_node_property(
+                &tenant_id,
+                id,
+                target_key.clone(),
+                PropertyValue::Vector(embedding.clone()),
+            ) {
+                Ok(()) => return,
+                Err(e) => tracing::warn!(
+                    "auto-embed: could not store {}.{} on node {}: {}",
+                    label, target_key, id.as_u64(), e
+                ),
+            }
+        }
+        if let Err(e) = vector_index.add_vector(&label, &target_key, id, &embedding) {
+            tracing::warn!(
+                "auto-embed: could not index {}.{} for node {}: {}",
+                label, target_key, id.as_u64(), e
+            );
+        }
+    });
 }
 
 #[cfg(test)]

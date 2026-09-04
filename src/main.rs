@@ -609,7 +609,7 @@ async fn start_server() {
 
     // Start background indexer now that store is wrapped in Arc
     if let Some(ref pm) = persistence {
-        pm.start_indexer(&*store.read().await, rx);
+        pm.start_indexer(Arc::clone(&store), rx);
     }
 
     // Start HTTP server for Visualizer API (port from --http-port, default 8080)
