@@ -3790,6 +3790,60 @@ impl QueryPlanner {
                     if self_ref {
                         expand = expand.with_target_bound_var(target_var.clone());
                     }
+                    // If the *next* segment closes the pattern back onto a
+                    // variable already bound, this expand's target must be a
+                    // neighbour of that variable — so test it here, during the
+                    // walk, instead of building a row for every candidate and
+                    // discarding it two operators later.
+                    //
+                    // LDBC BI-17 is the case:
+                    // `(a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(a)`. This
+                    // expand binds `c`, and at SF1 it builds ~3.2M rows for
+                    // the closing hop to reduce to 387,573 triangles. Pruning
+                    // during the walk is the row-count half of #1082, whose
+                    // full form (a sorted-merge intersection) measured a 170x
+                    // ceiling (#1086).
+                    //
+                    // Deliberately narrow. Both segments must be undirected
+                    // over the same edge types, so that "is a neighbour of the
+                    // closing variable" has one unambiguous meaning and the
+                    // sorted list the test binary-searches is the right one.
+                    // A directed close would need the matching half of the
+                    // index and is left to the operator #1082 asks for.
+                    //
+                    // This prunes and never widens: a row it rejects has no
+                    // edge to close on, and a row it keeps still faces the
+                    // closing hop, which also enforces relationship
+                    // isomorphism.
+                    if !self_ref {
+                        if let Some(next) = path.segments.get(seg_idx + 1) {
+                            let next_target = &path_nodes[seg_idx + 2].var;
+                            let same_types = !segment.edge.types.is_empty()
+                                && next.edge.types.len() == segment.edge.types.len()
+                                && next.edge.types.iter().zip(segment.edge.types.iter())
+                                    .all(|(a, b)| a.as_str() == b.as_str());
+                            // Not `current_var`: `(a)-[:R]-(b)-[:R]-(c)-[:R]-(b)`
+                            // closes back onto this expand's *source*, and
+                            // every `c` it produces is a neighbour of `b` by
+                            // construction. The test would be satisfied by
+                            // every candidate and cost a binary search each
+                            // time to reject none. The closing hop still does
+                            // the real work there, which is finding a second,
+                            // distinct `b`-`c` edge.
+                            let closes_onto_bound = bound.contains(next_target)
+                                && *next_target != target_var
+                                && *next_target != current_var;
+                            if closes_onto_bound
+                                && same_types
+                                && next.edge.length.is_none()
+                                && segment.edge.length.is_none()
+                                && matches!(segment.edge.direction, Direction::Both)
+                                && matches!(next.edge.direction, Direction::Both)
+                            {
+                                expand = expand.with_co_neighbour(next_target.clone());
+                            }
+                        }
+                    }
                     // A selective equality on the far side of the expansion —
                     // LDBC IC11's `org.name = "..."` — applied during the walk
                     // rather than to the rows it produces (#656).
