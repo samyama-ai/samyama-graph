@@ -31,6 +31,7 @@ use samyama_graph_algorithms::{
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::random_walk,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
+    community_detect::louvain,
 };
 
 /// How many shortest paths to enumerate per pair before stopping. The count is
@@ -415,6 +416,14 @@ fn main() {
         // sequence returned really is a cycle.
         let cycle: Option<Vec<NodeId>> = find_cycle(&view);
 
+        // Louvain's partition is not unique -- it is greedy, and NetworkX's own
+        // implementation takes a seed -- so there is nothing to agree with. What
+        // *is* checkable is that the result partitions the nodes and that its
+        // modularity beats the two trivial partitions, which is the whole point
+        // of running it. Exported on the undirected collapse, which is what
+        // modularity is defined on here.
+        let louvain_partition = louvain(&single, 10);
+
         let mut h2 = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
         put("katz", serde_json::to_value(&katz).unwrap());
@@ -444,6 +453,7 @@ fn main() {
         // *given a seed*, and nothing in this export exercised a seed until
         // this line. It is the clause most likely to rot, because a caller
         // switching to an unseeded RNG breaks nothing that compiles.
+        put("louvain_partition", serde_json::to_value(&louvain_partition).unwrap());
         put("random_walk_seeded",
             serde_json::to_value(random_walk(&view, 0, 32, 0x5A_4D)
                 .to_vec()).unwrap());
