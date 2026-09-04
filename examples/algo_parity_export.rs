@@ -21,7 +21,8 @@ use samyama_graph_algorithms::{
     all_shortest_paths, a_star, yens_k_shortest, modularity,
     hits, katz_centrality, personalised_page_rank,
     bellman_ford, dag_longest_path, transitive_closure, wiener_index,
-    biconnected_components, bipartite_sets, global_efficiency, k_truss,
+    biconnected_components, bipartite_sets, dominating_set, global_efficiency, k_truss,
+    greedy_colouring, maximal_matching,
     rich_club_coefficient, square_clustering, transitivity,
     constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
@@ -425,6 +426,24 @@ fn main() {
                 "common_neighbours": common,
                 "overlap": overlap,
                 "cosine": cosine,
+
+                // The three greedy results, exported to be checked against
+                // their **invariant** rather than compared to NetworkX.
+                //
+                // The comment below still holds for comparison: a greedy
+                // matching agrees with NetworkX or not depending on which edge
+                // each side visited first, so a parity check would pass by luck
+                // and fail by luck. It does not follow that nothing can be
+                // checked. A matching is maximal if no edge can be added; a
+                // colouring is proper if no edge is monochromatic; a dominating
+                // set dominates if every node is in it or beside it. Those are
+                // properties of the answer, not of the tie-break, and they are
+                // *stronger* than parity -- they say the result is right rather
+                // than that it matches someone else's arbitrary choice
+                // (benchmarks#135).
+                "maximal_matching": maximal_matching(&single, true),
+                "greedy_colouring": greedy_colouring(&single, true),
+                "dominating_set": dominating_set(&single, true),
 
                 "hop_distance": hop,
                 "shortest_path_count": count,
