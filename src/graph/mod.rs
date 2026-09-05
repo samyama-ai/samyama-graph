@@ -68,5 +68,5 @@ pub use property::{PropertyMap, PropertyValue};
 pub use store::{GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats, IsolationLevel, TxnId, TxnStatus, Transaction, TypeAdjacency};
 pub use types::{EdgeId, EdgeType, Label, NodeId};
 pub use catalog::GraphCatalog;
-pub use event::IndexEvent;
+pub use event::{IndexEvent, Mutation};
 pub use storage::{Column, ColumnStore};

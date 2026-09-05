@@ -88,6 +88,9 @@ pub struct AppState {
     pub embed_pipeline: Option<Arc<EmbedPipeline>>,
     /// Per-tenant EmbedPipeline cache; invalidated on PATCH /api/tenants/:id
     pub embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>>,
+    /// Persistence for writes made through `POST /api/query` (#1094). Without it a
+    /// write over HTTP lives only in memory, and every one of them returns success.
+    pub persistence: Option<Arc<crate::persistence::PersistenceManager>>,
 }
 
 /// HTTP server managing the Visualizer API and static assets
@@ -97,12 +100,13 @@ pub struct HttpServer {
     data_path: Option<String>,
     tenants: Option<Arc<TenantManager>>,
     embed_pipeline: Option<Arc<EmbedPipeline>>,
+    persistence: Option<Arc<crate::persistence::PersistenceManager>>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port, data_path: None, tenants: None, embed_pipeline: None }
+        Self { store, port, data_path: None, tenants: None, embed_pipeline: None, persistence: None }
     }
 
     /// Set the data directory for snapshot persistence (HA-08)
@@ -115,6 +119,12 @@ impl HttpServer {
     /// tenants created via HTTP are immediately visible to `GRAPH.LIST`.
     pub fn with_tenant_manager(mut self, tenants: Arc<TenantManager>) -> Self {
         self.tenants = Some(tenants);
+        self
+    }
+
+    /// Persist writes made through the HTTP query endpoint (#1094).
+    pub fn with_persistence(mut self, pm: Arc<crate::persistence::PersistenceManager>) -> Self {
+        self.persistence = Some(pm);
         self
     }
 
@@ -160,6 +170,7 @@ impl HttpServer {
             tenant_manager: self.tenants.clone(),
             embed_pipeline: self.embed_pipeline.clone(),
             embed_cache: Arc::clone(&embed_cache),
+            persistence: self.persistence.clone(),
         };
 
         let optimize_state = Arc::new(super::optimize::OptimizeState::default());
@@ -241,6 +252,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         let cloned = state.clone();
@@ -259,6 +271,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         let cloned = state.clone();
@@ -283,6 +296,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         let c1 = state.clone();
@@ -305,6 +319,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         // Write through the state
@@ -343,6 +358,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         let _app: Router = Router::new()
@@ -362,6 +378,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         };
 
         let app = Router::new()

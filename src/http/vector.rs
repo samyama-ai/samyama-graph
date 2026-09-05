@@ -322,6 +322,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
+            persistence: None,
         }
     }
 

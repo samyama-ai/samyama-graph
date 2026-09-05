@@ -153,38 +153,27 @@ impl CommandHandler {
         // Execute query with appropriate method
         let result = if is_write_query {
             let mut store_guard = store.write().await;
-            
+
+            // Record what the statement changes, so persistence does not depend on
+            // what it returns (#1094).
+            if self.persistence.is_some() {
+                store_guard.enable_write_log();
+            }
+
             // Set current tenant for indexing events
             // In a more complex architecture, the store_guard would be isolated
             let res = self.query_engine.execute_mut(&query_str, &mut *store_guard, &graph_name);
 
             // If write succeeded and persistence is enabled, persist the changes
-            if let (Ok(ref batch), Some(ref persist_mgr)) = (&res, &self.persistence) {
-                // Extract created nodes/edges from the result and persist them
-                // The RecordBatch contains Node and Edge values that were created
-                for record in &batch.records {
-                    for (_col, value) in record.bindings().iter() {
-                        match value {
-                            Value::Node(node_id, node) => {
-                                // Persist the created node
-                                if let Err(e) = persist_mgr.persist_create_node(&graph_name, node) {
-                                    warn!("Failed to persist node {:?}: {}", node_id, e);
-                                }
-                            }
-                            Value::Edge(edge_id, edge) => {
-                                // Persist the created edge
-                                if let Err(e) = persist_mgr.persist_create_edge(&graph_name, edge) {
-                                    warn!("Failed to persist edge {:?}: {}", edge_id, e);
-                                }
-                            }
-                            Value::NodeRef(_) | Value::EdgeRef(..) => {
-                                // Refs from read queries — nothing to persist
-                            }
-                            _ => {} // Other value types don't need persistence
-                        }
-                    }
+            if let (Ok(_), Some(ref persist_mgr)) = (&res, &self.persistence) {
+                let mutations = store_guard.take_write_log();
+                match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
+                    Ok(n) => debug!("Persisted {} entities from {} mutations", n, mutations.len()),
+                    Err(e) => warn!("Failed to persist write: {}", e),
                 }
-                debug!("Write query persisted successfully");
+            } else if self.persistence.is_some() {
+                // The statement failed; do not carry its partial log into the next one.
+                let _ = store_guard.take_write_log();
             }
 
             drop(store_guard);

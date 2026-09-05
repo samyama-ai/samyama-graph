@@ -29,6 +29,7 @@ use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
 use samyama::snapshot::{export_tenant, import_tenant};
+use samyama::persistence::PersistenceManager;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -172,10 +173,48 @@ fn main() {
         let _ = s.create_edge(a, b, "KNOWS").unwrap();
     }
 
+    // ---- Path 4: written by Cypher with persistence on, then recovered the way
+    // a restart recovers -- `PersistenceManager::recover` into a fresh store.
+    //
+    // The three paths above all live in one process, so between them they could
+    // not see a write that reaches memory and never reaches disk. That is the
+    // half of REL-06 the requirement actually names ("visible before restart is
+    // visible after"), and it is where #1094 was: writes over HTTP returned 200
+    // and were gone on the next start.
+    let restart_dir = tempfile::tempdir().expect("tempdir");
+    let mut restart_store = GraphStore::new();
+    {
+        let pm = PersistenceManager::new(restart_dir.path()).expect("persistence");
+        pm.tenants()
+            .create_tenant("default".to_string(), "default".to_string(), None)
+            .ok();
+
+        let mut live = GraphStore::new();
+        live.enable_write_log();
+        // One statement at a time, as a client issues them: a per-statement
+        // journal that only works when the whole build arrives at once would
+        // pass here and fail for every real caller.
+        for stmt in CYPHER_BUILD.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            write(&mut live, stmt);
+            let muts = live.take_write_log();
+            pm.apply_mutations("default", &live, &muts).expect("persist");
+        }
+        pm.checkpoint().expect("checkpoint");
+
+        let (nodes, edges) = pm.recover("default").expect("recover");
+        for node in nodes {
+            restart_store.insert_recovered_node(node);
+        }
+        for edge in edges {
+            restart_store.insert_recovered_edge(edge).expect("recovered edge");
+        }
+    }
+
     let built = vec![
         Built { name: "cypher", store: cypher_store },
         Built { name: "snapshot", store: snapshot_store },
         Built { name: "store_api", store: api_store },
+        Built { name: "restart", store: restart_store },
     ];
 
     // The Cypher-built graph is the reference: it is the path a user exercises
@@ -219,7 +258,7 @@ fn main() {
 
     println!("CH-IMPORT — cross-path import invariants");
     println!("{}", "=".repeat(78));
-    println!("paths: cypher (reference), snapshot, store_api");
+    println!("paths: cypher (reference), snapshot, store_api, restart");
     println!("{:<26} {:<12} {}", "probe", "path", "agrees");
     println!("{}", "-".repeat(78));
     for (probe, path, agrees, expected, got) in &results {
@@ -263,7 +302,7 @@ fn main() {
   \"requirement_ids\": [\"LANG-15\", \"REL-06\"],
   \"run_id\": \"import-{commit}\",
   \"engine\": {{\"name\": \"samyama\", \"version\": \"{}\", \"commit\": \"{commit}\"}},
-  \"dataset\": {{\"name\": \"synthetic-fixture\", \"paths\": [\"cypher\", \"snapshot\", \"store_api\"]}},
+  \"dataset\": {{\"name\": \"synthetic-fixture\", \"paths\": [\"cypher\", \"snapshot\", \"store_api\", \"restart\"]}},
   \"measurements\": {{\"agreed\": {agreed}, \"total\": {total}, \"canary_detected\": {canary_detected}, \"cases\": [
       {cases}
   ]}},

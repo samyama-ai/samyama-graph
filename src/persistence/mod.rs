@@ -228,6 +228,108 @@ impl PersistenceManager {
         Ok(())
     }
 
+    /// Persist a statement's changes, as recorded by [`GraphStore::take_write_log`] (#1094).
+    ///
+    /// This replaces reading durability off the *result* of a write query. That older
+    /// call site walked the returned bindings for `Node`/`Edge` values, so what reached
+    /// storage depended on the `RETURN` clause: `CREATE (:Person)` persisted nothing,
+    /// and `DELETE` left the row on disk to be resurrected by the next restart. Every
+    /// write returned success either way.
+    ///
+    /// The log carries ids, not payloads, so the final state of each touched entity is
+    /// read from `store` here. Ids are coalesced to their last operation before anything
+    /// is written: a node set five times in one statement is one write, and one created
+    /// and then deleted is a delete of something never stored, which is a no-op rather
+    /// than a resurrection. An `Upserted` id missing from the store was deleted later in
+    /// the same statement and is skipped for the same reason.
+    ///
+    /// Returns the number of entities written.
+    pub fn apply_mutations(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        mutations: &[crate::graph::event::Mutation],
+    ) -> Result<usize, PersistenceError> {
+        use crate::graph::event::Mutation;
+        use std::collections::HashMap;
+
+        // Last operation wins, in order of first appearance. Order matters only for
+        // reading a WAL by eye; correctness comes from each entry carrying final state.
+        let mut order: Vec<(bool, u64)> = Vec::new();
+        let mut last: HashMap<(bool, u64), bool> = HashMap::new(); // (is_edge, id) -> deleted
+        for m in mutations {
+            let (key, deleted) = match *m {
+                Mutation::NodeUpserted(id) => ((false, id.as_u64()), false),
+                Mutation::NodeDeleted(id) => ((false, id.as_u64()), true),
+                Mutation::EdgeUpserted(id) => ((true, id.as_u64()), false),
+                Mutation::EdgeDeleted(id) => ((true, id.as_u64()), true),
+            };
+            if last.insert(key, deleted).is_none() {
+                order.push(key);
+            }
+        }
+
+        let mut written = 0usize;
+        for key in order {
+            let (is_edge, id) = key;
+            let deleted = last[&key];
+            match (is_edge, deleted) {
+                (false, false) => {
+                    // Skipped when absent: deleted later in the same statement.
+                    if let Some(node) = store.get_node(crate::graph::NodeId::new(id)) {
+                        let existed = self.storage.get_node(tenant, id)?.is_some();
+                        let properties = bincode::serialize(&node.properties)?;
+                        self.wal.lock().unwrap().append(WalEntry::CreateNode {
+                            tenant: tenant.to_string(),
+                            node_id: id,
+                            labels: node.labels.iter().map(|l| l.as_str().to_string()).collect(),
+                            properties,
+                        })?;
+                        self.storage.put_node(tenant, node)?;
+                        if !existed {
+                            self.tenants.check_quota(tenant, "nodes")?;
+                            self.tenants.increment_usage(tenant, "nodes", 1)?;
+                        }
+                        written += 1;
+                    }
+                }
+                (false, true) => {
+                    if self.storage.get_node(tenant, id)?.is_some() {
+                        self.persist_delete_node(tenant, id)?;
+                        written += 1;
+                    }
+                }
+                (true, false) => {
+                    if let Some(edge) = store.get_edge(crate::graph::EdgeId::new(id)) {
+                        let existed = self.storage.get_edge(tenant, id)?.is_some();
+                        let properties = bincode::serialize(&edge.properties)?;
+                        self.wal.lock().unwrap().append(WalEntry::CreateEdge {
+                            tenant: tenant.to_string(),
+                            edge_id: id,
+                            source: edge.source.as_u64(),
+                            target: edge.target.as_u64(),
+                            edge_type: edge.edge_type.as_str().to_string(),
+                            properties,
+                        })?;
+                        self.storage.put_edge(tenant, &edge)?;
+                        if !existed {
+                            self.tenants.check_quota(tenant, "edges")?;
+                            self.tenants.increment_usage(tenant, "edges", 1)?;
+                        }
+                        written += 1;
+                    }
+                }
+                (true, true) => {
+                    if self.storage.get_edge(tenant, id)?.is_some() {
+                        self.persist_delete_edge(tenant, id)?;
+                        written += 1;
+                    }
+                }
+            }
+        }
+        Ok(written)
+    }
+
     /// Update node properties
     pub fn persist_update_node_properties(
         &self,

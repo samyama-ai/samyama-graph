@@ -788,6 +788,11 @@ pub struct GraphStore {
     /// Async index event sender
     pub index_sender: Option<UnboundedSender<crate::graph::event::IndexEvent>>,
 
+    /// Journal of graph changes, for callers that must persist them (#1094).
+    /// `None` — the default — records nothing, so an embedded or benchmark store
+    /// pays neither the allocation nor the push.
+    write_log: Option<Vec<crate::graph::event::Mutation>>,
+
     /// Next node ID
     next_node_id: u64,
 
@@ -862,10 +867,44 @@ impl GraphStore {
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
+            write_log: None,
             next_node_id: 1,
             next_edge_id: 1,
             catalog: GraphCatalog::new(),
             statistics_cache: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Start recording every change to this store, for a caller that has to
+    /// persist them (#1094).
+    ///
+    /// Off by default. Durability used to be read off the *result* of a write
+    /// query -- the persist loop walked the returned bindings -- which made it a
+    /// property of the `RETURN` clause: `CREATE (:Person)` with nothing returned
+    /// reached no storage, and `DELETE` had no row to describe itself with at all.
+    pub fn enable_write_log(&mut self) {
+        if self.write_log.is_none() {
+            self.write_log = Some(Vec::new());
+        }
+    }
+
+    /// Whether this store is recording changes.
+    pub fn write_log_enabled(&self) -> bool {
+        self.write_log.is_some()
+    }
+
+    /// Take the changes recorded since the last take, leaving recording on.
+    pub fn take_write_log(&mut self) -> Vec<crate::graph::event::Mutation> {
+        match &mut self.write_log {
+            Some(log) => std::mem::take(log),
+            None => Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn journal(&mut self, m: crate::graph::event::Mutation) {
+        if let Some(log) = &mut self.write_log {
+            log.push(m);
         }
     }
 
@@ -1173,6 +1212,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
             versions.push(node);
         }
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         node_id
     }
 
@@ -1255,6 +1295,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
             versions.push(node);
         }
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         node_id
     }
 
@@ -1352,6 +1393,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
             versions.push(node);
         }
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         node_id
     }
 
@@ -1525,6 +1567,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         Ok(())
     }
 
@@ -1585,6 +1628,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(())
     }
 
@@ -1657,6 +1701,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             let _ = self.delete_edge(*edge_id);
         }
 
+        self.journal(crate::graph::event::Mutation::NodeDeleted(id));
         Ok(node)
     }
 
@@ -1704,6 +1749,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         Ok(true)
     }
 
@@ -1748,6 +1794,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.handle_index_event(event, None);
         }
 
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         Ok(())
     }
 
@@ -1792,6 +1839,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_endpoints[idx] = (source, target);
 
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
 
@@ -1889,6 +1937,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels = label_set(target).unwrap_or(empty);
         self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
 
@@ -1996,6 +2045,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels = label_set(target).unwrap_or(empty);
         self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
 
@@ -2110,6 +2160,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.remove_edge_property(edge_id, &key);
             return;
         }
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
         props.insert(key, value);
     }
@@ -2165,6 +2216,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Update catalog triple stats
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
+        self.journal(crate::graph::event::Mutation::EdgeDeleted(id));
         Ok(edge)
     }
 
@@ -2635,6 +2687,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if let Some(node) = self.get_node_mut(node_id) {
             node.remove_property(key);
         }
+        self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         self.invalidate_statistics_cache();
     }
 
@@ -2645,6 +2698,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if let Some(props) = self.get_edge_properties_mut(edge_id) {
             props.remove(key);
         }
+        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         self.invalidate_statistics_cache();
     }
 

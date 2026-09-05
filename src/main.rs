@@ -615,10 +615,14 @@ async fn start_server() {
     // Start HTTP server for Visualizer API (port from --http-port, default 8080)
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);
+    let http_persistence = persistence.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
             .with_tenant_manager(http_tenants);
+        if let Some(pm) = http_persistence {
+            http_server = http_server.with_persistence(pm);
+        }
         if let Some(ref pipeline) = global_embed_pipeline {
             http_server = http_server.with_embed_pipeline(Arc::clone(pipeline));
         }
