@@ -221,6 +221,15 @@ fn main() {
         }
     }
 
+    // One name probed twice is one algorithm. `nodeSimilarity` appears in
+    // CANDIDATES under two call shapes -- `{topK: 3}` and no argument -- because
+    // both are worth probing, and both dispatch, so it was counted twice and
+    // ALGO-01's "algorithms callable from Cypher" read one higher than the
+    // engine ships. The set is also what the name list downstream is built from,
+    // so the count and the list disagreed by exactly this.
+    let mut seen = std::collections::HashSet::new();
+    callable.retain(|n| seen.insert(*n));
+
     let distinct: Vec<&&str> = callable.iter().filter(|n| !ALIASES.contains(n)).collect();
     let json = serde_json::json!({
         "target_h1": 40,
