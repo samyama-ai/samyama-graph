@@ -303,7 +303,21 @@ pub async fn query_handler(
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
         let mut store_guard = state.store.write().await;
+        // Record the changes so they can be persisted: a write here used to reach
+        // memory only, and returned 200 all the same (#1094).
+        if state.persistence.is_some() {
+            store_guard.enable_write_log();
+        }
         let result = state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph);
+        if let Some(pm) = &state.persistence {
+            let mutations = store_guard.take_write_log();
+            if result.is_ok() {
+                match pm.apply_mutations(&payload.graph, &store_guard, &mutations) {
+                    Ok(n) => tracing::debug!("Persisted {} entities from {} mutations", n, mutations.len()),
+                    Err(e) => tracing::warn!("Failed to persist HTTP write: {}", e),
+                }
+            }
+        }
         snapshot_version = store_guard.current_version;
         let props = result
             .as_ref()
@@ -1218,6 +1232,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: None,
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
@@ -1276,6 +1291,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: None,
         };
         let app = Router::new()
             .route("/api/schema", get(schema_handler))
@@ -1316,6 +1332,7 @@ mod tests {
             tenant_manager: None,
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: None,
         };
         let app = Router::new()
             .route("/api/query", axum::routing::post(query_handler))
@@ -1921,4 +1938,57 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+
+    /// The reproduction from #1094: writes over HTTP returned 200 and reached no
+    /// storage, so a restart with `--data-path` set found an empty graph. Neither
+    /// statement here has a `RETURN` clause, which is the case the older persist
+    /// loop -- it walked the result bindings -- could not see at all.
+    #[tokio::test]
+    async fn http_writes_reach_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let pm = std::sync::Arc::new(
+            crate::persistence::PersistenceManager::new(dir.path()).unwrap(),
+        );
+        pm.tenants()
+            .create_tenant("default".to_string(), "default".to_string(), None)
+            .ok();
+
+        let state = AppState {
+            store: Arc::new(RwLock::new(GraphStore::new())),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: Some(std::sync::Arc::clone(&pm)),
+        };
+        let app = Router::new()
+            .route("/api/query", post(query_handler))
+            .with_state(state.clone());
+
+        for name in ["ada", "grace"] {
+            let (status, _) = post_query(
+                app.clone(),
+                &format!(r#"{{"query": "CREATE (p:Person {{name: \"{name}\"}})", "graph": "default"}}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        // What a restart would load.
+        pm.checkpoint().unwrap();
+        let (nodes, _edges) = pm.recover("default").unwrap();
+        let mut names: Vec<String> = nodes
+            .iter()
+            .map(|n| n.properties.get("name").unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names.len(),
+            2,
+            "two 200s and {} nodes on disk",
+            names.len()
+        );
+        assert!(names[0].contains("ada") && names[1].contains("grace"), "{names:?}");
+    }
 }
