@@ -1451,6 +1451,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.node_columns.set_property(idx, key, value.clone());
         }
 
+        // Kept before the move so the index event below is built from the
+        // properties *as given* rather than read back off the node. Reading them
+        // back ties indexing to the row copy: with the row empty — which is what a
+        // snapshot-imported graph looks like, and what removing the duplication in
+        // #1123 would make every graph look like — the event carries nothing and
+        // the index silently never learns the values (#1132).
+        let indexed_properties = properties.clone();
+
         let mut node = Node::new_with_properties(node_id, labels.clone(), properties);
         node.version = self.current_version;
 
@@ -1481,15 +1489,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 tenant_id: tenant_id.to_string(),
                 id: node_id,
                 labels: node.labels.iter().cloned().collect(),
-                properties: node.properties.clone(),
+                properties: indexed_properties,
             });
-        } else if !node.properties.is_empty() {
+        } else if !indexed_properties.is_empty() {
             self.handle_index_event(
                 crate::graph::event::IndexEvent::NodeCreated {
                     tenant_id: tenant_id.to_string(),
                     id: node_id,
                     labels: node.labels.iter().cloned().collect(),
-                    properties: node.properties.clone(),
+                    properties: indexed_properties,
                 },
                 None,
             );
