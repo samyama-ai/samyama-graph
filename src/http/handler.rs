@@ -778,35 +778,63 @@ pub async fn import_csv_handler(
         return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
     }
 
-    let mut lines = csv_text.lines();
-    let header_line = match lines.next() {
-        Some(h) => h,
-        None => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Empty CSV file" }))).into_response(),
-    };
+    // RFC 4180, not `split(delimiter)`. The hand-rolled version had no quote
+    // handling and no record-vs-line distinction, so `"Doe, Jane",42` parsed as
+    // three fields and shifted every column after it, and a quoted field holding a
+    // newline became two records -- silently, with a plausible `nodes_created`
+    // count and `"status": "ok"` (#1105).
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(true)
+        // A row with the wrong number of fields is an error, not a node with some
+        // of its properties missing.
+        .flexible(false)
+        .from_reader(csv_text.as_bytes());
 
-    let headers: Vec<&str> = header_line.split(delimiter as char).collect();
-    let id_col_idx = id_column.as_ref().and_then(|id_col| headers.iter().position(|h| h.trim() == id_col.as_str()));
+    let headers: Vec<String> = match reader.headers() {
+        Ok(h) if !h.is_empty() => h.iter().map(|h| h.trim().to_string()).collect(),
+        Ok(_) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Empty CSV file" }))).into_response(),
+        Err(e) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Unreadable CSV header: {e}") }))).into_response(),
+    };
+    let id_col_idx = id_column.as_ref().and_then(|id_col| headers.iter().position(|h| h == id_col.as_str()));
+
+    // Read and validate every record before touching the store, so a ragged row on
+    // line 900 does not leave 899 nodes behind and a 400 in front of them.
+    let mut records: Vec<csv::StringRecord> = Vec::new();
+    for record in reader.records() {
+        match record {
+            Ok(r) => records.push(r),
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("{e}"), "nodes_created": 0 })),
+                )
+                    .into_response()
+            }
+        }
+    }
 
     let mut count = 0usize;
     state.mutate(&graph, |store_guard| {
     let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
 
-    for line in lines {
-        if line.trim().is_empty() { continue; }
-        let fields: Vec<&str> = line.split(delimiter as char).collect();
-
+    for record in &records {
         let node_id = store_guard.create_node(label.as_str());
 
         if let Some(idx) = id_col_idx {
-            if let Some(val) = fields.get(idx) {
+            if let Some(val) = record.get(idx) {
                 id_map.insert(val.trim().to_string(), node_id);
             }
         }
 
         if let Some(node) = store_guard.get_node_mut(node_id) {
             for (i, header) in headers.iter().enumerate() {
-                if let Some(value) = fields.get(i) {
+                if let Some(value) = record.get(i) {
                     let trimmed = value.trim();
+                    // An empty field leaves the property unset rather than setting
+                    // it to null. That is not what `LOAD CSV` does in other engines
+                    // and it is kept deliberately: changing it would silently alter
+                    // the shape of every node existing callers already import.
                     if trimmed.is_empty() { continue; }
 
                     let prop_val = if let Ok(int_val) = trimmed.parse::<i64>() {
@@ -821,7 +849,7 @@ pub async fn import_csv_handler(
                         PropertyValue::String(trimmed.to_string())
                     };
 
-                    node.set_property(header.trim(), prop_val);
+                    node.set_property(header.as_str(), prop_val);
                 }
             }
         }
@@ -835,7 +863,7 @@ pub async fn import_csv_handler(
         "nodes_created": count,
         "label": label,
         "graph": graph,
-        "columns": headers.iter().map(|h| h.trim()).collect::<Vec<_>>(),
+        "columns": headers,
     })).into_response()
 }
 
@@ -2047,6 +2075,93 @@ mod tests {
         pm.checkpoint().unwrap();
         let (nodes, _) = pm.recover("default").unwrap();
         assert_eq!(nodes.len(), 2, "the import returned ok and a restart found {} nodes", nodes.len());
+    }
+
+    /// Post a CSV upload as multipart, the way the endpoint is actually called.
+    async fn post_csv(app: Router, label: &str, csv: &str) -> (StatusCode, serde_json::Value) {
+        const B: &str = "X-BOUNDARY";
+        let body = format!(
+            "--{B}\r\nContent-Disposition: form-data; name=\"label\"\r\n\r\n{label}\r\n\
+             --{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.csv\"\r\n\r\n{csv}\r\n\
+             --{B}--\r\n"
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/import/csv")
+                    .header("content-type", format!("multipart/form-data; boundary={B}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// `/api/import/csv` split on the delimiter, so a comma inside a quoted field
+    /// became a field separator and every column after it shifted by one. The
+    /// import still reported `"status": "ok"` with the right node count, which is
+    /// what made it a LANG-03 case rather than a crash (#1105).
+    #[tokio::test]
+    async fn a_quoted_comma_does_not_shift_the_columns() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = Router::new()
+            .route("/api/import/csv", post(import_csv_handler))
+            .with_state(state.clone());
+
+        let (status, json) =
+            post_csv(app, "Person", "name,age,city\n\"Doe, Jane\",42,Pune\n").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["nodes_created"], 1);
+
+        let store = state.store.read().await;
+        let node = store.get_nodes_by_label(&"Person".into())[0];
+        let prop = |k: &str| node.properties.get(k).cloned();
+        // Compared as values, not as rendered strings: `PropertyValue`'s `Display`
+        // quotes strings, so `to_string()` would pass on a shifted column too.
+        assert_eq!(prop("name"), Some(PropertyValue::String("Doe, Jane".into())));
+        assert_eq!(prop("age"), Some(PropertyValue::Integer(42)));
+        assert_eq!(prop("city"), Some(PropertyValue::String("Pune".into())));
+    }
+
+    /// A quoted field containing a newline is one record, not two. The old reader
+    /// walked `csv_text.lines()`, so it made a second, short row.
+    #[tokio::test]
+    async fn a_quoted_newline_is_one_record() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = Router::new()
+            .route("/api/import/csv", post(import_csv_handler))
+            .with_state(state.clone());
+
+        let (status, json) =
+            post_csv(app, "Note", "title,body\nfirst,\"line one\nline two\"\n").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["nodes_created"], 1, "a quoted newline made a second node");
+        assert_eq!(state.store.read().await.node_count(), 1);
+    }
+
+    /// A row with the wrong number of fields used to be truncated in silence: the
+    /// node was created with a subset of its properties and the response still said
+    /// ok. It is now a 400, and -- because the file is validated before the store is
+    /// touched -- the rows before it are not left behind either.
+    #[tokio::test]
+    async fn a_ragged_row_is_rejected_and_leaves_nothing_behind() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = Router::new()
+            .route("/api/import/csv", post(import_csv_handler))
+            .with_state(state.clone());
+
+        let (status, json) =
+            post_csv(app, "Person", "name,age\nada,36\ngrace\nalan,41\n").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            0,
+            "the rows before the ragged one were committed anyway"
+        );
     }
 
     /// The miss in #1106 was not that five handlers each forgot to persist. It was

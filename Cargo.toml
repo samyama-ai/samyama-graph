@@ -89,6 +89,8 @@ sha2 = "0.10"
 # rendering nothing here uses).
 arrow = { version = "53", default-features = false, features = ["ipc"] }
 parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+# RFC 4180 parsing for `/api/import/csv`, which used to split on the delimiter (#1105).
+csv = "1.4"
 
 # High Availability (Phase 4)
 openraft = { version = "0.9", features = ["serde"] }
