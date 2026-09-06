@@ -14,8 +14,22 @@
 //! This is the metamorphic shape LANG-05 asks for, applied to storage rather than
 //! to query rewriting: the transformation is "persist and reload", which the
 //! specification requires to preserve every answer.
+//!
+//! There are **three** representations, not two, and the ingest path decides which:
+//!
+//! | path | row copy | columnar |
+//! |---|---|---|
+//! | `CREATE` / `set_node_property` | yes | yes |
+//! | snapshot import | no | yes |
+//! | persistence recover | yes | no |
+//!
+//! `insert_recovered_node` never touches `node_columns`, so a reader that consults
+//! only the columns is wrong after a restart in exactly the way a reader that
+//! consults only the row was wrong after an import. Both directions are compared
+//! here for that reason: fixing one and testing one is how the first bug survived.
 
 use samyama::graph::GraphStore;
+use samyama::persistence::PersistenceManager;
 use samyama::query::QueryEngine;
 use samyama::snapshot::{export_tenant, import_tenant};
 
@@ -55,6 +69,28 @@ const QUERIES: &[&str] = &[
     "MATCH (a)-[r:KNOWS]->(b) RETURN a.name, r.since, b.name ORDER BY a.name",
     "MATCH (n) RETURN count(n)",
     "MATCH (n:Person) WHERE n.name STARTS WITH \"a\" RETURN n.name ORDER BY n.name",
+    // Shapes added after the first run found one bug in sixteen queries: the
+    // corpus is the coverage, so it is worth more than the fix was.
+    "MATCH (n:Person) RETURN n.name, n.age, n.score, n.active ORDER BY n.name",
+    "MATCH (n) RETURN labels(n) ORDER BY labels(n)",
+    "MATCH (n:Person) RETURN min(n.age), max(n.age)",
+    "MATCH (n:Person) WHERE n.nickname IS NULL RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.nickname IS NOT NULL RETURN n.name",
+    "MATCH (n:Person) RETURN n.name AS who ORDER BY who DESC",
+    "MATCH (n:Person) WITH n.age AS a WHERE a > 40 RETURN a ORDER BY a",
+    "MATCH (n:Person) RETURN DISTINCT n.active ORDER BY n.active",
+    "MATCH (n:Person) RETURN collect(n.name) ORDER BY n.name",
+    "MATCH (a)-[r:KNOWS]->(b) RETURN r ORDER BY a.name",
+    "MATCH (a)-[r:KNOWS]->(b) RETURN properties(r) ORDER BY a.name",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.since > 2020 RETURN a.name",
+    "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
+    "MATCH (n:Person) RETURN n.name ORDER BY n.score",
+    "MATCH (n:Person) RETURN count(DISTINCT n.active)",
+    "MATCH (n:Odd) RETURN n.when",
+    "MATCH (n:Odd) RETURN keys(n)",
+    "MATCH (n) WHERE n.name = \"ada\" RETURN n.age",
+    "MATCH (n:Person) RETURN sum(n.score) / count(n)",
+    "MATCH (n:Person) WHERE n.age IN [36, 45] RETURN n.name ORDER BY n.name",
 ];
 
 /// Canonicalise the brace-delimited groups a `Debug` rendering produces for maps
@@ -131,17 +167,102 @@ fn answer(engine: &QueryEngine, store: &GraphStore, q: &str) -> String {
     }
 }
 
+/// Build the graph the corpus is written against.
+fn built(engine: &QueryEngine) -> GraphStore {
+    let mut store = GraphStore::new();
+    for stmt in BUILD.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        engine
+            .execute_mut(stmt, &mut store, T)
+            .unwrap_or_else(|e| panic!("setup failed: {stmt}\n{e}"));
+    }
+    assert!(store.node_count() >= 5, "setup built nothing to compare");
+    store
+}
+
+/// Compare every query's answer between two stores, reporting all divergences
+/// rather than the first: one failure per run turns a corpus into a queue.
+fn compare(engine: &QueryEngine, reference: &GraphStore, other: &GraphStore, what: &str) {
+    let mut diffs = Vec::new();
+    for q in QUERIES {
+        let a = answer(engine, reference, q);
+        let b = answer(engine, other, q);
+        if a != b {
+            diffs.push(format!("--- {q}\n  built: {a}\n  {what}: {b}"));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "{} of {} queries answer differently after {what}. Each one is a reader \
+         that consults one property representation and not the other (#545):\n\n{}",
+        diffs.len(),
+        QUERIES.len(),
+        diffs.join("\n\n")
+    );
+}
+
+#[test]
+fn every_query_answers_the_same_after_a_persistence_restart() {
+    let engine = QueryEngine::new();
+    let source = built(&engine);
+
+    let dir = tempfile::tempdir().unwrap();
+    let pm = PersistenceManager::new(dir.path()).unwrap();
+    pm.tenants().create_tenant(T.to_string(), T.to_string(), None).ok();
+
+    // Persisted the way the servers persist, through the mutation journal.
+    let mut live = GraphStore::new();
+    live.enable_write_log();
+    for stmt in BUILD.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        engine.execute_mut(stmt, &mut live, T).unwrap();
+        let muts = live.take_write_log();
+        pm.apply_mutations(T, &live, &muts).expect("persist");
+    }
+    pm.checkpoint().expect("checkpoint");
+
+    let (nodes, edges) = pm.recover(T).expect("recover");
+    let mut restored = GraphStore::new();
+    for n in nodes {
+        restored.insert_recovered_node(n);
+    }
+    for e in edges {
+        restored.insert_recovered_edge(e).expect("recovered edge");
+    }
+    assert_eq!(
+        restored.node_count(),
+        source.node_count(),
+        "the restart lost nodes, so any answer comparison below is moot"
+    );
+
+    // The precondition that makes this test mean anything: the restored store must
+    // actually hold its properties somewhere different from the built one.
+    // `insert_recovered_node` fills the row copy and never touches the columns, so
+    // if the columns are populated here the recovery path has changed and this test
+    // is comparing a store against itself.
+    let a_person = restored
+        .get_nodes_by_label(&"Person".into())
+        .first()
+        .map(|n| n.id)
+        .expect("no Person survived the restart");
+    let idx = a_person.as_u64() as usize;
+    assert!(
+        restored.node_columns.get_property_keys(idx).is_empty(),
+        "recovery now populates the column store, so this test no longer exercises \
+         the row-only representation it was written for — re-derive it rather than \
+         deleting this assertion"
+    );
+    assert!(
+        !restored.get_node(a_person).unwrap().properties.is_empty(),
+        "recovery populated neither representation"
+    );
+
+    compare(&engine, &source, &restored, "a persistence restart");
+}
+
 #[test]
 fn every_query_answers_the_same_after_a_snapshot_round_trip() {
     let engine = QueryEngine::new();
 
-    let mut built = GraphStore::new();
-    for stmt in BUILD.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        engine
-            .execute_mut(stmt, &mut built, T)
-            .unwrap_or_else(|e| panic!("setup failed: {stmt}\n{e}"));
-    }
-    assert!(built.node_count() >= 5, "setup built nothing to compare");
+    let built = built(&engine);
 
     let mut bytes = Vec::new();
     export_tenant(&built, &mut bytes).expect("export");
@@ -151,6 +272,20 @@ fn every_query_answers_the_same_after_a_snapshot_round_trip() {
         imported.node_count(),
         built.node_count(),
         "the round trip lost nodes, so any answer comparison below is moot"
+    );
+
+    // Same precondition, other direction: after an import the row copy is empty by
+    // design and the values are in the columns. If that stops being true this test
+    // compares a store against itself and proves nothing.
+    let a_person = imported
+        .get_nodes_by_label(&"Person".into())
+        .first()
+        .map(|n| n.id)
+        .expect("no Person survived the round trip");
+    assert!(
+        imported.get_node(a_person).unwrap().properties.is_empty(),
+        "import now fills the row copy, so this test no longer exercises the \
+         columnar-only representation it was written for"
     );
 
     let mut diffs = Vec::new();
