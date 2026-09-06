@@ -139,6 +139,17 @@ impl PersistenceManager {
     }
 
     /// Persist a node creation
+    /// Persist a node exactly as given.
+    ///
+    /// **The caller owns the property merge.** This serialises `node.properties`,
+    /// the row copy, and a node that arrived by snapshot import has an empty one —
+    /// its values are in the column store (#545). Passing such a node here writes a
+    /// node with no properties and reports success (#1129).
+    ///
+    /// Use `GraphStore::node_materialized(id)` to get a node whose row map holds
+    /// every property wherever it lives, or use `apply_mutations`, which does that
+    /// for you. Today nothing outside this module's own tests calls this; the
+    /// contract is written down so that stays a choice rather than an accident.
     pub fn persist_create_node(&self, tenant: &str, node: &Node) -> Result<(), PersistenceError> {
         // Check tenant quota
         self.tenants.check_quota(tenant, "nodes")?;
@@ -505,6 +516,52 @@ pub type PersistenceResult<T> = Result<T, PersistenceError>;
 
 #[cfg(test)]
 mod tests {
+
+    /// Nothing outside this module's tests may call the persistence functions that
+    /// cannot merge a node's properties.
+    ///
+    /// `persist_create_node` and `PersistentStorage::put_node` serialise the row
+    /// copy. A node from a snapshot import has an empty row copy and its values in
+    /// the column store, so those functions write a node with no properties and
+    /// report success — the loss in #1129, which reached a restart before anything
+    /// noticed. `apply_mutations` merges first; a new caller that does not is the
+    /// way the bug comes back.
+    ///
+    /// A doc comment says the contract. This one enforces it.
+    #[test]
+    fn nothing_persists_a_node_without_merging_its_properties() {
+        let source = include_str!("mod.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mod.rs has a production region");
+
+        let offenders: Vec<(usize, &str)> = production
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.contains("persist_create_node(") || l.contains(".put_node(")
+            })
+            // The definition itself, and the one call inside it.
+            .filter(|(_, l)| !l.contains("pub fn persist_create_node"))
+            // `apply_mutations` is the merged path — it is fed `node_materialized`.
+            .filter(|(i, _)| {
+                let start = i.saturating_sub(25);
+                !production.lines().collect::<Vec<_>>()[start..*i]
+                    .iter()
+                    .any(|l| l.contains("node_materialized"))
+            })
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "these persist a node without merging its properties, so a node that \
+             came from a snapshot import is written with none of them and the call \
+             reports success (#1129). Pass `store.node_materialized(id)`, or route \
+             the write through `apply_mutations`: {offenders:?}"
+        );
+    }
     use super::*;
     use crate::graph::{Label, NodeId, EdgeId, EdgeType, PropertyValue, PropertyMap};
     use tempfile::TempDir;
