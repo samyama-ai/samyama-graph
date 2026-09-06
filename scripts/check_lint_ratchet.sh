@@ -16,8 +16,23 @@ set -uo pipefail
 
 CEILING="${1:-769}"
 
-count=$(cargo clippy --workspace --all-targets 2>&1 | grep -cE "^warning")
+# Two different things start with "warning:" — individual lints, and cargo's
+# per-crate summary ("warning: `samyama` (lib) generated 64 warnings"). The count
+# below includes both, which is what the ceiling was set against, so it stays that
+# way until the ceiling is re-measured on CI in the same commit.
+#
+# It is worth knowing that the two move independently. The summary count is one
+# line per *crate that emitted anything*, so it shifts with toolchain version and
+# with how the workspace is split, neither of which is lint debt. Measured on
+# 2026-09-07 with rustc 1.96.1: 945 total = 799 lints + 146 summaries, while CI on
+# `stable` passed the 769 ceiling on the same commit. A number that differs between
+# a developer's machine and CI teaches people to ignore it, so both are printed.
+raw=$(cargo clippy --workspace --all-targets 2>&1)
+count=$(echo "$raw" | grep -cE "^warning")
+lints=$(echo "$raw" | grep -E "^warning" | grep -vc "generated")
+summaries=$((count - lints))
 echo "clippy warnings: $count (ceiling $CEILING)"
+echo "  of which lints: $lints, per-crate summaries: $summaries"
 
 if [ "$count" -gt "$CEILING" ]; then
   echo "FAIL: $((count - CEILING)) more clippy warnings than the ceiling."
