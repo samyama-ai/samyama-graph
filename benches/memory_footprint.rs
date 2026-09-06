@@ -22,6 +22,11 @@
 //!   cargo bench --bench memory_footprint -- --scale 200000
 
 use samyama::graph::GraphStore;
+
+// The LDBC loader, shared with `ldbc_benchmark` rather than re-implemented: a second
+// loader would measure a second graph, and the point is to measure the one the
+// benchmark builds.
+mod ldbc_common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -154,6 +159,124 @@ struct Phase {
     heap_delta: usize,
 }
 
+/// Load a real LDBC SNB export and report its footprint (PERF-10 as specified).
+///
+/// RSS is the figure the spec names, and it is the honest one for "resident": the
+/// live-heap number ignores allocator fragmentation and the return of freed pages,
+/// both of which a customer pays for. Both are reported, with their ratio, because a
+/// large gap between them is itself the finding — it says the cost is in the
+/// allocator rather than in the data structures.
+fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
+    let base_heap = live_heap();
+    let base_rss = rss();
+    let hist_base = hist_snapshot();
+    let t = std::time::Instant::now();
+
+    let mut store = GraphStore::new();
+    let loaded = match ldbc_common::load_dataset(&mut store, dir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("could not load {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+    };
+    let after_load = live_heap();
+
+    // The planner's view, built here rather than lazily at first query, so the number
+    // includes what a served graph actually holds.
+    let _stats = store.statistics();
+    let after_stats = live_heap();
+    let final_rss = rss();
+    let hist_end = hist_snapshot();
+    let elapsed = t.elapsed();
+
+    let nodes = loaded.total_nodes;
+    let edges = loaded.total_edges;
+    let heap = after_stats.saturating_sub(base_heap);
+    let rss_delta = match (base_rss, final_rss) {
+        (Some(b), Some(f)) => f.saturating_sub(b) as i64,
+        _ => -1,
+    };
+
+    println!("PERF-10 — real dataset at {}", dir.display());
+    println!("{}", "-".repeat(78));
+    println!("{:<28} {:>16}", "nodes", nodes);
+    println!("{:<28} {:>16}", "edges", edges);
+    println!("{:<28} {:>16}", "load seconds", elapsed.as_secs());
+    println!("{:<28} {:>16}", "live heap (bytes)", heap);
+    println!("{:<28} {:>16}", "RSS delta (bytes)", rss_delta);
+    println!("{:<28} {:>16}", "statistics (bytes)", after_stats.saturating_sub(after_load));
+    if edges > 0 {
+        println!("{:<28} {:>16.1}", "heap bytes/edge", heap as f64 / edges as f64);
+        if rss_delta >= 0 {
+            println!("{:<28} {:>16.1}", "RSS bytes/edge  <- PERF-10", rss_delta as f64 / edges as f64);
+        }
+    }
+    if heap > 0 && rss_delta > 0 {
+        println!("{:<28} {:>16.2}", "RSS / heap", rss_delta as f64 / heap as f64);
+    }
+
+    // Which allocation sizes the load made. **These are calls, not live blocks** --
+    // most are transient parsing churn -- so the histogram measures allocator
+    // pressure during load and says nothing directly about residency. Read together
+    // with `RSS / heap` it is still decisive in one direction: a load dominated by
+    // tiny allocations that nonetheless ends at RSS ~= live heap has *not* paid
+    // per-allocation overhead in resident bytes, which rules the allocator out and
+    // points at the data itself. One `load_dataset` call builds nodes and edges
+    // together, so the phase split the synthetic path reports is not available here.
+    println!("\nallocation sizes during load (calls, not live blocks)");
+    println!("{:<16} {:>14} {:>12}", "size", "count", "share");
+    let total: usize = (0..BUCKETS).map(|i| hist_end[i].saturating_sub(hist_base[i])).sum();
+    for i in 0..BUCKETS {
+        let n = hist_end[i].saturating_sub(hist_base[i]);
+        if n == 0 {
+            continue;
+        }
+        let label = if i + 1 >= BUCKETS { format!(">={}", 1usize << i) } else { format!("{}..{}", 1usize << i, (1usize << (i + 1)) - 1) };
+        println!("{:<16} {:>14} {:>11.1}%", label, n, 100.0 * n as f64 / total.max(1) as f64);
+    }
+
+    if let Some(path) = json_out {
+        let commit = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let name = dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let body = format!(
+            "{{
+  \"suite\": \"memory-footprint\",
+  \"requirement_ids\": [\"PERF-10\"],
+  \"run_id\": \"footprint-{commit}-{name}\",
+  \"engine\": {{\"name\": \"samyama\", \"version\": \"{}\", \"commit\": \"{commit}\"}},
+  \"hardware\": {{\"note\": \"single process; RSS is host-dependent, heap bytes are not\"}},
+  \"dataset\": {{\"name\": \"{name}\", \"nodes\": {nodes}, \"edges\": {edges}, \"synthetic\": false}},
+  \"measurements\": {{
+    \"live_heap_bytes\": {heap},
+    \"rss_delta_bytes\": {rss_delta},
+    \"load_seconds\": {},
+    \"bytes_per_node_heap\": {:.2},
+    \"bytes_per_edge_heap\": {:.2},
+    \"bytes_per_edge_rss\": {:.2}
+  }}
+}}
+",
+            env!("CARGO_PKG_VERSION"),
+            elapsed.as_secs(),
+            if nodes > 0 { heap as f64 / nodes as f64 } else { 0.0 },
+            if edges > 0 { heap as f64 / edges as f64 } else { 0.0 },
+            if edges > 0 && rss_delta >= 0 { rss_delta as f64 / edges as f64 } else { -1.0 },
+        );
+        if let Err(e) = std::fs::write(&path, body) {
+            eprintln!("could not write {path}: {e}");
+        } else {
+            println!("\n-> {path}");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
@@ -173,6 +296,19 @@ fn main() {
     let compact_every: usize = arg("--compact-every")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+
+    // PERF-10 is specified on SNB SF10 — "≤128 B/edge resident" — and the synthetic
+    // graph above is a proxy for it whose value moves 4.5x across degree 2..16. So a
+    // number from it can bound nothing: the spec's target is a property of a
+    // particular dataset, and the only way to report against that target is to load
+    // that dataset.
+    //
+    // This path loads a real SNB export with the same loader the LDBC benchmark uses
+    // and reports the same allocator and RSS figures. Nothing else in the bench
+    // changes, so the synthetic and real numbers stay comparable.
+    if let Some(dir) = arg("--ldbc-data") {
+        return measure_real_dataset(std::path::Path::new(&dir), arg("--json"));
+    }
 
     println!(
         "Memory footprint — {scale} nodes, target degree {avg_degree}{}",
