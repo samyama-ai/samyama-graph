@@ -139,16 +139,13 @@ impl CommandHandler {
 
         debug!("Executing query: {}", query_str);
 
-        // Check if this is a write query (CREATE, DELETE, SET, MERGE)
-        let query_upper = query_str.trim().to_uppercase();
-        let is_write_query = query_upper.starts_with("CREATE")
-            || query_upper.starts_with("DELETE")
-            || query_upper.starts_with("SET")
-            || query_upper.starts_with("MERGE")
-            || query_upper.contains(" CREATE ")
-            || query_upper.contains(" DELETE ")
-            || query_upper.contains(" SET ")
-            || query_upper.contains(" MERGE ");
+        // Asked of the parser, not of the query text. This used to be a list of
+        // keywords that had no `REMOVE` in it, while the HTTP server kept a
+        // different list with different holes (#1111).
+        let is_write_query = self
+            .query_engine
+            .statement_is_write(&query_str)
+            .unwrap_or(false);
 
         // Execute query with appropriate method
         let result = if is_write_query {
@@ -205,7 +202,18 @@ impl CommandHandler {
         args: &[RespValue],
         store: &Arc<RwLock<GraphStore>>,
     ) -> RespValue {
-        // For now, same as GRAPH.QUERY (we don't enforce read-only yet)
+        // The command exists so a caller can send reads somewhere a write must not
+        // land — a replica, a reader pool. It used to delegate straight to
+        // `GRAPH.QUERY`, with a comment saying read-only was not enforced, so the
+        // guarantee in the name was not one (#1111). Now that the parser decides
+        // what a write is, refusing one here is a single check.
+        if let Some(Ok(Some(query))) = args.get(2).map(|a| a.as_string()) {
+            if self.query_engine.statement_is_write(&query).unwrap_or(false) {
+                return RespValue::Error(
+                    "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string(),
+                );
+            }
+        }
         self.handle_graph_query(args, store).await
     }
 
