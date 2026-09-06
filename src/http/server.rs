@@ -88,9 +88,47 @@ pub struct AppState {
     pub embed_pipeline: Option<Arc<EmbedPipeline>>,
     /// Per-tenant EmbedPipeline cache; invalidated on PATCH /api/tenants/:id
     pub embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>>,
-    /// Persistence for writes made through `POST /api/query` (#1094). Without it a
-    /// write over HTTP lives only in memory, and every one of them returns success.
+    /// Persistence for writes made over HTTP (#1094, #1106). Without it a write
+    /// lives only in memory, and every one of them returns success.
     pub persistence: Option<Arc<crate::persistence::PersistenceManager>>,
+}
+
+impl AppState {
+    /// Take the write lock, run a mutation, and persist whatever it changed.
+    ///
+    /// Every HTTP path that mutates the graph goes through here. Five did not
+    /// (#1106) — Parquet, CSV and JSON import, `/api/enrich` and `/api/verify` all
+    /// wrote to memory and returned 200 with nothing on disk — and the shape of the
+    /// miss is why this is a method and not a fourth copy of the same six lines:
+    /// each handler took the lock itself, so the fix to `query_handler` was not
+    /// something the others could inherit.
+    ///
+    /// The log is applied on the outcome of the *store*, not of `body`. A statement
+    /// that fails partway does not undo the rows it already wrote — the engine has
+    /// no statement rollback (LANG-07) — and REL-06 does not let disk disagree with
+    /// memory about rows that are visible.
+    ///
+    /// `GraphStore` is passed by `&mut` rather than the guard so that a body cannot
+    /// hold the lock past the persist.
+    pub async fn mutate<T>(
+        &self,
+        graph: &str,
+        body: impl FnOnce(&mut GraphStore) -> T,
+    ) -> T {
+        let mut store = self.store.write().await;
+        if self.persistence.is_some() {
+            store.enable_write_log();
+        }
+        let out = body(&mut store);
+        if let Some(pm) = &self.persistence {
+            let mutations = store.take_write_log();
+            match pm.apply_mutations(graph, &store, &mutations) {
+                Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
+                Err(e) => tracing::warn!("failed to persist {} mutations: {e}", mutations.len()),
+            }
+        }
+        out
+    }
 }
 
 /// HTTP server managing the Visualizer API and static assets

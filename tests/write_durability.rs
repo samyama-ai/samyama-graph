@@ -148,19 +148,40 @@ fn repeated_writes_to_one_node_do_not_inflate_the_tenant_count() {
     assert_eq!(db.restart().0.len(), 1);
 }
 
+/// A statement that fails partway does not undo what it already wrote — the engine
+/// has no statement rollback (LANG-07: transactions are "none"). So the question is
+/// not whether to persist a failed statement's log but whether disk is allowed to
+/// disagree with memory, and REL-06 says it is not.
+///
+/// `UNWIND [1, 2, 0] AS n CREATE (:M {v: 10 / n})` errors on the last row with rows
+/// already in the store. Dropping the log there left memory holding rows that a
+/// restart threw away.
 #[test]
-fn a_failed_statement_does_not_persist_its_partial_log() {
+fn a_partial_failure_leaves_disk_agreeing_with_memory() {
     let mut db = Db::new();
-    db.write("CREATE (p:Person {name: \"ada\"})");
 
-    // Fails at execution, after the CREATE has already touched the store.
-    let _ = db
-        .engine
-        .execute_mut("CREATE (q:Person {name: \"eve\"}) RETURN nosuchfn(q)", &mut db.store, T);
+    let result = db.engine.execute_mut(
+        "UNWIND [1, 2, 0] AS n CREATE (:M {v: 10 / n})",
+        &mut db.store,
+        T,
+    );
+    assert!(result.is_err(), "the statement is supposed to fail");
+    // How many rows got through before the error is an evaluation-order detail and
+    // not what this test is about; that any did is the whole point.
+    let in_memory = db.store.node_count();
+    assert!(in_memory > 0, "the failure left nothing visible, so there is nothing to lose");
+
+    // Persisted the way the server persists it: on the outcome of the *store*, not
+    // the outcome of the statement.
     let muts = db.store.take_write_log();
-    // The server drops the log rather than applying it.
-    drop(muts);
+    db.pm.apply_mutations(T, &db.store, &muts).expect("persist");
 
     let (nodes, _) = db.restart();
-    assert_eq!(nodes.len(), 1, "only the committed statement is on disk");
+    assert_eq!(
+        nodes.len(),
+        in_memory,
+        "restart found {} of the {} rows the failed statement left visible",
+        nodes.len(),
+        in_memory
+    );
 }
