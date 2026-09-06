@@ -100,6 +100,25 @@ pub fn dense_is_smaller(span: usize, entries: usize, elem_bytes: usize) -> bool 
     dense_bits < sparse_bits
 }
 
+impl<T> ColumnData<T> {
+    /// Resident bytes at capacity. `elem` is `size_of::<T>()`; `owned` reports what
+    /// each element owns beyond that, which is the string contents for a `String`
+    /// column and nothing for the scalar ones.
+    pub fn heap_bytes(&self, elem: usize, owned: impl Fn(&T) -> usize) -> usize {
+        match self {
+            ColumnData::Sparse(m) => {
+                m.capacity() * (std::mem::size_of::<usize>() + elem + 1)
+                    + m.values().map(&owned).sum::<usize>()
+            }
+            ColumnData::Dense { values, present, .. } => {
+                values.capacity() * elem
+                    + present.capacity() * std::mem::size_of::<u64>()
+                    + values.iter().map(&owned).sum::<usize>()
+            }
+        }
+    }
+}
+
 impl<T: Clone + Default> ColumnData<T> {
     fn new() -> Self {
         ColumnData::Sparse(FxHashMap::default())
@@ -369,6 +388,41 @@ pub enum Column {
 }
 
 impl Column {
+    /// Resident bytes of this column's data, at capacity.
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Column::Int(d) => d.heap_bytes(std::mem::size_of::<i64>(), |_| 0),
+            Column::Float(d) => d.heap_bytes(std::mem::size_of::<f64>(), |_| 0),
+            Column::Bool(d) => d.heap_bytes(std::mem::size_of::<bool>(), |_| 0),
+            Column::String(d) => d.heap_bytes(std::mem::size_of::<String>(), |s: &String| s.len()),
+            Column::Other(m) => {
+                m.capacity()
+                    * (std::mem::size_of::<usize>() + std::mem::size_of::<PropertyValue>() + 1)
+                    + m.values().map(property_value_heap).sum::<usize>()
+            }
+        }
+    }
+}
+
+/// Heap a `PropertyValue` owns beyond its own 56 bytes.
+fn property_value_heap(v: &PropertyValue) -> usize {
+    match v {
+        PropertyValue::String(s) => s.len(),
+        PropertyValue::Array(a) => {
+            a.capacity() * std::mem::size_of::<PropertyValue>()
+                + a.iter().map(property_value_heap).sum::<usize>()
+        }
+        PropertyValue::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
+        PropertyValue::Map(m) => {
+            m.capacity() * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1)
+                + m.iter().map(|(k, v)| k.len() + property_value_heap(v)).sum::<usize>()
+        }
+        PropertyValue::ZonedDateTime { zone: Some(z), .. } => z.len(),
+        _ => 0,
+    }
+}
+
+impl Column {
     pub fn new_int() -> Self { Column::Int(ColumnData::new()) }
     pub fn new_float() -> Self { Column::Float(ColumnData::new()) }
     pub fn new_string() -> Self { Column::String(ColumnData::new()) }
@@ -515,6 +569,22 @@ pub struct ColumnStore {
 impl ColumnStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Resident bytes across every column (capacity, not length).
+    ///
+    /// Reported so `GraphStore::memory_report` can attribute the columnar half of
+    /// property storage instead of leaving it in an unexplained remainder — every
+    /// property is currently written here *and* to the row `Node.properties`, and a
+    /// duplication nobody can see the size of is one nobody removes.
+    pub fn heap_bytes(&self) -> usize {
+        let mut total = self.names.iter().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
+        total += self.index.capacity() * (std::mem::size_of::<String>() + std::mem::size_of::<ColumnId>() + 1);
+        for (name, col) in self.names.iter().zip(self.columns.iter()) {
+            total += name.len();
+            total += col.heap_bytes();
+        }
+        total
     }
 
     /// The id of a property's column, if it has one.

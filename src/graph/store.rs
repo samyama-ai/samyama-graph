@@ -682,6 +682,12 @@ pub struct EdgeVersionEntry {
 /// cannot say which structure to change and these can.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryReport {
+    /// Columnar node properties. Written on **every** `set_node_property`
+    /// alongside the row copy in `node_properties`, so the two lines are the same
+    /// data twice (#1123).
+    pub node_columns: usize,
+    /// Columnar edge properties, likewise duplicated with `edge_properties`.
+    pub edge_columns: usize,
     /// Node arena including MVCC version chains — one `Vec<Node>` per node id.
     pub node_versions: usize,
     /// Node property tables, their key strings and their string values.
@@ -709,7 +715,9 @@ impl MemoryReport {
     /// property and hierarchy index managers are behind `Arc` and are not walked, so
     /// this is a floor on the graph's footprint and not the process's.
     pub fn attributed(&self) -> usize {
-        self.node_versions
+        self.node_columns
+            + self.edge_columns
+            + self.node_versions
             + self.node_properties
             + self.node_labels
             + self.edge_endpoints
@@ -724,12 +732,14 @@ impl MemoryReport {
     /// Named lines, largest first — the order someone reading it wants.
     pub fn lines(&self) -> Vec<(&'static str, usize)> {
         let mut v = vec![
+            ("node properties (columnar)", self.node_columns),
+            ("edge properties (columnar)", self.edge_columns),
             ("node versions (arena)", self.node_versions),
-            ("node properties", self.node_properties),
+            ("node properties (row)", self.node_properties),
             ("node labels", self.node_labels),
             ("edge endpoints", self.edge_endpoints),
             ("edge type ids", self.edge_type_ids),
-            ("edge properties", self.edge_properties),
+            ("edge properties (row)", self.edge_properties),
             ("adjacency: write buffer", self.adjacency_write_buffer),
             ("adjacency: frozen CSR", self.adjacency_frozen),
             ("label index", self.label_index),
@@ -1095,6 +1105,8 @@ impl GraphStore {
         }
 
         MemoryReport {
+            node_columns: self.node_columns.heap_bytes(),
+            edge_columns: self.edge_columns.heap_bytes(),
             node_versions,
             node_properties,
             node_labels,
