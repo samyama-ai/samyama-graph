@@ -15692,6 +15692,163 @@ impl PhysicalOperator for UnwindOperator {
     }
 }
 
+/// `LOAD CSV` — one row per CSV record (LANG-09).
+///
+/// Streams. The obvious alternative is to desugar `LOAD CSV ... AS row` into
+/// `UNWIND <the whole file> AS row`, which needs no operator at all and inherits
+/// every UNWIND optimisation — but `UnwindOperator` materialises its list into a
+/// `Vec<Record>`, one clone per row, so a bulk-ingest clause would hold the entire
+/// file *and* a record per line in memory. This holds a `csv::Reader` and yields one
+/// record at a time, which is the only version that can honestly use the word bulk.
+///
+/// The reader is opened lazily, on the first `next()`, so a query that is planned
+/// and never pulled does not touch the filesystem, and `reset()` can drop it.
+pub struct LoadCsvOperator {
+    input: OperatorBox,
+    clause: crate::query::ast::LoadCsvClause,
+    /// The row this file is being read for. `LOAD CSV` is a source and its input is
+    /// a single empty row in every realistic query, but the operator is written for
+    /// the general case rather than assuming it.
+    current: Option<Record>,
+    reader: Option<csv::Reader<std::fs::File>>,
+    headers: Vec<String>,
+    exhausted: bool,
+}
+
+impl LoadCsvOperator {
+    pub fn new(input: OperatorBox, clause: crate::query::ast::LoadCsvClause) -> Self {
+        Self {
+            input,
+            clause,
+            current: None,
+            reader: None,
+            headers: Vec::new(),
+            exhausted: false,
+        }
+    }
+
+    fn open(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        let source = match eval_expression(&self.clause.source, record, store)? {
+            Value::Property(PropertyValue::String(s)) => s,
+            other => {
+                return Err(ExecutionError::TypeError(format!(
+                    "LOAD CSV FROM expects a string path, got {other:?}"
+                )))
+            }
+        };
+        let path = crate::query::csv_source::resolve(&source)
+            .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        let file = std::fs::File::open(&path)
+            .map_err(|e| ExecutionError::RuntimeError(format!("LOAD CSV cannot open '{}': {e}", path.display())))?;
+
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(self.clause.field_terminator.unwrap_or(',') as u8)
+            .has_headers(self.clause.with_headers)
+            // A ragged row is an error, not a row with some fields missing. Without
+            // headers the row is a list and a short one changes what `row[3]` means.
+            .flexible(false)
+            .from_reader(file);
+
+        self.headers = if self.clause.with_headers {
+            reader
+                .headers()
+                .map_err(|e| ExecutionError::RuntimeError(format!("LOAD CSV cannot read the header row: {e}")))?
+                .iter()
+                .map(|h| h.trim().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.reader = Some(reader);
+        Ok(())
+    }
+
+    /// A field becomes a string. Cypher's `LOAD CSV` does not infer types — every
+    /// field arrives as a string and the query converts with `toInteger`/`toFloat` —
+    /// and guessing here would make `007` an integer and lose the zeros, silently,
+    /// in an ingest path.
+    fn field(raw: &str) -> Value {
+        Value::Property(PropertyValue::String(raw.to_string()))
+    }
+}
+
+impl PhysicalOperator for LoadCsvOperator {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if self.reader.is_none() {
+                if self.exhausted {
+                    return Ok(None);
+                }
+                let record = match self.input.next(store)? {
+                    Some(r) => r,
+                    None => {
+                        self.exhausted = true;
+                        return Ok(None);
+                    }
+                };
+                self.open(&record, store)?;
+                self.current = Some(record);
+            }
+
+            let reader = self.reader.as_mut().expect("opened above");
+            let mut row = csv::StringRecord::new();
+            let more = reader
+                .read_record(&mut row)
+                .map_err(|e| ExecutionError::RuntimeError(format!("LOAD CSV: {e}")))?;
+            if !more {
+                // This file is done; the next input row, if any, opens the next one.
+                self.reader = None;
+                self.current = None;
+                continue;
+            }
+
+            let value = if self.clause.with_headers {
+                let mut map = std::collections::BTreeMap::new();
+                for (i, header) in self.headers.iter().enumerate() {
+                    map.insert(header.clone(), Self::field(row.get(i).unwrap_or("")));
+                }
+                Value::Map(map)
+            } else {
+                Value::List(row.iter().map(Self::field).collect())
+            };
+
+            let mut out = self.current.clone().unwrap_or_default();
+            out.bind(self.clause.variable.clone(), value);
+            return Ok(Some(out));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.reader = None;
+        self.current = None;
+        self.headers.clear();
+        self.exhausted = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "LoadCsv".to_string(),
+            details: format!(
+                "{} AS {}{}",
+                format_expression(&self.clause.source),
+                self.clause.variable,
+                if self.clause.with_headers { " (with headers)" } else { "" }
+            ),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 /// MERGE operator - upsert: match or create pattern
 pub struct MergeOperator {
     /// Upstream rows, when this MERGE runs inside a clause pipeline.

@@ -1288,9 +1288,15 @@ impl QueryPlanner {
         // no MATCH but is still row-driven, and planning it as a CREATE-only statement runs
         // it once with nothing bound. It falls through to the general pipeline, where the
         // Unwind feeds the create.
+        //
+        // `LOAD CSV` is the same shape and needed the same exclusion: without it
+        // `LOAD CSV ... AS row CREATE (:P {n: row.name})` was planned as a bare CREATE
+        // and failed with "`n` refers to a variable that is not bound here", the file
+        // never opened.
         if query.match_clauses.is_empty()
             && query.call_clause.is_none()
             && !Self::has_any_unwind(query)
+            && query.load_csv_clause.is_none()
         {
             if let Some(create_clause) = &query.create_clause {
                 let mut plan = self.plan_create_only(create_clause)?;
@@ -1771,6 +1777,19 @@ impl QueryPlanner {
         let unwind_before_barrier = query.unwind_leading
             || query.with_clause.is_some()
             || !query.extra_with_stages.is_empty();
+
+        // `LOAD CSV` is a source: it opens the file and produces the rows the rest of
+        // the query is written against, so it goes at the bottom of the pipeline, the
+        // same place a leading UNWIND goes.
+        if let Some(load) = &query.load_csv_clause {
+            use crate::query::executor::operator::{LoadCsvOperator, SingleRowOperator};
+            let base: OperatorBox = match operator.take() {
+                Some(op) => op,
+                None => Box::new(SingleRowOperator::new()),
+            };
+            operator = Some(Box::new(LoadCsvOperator::new(base, load.clone())));
+            known_vars.insert(load.variable.clone());
+        }
 
         if unwind_before_barrier {
             if let Some(unwind) = leading_unwind {
@@ -6224,7 +6243,12 @@ impl QueryPlanner {
         // hardest part of the planner.
         let split = clauses
             .iter()
-            .position(|c| !matches!(c, Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_)))
+            .position(|c| {
+                !matches!(
+                    c,
+                    Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_) | Clause::LoadCsv(_)
+                )
+            })
             .unwrap_or(clauses.len());
 
         let mut operator: OperatorBox = if split == 0 {
@@ -6245,6 +6269,7 @@ impl QueryPlanner {
                             prefix.extra_unwind_clauses.push(u.clone());
                         }
                     }
+                    Clause::LoadCsv(l) => prefix.load_csv_clause = Some(l.clone()),
                     _ => unreachable!("split stops at the first non-reading clause"),
                 }
             }
@@ -6268,6 +6293,7 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::LoadCsv(l) => { bound.insert(l.variable.clone()); }
                 _ => {}
             }
         }
@@ -6410,6 +6436,16 @@ impl QueryPlanner {
                             _ => String::new(),
                         }))
                         .collect();
+                }
+                // A `LOAD CSV` after the reading prefix -- `WITH ... LOAD CSV ...`.
+                // Without this arm it would fall through the wildcard below and
+                // silently bind nothing, which is how a clause gets added to one AST
+                // shape and not the other.
+                Clause::LoadCsv(l) => {
+                    operator = Box::new(
+                        crate::query::executor::operator::LoadCsvOperator::new(operator, l.clone()),
+                    );
+                    bound.insert(l.variable.clone());
                 }
                 Clause::Unwind(u) => {
                     operator = Box::new(UnwindOperator::new(
@@ -7948,6 +7984,7 @@ mod tests {
 
         // Build a query manually with no MATCH and no CREATE
         let query = crate::query::ast::Query {
+            load_csv_clause: None,
             match_clauses: vec![],
             where_clause: None,
             return_clause: None,

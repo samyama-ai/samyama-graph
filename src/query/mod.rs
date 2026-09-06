@@ -75,6 +75,7 @@ pub mod parser;
 pub mod star;
 pub mod validate;
 pub mod executor;
+pub mod csv_source;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;

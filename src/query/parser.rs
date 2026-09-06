@@ -204,6 +204,9 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                             Rule::unwind_clause => {
                                 query.clauses.push(Clause::Unwind(parse_unwind_clause(c)?));
                             }
+                            Rule::load_csv_clause => {
+                                query.clauses.push(Clause::LoadCsv(parse_load_csv_clause(c)?));
+                            }
                             Rule::with_clause => {
                                 query.clauses.push(Clause::With(parse_with_clause(c)?));
                             }
@@ -532,6 +535,11 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                         query.foreach_clause = Some(parse_foreach_clause(fe)?);
                     }
                 }
+            }
+            Rule::load_csv_stmt => {
+                // Same clause set again -- `parse_match_statement` dispatches on each
+                // inner rule, and `load_csv_clause` is one of the rules it knows.
+                parse_match_statement(inner, query)?;
             }
             Rule::match_stmt | Rule::unwind_stmt => {
                 // Same clause set, so the same builder applies -- it already dispatches on
@@ -1155,6 +1163,9 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     query.extra_unwind_clauses.push(u);
                 }
             }
+            Rule::load_csv_clause => {
+                query.load_csv_clause = Some(parse_load_csv_clause(inner)?);
+            }
             Rule::merge_inline => {
                 query.merge_clause = Some(parse_merge_clause(inner)?);
             }
@@ -1421,6 +1432,53 @@ fn parse_unwind_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<UnwindC
     Ok(UnwindClause {
         expression: expression.ok_or_else(|| ParseError::SemanticError("UNWIND missing expression".to_string()))?,
         variable: variable.ok_or_else(|| ParseError::SemanticError("UNWIND missing AS variable".to_string()))?,
+    })
+}
+
+/// `LOAD CSV [WITH HEADERS] FROM <expr> AS <var> [FIELDTERMINATOR <str>]`.
+///
+/// `WITH HEADERS` has no token of its own in the parse tree — it is a bare keyword
+/// pair — so it is read off the clause text rather than from a child pair.
+fn parse_load_csv_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<LoadCsvClause> {
+    let text = pair.as_str().to_string();
+    let mut source = None;
+    let mut variable = None;
+    let mut field_terminator = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => source = Some(parse_expression(inner)?),
+            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::string => {
+                let raw = inner.as_str();
+                let unquoted = &raw[1..raw.len().saturating_sub(1)];
+                let mut chars = unquoted.chars();
+                let (first, rest) = (chars.next(), chars.next());
+                match (first, rest) {
+                    (Some(c), None) => field_terminator = Some(c),
+                    _ => {
+                        return Err(ParseError::SemanticError(format!(
+                            "FIELDTERMINATOR must be a single character, got {raw}"
+                        )))
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Uppercased once: the keyword is case-insensitive in the grammar, so matching
+    // the written case would accept `WITH HEADERS` and quietly ignore `with headers`.
+    let upper = text.to_uppercase();
+    let with_headers = upper.contains("WITH") && upper.contains("HEADERS");
+
+    Ok(LoadCsvClause {
+        source: source
+            .ok_or_else(|| ParseError::SemanticError("LOAD CSV missing FROM source".to_string()))?,
+        variable: variable
+            .ok_or_else(|| ParseError::SemanticError("LOAD CSV missing AS variable".to_string()))?,
+        with_headers,
+        field_terminator,
     })
 }
 
