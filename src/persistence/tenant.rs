@@ -503,6 +503,36 @@ impl TenantManager {
         Ok(())
     }
 
+    /// Set resource usage to a known value.
+    ///
+    /// `recover()` used to *increment* by the number of rows it had just read, which
+    /// is right exactly once (#1113). A second call — a diagnostic read, a second
+    /// tenant load — added the whole graph again, and since the counter gates
+    /// `check_quota`, a graph that had not grown drifted toward refusing writes.
+    ///
+    /// A count read from storage is the truth, not a delta to apply to whatever the
+    /// counter happens to hold, so it is assigned.
+    pub fn set_usage(&self, tenant_id: &str, resource: &str, amount: usize) -> TenantResult<()> {
+        let mut usage = self.usage.write().unwrap();
+
+        let tenant_usage = usage
+            .get_mut(tenant_id)
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        match resource {
+            "nodes" => tenant_usage.node_count = amount,
+            "edges" => tenant_usage.edge_count = amount,
+            "memory" => tenant_usage.memory_bytes = amount,
+            "storage" => tenant_usage.storage_bytes = amount,
+            "connections" => tenant_usage.active_connections = amount,
+            _ => {}
+        }
+
+        debug!("Set {} for tenant {} to {}", resource, tenant_id, amount);
+
+        Ok(())
+    }
+
     /// Get resource usage for a tenant
     pub fn get_usage(&self, tenant_id: &str) -> TenantResult<ResourceUsage> {
         let usage = self.usage.read().unwrap();

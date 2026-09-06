@@ -399,6 +399,34 @@ impl PersistentStorage {
         Ok(tenants.into_iter().collect())
     }
 
+    /// Remove every node and edge belonging to a tenant.
+    ///
+    /// `GRAPH.DELETE` cleared the in-memory store and left all of this behind
+    /// (#1110), so a restart brought the graph back — and because `clear()` also
+    /// rewinds the id counters, the writes that followed were persisted over ids
+    /// that still belonged to the deleted graph.
+    ///
+    /// A range delete rather than a scan and a loop: a drop should not cost one
+    /// round trip per row, and the keys are `{tenant}:n:{id:016x}`, so the tenant's
+    /// rows are one contiguous range. The upper bound is the prefix with its last
+    /// byte incremented, which is the first key that cannot belong to it.
+    pub fn delete_graph(&self, tenant: &str) -> StorageResult<()> {
+        for (cf_name, kind) in [("nodes", 'n'), ("edges", 'e')] {
+            let cf = self
+                .db
+                .cf_handle(cf_name)
+                .ok_or_else(|| StorageError::ColumnFamily(cf_name.to_string()))?;
+            let from = format!("{}:{}:", tenant, kind).into_bytes();
+            let mut to = from.clone();
+            // ':' + 1. The range is half-open, so this is the first key past the
+            // prefix and no key of the prefix can equal it.
+            *to.last_mut().expect("prefix is never empty") += 1;
+            self.db.delete_range_cf(&cf, from, to)?;
+        }
+        debug!("Dropped every node and edge for tenant {}", tenant);
+        Ok(())
+    }
+
     /// Create node key with tenant prefix
     fn node_key(tenant: &str, node_id: u64) -> Vec<u8> {
         format!("{}:n:{:016x}", tenant, node_id).into_bytes()

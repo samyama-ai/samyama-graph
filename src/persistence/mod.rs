@@ -379,6 +379,25 @@ impl PersistenceManager {
     }
 
     /// List all tenants that have persisted data in RocksDB
+    /// Drop a graph: its rows, and the usage counted against them.
+    ///
+    /// `GRAPH.DELETE` used to clear memory only (#1110). Three things then went
+    /// wrong together, and all three are this function's job to prevent: the graph
+    /// came back on restart; the id counters had been rewound, so later writes were
+    /// persisted over rows still belonging to the deleted graph; and tenant usage
+    /// kept counting rows nobody could see.
+    ///
+    /// Usage is assigned rather than decremented by a remembered count: after a drop
+    /// the true count is zero whatever the counter had drifted to, and a counter that
+    /// is already wrong cannot be corrected by subtracting from it.
+    pub fn drop_graph(&self, tenant: &str) -> Result<(), PersistenceError> {
+        self.storage.delete_graph(tenant)?;
+        self.storage.flush()?;
+        self.tenants.set_usage(tenant, "nodes", 0)?;
+        self.tenants.set_usage(tenant, "edges", 0)?;
+        Ok(())
+    }
+
     pub fn list_persisted_tenants(&self) -> Result<Vec<String>, PersistenceError> {
         Ok(self.storage.list_persisted_tenants()?)
     }
@@ -395,9 +414,13 @@ impl PersistenceManager {
         let edges = self.storage.scan_edges(tenant)?;
         info!("Recovered {} edges from storage", edges.len());
 
-        // Update resource usage
-        self.tenants.increment_usage(tenant, "nodes", nodes.len())?;
-        self.tenants.increment_usage(tenant, "edges", edges.len())?;
+        // Set, not increment. This used to add the graph's whole size to the
+        // counter on every call, so a second recover for the same tenant counted
+        // every row twice — and the counter gates `check_quota`, so an unchanged
+        // graph drifted toward refusing writes (#1113). What was just read from
+        // storage *is* the count.
+        self.tenants.set_usage(tenant, "nodes", nodes.len())?;
+        self.tenants.set_usage(tenant, "edges", edges.len())?;
 
         Ok((nodes, edges))
     }

@@ -227,15 +227,38 @@ impl CommandHandler {
             return RespValue::Error("ERR wrong number of arguments for 'GRAPH.DELETE' command".to_string());
         }
 
-        let _graph_name = match args[1].as_string() {
+        let graph_name = match args[1].as_string() {
             Ok(Some(s)) => s,
             Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
+        // The name used to be parsed and thrown away, and then the *whole store*
+        // was cleared -- so `GRAPH.DELETE analytics` also emptied `default`
+        // (#1110). `GRAPH.QUERY` already refuses a name this build does not serve;
+        // a destructive command has more reason to, not less.
+        if graph_name != "default" {
+            return RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist. \
+                 The name was previously ignored and the whole store was cleared.",
+                graph_name
+            ));
+        }
 
-        // Clear the graph
+        // Disk first, then memory. The other order leaves a window where a
+        // concurrent write is journalled against ids the drop is about to reuse.
+        if let Some(ref persist_mgr) = self.persistence {
+            if let Err(e) = persist_mgr.drop_graph(&graph_name) {
+                // Do not clear memory after a failed drop: memory and disk would
+                // then disagree, which is the state this command used to leave
+                // behind unconditionally.
+                return RespValue::Error(format!("ERR failed to delete graph: {}", e));
+            }
+        }
+
         let mut store_guard = store.write().await;
         store_guard.clear();
+        // Nothing journalled by `clear()` -- the drop above is the durable half.
+        let _ = store_guard.take_write_log();
         drop(store_guard);
 
         RespValue::SimpleString("OK".to_string())
