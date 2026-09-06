@@ -121,6 +121,8 @@ pub struct Query {
     pub foreach_clause: Option<ForeachClause>,
     /// UNWIND clause (optional)
     pub unwind_clause: Option<UnwindClause>,
+    /// `LOAD CSV` clause (optional) — a reading clause, like `unwind_clause`.
+    pub load_csv_clause: Option<LoadCsvClause>,
     /// Every clause of the query, in the order it was written.
     ///
     /// The fields above describe a query by *kind* — all the MATCHes here, the
@@ -271,6 +273,25 @@ pub struct MatchClause {
     pub optional: bool,
 }
 
+/// `LOAD CSV [WITH HEADERS] FROM <expr> AS <var> [FIELDTERMINATOR <str>]` (LANG-09).
+///
+/// A reading clause: one row per CSV record, the way `UNWIND` gives one row per list
+/// element.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadCsvClause {
+    /// The source, evaluated per row of the input. A literal in every realistic
+    /// query, but an expression so `LOAD CSV FROM $path` works.
+    pub source: Expression,
+    /// The variable each record is bound to.
+    pub variable: String,
+    /// With headers each record binds as a map keyed by the header row; without, as
+    /// a list. This changes the *shape* of the bound value, so a query written for
+    /// one reads nothing from the other.
+    pub with_headers: bool,
+    /// `FIELDTERMINATOR`. `None` means `,`.
+    pub field_terminator: Option<char>,
+}
+
 /// One clause of a query, as written.
 ///
 /// A flat, ordered alternative to the by-kind fields on [`Query`]. Cypher is a
@@ -283,6 +304,8 @@ pub enum Clause {
     /// A `WHERE` attached to the reading clause before it.
     Where(WhereClause),
     Unwind(UnwindClause),
+    /// `LOAD CSV` — a reading clause, like `Unwind`.
+    LoadCsv(LoadCsvClause),
     With(WithClause),
     Create(CreateClause),
     Merge(MergeClause),
@@ -318,6 +341,7 @@ impl Clause {
             Clause::Match(_) => "MATCH",
             Clause::Where(_) => "WHERE",
             Clause::Unwind(_) => "UNWIND",
+            Clause::LoadCsv(_) => "LOAD CSV",
             Clause::With(_) => "WITH",
             Clause::Create(_) => "CREATE",
             Clause::Merge(_) => "MERGE",
@@ -932,6 +956,7 @@ impl Query {
             params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
+            load_csv_clause: None,
             clauses: Vec::new(),
             needs_clause_pipeline: false,
             extra_unwind_clauses: Vec::new(),

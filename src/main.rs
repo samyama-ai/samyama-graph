@@ -454,6 +454,25 @@ async fn start_server() {
         config.data_path = Some(path);
     }
 
+    // Parse --import-dir <dir>: the directory `LOAD CSV` may read under (LANG-09).
+    //
+    // Absent by default, and absent means the clause is refused rather than reading
+    // from the working directory. `LOAD CSV FROM 'file:///etc/passwd'` on a server
+    // reachable over the network is an arbitrary local file read for anyone who can
+    // send a query, so this is a gate that must be opened deliberately.
+    if let Some(dir) = std::env::args()
+        .position(|a| a == "--import-dir")
+        .and_then(|pos| std::env::args().nth(pos + 1))
+    {
+        match samyama::query::csv_source::set_import_root(Some(std::path::Path::new(&dir))) {
+            Ok(()) => println!("LOAD CSV enabled, reading under {}", dir),
+            Err(e) => {
+                eprintln!("--import-dir: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // Parse --demo flag: social (rich schema) or large (scale stress test)
     let demo_mode: Option<String> = std::env::args()
         .position(|a| a == "--demo")

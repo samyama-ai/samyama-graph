@@ -434,6 +434,9 @@ fn write_patterns(query: &Query) -> Vec<(WriteKind, &crate::query::ast::Pattern,
                 Clause::Unwind(uc) => {
                     bound.insert(uc.variable.clone());
                 }
+                Clause::LoadCsv(lc) => {
+                    bound.insert(lc.variable.clone());
+                }
                 Clause::Create(cc) => {
                     out.push((WriteKind::Create, &cc.pattern, bound.clone()));
                     pattern_variables(&cc.pattern, &mut bound);
@@ -1015,6 +1018,7 @@ fn validate_order_by_in_scope(query: &Query) -> Result<(), ValidationError> {
             Clause::Create(cc) => { pattern_vars(&cc.pattern, &mut scope); seen_any_binding = true; }
             Clause::Merge(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
             Clause::Unwind(u) => { scope.insert(u.variable.clone()); seen_any_binding = true; }
+            Clause::LoadCsv(l) => { scope.insert(l.variable.clone()); seen_any_binding = true; }
             Clause::With(wc) => {
                 let projected = projected_names(&wc.items);
                 if let Some(ob) = &wc.order_by {
@@ -1169,6 +1173,7 @@ fn all_expressions(query: &Query) -> Vec<&Expression> {
                 Clause::With(w) => push_items(&w.items, &mut out),
                 Clause::Where(w) => out.push(&w.predicate),
                 Clause::Unwind(u) => out.push(&u.expression),
+                Clause::LoadCsv(l) => out.push(&l.source),
                 _ => {}
             }
         }
@@ -1379,6 +1384,7 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
                 Clause::Create(cc) => pattern_vars(&cc.pattern, &mut bound),
                 Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut bound),
                 Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::LoadCsv(l) => { bound.insert(l.variable.clone()); }
                 Clause::With(w) => bound = projected_names(&w.items),
                 Clause::Where(w) => walk(&w.predicate, &bound)?,
                 _ => {}
@@ -1393,6 +1399,9 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
     }
     if let Some(u) = &query.unwind_clause {
         bound.insert(u.variable.clone());
+    }
+    if let Some(l) = &query.load_csv_clause {
+        bound.insert(l.variable.clone());
     }
     for u in &query.extra_unwind_clauses {
         bound.insert(u.variable.clone());
@@ -1578,6 +1587,9 @@ fn validate_delete_targets(query: &Query) -> Result<(), ValidationError> {
         if let Some(u) = &query.unwind_clause {
             out.insert(u.variable.clone());
         }
+        if let Some(l) = &query.load_csv_clause {
+            out.insert(l.variable.clone());
+        }
         for u in &query.extra_unwind_clauses {
             out.insert(u.variable.clone());
         }
@@ -1603,6 +1615,9 @@ fn validate_delete_targets(query: &Query) -> Result<(), ValidationError> {
                 Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut out),
                 Clause::Unwind(u) => {
                     out.insert(u.variable.clone());
+                }
+                Clause::LoadCsv(l) => {
+                    out.insert(l.variable.clone());
                 }
                 Clause::With(w) => out.extend(projected_names(&w.items)),
                 _ => {}
@@ -1750,6 +1765,10 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
             bound.insert(u.variable.clone());
             binders(&u.expression, bound);
         }
+        if let Some(l) = &query.load_csv_clause {
+            bound.insert(l.variable.clone());
+            binders(&l.source, bound);
+        }
         if let Some(f) = &query.foreach_clause {
             bound.insert(f.variable.clone());
             for c in &f.create_clauses {
@@ -1772,6 +1791,10 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
                 Clause::Unwind(u) => {
                     bound.insert(u.variable.clone());
                     binders(&u.expression, bound);
+                }
+                Clause::LoadCsv(l) => {
+                    bound.insert(l.variable.clone());
+                    binders(&l.source, bound);
                 }
                 Clause::Foreach(f) => {
                     bound.insert(f.variable.clone());
