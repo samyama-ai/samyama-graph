@@ -330,6 +330,71 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
             heap.saturating_sub(report.attributed())
         );
 
+        // What the columnar store would cost for the same properties.
+        //
+        // `node_columns` exists and the snapshot path uses it; the LDBC path writes
+        // row storage instead, so SNB pays a `HashMap<String, PropertyValue>` per
+        // node. This estimates the alternative with the engine's *own* cost model
+        // (`dense_is_smaller`) rather than a hand-rolled one, so the comparison
+        // cannot flatter the design it is arguing for.
+        {
+            use std::collections::HashMap as Map;
+            // key -> (entries, min index, max index, elem bytes)
+            let mut cols: Map<&str, (usize, usize, usize, usize)> = Map::new();
+            for node in store.all_nodes() {
+                let idx = node.id.as_u64() as usize;
+                for (k, v) in node.properties.iter() {
+                    let elem = match v {
+                        samyama::graph::PropertyValue::Boolean(_) => 1,
+                        samyama::graph::PropertyValue::Integer(_)
+                        | samyama::graph::PropertyValue::Float(_) => 8,
+                        samyama::graph::PropertyValue::String(_) => STRING_HANDLE,
+                        // No typed column: these land in `Other`, a sparse map of
+                        // whole values.
+                        _ => std::mem::size_of::<samyama::graph::PropertyValue>(),
+                    };
+                    let e = cols.entry(k.as_str()).or_insert((0, usize::MAX, 0, elem));
+                    e.0 += 1;
+                    e.1 = e.1.min(idx);
+                    e.2 = e.2.max(idx);
+                    e.3 = e.3.max(elem);
+                }
+            }
+            let mut columnar = 0usize;
+            let mut dense_cols = 0usize;
+            for (name, (entries, lo, hi, elem)) in &cols {
+                let span = hi.saturating_sub(*lo) + 1;
+                let dense = span * elem + span.div_ceil(64) * 8;
+                let sparse = entries * (8 + elem + 1) * 8 / 7;
+                let bytes = if samyama::graph::storage::columnar::dense_is_smaller(span, *entries, *elem) {
+                    dense_cols += 1;
+                    dense
+                } else {
+                    sparse
+                };
+                columnar += bytes + name.len() + STRING_HANDLE;
+            }
+            // Plus the string contents, which are heap either way and cancel out of
+            // the comparison; counted on both sides so neither is flattered.
+            columnar += value_bytes;
+            let row_based = report.node_properties;
+            println!("\nnode properties: row storage vs the columnar store");
+            println!("{:<30} {:>16}", "row storage (measured)", row_based);
+            println!("{:<30} {:>16}", "columnar (engine cost model)", columnar);
+            println!("{:<30} {:>16}", "columns", cols.len());
+            println!("{:<30} {:>16}", "  of which dense", dense_cols);
+            if row_based > columnar {
+                let saved = row_based - columnar;
+                println!("{:<30} {:>16}", "would save", saved);
+                if heap > 0 {
+                    println!("{:<30} {:>15.1}%", "  as a share of live heap", 100.0 * saved as f64 / heap as f64);
+                }
+                if edges > 0 {
+                    println!("{:<30} {:>16.1}", "  bytes/edge", saved as f64 / edges as f64);
+                }
+            }
+        }
+
         println!("\nrepetition (what interning would remove)");
         println!("{:<30} {:>16}", "property entries", entries);
         println!("{:<30} {:>16}", "distinct property keys", distinct_keys.len());
