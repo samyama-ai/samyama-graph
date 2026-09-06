@@ -159,6 +159,13 @@ impl PersistentStorage {
     }
 
     /// Store a node
+    /// Write a node to storage exactly as given.
+    ///
+    /// **The caller owns the property merge**, for the same reason as
+    /// `PersistenceManager::persist_create_node`: this serialises the row copy, and
+    /// a node from a snapshot import has an empty one while its values sit in the
+    /// column store (#545, #1129). A `Node` on its own cannot reach the columns, so
+    /// this function cannot fix it — the caller has to pass a merged node.
     pub fn put_node(&self, tenant: &str, node: &Node) -> StorageResult<()> {
         let cf = self.db.cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
