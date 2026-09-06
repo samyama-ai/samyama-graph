@@ -255,9 +255,11 @@ impl CommandHandler {
             }
         }
 
+        // persistence: the durable half is `drop_graph` above, which removes the
+        // rows outright. `clear()` journals nothing and does not need to -- one
+        // journal entry per node of a dropped graph is the wrong shape for it.
         let mut store_guard = store.write().await;
         store_guard.clear();
-        // Nothing journalled by `clear()` -- the drop above is the durable half.
         let _ = store_guard.take_write_log();
         drop(store_guard);
 
@@ -427,6 +429,49 @@ impl Default for CommandHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The RESP counterpart of `no_handler_takes_the_write_lock_outside_mutate`
+    /// (#1107). That guard covers `handler.rs` only, which is how `GRAPH.DELETE`
+    /// stayed missed: it cleared the store on this side of the wall, returned `OK`,
+    /// and wrote nothing to disk (#1110).
+    ///
+    /// A command that takes the write lock either journals what it changed and
+    /// applies the log, or says on the lines above it which other mechanism makes it
+    /// durable.
+    #[test]
+    fn no_command_takes_the_write_lock_without_saying_how_it_persists() {
+        let source = include_str!("command.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("command.rs has a production region");
+        let lines: Vec<&str> = production.lines().collect();
+
+        let offenders: Vec<(usize, &str)> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("store.write().await"))
+            .filter(|(i, _)| {
+                let above = &lines[i.saturating_sub(8)..*i];
+                let waived = above
+                    .iter()
+                    .any(|c| c.trim_start().starts_with("//") && c.contains("persistence:"));
+                // Or it journals: `enable_write_log` in the same command body.
+                let journals = lines[*i..lines.len().min(i + 30)]
+                    .iter()
+                    .any(|l| l.contains("enable_write_log"));
+                !(waived || journals)
+            })
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "these take the write lock without journalling what they change, so a \
+             restart will not see it. Enable the write log and apply it, or write a \
+             `// persistence: <how>` note above the line: {offenders:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_ping() {
