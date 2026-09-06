@@ -4277,6 +4277,32 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// wins on conflict. This is what the Cypher `RETURN n.<prop>` path sees;
     /// callers that iterate only `node.properties` miss ColumnStore-backed scalars
     /// (name/title/ids from stub/bulk loads and v2 snapshot import).
+    /// A node with its properties filled in from wherever they live.
+    ///
+    /// After a snapshot import the row copy is **empty by design** and the values
+    /// are in the column store (#545), so cloning the row alone hands back a node
+    /// with `properties: {}`. Reading a single property already consulted the
+    /// columns first, which is why `RETURN n.name` was right on an imported graph
+    /// while `RETURN n` returned an empty property bag for every node (#1125) — one
+    /// of the pair was moved to the columnar store and the other was not.
+    ///
+    /// The merge runs only when the columns hold a key the row does not, so a graph
+    /// built by `CREATE` — where `set_node_property` writes both — pays a key scan
+    /// and no rebuild.
+    pub fn node_materialized(&self, id: NodeId) -> Option<Node> {
+        let mut node = self.get_node(id)?.clone();
+        let idx = id.as_u64() as usize;
+        if self
+            .node_columns
+            .get_property_keys(idx)
+            .iter()
+            .any(|k| !node.properties.contains_key(k))
+        {
+            node.properties = self.node_properties_full(id);
+        }
+        Some(node)
+    }
+
     pub fn node_properties_full(&self, id: NodeId) -> HashMap<String, PropertyValue> {
         let mut out: HashMap<String, PropertyValue> = HashMap::new();
         if let Some(node) = self.get_node(id) {
