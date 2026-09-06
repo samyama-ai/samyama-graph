@@ -193,6 +193,10 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     let nodes = loaded.total_nodes;
     let edges = loaded.total_edges;
     let heap = after_stats.saturating_sub(base_heap);
+    // Filled by the structural walk below, so the JSON carries the *attribution*
+    // and not only the `heap / nodes` ratio, which attributes the whole graph to
+    // nodes and reads as "the footprint is node-side" when it is not.
+    let mut node_side_bytes = 0usize;
     let rss_delta = match (base_rss, final_rss) {
         (Some(b), Some(f)) => f.saturating_sub(b) as i64,
         _ => -1,
@@ -214,6 +218,99 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     }
     if heap > 0 && rss_delta > 0 {
         println!("{:<28} {:>16.2}", "RSS / heap", rss_delta as f64 / heap as f64);
+    }
+
+    // What is *in* a node, since that is where the footprint sits.
+    //
+    // `bytes/node` scores the problem; this says which field to go and change. The
+    // three quantities that matter are all about repetition: a property key is an
+    // owned `String` per node, a label is an owned `String` per node, and SNB has a
+    // handful of distinct values of each repeated across tens of millions of nodes.
+    {
+        let mut entries = 0usize;
+        let mut key_bytes = 0usize;
+        let mut label_count = 0usize;
+        let mut label_bytes = 0usize;
+        let mut distinct_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut distinct_labels: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut value_bytes = 0usize;
+
+        for node in store.all_nodes() {
+            for (k, v) in node.properties.iter() {
+                entries += 1;
+                key_bytes += k.len();
+                distinct_keys.insert(k.as_str());
+                value_bytes += match v {
+                    samyama::graph::PropertyValue::String(s) => s.len(),
+                    _ => 0,
+                };
+            }
+            for l in node.labels.iter() {
+                label_count += 1;
+                label_bytes += l.as_str().len();
+                distinct_labels.insert(l.as_str());
+            }
+        }
+
+        // What the repetition costs. A `String` is 24 bytes of handle plus a heap
+        // buffer; interning replaces both with an index, so the recoverable amount
+        // is the handles and buffers minus one copy of each distinct string.
+        const STRING_HANDLE: usize = std::mem::size_of::<String>();
+        let key_cost = entries * STRING_HANDLE + key_bytes;
+        let key_interned = entries * std::mem::size_of::<u32>()
+            + distinct_keys.iter().map(|k| k.len() + STRING_HANDLE).sum::<usize>();
+        let label_cost = label_count * STRING_HANDLE + label_bytes;
+        let label_interned = label_count * std::mem::size_of::<u32>()
+            + distinct_labels.iter().map(|l| l.len() + STRING_HANDLE).sum::<usize>();
+
+        // Interning is a real win and not the main one, so the structural sizes have
+        // to be reported too: the container overhead per node is paid once per node
+        // whatever the strings cost.
+        let node_struct = std::mem::size_of::<samyama::graph::Node>();
+        let pv = std::mem::size_of::<samyama::graph::PropertyValue>();
+        let mut prop_capacity = 0usize;
+        let mut label_capacity = 0usize;
+        for node in store.all_nodes() {
+            prop_capacity += node.properties.capacity();
+            label_capacity += node.labels.capacity();
+        }
+        // hashbrown: one control byte per slot plus the slot itself.
+        let prop_table = prop_capacity * (STRING_HANDLE + pv + 1);
+        let label_table = label_capacity * (STRING_HANDLE + 1);
+
+        println!("\nwhat is in a node");
+        println!("{:<34} {:>16}", "sizeof(Node)", node_struct);
+        println!("{:<34} {:>16}", "sizeof(PropertyValue)", pv);
+        println!("{:<34} {:>16}", "Node structs total", node_struct * nodes);
+        println!("{:<34} {:>16}", "property table slots", prop_capacity);
+        println!("{:<34} {:>16}", "property tables total", prop_table);
+        println!("{:<34} {:>16}", "label table slots", label_capacity);
+        println!("{:<34} {:>16}", "label tables total", label_table);
+        node_side_bytes = node_struct * nodes + prop_table + label_table;
+        if heap > 0 {
+            println!(
+                "{:<34} {:>15.1}%",
+                "  node side as share of heap",
+                100.0 * (node_struct * nodes + prop_table + label_table) as f64 / heap as f64
+            );
+        }
+        println!("{:<34} {:>16}", "property entries", entries);
+        println!("{:<34} {:>16}", "distinct property keys", distinct_keys.len());
+        println!("{:<34} {:>16}", "labels held", label_count);
+        println!("{:<34} {:>16}", "distinct labels", distinct_labels.len());
+        println!("{:<34} {:>16}", "string property value bytes", value_bytes);
+        println!("{:<34} {:>16}", "key handles + buffers", key_cost);
+        println!("{:<34} {:>16}", "  same, interned", key_interned);
+        println!("{:<34} {:>16}", "label handles + buffers", label_cost);
+        println!("{:<34} {:>16}", "  same, interned", label_interned);
+        let recoverable = key_cost.saturating_sub(key_interned) + label_cost.saturating_sub(label_interned);
+        println!("{:<34} {:>16}", "recoverable by interning", recoverable);
+        if heap > 0 {
+            println!("{:<34} {:>15.1}%", "  as a share of live heap", 100.0 * recoverable as f64 / heap as f64);
+        }
+        if edges > 0 {
+            println!("{:<34} {:>16.1}", "  bytes/edge it would remove", recoverable as f64 / edges as f64);
+        }
     }
 
     // Which allocation sizes the load made. **These are calls, not live blocks** --
@@ -259,7 +356,9 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     \"load_seconds\": {},
     \"bytes_per_node_heap\": {:.2},
     \"bytes_per_edge_heap\": {:.2},
-    \"bytes_per_edge_rss\": {:.2}
+    \"bytes_per_edge_rss\": {:.2},
+    \"node_side_bytes\": {node_side_bytes},
+    \"node_side_share\": {:.4}
   }}
 }}
 ",
@@ -268,6 +367,7 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
             if nodes > 0 { heap as f64 / nodes as f64 } else { 0.0 },
             if edges > 0 { heap as f64 / edges as f64 } else { 0.0 },
             if edges > 0 && rss_delta >= 0 { rss_delta as f64 / edges as f64 } else { -1.0 },
+            if heap > 0 { node_side_bytes as f64 / heap as f64 } else { 0.0 },
         );
         if let Err(e) = std::fs::write(&path, body) {
             eprintln!("could not write {path}: {e}");
