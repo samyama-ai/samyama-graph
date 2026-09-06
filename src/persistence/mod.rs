@@ -275,8 +275,16 @@ impl PersistenceManager {
             let deleted = last[&key];
             match (is_edge, deleted) {
                 (false, false) => {
+                    // `node_materialized`, not `get_node`: a node that arrived by
+                    // snapshot import has an **empty row copy** and holds its
+                    // properties in the column store (#545). Serialising the row
+                    // persisted only the keys a later `SET` happened to write back
+                    // into it, so restore-a-snapshot, update-one-property, restart
+                    // lost every property the update did not touch (#1129).
+                    //
                     // Skipped when absent: deleted later in the same statement.
-                    if let Some(node) = store.get_node(crate::graph::NodeId::new(id)) {
+                    if let Some(node) = store.node_materialized(crate::graph::NodeId::new(id)) {
+                        let node = &node;
                         let existed = self.storage.get_node(tenant, id)?.is_some();
                         let properties = bincode::serialize(&node.properties)?;
                         self.wal.lock().unwrap().append(WalEntry::CreateNode {
