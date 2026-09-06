@@ -121,6 +121,116 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/import/parquet:
+    post:
+      operationId: importParquet
+      summary: Import nodes from a Parquet file
+      description: |
+        Upload a Parquet file to create one node per row, with the file's columns as
+        properties. Nodes only: an edge needs identity resolution — a `source` column
+        names *something*, and which property it names is a decision the file cannot
+        make — so that belongs in `LOAD PARQUET`, where the mapping is written in the
+        query.
+      parameters:
+        - name: label
+          in: query
+          required: true
+          schema:
+            type: string
+          description: |
+            The label every created node gets. Required rather than inferred: a Parquet
+            file carries a schema, not a label, and taking one from the filename would
+            make the import depend on what the file was called.
+        - name: graph
+          in: query
+          required: false
+          schema:
+            type: string
+            default: default
+          description: Target graph/tenant name
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Parquet file content
+      responses:
+        '200':
+          description: Import successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    examples:
+                      - ok
+                  stats:
+                    type: object
+                    description: Rows read and nodes created
+        '400':
+          description: Missing file field, unreadable Parquet, or unknown graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/query/export:
+    post:
+      operationId: exportQuery
+      summary: A read query's result as Arrow IPC or Parquet
+      description: |
+        Runs a read query and returns the result as a binary columnar stream rather
+        than JSON. `arrow` is the default because it needs no intermediate file at
+        either end.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: The Cypher read query
+                graph:
+                  type: string
+                  default: default
+                  description: Target graph/tenant name
+                format:
+                  type: string
+                  enum: [arrow, parquet]
+                  default: arrow
+                  description: Output encoding
+      responses:
+        '200':
+          description: The result set
+          content:
+            application/vnd.apache.arrow.stream:
+              schema:
+                type: string
+                format: binary
+            application/vnd.apache.parquet:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Unknown format, unknown graph, or a query that does not run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/import/json:
     post:
       operationId: importJson
