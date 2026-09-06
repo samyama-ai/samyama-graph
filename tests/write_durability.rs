@@ -185,3 +185,66 @@ fn a_partial_failure_leaves_disk_agreeing_with_memory() {
         in_memory
     );
 }
+
+/// Restore a snapshot, change one property, restart: everything else survives.
+///
+/// A node that arrived by snapshot import has an **empty row copy** — its values
+/// live in the column store (#545). `apply_mutations` serialised the row, so it
+/// persisted only the keys a later `SET` had written back into it. Measured before
+/// the fix: a node imported with `{name, age}`, updated with `SET p.age = 37`,
+/// came back from a restart holding `{age: 37}` alone (#1129).
+///
+/// This is the same class as #1094 — durability derived from the wrong view of a
+/// write — and it survived that fix because the write log records *which* node
+/// changed, correctly, while the payload was read from a representation that was
+/// empty for imported nodes.
+#[test]
+fn an_imported_node_keeps_the_properties_a_later_write_did_not_touch() {
+    use samyama::snapshot::{export_tenant, import_tenant};
+
+    let engine = QueryEngine::new();
+    let mut source = GraphStore::new();
+    engine
+        .execute_mut("CREATE (:P {name: \"ada\", age: 36, city: \"London\"})", &mut source, T)
+        .unwrap();
+    let mut bytes = Vec::new();
+    export_tenant(&source, &mut bytes).unwrap();
+
+    let db = Db::new();
+    let mut live = GraphStore::new();
+    import_tenant(&mut live, std::io::Cursor::new(&bytes)).unwrap();
+    live.enable_write_log();
+
+    // The precondition: the import really did leave the row copy empty, so this
+    // test exercises the merge rather than a store that never needed one.
+    let id = live.get_nodes_by_label(&"P".into())[0].id;
+    assert!(
+        live.get_node(id).unwrap().properties.is_empty(),
+        "import now fills the row copy, so this test no longer covers the case it \
+         was written for"
+    );
+
+    engine.execute_mut("MATCH (p:P) SET p.age = 37", &mut live, T).unwrap();
+    let muts = live.take_write_log();
+    db.pm.apply_mutations(T, &live, &muts).expect("persist");
+    db.pm.checkpoint().unwrap();
+
+    let (nodes, _) = db.pm.recover(T).unwrap();
+    assert_eq!(nodes.len(), 1);
+    let props = &nodes[0].properties;
+    assert_eq!(
+        props.get("age"),
+        Some(&samyama::graph::PropertyValue::Integer(37)),
+        "the update itself did not survive"
+    );
+    assert_eq!(
+        props.get("name").map(|v| v.to_string()),
+        Some(samyama::graph::PropertyValue::String("ada".into()).to_string()),
+        "`name` was dropped: the write persisted only what the row copy held"
+    );
+    assert_eq!(
+        props.get("city").map(|v| v.to_string()),
+        Some(samyama::graph::PropertyValue::String("London".into()).to_string()),
+        "`city` was dropped: the write persisted only what the row copy held"
+    );
+}
