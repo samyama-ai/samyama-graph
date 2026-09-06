@@ -182,6 +182,34 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     };
     let after_load = live_heap();
 
+    // What a bulk load leaves behind in `Vec` slack, and what returning it is worth.
+    // Reported as its own line rather than folded into the total: a load that never
+    // shrinks is the state the engine ships in today, so both numbers are real.
+    let before_shrink = live_heap();
+    let rss_before_shrink = rss();
+    store.shrink_to_fit();
+    let after_shrink = live_heap();
+    let rss_after_shrink = rss();
+
+    // Does the allocator give the pages back?
+    //
+    // `shrink_to_fit` and CSR compaction both cut live heap and left RSS where it
+    // was, which is the difference between "freed" and "returned". glibc keeps freed
+    // arenas mapped; `malloc_trim` is the ask. If this moves RSS, the reclamations
+    // are worth something against a *resident* target; if it does not, the footprint
+    // has to be avoided at allocation time instead of reclaimed afterwards.
+    #[cfg(target_env = "gnu")]
+    let rss_after_trim = {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        let returned = unsafe { malloc_trim(0) };
+        eprintln!("malloc_trim returned {returned}");
+        rss()
+    };
+    #[cfg(not(target_env = "gnu"))]
+    let rss_after_trim = rss();
+
     // The planner's view, built here rather than lazily at first query, so the number
     // includes what a served graph actually holds.
     let _stats = store.statistics();
@@ -210,6 +238,13 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     println!("{:<28} {:>16}", "live heap (bytes)", heap);
     println!("{:<28} {:>16}", "RSS delta (bytes)", rss_delta);
     println!("{:<28} {:>16}", "statistics (bytes)", after_stats.saturating_sub(after_load));
+    println!("{:<28} {:>16}", "returned by shrink_to_fit", before_shrink.saturating_sub(after_shrink));
+    if let (Some(a), Some(b), Some(c)) = (rss_before_shrink, rss_after_shrink, rss_after_trim) {
+        println!("{:<28} {:>16}", "  RSS before shrink", a);
+        println!("{:<28} {:>16}", "  RSS after shrink", b);
+        println!("{:<28} {:>16}", "  RSS after malloc_trim", c);
+        println!("{:<28} {:>16}", "  RSS actually returned", a.saturating_sub(c));
+    }
     if edges > 0 {
         println!("{:<28} {:>16.1}", "heap bytes/edge", heap as f64 / edges as f64);
         if rss_delta >= 0 {
@@ -262,54 +297,51 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
         let label_cost = label_count * STRING_HANDLE + label_bytes;
         let label_interned = label_count * std::mem::size_of::<u32>()
             + distinct_labels.iter().map(|l| l.len() + STRING_HANDLE).sum::<usize>();
+        let recoverable = key_cost.saturating_sub(key_interned)
+            + label_cost.saturating_sub(label_interned);
 
-        // Interning is a real win and not the main one, so the structural sizes have
-        // to be reported too: the container overhead per node is paid once per node
-        // whatever the strings cost.
-        let node_struct = std::mem::size_of::<samyama::graph::Node>();
-        let pv = std::mem::size_of::<samyama::graph::PropertyValue>();
-        let mut prop_capacity = 0usize;
-        let mut label_capacity = 0usize;
-        for node in store.all_nodes() {
-            prop_capacity += node.properties.capacity();
-            label_capacity += node.labels.capacity();
-        }
-        // hashbrown: one control byte per slot plus the slot itself.
-        let prop_table = prop_capacity * (STRING_HANDLE + pv + 1);
-        let label_table = label_capacity * (STRING_HANDLE + 1);
+        // The store's own decomposition, rather than a second walk here that could
+        // drift from it. Capacity, not length: slack is resident.
+        let report = store.memory_report();
+        node_side_bytes = report.node_versions + report.node_properties + report.node_labels;
 
-        println!("\nwhat is in a node");
-        println!("{:<34} {:>16}", "sizeof(Node)", node_struct);
-        println!("{:<34} {:>16}", "sizeof(PropertyValue)", pv);
-        println!("{:<34} {:>16}", "Node structs total", node_struct * nodes);
-        println!("{:<34} {:>16}", "property table slots", prop_capacity);
-        println!("{:<34} {:>16}", "property tables total", prop_table);
-        println!("{:<34} {:>16}", "label table slots", label_capacity);
-        println!("{:<34} {:>16}", "label tables total", label_table);
-        node_side_bytes = node_struct * nodes + prop_table + label_table;
-        if heap > 0 {
+        println!("\nwhere the bytes are (structural walk, largest first)");
+        println!("{:<30} {:>16} {:>10}", "structure", "bytes", "share");
+        for (name, bytes) in report.lines() {
+            if bytes == 0 {
+                continue;
+            }
             println!(
-                "{:<34} {:>15.1}%",
-                "  node side as share of heap",
-                100.0 * (node_struct * nodes + prop_table + label_table) as f64 / heap as f64
+                "{:<30} {:>16} {:>9.1}%",
+                name,
+                bytes,
+                if heap > 0 { 100.0 * bytes as f64 / heap as f64 } else { 0.0 }
             );
         }
-        println!("{:<34} {:>16}", "property entries", entries);
-        println!("{:<34} {:>16}", "distinct property keys", distinct_keys.len());
-        println!("{:<34} {:>16}", "labels held", label_count);
-        println!("{:<34} {:>16}", "distinct labels", distinct_labels.len());
-        println!("{:<34} {:>16}", "string property value bytes", value_bytes);
-        println!("{:<34} {:>16}", "key handles + buffers", key_cost);
-        println!("{:<34} {:>16}", "  same, interned", key_interned);
-        println!("{:<34} {:>16}", "label handles + buffers", label_cost);
-        println!("{:<34} {:>16}", "  same, interned", label_interned);
-        let recoverable = key_cost.saturating_sub(key_interned) + label_cost.saturating_sub(label_interned);
-        println!("{:<34} {:>16}", "recoverable by interning", recoverable);
+        println!(
+            "{:<30} {:>16} {:>9.1}%",
+            "attributed",
+            report.attributed(),
+            if heap > 0 { 100.0 * report.attributed() as f64 / heap as f64 } else { 0.0 }
+        );
+        println!(
+            "{:<30} {:>16}",
+            "unattributed (indexes, etc.)",
+            heap.saturating_sub(report.attributed())
+        );
+
+        println!("\nrepetition (what interning would remove)");
+        println!("{:<30} {:>16}", "property entries", entries);
+        println!("{:<30} {:>16}", "distinct property keys", distinct_keys.len());
+        println!("{:<30} {:>16}", "labels held", label_count);
+        println!("{:<30} {:>16}", "distinct labels", distinct_labels.len());
+        println!("{:<30} {:>16}", "string property value bytes", value_bytes);
+        println!("{:<30} {:>16}", "recoverable by interning", recoverable);
         if heap > 0 {
-            println!("{:<34} {:>15.1}%", "  as a share of live heap", 100.0 * recoverable as f64 / heap as f64);
+            println!("{:<30} {:>15.1}%", "  as a share of live heap", 100.0 * recoverable as f64 / heap as f64);
         }
         if edges > 0 {
-            println!("{:<34} {:>16.1}", "  bytes/edge it would remove", recoverable as f64 / edges as f64);
+            println!("{:<30} {:>16.1}", "  bytes/edge it would remove", recoverable as f64 / edges as f64);
         }
     }
 

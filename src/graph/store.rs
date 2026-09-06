@@ -378,6 +378,11 @@ impl FrozenAdjacencyStore {
 
     fn edge_count(&self) -> usize { self.total_edges }
 
+    /// Resident bytes across every segment (capacity, not length).
+    fn heap_bytes(&self) -> usize {
+        self.segments.iter().map(FrozenAdjacency::heap_bytes).sum()
+    }
+
     fn node_capacity(&self) -> usize {
         self.segments.iter().map(|s| s.node_capacity()).max().unwrap_or(0)
     }
@@ -507,6 +512,12 @@ pub struct FrozenAdjacency {
 }
 
 impl FrozenAdjacency {
+    /// Resident bytes of the offset table and the packed entries.
+    fn heap_bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<u32>()
+            + self.edges.capacity() * std::mem::size_of::<(NodeId, EdgeId)>()
+    }
+
     /// Create an empty frozen tier
     fn empty() -> Self {
         Self { offsets: vec![0], edges: Vec::new() }
@@ -662,6 +673,71 @@ pub struct Transaction {
 pub struct EdgeVersionEntry {
     pub version: u64,
     pub properties: PropertyMap,
+}
+
+/// Where a loaded graph's bytes are, by structure (`GraphStore::memory_report`).
+///
+/// Every field is heap bytes at **capacity**, since slack is resident. The point of
+/// the type is that it decomposes rather than normalises: a `bytes/edge` figure
+/// cannot say which structure to change and these can.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryReport {
+    /// Node arena including MVCC version chains — one `Vec<Node>` per node id.
+    pub node_versions: usize,
+    /// Node property tables, their key strings and their string values.
+    pub node_properties: usize,
+    /// Node label sets and their strings.
+    pub node_labels: usize,
+    /// `EdgeId -> (source, target)`.
+    pub edge_endpoints: usize,
+    /// `EdgeId -> type index`.
+    pub edge_type_ids: usize,
+    /// Sparse edge property maps.
+    pub edge_properties: usize,
+    /// Mutable `Vec<Vec<..>>` adjacency, both directions.
+    pub adjacency_write_buffer: usize,
+    /// Frozen CSR segments, both directions.
+    pub adjacency_frozen: usize,
+    /// `label -> nodes`.
+    pub label_index: usize,
+    /// `edge type -> edges`.
+    pub edge_type_index: usize,
+}
+
+impl MemoryReport {
+    /// Everything the walk attributes. Deliberately not called `total`: the vector,
+    /// property and hierarchy index managers are behind `Arc` and are not walked, so
+    /// this is a floor on the graph's footprint and not the process's.
+    pub fn attributed(&self) -> usize {
+        self.node_versions
+            + self.node_properties
+            + self.node_labels
+            + self.edge_endpoints
+            + self.edge_type_ids
+            + self.edge_properties
+            + self.adjacency_write_buffer
+            + self.adjacency_frozen
+            + self.label_index
+            + self.edge_type_index
+    }
+
+    /// Named lines, largest first — the order someone reading it wants.
+    pub fn lines(&self) -> Vec<(&'static str, usize)> {
+        let mut v = vec![
+            ("node versions (arena)", self.node_versions),
+            ("node properties", self.node_properties),
+            ("node labels", self.node_labels),
+            ("edge endpoints", self.edge_endpoints),
+            ("edge type ids", self.edge_type_ids),
+            ("edge properties", self.edge_properties),
+            ("adjacency: write buffer", self.adjacency_write_buffer),
+            ("adjacency: frozen CSR", self.adjacency_frozen),
+            ("label index", self.label_index),
+            ("edge type index", self.edge_type_index),
+        ];
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v
+    }
 }
 
 #[derive(Debug)]
@@ -905,6 +981,130 @@ impl GraphStore {
     fn journal(&mut self, m: crate::graph::event::Mutation) {
         if let Some(log) = &mut self.write_log {
             log.push(m);
+        }
+    }
+
+    /// Return capacity the graph is not using.
+    ///
+    /// `Vec` grows by doubling, so a bulk load leaves the edge arrays at up to 2x
+    /// the size they need. Measured on LDBC SF1: `edge_endpoints` and
+    /// `edge_type_ids` both sit at **1.94x** their length — 293 MB, 3.4% of live
+    /// heap, held and never read (#1118).
+    ///
+    /// Caller-driven rather than automatic, because it reallocates and copies: the
+    /// right moment is the end of a load, not the middle of one. Incremental writers
+    /// should not call it at all — they would pay a copy per growth step and get the
+    /// slack straight back.
+    pub fn shrink_to_fit(&mut self) {
+        self.edge_endpoints.shrink_to_fit();
+        self.edge_type_ids.shrink_to_fit();
+        self.nodes.shrink_to_fit();
+        for chain in &mut self.nodes {
+            chain.shrink_to_fit();
+        }
+        // The adjacency write buffer, per node. Not the frozen segments: those are
+        // built at exactly their size already.
+        self.outgoing.shrink_to_fit();
+        self.incoming.shrink_to_fit();
+        for v in self.outgoing.iter_mut().chain(self.incoming.iter_mut()) {
+            v.shrink_to_fit();
+        }
+        self.free_node_ids.shrink_to_fit();
+        self.free_edge_ids.shrink_to_fit();
+    }
+
+    /// Bytes held by each of the store's structures, walked rather than divided.
+    ///
+    /// A per-node or per-edge figure is a **normalisation, not a decomposition**:
+    /// `live_heap / nodes` divides the whole graph by the node count and reads high
+    /// whatever the memory is actually in, which is how PERF-10 acquired the claim
+    /// that its footprint was node-side when node-side is 28% of it (#1118). A
+    /// number that is going to send someone to a particular structure has to be
+    /// produced by looking at that structure.
+    ///
+    /// Capacity, not length: slack in a `Vec` is resident. Nested containers are
+    /// walked, so this is O(nodes + edges) and is a diagnostic rather than
+    /// something to call per query.
+    ///
+    /// Heap only. The `Arc`-held index managers report their own sizes if they can;
+    /// what is not attributed here is named in `unattributed_note` rather than
+    /// silently folded into another line.
+    pub fn memory_report(&self) -> MemoryReport {
+        let node_versions: usize = self
+            .nodes
+            .iter()
+            .map(|v| v.capacity() * std::mem::size_of::<Node>() + std::mem::size_of::<Vec<Node>>())
+            .sum();
+        let mut node_properties = 0usize;
+        let mut node_labels = 0usize;
+        for chain in &self.nodes {
+            for n in chain {
+                node_properties += n.properties.capacity()
+                    * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1);
+                for (k, v) in n.properties.iter() {
+                    node_properties += k.len();
+                    if let PropertyValue::String(sv) = v {
+                        node_properties += sv.len();
+                    }
+                }
+                node_labels += n.labels.capacity() * (std::mem::size_of::<Label>() + 1);
+                for l in n.labels.iter() {
+                    node_labels += l.as_str().len();
+                }
+            }
+        }
+
+        let write_buffer: usize = self
+            .outgoing
+            .iter()
+            .chain(self.incoming.iter())
+            .map(|v| {
+                v.capacity() * std::mem::size_of::<(NodeId, EdgeId)>()
+                    + std::mem::size_of::<Vec<(NodeId, EdgeId)>>()
+            })
+            .sum();
+        let frozen = self.frozen_outgoing.heap_bytes() + self.frozen_incoming.heap_bytes();
+
+        let edge_endpoints = self.edge_endpoints.capacity()
+            * std::mem::size_of::<(NodeId, NodeId)>();
+        let edge_type_ids = self.edge_type_ids.capacity() * std::mem::size_of::<u16>();
+        let mut edge_properties = self.edge_properties.capacity()
+            * (std::mem::size_of::<EdgeId>() + std::mem::size_of::<PropertyMap>() + 1);
+        for props in self.edge_properties.values() {
+            edge_properties += props.capacity()
+                * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1);
+            for (k, v) in props.iter() {
+                edge_properties += k.len();
+                if let PropertyValue::String(sv) = v {
+                    edge_properties += sv.len();
+                }
+            }
+        }
+
+        let mut label_index = self.label_index.capacity()
+            * (std::mem::size_of::<Label>() + std::mem::size_of::<HashSet<NodeId>>() + 1);
+        for (l, set) in self.label_index.iter() {
+            label_index += l.as_str().len()
+                + set.capacity() * (std::mem::size_of::<NodeId>() + 1);
+        }
+        let mut edge_type_index = self.edge_type_index.capacity()
+            * (std::mem::size_of::<EdgeType>() + std::mem::size_of::<HashSet<EdgeId>>() + 1);
+        for (t, set) in self.edge_type_index.iter() {
+            edge_type_index += t.as_str().len()
+                + set.capacity() * (std::mem::size_of::<EdgeId>() + 1);
+        }
+
+        MemoryReport {
+            node_versions,
+            node_properties,
+            node_labels,
+            edge_endpoints,
+            edge_type_ids,
+            edge_properties,
+            adjacency_write_buffer: write_buffer,
+            adjacency_frozen: frozen,
+            label_index,
+            edge_type_index,
         }
     }
 
