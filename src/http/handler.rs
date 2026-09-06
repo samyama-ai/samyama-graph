@@ -286,18 +286,13 @@ pub async fn query_handler(
             .into_response();
     }
 
-    // Check if query is write or read
-    let query_upper = payload.query.trim().to_uppercase();
-    let is_write = query_upper.starts_with("CREATE") ||
-                   query_upper.starts_with("SET") ||
-                   query_upper.starts_with("DELETE") ||
-                   query_upper.starts_with("MERGE") ||
-                   (query_upper.starts_with("MATCH") &&
-                    (query_upper.contains(" CREATE ") || query_upper.contains(" SET ") ||
-                     query_upper.contains(" DELETE ") || query_upper.contains(" MERGE ") ||
-                     query_upper.contains(" REMOVE ") ||
-                     query_upper.ends_with(" CREATE") || query_upper.ends_with(" SET") ||
-                     query_upper.ends_with(" DELETE") || query_upper.ends_with(" MERGE")));
+    // Asked of the parser, not of the query text. Two string matchers used to
+    // answer this, one per transport, and they disagreed: this one only looked
+    // past the first keyword when the statement began with `MATCH`, so
+    // `UNWIND [1] AS x CREATE (:X)` was sent to the read-only executor and came
+    // back 400 (#1111). A statement that does not parse is treated as a read and
+    // fails with its parse error a beat later, which is where it failed before.
+    let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
 
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
@@ -2162,6 +2157,33 @@ mod tests {
             0,
             "the rows before the ragged one were committed anyway"
         );
+    }
+
+    /// `UNWIND $rows AS row CREATE (...)` is the standard parameterised bulk insert
+    /// and it was refused over HTTP with a 400: the write check only looked past the
+    /// first keyword when the statement began with `MATCH`, so this went to the
+    /// read-only executor (#1111). Two shapes here, both previously rejected, and
+    /// each is checked all the way to what a restart would find.
+    #[tokio::test]
+    async fn writes_that_do_not_begin_with_match_reach_storage() {
+        for (query, expected) in [
+            ("UNWIND [1, 2, 3] AS x CREATE (:X {v: x})", 3),
+            ("WITH 7 AS x CREATE (:X {v: x})", 1),
+        ] {
+            let (state, pm, _dir) = state_with_persistence();
+            let app = Router::new()
+                .route("/api/query", post(query_handler))
+                .with_state(state.clone());
+
+            let body = serde_json::json!({"query": query, "graph": "default"}).to_string();
+            let (status, json) = post_query(app, &body).await;
+            assert_eq!(status, StatusCode::OK, "{query} -> {json}");
+
+            assert_eq!(state.store.read().await.node_count(), expected, "{query}");
+            pm.checkpoint().unwrap();
+            let (nodes, _) = pm.recover("default").unwrap();
+            assert_eq!(nodes.len(), expected, "{query} returned 200 and a restart found {} nodes", nodes.len());
+        }
     }
 
     /// The miss in #1106 was not that five handlers each forgot to persist. It was

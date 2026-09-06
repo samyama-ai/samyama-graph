@@ -210,6 +210,22 @@ impl QueryEngine {
         Ok(query)
     }
 
+    /// Whether this statement can change the graph, answered by the parser.
+    ///
+    /// The servers each matched strings against the query text to decide which
+    /// executor to use, and the two lists disagreed (#1111). The AST already knows,
+    /// and `cached_parse` means asking it costs a cache lookup on the second and
+    /// later sight of a statement — the same parse the execute call is about to do.
+    ///
+    /// A statement that does not parse is not classified here. The caller gets the
+    /// parse error, which is the same error it would have got a beat later.
+    pub fn statement_is_write(
+        &self,
+        query_str: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(self.cached_parse(query_str)?.is_write())
+    }
+
     /// Parse and execute a read-only Cypher query (MATCH, RETURN, etc.)
     pub fn execute(
         &self,

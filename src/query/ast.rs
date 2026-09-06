@@ -854,6 +854,55 @@ pub struct OrderByItem {
 
 impl Query {
     /// Create a new empty query
+    /// Whether executing this statement can change the graph.
+    ///
+    /// The servers used to answer this by matching strings against the query text,
+    /// once per transport and differently each time (#1111): the RESP list had no
+    /// `REMOVE`, and the HTTP list only looked past the first keyword when the
+    /// statement began with `MATCH`, so `UNWIND [1] AS x CREATE (:X)` — the
+    /// canonical parameterised bulk insert — was routed to the read-only executor
+    /// and refused with a 400.
+    ///
+    /// Both AST shapes are checked. `clauses` is the pipeline shape and the by-kind
+    /// fields are the other, and a statement populates one or the other; missing
+    /// either half is how a rule silently applies to only some queries.
+    ///
+    /// DDL counts as a write. `CREATE INDEX` and friends need `&mut GraphStore` for
+    /// the same reason `CREATE` does, and routing them to the read path fails at
+    /// execution rather than at the door.
+    ///
+    /// `union_queries` and `call_subquery` are checked recursively: a read query
+    /// whose subquery writes is a write.
+    pub fn is_write(&self) -> bool {
+        if self.clauses.iter().any(Clause::is_write) {
+            return true;
+        }
+        if self.create_clause.is_some()
+            || self.delete_clause.is_some()
+            || self.merge_clause.is_some()
+            || self.foreach_clause.is_some()
+            || !self.set_clauses.is_empty()
+            || !self.remove_clauses.is_empty()
+        {
+            return true;
+        }
+        // Schema changes mutate the store too.
+        if self.create_index_clause.is_some()
+            || self.drop_index_clause.is_some()
+            || self.create_vector_index_clause.is_some()
+            || self.create_constraint_clause.is_some()
+            || self.create_hierarchy_index_clause.is_some()
+            || self.drop_hierarchy_index.is_some()
+            || self.rebuild_hierarchy_index.is_some()
+        {
+            return true;
+        }
+        if self.union_queries.iter().any(|(q, _all)| q.is_write()) {
+            return true;
+        }
+        self.call_subquery.as_deref().is_some_and(|q| q.is_write())
+    }
+
     pub fn new() -> Self {
         Self {
             match_clauses: Vec::new(),
