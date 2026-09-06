@@ -164,16 +164,18 @@ impl CommandHandler {
             // In a more complex architecture, the store_guard would be isolated
             let res = self.query_engine.execute_mut(&query_str, &mut *store_guard, &graph_name);
 
-            // If write succeeded and persistence is enabled, persist the changes
-            if let (Ok(_), Some(ref persist_mgr)) = (&res, &self.persistence) {
+            // Persist on the outcome of the *store*, not of the statement. A
+            // statement that fails partway does not undo the rows it already wrote
+            // -- the engine has no statement rollback (LANG-07) -- so skipping the
+            // log on error left those rows visible in memory and absent from disk,
+            // which is the REL-06 violation rather than the guard against one
+            // (#1106).
+            if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
                     Ok(n) => debug!("Persisted {} entities from {} mutations", n, mutations.len()),
                     Err(e) => warn!("Failed to persist write: {}", e),
                 }
-            } else if self.persistence.is_some() {
-                // The statement failed; do not carry its partial log into the next one.
-                let _ = store_guard.take_write_log();
             }
 
             drop(store_guard);

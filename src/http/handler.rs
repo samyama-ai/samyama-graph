@@ -199,13 +199,12 @@ pub async fn import_parquet_handler(
             .into_response();
     };
 
-    let mut store_guard = state.store.write().await;
-    match crate::export::import::parquet_to_nodes(
-        &mut store_guard,
-        &params.graph,
-        &params.label,
-        data,
-    ) {
+    let outcome = state
+        .mutate(&params.graph, |store| {
+            crate::export::import::parquet_to_nodes(store, &params.graph, &params.label, data)
+        })
+        .await;
+    match outcome {
         Ok(stats) => (StatusCode::OK, Json(json!({ "status": "ok", "stats": stats })))
             .into_response(),
         Err(e) => (
@@ -302,27 +301,19 @@ pub async fn query_handler(
 
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
-        let mut store_guard = state.store.write().await;
-        // Record the changes so they can be persisted: a write here used to reach
+        // `mutate` records the changes and persists them: a write here used to reach
         // memory only, and returned 200 all the same (#1094).
-        if state.persistence.is_some() {
-            store_guard.enable_write_log();
-        }
-        let result = state.engine.execute_mut(&payload.query, &mut *store_guard, &payload.graph);
-        if let Some(pm) = &state.persistence {
-            let mutations = store_guard.take_write_log();
-            if result.is_ok() {
-                match pm.apply_mutations(&payload.graph, &store_guard, &mutations) {
-                    Ok(n) => tracing::debug!("Persisted {} entities from {} mutations", n, mutations.len()),
-                    Err(e) => tracing::warn!("Failed to persist HTTP write: {}", e),
-                }
-            }
-        }
-        snapshot_version = store_guard.current_version;
-        let props = result
-            .as_ref()
-            .map(|b| merged_node_properties(b, &store_guard))
-            .unwrap_or_default();
+        let (result, version, props) = state
+            .mutate(&payload.graph, |store| {
+                let result = state.engine.execute_mut(&payload.query, store, &payload.graph);
+                let props = result
+                    .as_ref()
+                    .map(|b| merged_node_properties(b, store))
+                    .unwrap_or_default();
+                (result, store.current_version, props)
+            })
+            .await;
+        snapshot_version = version;
         (result, props)
     } else {
         let store_guard = state.store.read().await;
@@ -796,8 +787,8 @@ pub async fn import_csv_handler(
     let headers: Vec<&str> = header_line.split(delimiter as char).collect();
     let id_col_idx = id_column.as_ref().and_then(|id_col| headers.iter().position(|h| h.trim() == id_col.as_str()));
 
-    let mut store_guard = state.store.write().await;
     let mut count = 0usize;
+    state.mutate(&graph, |store_guard| {
     let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
 
     for line in lines {
@@ -836,6 +827,8 @@ pub async fn import_csv_handler(
         }
         count += 1;
     }
+    let _ = id_map;
+    }).await;
 
     Json(json!({
         "status": "ok",
@@ -864,9 +857,8 @@ pub async fn import_json_handler(
         return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
     }
 
-    let mut store_guard = state.store.write().await;
     let mut count = 0usize;
-
+    state.mutate(&payload.graph, |store_guard| {
     for node_json in &payload.nodes {
         let node_id = store_guard.create_node(payload.label.as_str());
 
@@ -891,6 +883,7 @@ pub async fn import_json_handler(
         }
         count += 1;
     }
+    }).await;
 
     Json(json!({
         "status": "ok",
@@ -980,6 +973,10 @@ pub async fn restore_snapshot_handler(
         }
     };
 
+    // persistence: the snapshot bytes are committed to `data_path/snapshots` below
+    // and reloaded by `restore_persisted_snapshots` at boot (HA-08), so this path
+    // does not go through the mutation journal -- one journal entry per node of a
+    // hundred-million-node snapshot is not the right shape for it.
     let mut store_guard = state.store.write().await;
     let cursor = std::io::Cursor::new(&data);
     let dedup_keys: Vec<String> = params
@@ -1097,15 +1094,20 @@ pub async fn enrich_handler(
     }
 
     // Write phase: quarantine.
-    let mut filled = 0usize;
-    {
-        let mut store = state.store.write().await;
-        for o in &outcomes {
-            if enrich::quarantine(&mut store, o).is_ok() {
-                filled += 1;
+    // `/api/enrich` is single-graph by design -- `EnrichRequest` carries no graph and
+    // the policy is global -- so the tenant is the default one. A per-graph enrich
+    // would have to thread the name through here as well.
+    let filled = state
+        .mutate("default", |store| {
+            let mut filled = 0usize;
+            for o in &outcomes {
+                if enrich::quarantine(store, o).is_ok() {
+                    filled += 1;
+                }
             }
-        }
-    }
+            filled
+        })
+        .await;
 
     (
         StatusCode::OK,
@@ -1131,10 +1133,10 @@ pub async fn verify_handler(
         };
         enrich::collect_result_nodes(&batch)
     };
-    let report = {
-        let mut store = state.store.write().await;
-        enrich::verify(&cfg, &mut store, &node_ids)
-    };
+    // Single-graph, as `/api/enrich` is.
+    let report = state
+        .mutate("default", |store| enrich::verify(&cfg, store, &node_ids))
+        .await;
     (StatusCode::OK, Json(report)).into_response()
 }
 
@@ -1990,5 +1992,99 @@ mod tests {
             names.len()
         );
         assert!(names[0].contains("ada") && names[1].contains("grace"), "{names:?}");
+    }
+
+    /// Build an `AppState` backed by a real `PersistenceManager`, and hand back the
+    /// manager so a test can ask what a restart would load.
+    fn state_with_persistence() -> (
+        AppState,
+        std::sync::Arc<crate::persistence::PersistenceManager>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let pm = std::sync::Arc::new(
+            crate::persistence::PersistenceManager::new(dir.path()).unwrap(),
+        );
+        pm.tenants()
+            .create_tenant("default".to_string(), "default".to_string(), None)
+            .ok();
+        let state = AppState {
+            store: Arc::new(RwLock::new(GraphStore::new())),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: Some(std::sync::Arc::clone(&pm)),
+        };
+        (state, pm, dir)
+    }
+
+    /// `/api/import/json` is an ingest path, and REL-06 is about ingest paths. It
+    /// wrote to memory and returned `{"status":"ok"}` with nothing on disk (#1106).
+    #[tokio::test]
+    async fn json_import_reaches_storage() {
+        let (state, pm, _dir) = state_with_persistence();
+        let app = Router::new()
+            .route("/api/import/json", post(import_json_handler))
+            .with_state(state.clone());
+
+        let body = r#"{"label":"Person","nodes":[{"name":"ada"},{"name":"grace"}]}"#;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/import/json")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(state.store.read().await.node_count(), 2, "imported into memory");
+        pm.checkpoint().unwrap();
+        let (nodes, _) = pm.recover("default").unwrap();
+        assert_eq!(nodes.len(), 2, "the import returned ok and a restart found {} nodes", nodes.len());
+    }
+
+    /// The miss in #1106 was not that five handlers each forgot to persist. It was
+    /// that each one took the write lock itself, so there was nowhere for the fix to
+    /// live and nothing for a new handler to inherit. `AppState::mutate` is that
+    /// place; this test is what keeps handlers in it.
+    ///
+    /// A handler that genuinely must not go through `mutate` says so on the line,
+    /// with the mechanism that makes it durable instead.
+    #[test]
+    fn no_handler_takes_the_write_lock_outside_mutate() {
+        let source = include_str!("handler.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("handler.rs has a production region");
+
+        let lines: Vec<&str> = production.lines().collect();
+        let offenders: Vec<(usize, &str)> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("store.write().await"))
+            // The waiver is a `persistence:` note in the comment block above the
+            // line, so it has room to say *how* the path is durable instead.
+            .filter(|(i, _)| {
+                !lines[i.saturating_sub(6)..*i]
+                    .iter()
+                    .any(|c| c.trim_start().starts_with("//") && c.contains("persistence:"))
+            })
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "these take the write lock directly, so whatever they change is not \
+             journalled and does not survive a restart. Route them through \
+             `AppState::mutate`, or write a `// persistence: <how>` note above the line if \
+             the path is durable by another mechanism: {offenders:?}"
+        );
     }
 }
