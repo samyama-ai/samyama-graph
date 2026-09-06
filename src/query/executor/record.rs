@@ -498,8 +498,10 @@ impl Value {
     pub fn materialize_node(self, store: &GraphStore) -> Self {
         match self {
             Value::NodeRef(id) => {
-                if let Some(node) = store.get_node(id) {
-                    Value::Node(id, Box::new(node.clone()))
+                // One implementation of the merge, on the store — see
+                // `node_materialized` for why the row copy alone is not enough.
+                if let Some(node) = store.node_materialized(id) {
+                    Value::Node(id, Box::new(node))
                 } else {
                     Value::Null
                 }

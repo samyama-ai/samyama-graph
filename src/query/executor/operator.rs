@@ -8090,8 +8090,11 @@ impl ProjectOperator {
                 // "Edge not found" (#905). A *property* read of the same
                 // reference does fail -- see `read_property`.
                 match val {
-                    Value::NodeRef(id) => Ok(match store.get_node(id) {
-                        Some(node) => Value::Node(id, Box::new(node.clone())),
+                    // `node_materialized`, not `get_node`: after an import the row
+                    // copy of the properties is empty and the values are in the
+                    // column store (#1125).
+                    Value::NodeRef(id) => Ok(match store.node_materialized(id) {
+                        Some(node) => Value::Node(id, Box::new(node)),
                         None => Value::NodeRef(id),
                     }),
                     Value::EdgeRef(id, src, dst, ref ty) => Ok(match store.get_edge(id) {
