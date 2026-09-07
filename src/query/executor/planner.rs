@@ -3704,6 +3704,11 @@ impl QueryPlanner {
                 {
                     expand = expand.with_trail_enumeration();
                 }
+                // The restrictor the query asked for, which overrides the inference
+                // above: `multiplicity_is_observable` guesses at intent from query
+                // shape, and a written `ACYCLIC` is not a guess (#1141).
+                expand = expand.with_restrictor(path.restrictor);
+                    expand = expand.with_selector(path.selector);
                         // Relationship isomorphism applies to a var-length segment too: an
                         // edge an earlier segment of this clause walked is not available to
                         // it. `ExpandOperator` has done this since #684; this path did not
@@ -4329,6 +4334,11 @@ impl QueryPlanner {
                 {
                     expand = expand.with_trail_enumeration();
                 }
+                // The restrictor the query asked for, which overrides the inference
+                // above: `multiplicity_is_observable` guesses at intent from query
+                // shape, and a written `ACYCLIC` is not a guess (#1141).
+                expand = expand.with_restrictor(path.restrictor);
+                    expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not
@@ -4487,6 +4497,11 @@ impl QueryPlanner {
                 {
                     expand = expand.with_trail_enumeration();
                 }
+                // The restrictor the query asked for, which overrides the inference
+                // above: `multiplicity_is_observable` guesses at intent from query
+                // shape, and a written `ACYCLIC` is not a guess (#1141).
+                expand = expand.with_restrictor(path.restrictor);
+                    expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not

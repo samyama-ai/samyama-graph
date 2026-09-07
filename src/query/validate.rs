@@ -29,6 +29,9 @@ pub enum ValidationError {
     CreateRelationshipWithoutType,
     CreateUndirectedRelationship,
     CreateVariableLengthRelationship,
+    /// `WALK` with an unbounded quantifier under `ALL` (#1141). Its own variant
+    /// rather than a generic message, so a caller can branch on it.
+    UnboundedWalk,
     CreateOnBoundRelationship(String),
     MergeRelationshipWithoutType,
     MergeVariableLengthRelationship,
@@ -106,6 +109,9 @@ impl ValidationError {
     pub fn code(&self) -> &'static str {
         use crate::query::error_code as c;
         match self {
+            // Its own class: the query is well-formed and the pattern is legal;
+            // the *combination* has no finite answer. Nothing to rebind or retype.
+            Self::UnboundedWalk => c::INVALID_PATTERN,
             Self::UnboundVariable { .. } => c::VARIABLE_NOT_BOUND,
             Self::UnboundPatternVariable { .. } => c::VARIABLE_NOT_BOUND,
             Self::OrderByUndefinedVariable { .. } => c::VARIABLE_NOT_BOUND,
@@ -326,6 +332,16 @@ impl std::fmt::Display for ValidationError {
             Self::CreateVariableLengthRelationship => write!(
                 f,
                 "Variable length relationships cannot be created"
+            ),
+            Self::UnboundedWalk => write!(
+                f,
+                "an unbounded WALK under ALL has no finite answer: a walk may reuse \
+                 edges and nodes, so any cycle makes the result infinite, and \
+                 ISO/IEC 39075 forbids the combination. Give the quantifier an upper \
+                 bound (`*1..4`), or use TRAIL, ACYCLIC or SIMPLE, each of which is \
+                 finite by construction. A shortest selector does not rescue it in \
+                 this engine: candidates are enumerated before the selector is \
+                 applied, so an unbounded walk never reaches it"
             ),
             Self::CreateOnBoundRelationship(name) => write!(
                 f,
@@ -2664,7 +2680,43 @@ fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError
     Ok(())
 }
 
+/// `WALK` with an unbounded quantifier under `ALL` is refused (#1141).
+///
+/// ISO/IEC 39075 forbids the combination, and the reason is not pedantry: on any
+/// graph containing a cycle the answer is infinite, because a walk may reuse both
+/// edges and nodes without limit. Every other restrictor is finite by construction
+/// — `TRAIL` is bounded by the edge count, `ACYCLIC` and `SIMPLE` by the node count.
+///
+/// Refusing is the alternative to returning a capped subset and calling it the
+/// answer, which is the silent-wrong-answer class this engine treats as P0.
+///
+/// **Refused under every selector, not only `ALL`.** `ANY SHORTEST WALK` is finite
+/// in the standard — a shortest path cannot repeat a node — but it is not finite
+/// *here*, because this implementation enumerates the candidates and then applies
+/// the selector, so the selector never gets a turn. Allowing it hung the query.
+/// Making it work needs shortest-first traversal, which is a different operator;
+/// refusing until then is the honest position, and the message says which limit is
+/// being hit.
+fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationError> {
+    for mc in &query.match_clauses {
+        for path in &mc.pattern.paths {
+            if path.restrictor != crate::query::ast::PathRestrictor::Walk {
+                continue;
+            }
+            for seg in &path.segments {
+                if let Some(len) = &seg.edge.length {
+                    if len.max.is_none() {
+                        return Err(ValidationError::UnboundedWalk);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_unbounded_walk_is_refused(query)?;
     validate_variables_are_bound(query)?;
 
     validate_with_items_aliased(query)?;

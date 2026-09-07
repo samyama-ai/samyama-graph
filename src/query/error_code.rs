@@ -102,3 +102,9 @@ pub const CLAUSE_CONFLICT: &str = "Samyama.ClientError.Statement.ClauseConflict"
 /// A CREATE or MERGE pattern the language does not permit -- an untyped
 /// relationship, an undirected one, a variable-length one.
 pub const INVALID_WRITE_PATTERN: &str = "Samyama.ClientError.Statement.InvalidWritePattern";
+
+/// A read pattern that is well-formed but has no finite answer, e.g. an unbounded
+/// `WALK` under `ALL` (#1141). Distinct from a write-pattern error: nothing is
+/// being written, and nothing needs rebinding or retyping — the combination of
+/// restrictor, selector and quantifier is what cannot be served.
+pub const INVALID_PATTERN: &str = "Samyama.ClientError.Statement.InvalidPattern";

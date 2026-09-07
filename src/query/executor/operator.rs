@@ -6999,6 +6999,9 @@ impl PhysicalOperator for ExpandOperator {
 /// unrestricted, matching Cypher). An optional `path_variable` is materialized
 /// with the BFS route (shortest path source→target).
 pub struct VarLengthExpandOperator {
+    /// GQL path restrictor. `Trail` is the default and is what this operator has
+    /// always enforced, so an unannotated pattern is unchanged (#1141).
+    restrictor: crate::query::ast::PathRestrictor,
     input: OperatorBox,
     source_var: String,
     target_var: String,
@@ -7041,6 +7044,17 @@ pub struct VarLengthExpandOperator {
     edge_properties: std::collections::HashMap<String, PropertyValue>,
     /// Output records buffered for the current input record.
     pending: std::collections::VecDeque<Record>,
+    /// `(end node, path length)` for each entry of `pending`, in lockstep.
+    ///
+    /// The GQL selectors partition on the endpoint pair and then choose by length,
+    /// so applying one needs both facts and a `Record` carries neither reliably —
+    /// the path variable is bound only when the pattern names it. Recorded at the
+    /// single sink every walk goes through, so the two cannot fall out of step
+    /// (#1141).
+    pending_ends: std::collections::VecDeque<(NodeId, usize)>,
+    /// GQL path selector, applied once the expansion for one input record is
+    /// complete. `All` is the default and skips the pass entirely.
+    selector: crate::query::ast::PathSelector,
     /// `edge_types` resolved to interned ids, cached after the first use.
     ///
     /// Resolving is a hash lookup per type against the store, and the answer
@@ -7139,12 +7153,15 @@ impl VarLengthExpandOperator {
             target_labels: Vec::new(),
             direction,
             min_hops,
+            restrictor: crate::query::ast::PathRestrictor::default(),
             max_hops,
             path_variable: None,
             rel_variable: None,
             reversed_walk: false,
             edge_properties: std::collections::HashMap::new(),
             pending: std::collections::VecDeque::new(),
+            pending_ends: std::collections::VecDeque::new(),
+            selector: crate::query::ast::PathSelector::default(),
             type_ids: None,
             pinned_target: None,
             target_reach: None,
@@ -7444,6 +7461,34 @@ impl VarLengthExpandOperator {
 
     /// Enumerate trails rather than walking shortest paths, because the query
     /// can observe how many times a node is reached. See `enumerate_trails`.
+    /// Set the GQL path selector (#1141).
+    ///
+    /// A selector other than `All` needs every candidate path before it can choose
+    /// among them, so it turns enumeration on: the first-reach BFS keeps one path
+    /// per end node and cannot answer `ALL SHORTEST` at all.
+    pub fn with_selector(mut self, selector: crate::query::ast::PathSelector) -> Self {
+        self.selector = selector;
+        if selector != crate::query::ast::PathSelector::All {
+            self.enumerate_trails = true;
+        }
+        self
+    }
+
+    /// Set the GQL path restrictor (#1141).
+    ///
+    /// `Acyclic`, `Simple` and `Walk` all imply enumeration: each is a statement
+    /// about whole paths, and the first-reach BFS cannot express any of them — it
+    /// keeps one path per end node and so cannot tell a repeated node from a
+    /// repeated visit. Setting a non-default restrictor therefore turns enumeration
+    /// on rather than relying on the caller to remember.
+    pub fn with_restrictor(mut self, restrictor: crate::query::ast::PathRestrictor) -> Self {
+        self.restrictor = restrictor;
+        if restrictor != crate::query::ast::PathRestrictor::Trail {
+            self.enumerate_trails = true;
+        }
+        self
+    }
+
     pub fn with_trail_enumeration(mut self) -> Self {
         self.enumerate_trails = true;
         self
@@ -7598,11 +7643,14 @@ impl VarLengthExpandOperator {
 
         // Not a closure over `self`: `buffer` below needs `&mut self`, and a
         // captured `&self` would still be alive.
+        // `WALK` may reuse an edge; every other restrictor may not. Decided once
+        // here rather than inside the loop, so the common case pays nothing.
+        let reuse_edges = self.restrictor == crate::query::ast::PathRestrictor::Walk;
         macro_rules! collect {
             ($cur:expr, $used:expr) => {{
                 let mut out = Vec::new();
                 self.for_each_neighbor($cur, type_filter, store, |nb, eid| {
-                    if !$used.contains(&eid) {
+                    if reuse_edges || !$used.contains(&eid) {
                         out.push((nb, eid));
                     }
                 });
@@ -7622,6 +7670,29 @@ impl VarLengthExpandOperator {
                 }
                 continue;
             };
+            // Node restrictors (#1141). `Trail` and `Walk` say nothing about nodes,
+            // so they skip this entirely.
+            //
+            // `Acyclic` forbids any repeat, including the source. `Simple` forbids a
+            // repeat of an interior node but permits returning to the source — a
+            // cycle is a simple path — and a path that has done so may not continue,
+            // which is handled at the descend guard below rather than here. That
+            // asymmetry is why `Simple` is not prefix-closed: rejecting `nb ==
+            // source` outright would refuse every cycle, and accepting it without
+            // stopping would admit paths through the source.
+            match self.restrictor {
+                crate::query::ast::PathRestrictor::Acyclic => {
+                    if nb == source_id || path.iter().any(|&(n, _)| n == nb) {
+                        continue;
+                    }
+                }
+                crate::query::ast::PathRestrictor::Simple => {
+                    if path.iter().any(|&(n, _)| n == nb) {
+                        continue;
+                    }
+                }
+                _ => {}
+            }
             path.push((nb, eid));
             edges.push(eid);
             let depth = path.len();
@@ -7661,7 +7732,12 @@ impl VarLengthExpandOperator {
                 self.buffer_trail(record, nb, trail_nodes, trail_edges, store);
             }
 
-            if depth < self.max_hops {
+            // A `Simple` path that has returned to its source is complete: extending
+            // it would put the source in the interior, which `Simple` forbids. So it
+            // is emitted above and not descended from.
+            let simple_closed = self.restrictor == crate::query::ast::PathRestrictor::Simple
+                && nb == source_id;
+            if depth < self.max_hops && !simple_closed {
                 stack.push(collect!(nb, edges));
             } else {
                 path.pop();
@@ -7673,7 +7749,65 @@ impl VarLengthExpandOperator {
 
     /// BFS from the source bound in `record`, buffering one output record per
     /// distinct reachable target in `[min_hops, max_hops]`.
+    /// Expand one input record, then apply the GQL path selector to what it
+    /// produced (#1141).
+    ///
+    /// The selector partitions on the endpoint pair and chooses within each part,
+    /// so it cannot be applied while walking: `ALL SHORTEST` does not know which
+    /// length is shortest until the walk is done. Applied per input record rather
+    /// than per operator, because the pair is `(this record's source, end)` and two
+    /// input rows are two different partitions.
     fn expand_from(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        let first_new = self.pending.len();
+        let result = self.expand_from_inner(record, store);
+        if self.selector != crate::query::ast::PathSelector::All {
+            self.apply_selector(first_new);
+        }
+        result
+    }
+
+    /// Keep only the paths the selector asks for, among those just produced.
+    ///
+    /// Two passes: the minimum length per end node, then the choice. Stable — the
+    /// surviving records keep their relative order, so `ANY` returns the path the
+    /// walk found first, which is a conforming choice and a reproducible one.
+    fn apply_selector(&mut self, from: usize) {
+        use crate::query::ast::PathSelector;
+        let mut best: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+        if self.selector.is_shortest() {
+            for &(end, len) in self.pending_ends.iter().skip(from) {
+                best.entry(end).and_modify(|b| *b = (*b).min(len)).or_insert(len);
+            }
+        }
+        let mut taken: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut keep: Vec<bool> = Vec::with_capacity(self.pending.len() - from);
+        for &(end, len) in self.pending_ends.iter().skip(from) {
+            let long_enough = !self.selector.is_shortest() || best.get(&end) == Some(&len);
+            let wanted = long_enough && (!self.selector.is_single() || taken.insert(end));
+            keep.push(wanted);
+        }
+        // Rebuilt rather than filtered in place: `VecDeque::retain` would have to
+        // walk both deques in step, and one of them getting out of step is the
+        // failure this pairing exists to prevent.
+        let mut records: Vec<Record> = Vec::with_capacity(self.pending.len());
+        let mut ends: Vec<(NodeId, usize)> = Vec::with_capacity(self.pending_ends.len());
+        for (i, (rec, meta)) in self
+            .pending
+            .drain(..)
+            .zip(self.pending_ends.drain(..))
+            .enumerate()
+        {
+            if i < from || keep[i - from] {
+                records.push(rec);
+                ends.push(meta);
+            }
+        }
+        self.pending = records.into();
+        self.pending_ends = ends.into();
+        let _ = PathSelector::All;
+    }
+
+    fn expand_from_inner(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         // `MATCH (first)-[rs*]->(second)` where `rs` is *already bound* to a
         // list of relationships is not a search at all. openCypher reads it as
         // "the walk is exactly `rs`", so there is one candidate path and the
@@ -7926,6 +8060,9 @@ impl VarLengthExpandOperator {
         edges: Vec<crate::graph::EdgeId>,
         store: &GraphStore,
     ) {
+        // Length is the edge count, which is the definition a selector orders by
+        // and is right for a zero-length match too.
+        self.pending_ends.push_back((target, edges.len()));
         let mut rec = base.clone();
         rec.bind(self.target_var.clone(), Value::NodeRef(target));
 

@@ -181,7 +181,21 @@ create_stmt = { create_clause+ ~ return_clause? ~ order_by_clause? ~ skip_clause
 
 // Pattern matching
 pattern = { named_path ~ ("," ~ named_path)* }
-named_path = { (variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path) | shortest_path_call | path }
+named_path = { (variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path_modes ~ path) | (variable ~ "=" ~ path) | shortest_path_call | (path_modes ~ path) | path }
+
+// GQL path selectors and restrictors (ISO/IEC 39075:2024), as a prefix on a path
+// pattern: `MATCH ALL SHORTEST ACYCLIC (a)-[:R*1..3]->(b)`.
+//
+// Selector first, then restrictor, which is the standard's order: the restrictor
+// says which paths are candidates and the selector picks among them per endpoint
+// pair. Both optional and both independently useful.
+path_modes = { (path_selector ~ path_restrictor?) | path_restrictor }
+// **Longest alternative first.** PEG takes the first match and does not backtrack
+// into a longer one, so `ALL` before `ALL SHORTEST` would consume the `ALL` and
+// leave `SHORTEST` to fail as a node pattern -- the ordering trap that has bitten
+// this grammar before.
+path_selector = { (^"ALL" ~ ^"SHORTEST") | (^"ANY" ~ ^"SHORTEST") | ^"ANY" | ^"ALL" }
+path_restrictor = { ^"WALK" | ^"TRAIL" | ^"ACYCLIC" | ^"SIMPLE" }
 path = { node ~ (edge_pattern ~ node)* }
 
 // shortestPath / allShortestPaths wrapping a pattern
