@@ -11927,6 +11927,80 @@ impl PhysicalOperator for ShowConstraintsOperator {
     }
 }
 
+/// `CALL db.checkIntegrity()` — assert the store's invariants and report what is
+/// broken (#1143).
+///
+/// Reports one row per violation and **no rows when the store is sound**, which is
+/// the shape a caller can act on: `CALL db.checkIntegrity()` returning nothing is
+/// the answer you want, and any row is a place to look.
+///
+/// Exists because an instance was once found holding 813 edges whose endpoints
+/// resolved to null while its node side was clean. Every query against it was
+/// silently wrong, and it surfaced only as a row count nobody could explain. The
+/// cause was never reproduced — `DETACH DELETE` and reload is clean over a 60-round
+/// soak — so this is a detector rather than a fix, and its value is turning an hour
+/// of confusion into one query.
+pub struct CheckIntegrityOperator {
+    results: Option<std::vec::IntoIter<Record>>,
+}
+
+impl CheckIntegrityOperator {
+    pub fn new() -> Self {
+        Self { results: None }
+    }
+}
+
+impl Default for CheckIntegrityOperator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhysicalOperator for CheckIntegrityOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let records: Vec<Record> = store
+                .check_integrity()
+                .into_iter()
+                .map(|v| {
+                    let mut rec = Record::new();
+                    // `kind` so a caller can branch without parsing prose, and
+                    // `detail` so a human reading the output does not have to look
+                    // the kind up.
+                    let (kind, detail) = match &v {
+                        crate::graph::store::IntegrityViolation::DanglingEdge { .. } => {
+                            ("dangling_edge", v.to_string())
+                        }
+                    };
+                    rec.bind(
+                        "kind".to_string(),
+                        Value::Property(PropertyValue::String(kind.to_string())),
+                    );
+                    rec.bind(
+                        "detail".to_string(),
+                        Value::Property(PropertyValue::String(detail)),
+                    );
+                    rec
+                })
+                .collect();
+            self.results = Some(records.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next())
+    }
+
+    fn reset(&mut self) {
+        self.results = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CheckIntegrity".to_string(),
+            details: "every edge references two existing nodes".to_string(),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Show labels operator: CALL db.labels()
 pub struct ShowLabelsOperator {
     results: Option<std::vec::IntoIter<Record>>,

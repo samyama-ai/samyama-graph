@@ -3251,6 +3251,10 @@ impl QueryPlanner {
                 node_var,
                 score_var,
             )))
+        } else if call_clause.procedure_name == "db.checkIntegrity"
+            || call_clause.procedure_name == "db.checkintegrity"
+        {
+            Ok(Box::new(crate::query::executor::operator::CheckIntegrityOperator::new()))
         } else if call_clause.procedure_name == "db.labels" {
             Ok(Box::new(ShowLabelsOperator::new()))
         } else if call_clause.procedure_name == "db.relationshipTypes" {
