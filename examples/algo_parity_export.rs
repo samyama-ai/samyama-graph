@@ -610,8 +610,94 @@ fn main() {
         graphs.push(entry);
     }
 
+    // `or.solve` (ALGO-02).
+    //
+    // A metaheuristic, so the argmin is not unique and two correct runs can return
+    // different vectors. What *is* unique is the optimum of the linear program it is
+    // solving — minimise `sum(x_i * c_i)` over `lower <= x_i <= upper` subject to
+    // `sum(x_i) >= min_total` — so the checkable facts are that the answer is
+    // feasible and that it does not claim a value the LP cannot achieve. That is the
+    // same shape as the invariant checks already used for the greedy algorithms.
+    //
+    // Run through Cypher rather than against the solver directly: the problem is
+    // assembled from node properties, and assembling it by hand here would check the
+    // solver while skipping the part that reads the graph.
+    let or_solve = {
+        use samyama::graph::{GraphStore, PropertyValue};
+        use samyama::query::QueryEngine;
+
+        // Costs chosen so the greedy optimum is not the trivial all-at-lower point:
+        // `min_total` is above `n * lower`, so a correct answer has to buy units,
+        // and the cheapest coefficients are not in index order.
+        let costs: Vec<f64> = vec![7.0, 2.0, 9.0, 4.0, 1.0, 6.0, 3.0, 8.0];
+        let (lower, upper, min_total) = (0.0_f64, 10.0_f64, 25.0_f64);
+
+        let mut store = GraphStore::new();
+        for &c in &costs {
+            let id = store.create_node("Item");
+            let _ = store.set_node_property("default", id, "cost", PropertyValue::Float(c));
+        }
+        let engine = QueryEngine::new();
+        // `{lower:.1}` and not `{lower}`: `format!("{}", 25.0_f64)` renders `25`, the
+        // Cypher literal is then an integer, and `as_float()` on it returns `None`
+        // — so `min_total` silently vanished and the solver returned the
+        // unconstrained optimum (all zeros, objective 0) which the reference then
+        // read as a constraint violation. The engine was right and the fixture was
+        // wrong; a float that renders as an integer is the same trap that makes a
+        // `WHERE` clause quietly return no rows.
+        let q = format!(
+            "CALL algo.or.solve({{algorithm: \"Jaya\", label: \"Item\", property: \"qty\", \
+             cost_property: \"cost\", min: {lower:.1}, max: {upper:.1}, min_total: {min_total:.1}, \
+             population_size: 60, max_iterations: 300}})"
+        );
+        match engine.execute_mut(&q, &mut store, "default") {
+            Ok(batch) => {
+                let fitness = batch.records.first().and_then(|r| match r.get("fitness") {
+                    Some(v) => format!("{v:?}")
+                        .split('(')
+                        .next_back()
+                        .and_then(|t| t.trim_end_matches(')').parse::<f64>().ok()),
+                    None => None,
+                });
+                // The chosen quantities are written back onto the nodes, which is
+                // where a caller reads them, so that is where the check reads them.
+                //
+                // Cost and quantity are read from the **same node**, as pairs. Read
+                // as two lists they were misaligned — `get_nodes_by_label` does not
+                // return creation order — and the reference computed an objective of
+                // 139.9 for a solution the engine scored at 45.0. The engine was
+                // right; the pairing was the bug, and a check that pairs by position
+                // across two orderings is one transposition away from a false
+                // failure at any time.
+                let pairs: Vec<(f64, f64)> = store
+                    .get_nodes_by_label(&samyama::graph::Label::new("Item"))
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.get_property("cost").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
+                            n.get_property("qty").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
+                        )
+                    })
+                    .collect();
+                let chosen: Vec<f64> = pairs.iter().map(|(_, q)| *q).collect();
+                let chosen_costs: Vec<f64> = pairs.iter().map(|(c, _)| *c).collect();
+                serde_json::json!({
+                    "costs": costs,
+                    "chosen_costs": chosen_costs,
+                    "lower": lower,
+                    "upper": upper,
+                    "min_total": min_total,
+                    "chosen": chosen,
+                    "fitness": fitness,
+                })
+            }
+            Err(e) => serde_json::json!({ "unavailable": e.to_string() }),
+        }
+    };
+
     let doc = serde_json::json!({
         "generator": "algo_parity_export",
+        "or_solve": or_solve,
         "pagerank_config": {
             "damping": 0.85,
             "default_iterations": 20,
