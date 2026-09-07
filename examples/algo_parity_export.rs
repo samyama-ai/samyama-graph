@@ -29,6 +29,7 @@ use samyama_graph_algorithms::{
     eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
+    pathfinding_extra::article_rank,
     pathfinding_extra::random_walk,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     community_detect::louvain,
@@ -426,6 +427,19 @@ fn main() {
 
         let mut h2 = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
+        // ArticleRank (ALGO-02). Deterministic for a given damping and iteration
+        // count, so it has exactly one right answer and belongs in the parity
+        // denominator — "no library ships it" is not the same as "no reference can
+        // exist", and this requirement's exclusion test is the latter.
+        //
+        // The parameters travel with the result. A reference that has to guess them
+        // is comparing two different algorithms, and would disagree for a reason
+        // that says nothing about either implementation.
+        put("article_rank", serde_json::json!({
+            "damping": 0.85,
+            "iterations": 40,
+            "scores": idx(&article_rank(&view, 0.85, 40)),
+        }));
         put("katz", serde_json::to_value(&katz).unwrap());
         put("articulation_points", serde_json::to_value(&artic).unwrap());
         put("bridges", serde_json::to_value(&bridge_pairs).unwrap());
