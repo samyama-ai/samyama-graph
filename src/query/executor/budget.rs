@@ -83,6 +83,43 @@ pub fn configured_budget() -> u64 {
     }
 }
 
+/// Rows the whole plan may produce, across every pass, before the query is
+/// refused.
+///
+/// A multiple of the per-operator budget rather than equal to it: a plan with
+/// several amplifying operators, or one legitimately re-executed by a nested
+/// loop, does more total work than any single pass and is not thereby a runaway.
+/// The point of this bound is the case the per-pass one cannot see at all, not
+/// to second-guess the per-pass number.
+pub const QUERY_BUDGET_MULTIPLE: u64 = 20;
+
+/// A counter shared by every budgeted operator in one plan.
+///
+/// `reset()` clears the per-pass count and deliberately does **not** clear this.
+/// That difference is the whole point: a cartesian product re-executed by a
+/// nested loop starts its per-pass count again on every iteration, so a million
+/// passes of 50,000 rows each never cross a 50,000,000 per-pass budget while
+/// doing twenty times a budget's worth of work. The module said so and nothing
+/// enforced it (PERF-05).
+#[derive(Debug)]
+struct QueryTotal {
+    produced: std::sync::atomic::AtomicU64,
+    budget: u64,
+}
+
+impl QueryTotal {
+    fn charge(&self, rows: u64) -> Option<u64> {
+        if self.budget == 0 || rows == 0 {
+            return None;
+        }
+        let total = self
+            .produced
+            .fetch_add(rows, std::sync::atomic::Ordering::Relaxed)
+            + rows;
+        (total > self.budget).then_some(total)
+    }
+}
+
 /// Wraps one operator and refuses once it has produced more than `budget`.
 struct BudgetedOperator {
     inner: OperatorBox,
@@ -91,10 +128,30 @@ struct BudgetedOperator {
     name: String,
     produced: u64,
     budget: u64,
+    /// Shared across the plan, and not cleared by `reset()`.
+    total: std::sync::Arc<QueryTotal>,
 }
 
 impl BudgetedOperator {
     fn charge(&mut self, rows: usize) -> ExecutionResult<()> {
+        // The per-query bound first: it is the one that catches work spread
+        // across passes, and reporting the per-pass number for a query that
+        // crossed the total would name the wrong limit.
+        if let Some(total) = self.total.charge(rows as u64) {
+            return Err(ExecutionError::Coded {
+                code: error_code::ROW_BUDGET_EXCEEDED,
+                message: format!(
+                    "the plan produced {} rows in total (the per-query row budget \
+                     is {}) and the query was refused rather than run to \
+                     completion. No single operator crossed the per-operator \
+                     budget: this is work spread across repeated passes, usually a \
+                     cartesian product driven by a nested loop. Operator {} was the \
+                     one that crossed the total. Raise or disable the budget with \
+                     SAMYAMA_ROW_BUDGET (0 disables both bounds).",
+                    total, self.total.budget, self.name
+                ),
+            });
+        }
         self.produced += rows as u64;
         if self.produced > self.budget {
             return Err(ExecutionError::Coded {
@@ -188,12 +245,12 @@ impl PhysicalOperator for Vacated {
     fn reset(&mut self) {}
 }
 
-fn wrap(slot: &mut OperatorBox, budget: u64) {
+fn wrap(slot: &mut OperatorBox, budget: u64, total: &std::sync::Arc<QueryTotal>) {
     // Name taken before wrapping, so the refusal names the planner's operator.
     let name = slot.describe().name;
     let amplifies = slot.amplifies_rows();
     for child in slot.children_mut() {
-        wrap(child, budget);
+        wrap(child, budget, total);
     }
     // Only amplifying operators are budgeted. A scan of a 187M-node graph
     // produces 187M rows and is reading the data it was asked for; refusing it
@@ -202,7 +259,13 @@ fn wrap(slot: &mut OperatorBox, budget: u64) {
     // which is the cost `PROFILE` is opt-in to avoid.
     if amplifies {
         let inner = std::mem::replace(slot, Box::new(Vacated));
-        *slot = Box::new(BudgetedOperator { inner, name, produced: 0, budget });
+        *slot = Box::new(BudgetedOperator {
+            inner,
+            name,
+            produced: 0,
+            budget,
+            total: std::sync::Arc::clone(total),
+        });
     }
 }
 
@@ -214,7 +277,14 @@ pub fn enforce(root: &mut OperatorBox, budget: u64) {
     if budget == 0 {
         return;
     }
-    wrap(root, budget);
+    // One counter per plan, shared by every wrapped operator in it, so the two
+    // bounds answer different questions: `budget` is what one operator may do in
+    // one pass, and this is what the whole plan may do across all of them.
+    let total = std::sync::Arc::new(QueryTotal {
+        produced: std::sync::atomic::AtomicU64::new(0),
+        budget: budget.saturating_mul(QUERY_BUDGET_MULTIPLE),
+    });
+    wrap(root, budget, &total);
 }
 
 #[cfg(test)]
@@ -247,6 +317,87 @@ mod tests {
             msg.contains("CartesianProduct"),
             "the message must name the operator, not just fail: {msg}"
         );
+    }
+
+    /// The hole this module documented and did not close: work spread across
+    /// repeated passes.
+    ///
+    /// `reset()` clears the per-pass count, so an amplifying operator driven by a
+    /// nested loop starts again on every iteration. Each pass can stay under the
+    /// per-operator budget while the plan as a whole does many budgets' worth of
+    /// work — "a per-pass bound, not a per-query one", which this module stated and
+    /// nothing enforced.
+    ///
+    /// Tested at the mechanism rather than through a query, because **no query
+    /// shape the planner produces today drives an amplifying operator across
+    /// passes**: `UNWIND` plans *above* `CartesianProduct` rather than driving it,
+    /// and there is no `Apply` or nested-loop operator. Writing a query-level test
+    /// would mean writing one that cannot fail. See
+    /// `no_plan_today_re_executes_an_amplifying_operator`, which pins that reason
+    /// so this test's justification fails when it stops being true.
+    #[test]
+    fn reset_clears_the_pass_count_and_not_the_query_total() {
+        let total = std::sync::Arc::new(QueryTotal {
+            produced: std::sync::atomic::AtomicU64::new(0),
+            budget: 250,
+        });
+        let mut op = BudgetedOperator {
+            inner: Box::new(Vacated),
+            name: "CartesianProduct".to_string(),
+            produced: 0,
+            budget: 100,
+            total: std::sync::Arc::clone(&total),
+        };
+
+        // Three passes of 90 rows: each is inside the 100-row per-pass budget, and
+        // together they cross the 250-row total. This is the shape the per-pass
+        // bound cannot see.
+        for pass in 0..2 {
+            op.charge(90).unwrap_or_else(|e| panic!("pass {pass} of 90 rows is inside the per-pass budget: {e}"));
+            assert_eq!(op.produced, 90, "the pass count must not accumulate across passes");
+            op.reset();
+            assert_eq!(op.produced, 0, "reset must clear the pass count");
+        }
+
+        let err = op.charge(90).expect_err("270 rows across three passes must cross a 250-row total");
+        let msg = err.to_string();
+        assert!(msg.contains(error_code::ROW_BUDGET_EXCEEDED), "{msg}");
+        assert!(
+            msg.contains("per-query row budget"),
+            "a query that crossed the total must not be reported against the \
+             per-operator limit, which it never crossed: {msg}"
+        );
+        assert!(msg.contains("CartesianProduct"), "the message must name the operator: {msg}");
+    }
+
+    /// Why the test above is a unit test.
+    ///
+    /// If a planner change introduces a nested-loop or `Apply` operator, an
+    /// amplifying operator becomes reachable across passes and the per-query bound
+    /// becomes exercisable — and testable — through a query. This fails at that
+    /// point, which is when the reasoning above needs revisiting.
+    #[test]
+    fn no_plan_today_re_executes_an_amplifying_operator() {
+        let s = store(6);
+        let engine = QueryEngine::new();
+        for q in [
+            "UNWIND range(1, 3) AS k MATCH (a:N), (b:N) RETURN count(*)",
+            "MATCH (x:N) WITH x MATCH (a:N), (b:N) RETURN count(*)",
+            "UNWIND range(1,2) AS k MATCH (a:N) WITH k, a MATCH (b:N), (c:N) RETURN count(*)",
+        ] {
+            let plan = engine
+                .execute(&format!("EXPLAIN {q}"), &s)
+                .expect("EXPLAIN")
+                .records[0]
+                .get("plan")
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_default();
+            assert!(
+                !plan.contains("Apply") && !plan.contains("NestedLoop"),
+                "a plan now drives an operator across passes; the per-query budget \
+                 is reachable from a query and should be tested through one: {q}\n{plan}"
+            );
+        }
     }
 
     /// The converse, and the one that matters: a budget that refuses
