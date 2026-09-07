@@ -7626,7 +7626,13 @@ impl VarLengthExpandOperator {
             edges.push(eid);
             let depth = path.len();
 
-            if depth >= self.min_hops && self.emit_ok(nb, store) {
+            // Both bounds. `depth >= min_hops` alone was sufficient while this
+            // path was reachable only for `min_hops >= 1`, because the
+            // `depth < max_hops` descend guard below then implied the upper bound.
+            // At `*0..0` it does not: depth 1 satisfies `1 >= 0` and is emitted
+            // before anything checks it against `max_hops == 0`. Stated as the
+            // interval it is, rather than relying on a guard elsewhere (#1140).
+            if depth >= self.min_hops && depth <= self.max_hops && self.emit_ok(nb, store) {
                 trails += 1;
                 if trails > MAX_TRAILS {
                     return Err(ExecutionError::PlanningError(format!(
@@ -7762,10 +7768,35 @@ impl VarLengthExpandOperator {
         // nodes, and IC6 needs the pinned-target walk to stay cheap. Both have
         // `min_hops == 1`, as does every LDBC pattern, so the enumeration is
         // taken only where the BFS is not merely lossy but wrong.
-        // `min_hops == 0` stays on the BFS: `expand_trails` walks outward from
-        // the source and has no way to emit the source itself, so routing
-        // `*0..n` into it silently drops the zero-length match — caught by
-        // `zero_hops_includes_the_target_itself`.
+        // `min_hops == 0` used to stay on the BFS, because `expand_trails` walks
+        // outward from the source and cannot emit the source itself — routing
+        // `*0..n` into it dropped the zero-length match, which
+        // `zero_hops_includes_the_target_itself` catches.
+        //
+        // That reasoning was right about `expand_trails` and wrong about the
+        // conclusion. Staying on the BFS means `*0..n` gets first-reach dedup with
+        // the multiplicity guard never consulted, so `(a)-[:E*0..2]->(y)` over two
+        // parallel `a->b` edges answered `a, b, c` where the correct multiset is
+        // `a, b, b, c, c` — while `*1..2` on the same graph was right (#1140). A
+        // silent wrong answer through an interface reporting success.
+        //
+        // The fix is the invariant rather than a second traversal:
+        //
+        //     A(0, n)  ==  A(0, 0)  union  A(1, n)      as multisets
+        //
+        // true under every ISO/IEC 39075 path mode — WALK, TRAIL, ACYCLIC and
+        // SIMPLE — because a path has exactly one length and no restrictor mentions
+        // the quantifier bounds. `A(0,0)` is the single zero-length match, emitted
+        // here; `A(1,n)` is what `expand_trails` already computes, since its emit
+        // test is `depth >= min_hops` and its first depth is 1. So the two halves
+        // cannot diverge again: there is only one traversal.
+        if self.enumerate_trails && self.min_hops == 0 {
+            if self.emit_ok(source_id, store) {
+                let empty = std::collections::HashMap::new();
+                self.buffer(record, source_id, &empty, source_id, store);
+            }
+            return self.expand_trails(record, source_id, store);
+        }
         if self.min_hops >= 2 || (self.enumerate_trails && self.min_hops >= 1) {
             return self.expand_trails(record, source_id, store);
         }
