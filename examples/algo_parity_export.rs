@@ -30,6 +30,7 @@ use samyama_graph_algorithms::{
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::article_rank,
+    temporal::{propagation_ranking, symptom_explanation, temporal_reachability, temporal_shortest_path},
     pathfinding_extra::random_walk,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     community_detect::louvain,
@@ -435,6 +436,65 @@ fn main() {
         // The parameters travel with the result. A reference that has to guess them
         // is comparing two different algorithms, and would disagree for a reason
         // that says nothing about either implementation.
+        // The four ALGO-15 temporal primitives (ALGO-02).
+        //
+        // Each has exactly one right answer for a given graph, edge-time array and
+        // start time, so all four are referenceable — "ours, and no library ships
+        // it" is not the exclusion test this requirement uses.
+        //
+        // Times are derived from the edge slot rather than randomised, so the
+        // reference reproduces them without the exporter having to ship a second
+        // array that could drift from the first. The `* 7 % 23` spreads them across
+        // a range wide enough that a time-respecting walk and a static one differ:
+        // with monotonically increasing times every path is time-respecting and the
+        // check would pass on an engine that ignored time entirely.
+        {
+            let slots = view.out_targets.len();
+            let edge_times: Vec<i64> = (0..slots).map(|i| ((i * 7) % 23) as i64).collect();
+            match samyama_graph_algorithms::temporal::TemporalEdges::new(&view, edge_times.clone()) {
+                Ok(te) => {
+                    let sources = [0usize];
+                    let reach = temporal_reachability(&view, &te, &sources, 0)
+                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                    let prop = propagation_ranking(&view, &te, &sources, 0)
+                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                    let tsp = temporal_shortest_path(&view, &te, 0, r.n - 1, 0).map(|p| {
+                        p.map(|p| serde_json::json!({
+                            "nodes": p.nodes,
+                            "edge_times": p.edge_times,
+                            "arrival": p.arrival,
+                        }))
+                    });
+                    // Two symptoms at different times: one symptom cannot show
+                    // whether the explained-count accumulates across them.
+                    let symptoms = [(r.n - 1, 40i64), (r.n / 2, 30i64)];
+                    let expl = symptom_explanation(&view, &te, &symptoms).map(|v| {
+                        v.into_iter()
+                            .map(|e| serde_json::json!({
+                                "node": e.node,
+                                "explains": e.symptoms_explained,
+                                "onset": e.latest_onset,
+                            }))
+                            .collect::<Vec<_>>()
+                    });
+                    put("temporal", serde_json::json!({
+                        "edge_times": edge_times,
+                        "start": 0,
+                        "sources": sources,
+                        "target": r.n - 1,
+                        "symptoms": symptoms.iter().map(|(a, b)| serde_json::json!([a, b])).collect::<Vec<_>>(),
+                        "reachability": reach.ok(),
+                        "propagation_ranking": prop.ok(),
+                        "shortest_path": tsp.ok().flatten(),
+                        "symptom_explanation": expl.ok(),
+                    }));
+                }
+                Err(e) => {
+                    put("temporal", serde_json::json!({ "unavailable": e.to_string() }));
+                }
+            }
+        }
+
         put("article_rank", serde_json::json!({
             "damping": 0.85,
             "iterations": 40,
