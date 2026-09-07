@@ -1665,12 +1665,25 @@ fn parse_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Pattern> {
 fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
     let mut path_variable: Option<String> = None;
     let mut path_pattern: Option<PathPattern> = None;
+    let mut restrictor: Option<PathRestrictor> = None;
+    let mut selector: Option<PathSelector> = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => {
                 if path_variable.is_none() {
                     path_variable = Some(inner.as_str().to_string());
+                }
+            }
+            Rule::path_modes => {
+                for mode in inner.into_inner() {
+                    match mode.as_rule() {
+                        Rule::path_selector => selector = Some(parse_path_selector(mode.as_str())),
+                        Rule::path_restrictor => {
+                            restrictor = Some(parse_path_restrictor(mode.as_str()))
+                        }
+                        _ => {}
+                    }
                 }
             }
             Rule::path => {
@@ -1685,7 +1698,42 @@ fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPatter
 
     let mut pp = path_pattern.ok_or_else(|| ParseError::SemanticError("Named path missing path pattern".to_string()))?;
     pp.path_variable = path_variable;
+    if let Some(r) = restrictor {
+        pp.restrictor = r;
+    }
+    if let Some(s) = selector {
+        pp.selector = s;
+    }
     Ok(pp)
+}
+
+/// `WALK` / `TRAIL` / `ACYCLIC` / `SIMPLE`, case-insensitive.
+///
+/// Falls back to the default rather than erroring: the grammar has already
+/// restricted the input to these four, so an unknown string here would mean the
+/// grammar and this function had drifted, and a panic on a query is the wrong way
+/// to report that.
+fn parse_path_restrictor(text: &str) -> PathRestrictor {
+    match text.trim().to_ascii_uppercase().as_str() {
+        "WALK" => PathRestrictor::Walk,
+        "ACYCLIC" => PathRestrictor::Acyclic,
+        "SIMPLE" => PathRestrictor::Simple,
+        _ => PathRestrictor::Trail,
+    }
+}
+
+/// `ALL` / `ANY` / `ALL SHORTEST` / `ANY SHORTEST`, case-insensitive.
+///
+/// Whitespace-normalised before matching, because `ALL   SHORTEST` is the same
+/// selector and the grammar allows any separator between the two words.
+fn parse_path_selector(text: &str) -> PathSelector {
+    let norm = text.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+    match norm.as_str() {
+        "ANY" => PathSelector::Any,
+        "ALL SHORTEST" => PathSelector::AllShortest,
+        "ANY SHORTEST" => PathSelector::AnyShortest,
+        _ => PathSelector::All,
+    }
 }
 
 fn parse_shortest_path_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
@@ -1735,7 +1783,7 @@ fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
         segments.push(PathSegment { edge, node });
     }
 
-    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, start, segments })
+    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, restrictor: Default::default(), selector: Default::default(), start, segments })
 }
 
 fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {

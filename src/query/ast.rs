@@ -362,6 +362,99 @@ pub struct Pattern {
     pub paths: Vec<PathPattern>,
 }
 
+/// Which paths are candidates, before any selector applies (ISO/IEC 39075:2024).
+///
+/// The four modes differ only in what a path may repeat:
+///
+/// | mode | may repeat an edge | may repeat a node |
+/// |---|---|---|
+/// | `Walk` | yes | yes |
+/// | `Trail` | no | yes |
+/// | `Acyclic` | no | no |
+/// | `Simple` | no | no, except first and last may coincide |
+///
+/// `Trail` is the default and is what openCypher's relationship-uniqueness rule
+/// already required, so an unannotated pattern keeps its current meaning exactly.
+/// Naming it is the point: the executor already chose between a first-reach BFS and
+/// a trail enumerator by inferring intent from query shape, and the inference is
+/// what #1140 was a bug in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathRestrictor {
+    /// No restriction. Unbounded under `ALL` is forbidden by the standard, since
+    /// the answer is infinite on any graph with a cycle.
+    Walk,
+    /// No repeated edge. openCypher's rule, and this dialect's historical default.
+    #[default]
+    Trail,
+    /// No repeated node. Not expressible by any Cypher rewrite.
+    Acyclic,
+    /// No repeated node, except that the first and last may coincide — so a cycle
+    /// is a simple path and nothing shorter than the whole path is.
+    Simple,
+}
+
+impl PathRestrictor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathRestrictor::Walk => "WALK",
+            PathRestrictor::Trail => "TRAIL",
+            PathRestrictor::Acyclic => "ACYCLIC",
+            PathRestrictor::Simple => "SIMPLE",
+        }
+    }
+
+    /// Whether the restriction is prefix-closed — decidable while extending a path.
+    ///
+    /// `Trail` and `Acyclic` are: a prefix of a legal path is legal, so a traversal
+    /// can prune the moment it is violated. `Simple` is **not**, in the same way: a
+    /// prefix whose first and last nodes coincide is legal only if the path stops
+    /// there, so pruning on the full condition would reject paths that become legal
+    /// again. `Simple` prunes on the interior condition only and checks the
+    /// endpoint exemption at emit time.
+    pub fn is_prefix_closed(self) -> bool {
+        !matches!(self, PathRestrictor::Simple)
+    }
+}
+
+/// Which of the candidate paths to return, per endpoint pair (ISO/IEC 39075:2024).
+///
+/// Applied *after* the restrictor, and partitioning on the endpoint pair rather
+/// than filtering: `ANY` returns one path per pair, not one path overall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathSelector {
+    /// Every match. The default.
+    #[default]
+    All,
+    /// One match per endpoint pair, unspecified which. The standard permits any
+    /// choice, so returning whichever is found first is conforming.
+    Any,
+    /// Every match of minimum length, per endpoint pair.
+    AllShortest,
+    /// One match of minimum length per endpoint pair.
+    AnyShortest,
+}
+
+impl PathSelector {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathSelector::All => "ALL",
+            PathSelector::Any => "ANY",
+            PathSelector::AllShortest => "ALL SHORTEST",
+            PathSelector::AnyShortest => "ANY SHORTEST",
+        }
+    }
+
+    /// Whether only minimum-length paths are wanted.
+    pub fn is_shortest(self) -> bool {
+        matches!(self, PathSelector::AllShortest | PathSelector::AnyShortest)
+    }
+
+    /// Whether one path per endpoint pair suffices.
+    pub fn is_single(self) -> bool {
+        matches!(self, PathSelector::Any | PathSelector::AnyShortest)
+    }
+}
+
 /// Path type for path patterns (normal, shortest, allShortest)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathType {
@@ -377,6 +470,11 @@ pub struct PathPattern {
     pub path_variable: Option<String>,
     /// Path type (Normal, Shortest, AllShortest)
     pub path_type: PathType,
+    /// GQL path restrictor: which paths are candidates. `Trail` by default, which
+    /// is what an unannotated pattern has always meant here.
+    pub restrictor: PathRestrictor,
+    /// GQL path selector: which candidates to return per endpoint pair.
+    pub selector: PathSelector,
     /// Start node
     pub start: NodePattern,
     /// Edges and nodes
