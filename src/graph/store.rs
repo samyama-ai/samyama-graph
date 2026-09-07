@@ -750,6 +750,32 @@ impl MemoryReport {
     }
 }
 
+/// A broken store invariant (`GraphStore::check_integrity`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrityViolation {
+    /// An edge whose `source` or `target` is not a node in the store.
+    DanglingEdge {
+        edge: EdgeId,
+        /// `"source"` or `"target"`, so the message says which end.
+        end: &'static str,
+        node: NodeId,
+    },
+}
+
+impl std::fmt::Display for IntegrityViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntegrityViolation::DanglingEdge { edge, end, node } => write!(
+                f,
+                "edge {} has {} {}, which is not a node in the store",
+                edge.as_u64(),
+                end,
+                node.as_u64()
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
@@ -1021,6 +1047,46 @@ impl GraphStore {
         }
         self.free_node_ids.shrink_to_fit();
         self.free_edge_ids.shrink_to_fit();
+    }
+
+    /// Every edge references two nodes that exist (#1143).
+    ///
+    /// The invariant a dangling edge violates, checkable in one pass. Filed after an
+    /// instance was found holding 813 edges whose endpoints resolved to null, plus
+    /// edges referencing node ids from fixtures loaded much earlier — while the node
+    /// side was clean. Every query against that instance was silently wrong, and it
+    /// surfaced only as a row count nobody could explain.
+    ///
+    /// The cause was never reproduced: `DETACH DELETE` and reload is clean over a
+    /// 60-round soak, so "it deletes nodes but not edges" is wrong. The suspicion is
+    /// a write interrupted by a fault, which is exactly the case a periodic check
+    /// catches and a unit test does not.
+    ///
+    /// Returns the violations, capped, rather than a boolean: "the store is corrupt"
+    /// sends someone looking, and "edge 4 points at node 91, which does not exist"
+    /// tells them where. Empty means the invariant holds.
+    ///
+    /// O(edges). A diagnostic to run after a suspicious event or on a schedule, not
+    /// something to call per query.
+    pub fn check_integrity(&self) -> Vec<IntegrityViolation> {
+        /// Enough to characterise the damage; a corrupt store can have millions.
+        const MAX_REPORTED: usize = 100;
+        let mut out = Vec::new();
+        for edge in self.all_edges() {
+            for (end, node) in [("source", edge.source), ("target", edge.target)] {
+                if self.get_node(node).is_none() {
+                    out.push(IntegrityViolation::DanglingEdge {
+                        edge: edge.id,
+                        end,
+                        node,
+                    });
+                    if out.len() >= MAX_REPORTED {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Bytes held by each of the store's structures, walked rather than divided.
@@ -4510,6 +4576,37 @@ fn spawn_auto_embed(
 
 #[cfg(test)]
 mod tests {
+
+    /// The detector detects (#1143).
+    ///
+    /// Built by writing the edge arrays directly, because **no public API can
+    /// produce this state** — `insert_recovered_edge` validates both endpoints and
+    /// `DETACH DELETE` removes the edges. That is consistent with the report's own
+    /// guess that a fault interrupted a write, and is why four reproduction attempts
+    /// from the query language came back clean.
+    #[test]
+    fn check_integrity_names_the_edge_the_end_and_the_missing_node() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("N");
+        assert!(store.check_integrity().is_empty());
+
+        // An edge from a real node to one that does not exist.
+        let missing = NodeId::new(9_999);
+        assert!(store.get_node(missing).is_none());
+        let id = store.edge_endpoints.len() as u64;
+        store.edge_endpoints.push((a, missing));
+        store.edge_type_ids.push(0);
+        if store.edge_type_table.is_empty() {
+            store.edge_type_table.push(EdgeType::new("E"));
+        }
+
+        let found = store.check_integrity();
+        assert_eq!(found.len(), 1, "{found:?}");
+        let text = found[0].to_string();
+        assert!(text.contains(&id.to_string()), "names the edge: {text}");
+        assert!(text.contains("target"), "names the end: {text}");
+        assert!(text.contains("9999"), "names the missing node: {text}");
+    }
     use super::*;
 
     #[test]
