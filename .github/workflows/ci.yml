@@ -94,6 +94,26 @@ jobs:
       # seconds either way and the debug build of the engine is slow enough
       # that the dev profile dominates.
 
+      - name: CH-META-PATH — a quantified path pattern agrees with itself
+        # LANG-05, and the answer to #1140 (#1142). Three metamorphic relations
+        # over six graphs and every quantifier pair:
+        #
+        #   M1  A(lo,hi)  is a sub-multiset of  A(lo,hi+1)
+        #   M2  A(lo,hi)  is a sub-multiset of  A(lo-1,hi)
+        #   M3  A(lo,hi)  ==  sum over k in [lo,hi] of A(k,k)
+        #
+        # All three hold under every ISO/IEC 39075 path mode, so there are **no
+        # expected values to maintain and no commitment to a semantics**: every
+        # assertion compares two of the engine's own answers.
+        #
+        # A named gate rather than a line inside the 4,000-test run because that
+        # is what it is. #1140 — a lower bound of 0 collapsing the path multiset
+        # — was found by an external suite and not by ours, because our tests
+        # assert answers we chose and encoded the same assumption the bug did.
+        # Verified against the pre-fix engine: M2 broke in 12 cases and M3 in 15,
+        # every one with a `0..n` query on one side.
+        run: cargo test --release --test varlen_metamorphic
+
       - name: CH-IMPORT — the same graph by different paths is the same graph
         # REL-06. Builds one fixture via Cypher, a snapshot round
         # trip, and the store API, then compares 11 invariants through Cypher.
