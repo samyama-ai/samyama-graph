@@ -419,6 +419,7 @@ impl<'a> QueryExecutor<'a> {
         // one query return the same instant (#793). The guard clears it on the
         // way out, including on an early return.
         let _clock = crate::query::executor::operator::statement_clock::begin();
+        crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
         let query = if !self.params.is_empty() || !query.params.is_empty() {
             let mut q = query.clone();
@@ -659,6 +660,7 @@ impl<'a> MutQueryExecutor<'a> {
     pub fn execute(&mut self, query: &Query) -> ExecutionResult<RecordBatch> {
         // See the read-only executor above: one clock per statement (#793).
         let _clock = crate::query::executor::operator::statement_clock::begin();
+        crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
         let query = if !self.params.is_empty() || !query.params.is_empty() {
             let mut q = query.clone();
