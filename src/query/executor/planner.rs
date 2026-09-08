@@ -3712,6 +3712,7 @@ impl QueryPlanner {
                 // above: `multiplicity_is_observable` guesses at intent from query
                 // shape, and a written `ACYCLIC` is not a guess (#1141).
                 expand = expand.with_restrictor(path.restrictor);
+                expand = expand.with_restrictor_explicit(path.restrictor_explicit);
                     expand = expand.with_selector(path.selector);
                         // Relationship isomorphism applies to a var-length segment too: an
                         // edge an earlier segment of this clause walked is not available to
@@ -4342,6 +4343,7 @@ impl QueryPlanner {
                 // above: `multiplicity_is_observable` guesses at intent from query
                 // shape, and a written `ACYCLIC` is not a guess (#1141).
                 expand = expand.with_restrictor(path.restrictor);
+                expand = expand.with_restrictor_explicit(path.restrictor_explicit);
                     expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
@@ -4505,6 +4507,7 @@ impl QueryPlanner {
                 // above: `multiplicity_is_observable` guesses at intent from query
                 // shape, and a written `ACYCLIC` is not a guess (#1141).
                 expand = expand.with_restrictor(path.restrictor);
+                expand = expand.with_restrictor_explicit(path.restrictor_explicit);
                     expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to

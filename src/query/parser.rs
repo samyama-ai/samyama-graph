@@ -1700,6 +1700,7 @@ fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPatter
     pp.path_variable = path_variable;
     if let Some(r) = restrictor {
         pp.restrictor = r;
+        pp.restrictor_explicit = true;
     }
     if let Some(s) = selector {
         pp.selector = s;
@@ -1783,7 +1784,7 @@ fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
         segments.push(PathSegment { edge, node });
     }
 
-    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, restrictor: Default::default(), selector: Default::default(), start, segments })
+    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, restrictor: Default::default(), restrictor_explicit: false, selector: Default::default(), start, segments })
 }
 
 fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {

@@ -224,6 +224,10 @@ pub struct QueryResponse {
     records: Vec<Vec<serde_json::Value>>,
     /// The build that produced this result (TRUST-06).
     engine_version: &'static str,
+    /// Diagnostics the statement produced (#1149). Empty for almost every
+    /// query; a notification reports that the engine made a semantic choice the
+    /// query did not state and that the choice was observable in the rows.
+    notifications: Vec<crate::query::executor::operator::notifications::Notification>,
     /// The MVCC version the read saw, so a result can be tied to the data that
     /// produced it. Named `_version` and not `_hash` deliberately: it
     /// identifies the snapshot, it is not a content hash of it, and calling it
@@ -448,6 +452,7 @@ pub async fn query_handler(
                 columns: batch.columns,
                 records,
                 engine_version: crate::VERSION,
+                notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
             }).into_response()
         }
@@ -1338,6 +1343,93 @@ mod tests {
 
         assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("String"), "{json}");
         assert_eq!(props.get("age").and_then(|v| v.as_str()), Some("Integer"), "{json}");
+    }
+
+    /// #1149. The engine tells the user when a path mode it was not asked for
+    /// changed the answer -- and stays quiet the rest of the time.
+    ///
+    /// The rows are asserted alongside the notification in every case. A
+    /// diagnostic that came at the cost of a changed answer would be a
+    /// regression, not a feature, and this is the test that would catch it.
+    #[tokio::test]
+    async fn an_implicit_path_mode_that_changed_the_answer_is_reported() {
+        async fn ask(setup: &[&str], q: &str) -> (usize, Vec<String>) {
+            let state = AppState {
+                store: Arc::new(RwLock::new(GraphStore::new())),
+                engine: Arc::new(QueryEngine::new()),
+                data_path: None,
+                tenant_manager: None,
+                embed_pipeline: None,
+                embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+                persistence: None,
+            };
+            let app = Router::new()
+                .route("/api/query", axum::routing::post(query_handler))
+                .with_state(state);
+            let mut last = serde_json::Value::Null;
+            for stmt in setup.iter().chain(std::iter::once(&q)) {
+                let body = serde_json::json!({ "query": stmt, "graph": "default" });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                let response = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{stmt}");
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                last = serde_json::from_slice(&bytes).unwrap();
+            }
+            let codes = last["notifications"]
+                .as_array()
+                .expect("notifications array")
+                .iter()
+                .map(|n| n["code"].as_str().unwrap().to_string())
+                .collect();
+            (last["records"].as_array().expect("records").len(), codes)
+        }
+
+        // Two nodes and two edges, so `m -> n -> m` is a cycle. A bare `*1..4`
+        // is TRAIL and finds 2 paths; the standard's unrestricted reading finds 4.
+        const CYCLE: &[&str] = &[
+            r#"CREATE (a:N {name:"m"})-[:E]->(b:N {name:"n"})"#,
+            r#"MATCH (a:N {name:"n"}),(b:N {name:"m"}) CREATE (a)-[:E]->(b)"#,
+        ];
+        const CHAIN: &[&str] = &[
+            r#"CREATE (a:N {name:"a"})-[:E]->(b:N {name:"b"})-[:E]->(c:N {name:"c"})"#,
+        ];
+        let code = crate::query::executor::operator::notifications::PATH_MODE_AFFECTS_RESULT;
+
+        // The mode was not stated and it mattered: say so, and return TRAIL's rows.
+        let (rows, codes) = ask(CYCLE, r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        assert_eq!(rows, 2, "TRAIL's answer must not change");
+        assert_eq!(codes, vec![code.to_string()]);
+
+        // The same query with no named path takes a different route through the
+        // planner. It must report the same thing, or the diagnostic is a lottery.
+        let (rows, codes) = ask(CYCLE, r#"MATCH (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        assert_eq!(rows, 2);
+        assert_eq!(codes, vec![code.to_string()], "unnamed path must report too");
+
+        // The user wrote TRAIL. They chose; telling them is noise.
+        let (rows, codes) = ask(CYCLE, r#"MATCH p=TRAIL (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        assert_eq!(rows, 2);
+        assert!(codes.is_empty(), "an explicit TRAIL must be silent: {codes:?}");
+
+        // The user wrote WALK. They get the standard's four paths and no advice.
+        let (rows, codes) = ask(CYCLE, r#"MATCH p=WALK (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        assert_eq!(rows, 4, "WALK's answer must not change");
+        assert!(codes.is_empty(), "an explicit WALK must be silent: {codes:?}");
+
+        // One hop cannot reuse an edge, so the mode cannot matter.
+        let (rows, codes) = ask(CYCLE, r#"MATCH p=(x:N)-[:E*1..1]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        assert_eq!(rows, 1);
+        assert!(codes.is_empty(), "*1..1 must be silent: {codes:?}");
+
+        // No cycle, so no edge is ever reused and the two readings agree.
+        let (rows, codes) = ask(CHAIN, r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="a" RETURN x.name"#).await;
+        assert_eq!(rows, 2);
+        assert!(codes.is_empty(), "an acyclic graph must be silent: {codes:?}");
     }
 
     #[tokio::test]

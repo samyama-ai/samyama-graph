@@ -473,6 +473,14 @@ pub struct PathPattern {
     /// GQL path restrictor: which paths are candidates. `Trail` by default, which
     /// is what an unannotated pattern has always meant here.
     pub restrictor: PathRestrictor,
+    /// Whether the restrictor was written in the query, as opposed to defaulted to.
+    ///
+    /// `Trail` is both the default and a thing a user can ask for, so the value
+    /// alone cannot tell the two apart. The difference matters exactly once: a
+    /// pattern that defaulted to `Trail` and whose answer would change under the
+    /// standard's unrestricted reading is worth a notification (#1149), and one
+    /// that said `TRAIL` out loud is not -- that user already chose.
+    pub restrictor_explicit: bool,
     /// GQL path selector: which candidates to return per endpoint pair.
     pub selector: PathSelector,
     /// Start node

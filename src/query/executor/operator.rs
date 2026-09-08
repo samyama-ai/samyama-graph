@@ -195,6 +195,62 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
 /// large change for a small need. Set by `QueryExecutor::execute` at the start
 /// of a statement and cleared by the guard on the way out, including on an
 /// early return, so a stale value cannot leak into the next statement (#793).
+/// Diagnostics a statement produced alongside its rows (#1149).
+///
+/// A notification never changes an answer. It reports that the engine made a
+/// choice the query did not state, and that the choice was observable -- which
+/// is the one thing a user cannot recover from the result set.
+///
+/// Collected in a thread-local rather than threaded through `RecordBatch`
+/// because 35 sites construct that struct literally, and a field none of them
+/// set would be 35 edits to carry one bool. Reset at statement start, exactly
+/// like `statement_clock` above; read by the transport after `execute` returns.
+pub(crate) mod notifications {
+    use std::cell::RefCell;
+
+    /// One diagnostic. Shaped after the GQL status object: a code a client can
+    /// match on, and a description a human can read.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+    pub struct Notification {
+        pub code: &'static str,
+        pub severity: &'static str,
+        pub title: &'static str,
+        pub description: String,
+    }
+
+    thread_local! {
+        static PENDING: RefCell<Vec<Notification>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Start a statement. Clears whatever the previous one on this thread left.
+    pub fn begin() {
+        PENDING.with(|p| p.borrow_mut().clear());
+    }
+
+    /// Record a diagnostic, unless an identical one is already pending.
+    ///
+    /// De-duplicated because the emitting site sits inside an expansion loop:
+    /// one pattern over a dense graph would otherwise report the same fact
+    /// thousands of times and bury the result it is annotating.
+    pub fn emit(n: Notification) {
+        PENDING.with(|p| {
+            let mut v = p.borrow_mut();
+            if !v.contains(&n) {
+                v.push(n);
+            }
+        });
+    }
+
+    /// Everything this statement recorded.
+    pub fn take() -> Vec<Notification> {
+        PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
+
+    /// The path mode was not written down, and it changed the answer.
+    pub const PATH_MODE_AFFECTS_RESULT: &str =
+        "Samyama.Notification.Statement.PathModeAffectsResult";
+}
+
 pub(crate) mod statement_clock {
     use std::cell::Cell;
 
@@ -7002,6 +7058,8 @@ pub struct VarLengthExpandOperator {
     /// GQL path restrictor. `Trail` is the default and is what this operator has
     /// always enforced, so an unannotated pattern is unchanged (#1141).
     restrictor: crate::query::ast::PathRestrictor,
+    /// Whether the query named the restrictor. See `with_restrictor_explicit`.
+    restrictor_explicit: bool,
     input: OperatorBox,
     source_var: String,
     target_var: String,
@@ -7154,6 +7212,7 @@ impl VarLengthExpandOperator {
             direction,
             min_hops,
             restrictor: crate::query::ast::PathRestrictor::default(),
+            restrictor_explicit: false,
             max_hops,
             path_variable: None,
             rel_variable: None,
@@ -7489,6 +7548,16 @@ impl VarLengthExpandOperator {
         self
     }
 
+    /// Whether the query wrote the restrictor down (#1149).
+    ///
+    /// Only an *implicit* `Trail` is worth a notification. A pattern that said
+    /// `TRAIL` chose it, and telling that user their explicit choice was applied
+    /// is noise.
+    pub fn with_restrictor_explicit(mut self, explicit: bool) -> Self {
+        self.restrictor_explicit = explicit;
+        self
+    }
+
     pub fn with_trail_enumeration(mut self) -> Self {
         self.enumerate_trails = true;
         self
@@ -7646,19 +7715,41 @@ impl VarLengthExpandOperator {
         // `WALK` may reuse an edge; every other restrictor may not. Decided once
         // here rather than inside the loop, so the common case pays nothing.
         let reuse_edges = self.restrictor == crate::query::ast::PathRestrictor::Walk;
+        // #1149. An implicit `Trail` is the only case where the user did not say
+        // which path mode they meant, so it is the only case where being told the
+        // mode mattered is news. Computed once; the check inside the loop is a
+        // single `&&` against a bool that is false for every explicit pattern.
+        let watch_mode = !reuse_edges && !self.restrictor_explicit
+            && self.restrictor == crate::query::ast::PathRestrictor::Trail;
+        let mut mode_mattered = false;
         macro_rules! collect {
-            ($cur:expr, $used:expr) => {{
+            ($cur:expr, $used:expr, $depth:expr) => {{
                 let mut out = Vec::new();
+                let mut mattered = false;
                 self.for_each_neighbor($cur, type_filter, store, |nb, eid| {
                     if reuse_edges || !$used.contains(&eid) {
                         out.push((nb, eid));
+                    } else if watch_mode && !mattered {
+                        // This neighbour was rejected *only* because the edge is
+                        // already on the path. Under the standard's unrestricted
+                        // reading (WALK) it would extend the path. It is a real
+                        // extra answer, rather than a candidate that dies later,
+                        // exactly when the extension lands inside the hop bounds
+                        // and the end-node pattern accepts it.
+                        let d = $depth + 1;
+                        if d >= self.min_hops && d <= self.max_hops && self.emit_ok(nb, store) {
+                            mattered = true;
+                        }
                     }
                 });
+                if mattered {
+                    mode_mattered = true;
+                }
                 out
             }};
         }
 
-        stack.push(collect!(source_id, edges));
+        stack.push(collect!(source_id, edges, 0usize));
         let mut trails = 0usize;
 
         while let Some(frontier) = stack.last_mut() {
@@ -7738,11 +7829,25 @@ impl VarLengthExpandOperator {
             let simple_closed = self.restrictor == crate::query::ast::PathRestrictor::Simple
                 && nb == source_id;
             if depth < self.max_hops && !simple_closed {
-                stack.push(collect!(nb, edges));
+                stack.push(collect!(nb, edges, depth));
             } else {
                 path.pop();
                 edges.pop();
             }
+        }
+        if mode_mattered {
+            notifications::emit(notifications::Notification {
+                code: notifications::PATH_MODE_AFFECTS_RESULT,
+                severity: "INFORMATION",
+                title: "The path mode changed this answer",
+                description:
+                    "A quantified pattern was evaluated under TRAIL, openCypher's \
+                     relationship uniqueness, because the query did not name a path \
+                     mode. Under the unrestricted reading in ISO/IEC 39075:2024 \
+                     (WALK) it matches additional paths. Write WALK or TRAIL to say \
+                     which you mean."
+                        .to_string(),
+            });
         }
         Ok(())
     }
