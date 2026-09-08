@@ -2,11 +2,11 @@
   <h1 align="center">Samyama Graph</h1>
   <p align="center">A Rust-native graph-vector database for GraphRAG, knowledge graphs, and billion-edge analytics.</p>
   <p align="center">
-    <strong>The graph database that queried 1 billion edges for $2.50</strong>
+    <strong>Graph traversal, OpenCypher, and vector search in one Rust engine.</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
-    <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/github/v/release/samyama-ai/samyama-graph?color=blue&label=version" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml"><img src="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
     <a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d"><img src="https://img.shields.io/badge/community-WhatsApp-25D366?logo=whatsapp&logoColor=white" alt="WhatsApp Community"></a>
@@ -23,6 +23,11 @@
 Samyama Graph is a Rust-native graph-vector database that lets developers store, query, search, and analyze connected data in one system.
 
 It brings together graph traversal, OpenCypher-style querying, vector search, graph algorithms, and Redis-compatible access, making it useful for GraphRAG, knowledge graphs, AI agent memory, and large-scale relationship analytics.
+
+**Prefer to check rather than take our word for it?** [`case_studies/`](case_studies) runs real
+public knowledge graphs end to end in one command — every showcase query must return rows or the
+build fails. [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) has our LDBC SNB numbers, including the
+ones we don't come out well on and the column we've marked unverified.
 
 ### Quickstart
 
