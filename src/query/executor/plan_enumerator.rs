@@ -371,6 +371,7 @@ mod tests {
     fn make_path(start_var: &str, start_labels: Vec<Label>, segments: Vec<PathSegment>) -> PathPattern {
         PathPattern {
             restrictor: Default::default(),
+            restrictor_explicit: false,
             selector: Default::default(),
             path_variable: None,
             path_type: PathType::Normal,
