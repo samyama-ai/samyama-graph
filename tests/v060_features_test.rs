@@ -123,11 +123,12 @@ fn test_datetime_no_args_returns_now() {
     }
 }
 
-// BUG: datetime() in SET context evaluates to Null (SetPropertyOperator line 4931
-// only handles Literal and Property expressions, not Function).
-// This test documents the bug — enable when fixed.
+// `datetime()` in a SET value is evaluated as a function (routed through
+// `eval_expression` -> `eval_function`) and stored as a temporal value, not
+// dropped to Null. Regressed silently once (SET only handled Literal and
+// Property), so this asserts the *stored value*, not merely that it is
+// non-Null.
 #[test]
-#[ignore]
 fn test_datetime_in_set_context() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
@@ -140,22 +141,41 @@ fn test_datetime_in_set_context() {
 
     let result = engine.execute("MATCH (e:Event) RETURN e.date", &store).unwrap();
     let date_val = result.records[0].get("e.date").unwrap().as_property().unwrap();
-    assert!(!matches!(date_val, PropertyValue::Null), "datetime() in SET should not be Null");
+    // A real temporal value, carrying the components it was built from — not
+    // Null, and not an epoch-default 1970 fallback.
+    let secs = match date_val {
+        PropertyValue::ZonedDateTime { secs, .. } | PropertyValue::LocalDateTime { secs, .. } => *secs,
+        PropertyValue::DateTime(ms) => ms / 1000,
+        other => panic!("datetime() in SET should store a temporal value, got {other:?}"),
+    };
+    // 2026-03-04T00:00:00Z = 1_772_582_400. The year must round-trip, so a
+    // silent 1970 default (secs near 0) fails here.
+    let year = 1970 + secs / (365 * 86_400);
+    assert!(
+        (2025..=2027).contains(&year),
+        "datetime({{year: 2026, ...}}) stored secs={secs} (~year {year}), expected 2026",
+    );
 }
 
-// BUG: datetime() in WHERE context fails with "Unknown function: datetime"
-// (FilterOperator has its own evaluate_function that doesn't include datetime).
-// This test documents the bug — enable when fixed.
+// `datetime()` resolves in a WHERE predicate: the filter routes function calls
+// through the shared evaluator rather than a private one that lacked the
+// temporal functions. Asserts the predicate's *effect* (all rows kept when the
+// comparison is true, none when it is false), not just that the query is Ok.
 #[test]
-#[ignore]
 fn test_datetime_in_where_context() {
     let (store, engine) = social_graph();
 
-    let result = engine.execute(
+    let kept = engine.execute(
         "MATCH (n:Person) WHERE datetime({year: 2026, month: 1, day: 1}) > datetime({year: 2025, month: 1, day: 1}) RETURN n.name",
         &store,
-    );
-    assert!(result.is_ok(), "datetime() should work in WHERE: {:?}", result.err());
+    ).expect("datetime() should resolve in WHERE");
+    assert_eq!(kept.len(), 5, "a true datetime comparison keeps every row");
+
+    let dropped = engine.execute(
+        "MATCH (n:Person) WHERE datetime({year: 2025, month: 1, day: 1}) > datetime({year: 2026, month: 1, day: 1}) RETURN n.name",
+        &store,
+    ).expect("datetime() should resolve in WHERE");
+    assert_eq!(dropped.len(), 0, "a false datetime comparison drops every row");
 }
 
 // ===== CY-04: Named paths (p = (a)-[]->(b)) =================================
