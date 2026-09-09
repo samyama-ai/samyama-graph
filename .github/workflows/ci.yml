@@ -95,6 +95,10 @@ jobs:
       # that the dev profile dominates.
 
       - name: CH-META-PATH — a quantified path pattern agrees with itself
+        id: ch_meta_path
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-05, and the answer to #1140 (#1142). Three metamorphic relations
         # over six graphs and every quantifier pair:
         #
@@ -115,6 +119,10 @@ jobs:
         run: cargo test --release --test varlen_metamorphic
 
       - name: CH-IMPORT — the same graph by different paths is the same graph
+        id: ch_import
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # REL-06. Builds one fixture via Cypher, a snapshot round
         # trip, and the store API, then compares 11 invariants through Cypher.
         # Carries its own canary: a deliberately-wrong graph must be detected,
@@ -122,6 +130,10 @@ jobs:
         run: cargo run --release --example import_invariants
 
       - name: CH-DOC-EXEC — the Cypher in our documentation parses
+        id: ch_doc_exec
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # DX-04. Every fenced ```cypher block in every markdown file. Blocks
         # showing clause syntax rather than whole queries opt out with
         # ```cypher,ignore, and the opt-out count is printed so it cannot grow
@@ -129,6 +141,10 @@ jobs:
         run: cargo run --release --example doc_check
 
       - name: CH-API — the OpenAPI document and the server describe one API
+        id: ch_api
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # API-01. A documented endpoint the server does not serve is a broken
         # client; a served endpoint nobody documented is an undocumented
         # surface. #613 found one of each by hand, once. This makes it a gate
@@ -136,6 +152,10 @@ jobs:
         run: cargo run --release --example api_contract
 
       - name: CH-TCK — the openCypher pass count may not decrease
+        id: ch_tck
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-01 (#436). The rate went 57.2% -> 86.7% over a few days with
         # nothing stopping it going back: every fix so far has rested on this
         # number, and an unguarded number is one refactor from being wrong.
@@ -164,6 +184,10 @@ jobs:
           cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3700
 
       - name: CH-DETERM-THREADS — the answer does not depend on the thread count
+        id: ch_determ_threads
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-14 (#611). CH-DETERM varies the *process*, which catches a
         # RandomState seed reaching results. It says nothing about a parallel
         # operator emitting rows in a different order at 8 threads than at 1.
@@ -186,11 +210,19 @@ jobs:
         run: python3 scripts/test_check_release_gate.py
 
       - name: LINT-RATCHET — the clippy warning count may not rise
+        id: lint_ratchet
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # A ceiling, not a clean-tree gate: the debt stops growing while what
         # to do about the existing 769 stays open (#487).
         run: ./scripts/check_lint_ratchet.sh 796
 
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
+        id: ch_algo_parity
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # ALGO-02. The reference values are regenerated from NetworkX on a
         # cadence by the harness in samyama-graph-competitor-benchmarks; this
         # step re-runs the algorithms against the *recorded* answers, so it
@@ -200,3 +232,53 @@ jobs:
         # comparing against a live reference implementation — is the harness's
         # job, and the recorded file carries the date it was taken.
         run: cargo run --release --example algo_parity_check
+
+      - name: GATES — every gate above ran, and every one of them passed
+        # Each gate is `continue-on-error` so that one red does not skip the
+        # rest. This step is what makes the job fail, and it is the only place
+        # that does.
+        #
+        # The reason is #1134: the gates were sequential steps in one job, so a
+        # failure at step N silently skipped N+1 onwards and nothing in the log
+        # distinguished "passed" from "never ran". CH-API was red for a day and
+        # took CH-TCK, CH-DETERM-THREADS, LINT-RATCHET and CH-ALGO-PARITY with
+        # it -- and LINT-RATCHET, when it finally ran, turned out to have been
+        # measuring nothing for months. A gate nobody can see is a gate nobody
+        # fixes.
+        #
+        # `skipped` is failed here too. A gate that did not run has not passed,
+        # and treating the two alike is the defect this step exists to remove.
+        if: always()
+        env:
+          CH_META_PATH_OUTCOME: ${{ steps.ch_meta_path.outcome }}
+          CH_IMPORT_OUTCOME: ${{ steps.ch_import.outcome }}
+          CH_DOC_EXEC_OUTCOME: ${{ steps.ch_doc_exec.outcome }}
+          CH_API_OUTCOME: ${{ steps.ch_api.outcome }}
+          CH_TCK_OUTCOME: ${{ steps.ch_tck.outcome }}
+          CH_DETERM_THREADS_OUTCOME: ${{ steps.ch_determ_threads.outcome }}
+          LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
+          CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
+        run: |
+          failed=""
+          check() {
+            eval "outcome=\$$(echo "$1" | tr '[:lower:]' '[:upper:]')_OUTCOME"
+            case "$outcome" in
+              success) printf '  PASS  %s\n' "$2" ;;
+              *)       printf '  FAIL  %s (%s)\n' "$2" "$outcome"; failed="$failed $2" ;;
+            esac
+          }
+          check ch_meta_path "CH-META-PATH"
+          check ch_import "CH-IMPORT"
+          check ch_doc_exec "CH-DOC-EXEC"
+          check ch_api "CH-API"
+          check ch_tck "CH-TCK"
+          check ch_determ_threads "CH-DETERM-THREADS"
+          check lint_ratchet "LINT-RATCHET"
+          check ch_algo_parity "CH-ALGO-PARITY"
+          if [ -n "$failed" ]; then
+            echo
+            echo "failed gates:$failed"
+            exit 1
+          fi
+          echo
+          echo "all gates ran and passed"
