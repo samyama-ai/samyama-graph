@@ -99,13 +99,29 @@ impl NLQPipeline {
             .to_string()
     }
 
+    /// Whether a model-generated statement may be executed (AI-12).
+    ///
+    /// This used to be a prefix check on the uppercased text: a statement was
+    /// safe if it began with MATCH, RETURN, UNWIND, CALL or WITH. Almost every
+    /// destructive Cypher statement begins with MATCH, so
+    /// `MATCH (n) DETACH DELETE n` passed, as did `MATCH (n) SET ...`,
+    /// `MATCH ... MERGE ...` and `MATCH (n) REMOVE ...`. The tests did not
+    /// catch it because every negative case *started* with a write keyword --
+    /// they tested the check as written rather than the property it claims
+    /// (#1156).
+    ///
+    /// The engine already had the right answer. `Query::is_write()` reads the
+    /// parsed clause list, so it sees a write wherever it appears.
+    ///
+    /// Fails closed: a statement that does not parse is not safe. The old check
+    /// would accept unparseable text beginning with MATCH, leaving the parser
+    /// to reject it later -- which is a different component deciding a security
+    /// question by accident.
     pub fn is_safe_query(&self, query: &str) -> bool {
-        let trimmed = query.trim().to_uppercase();
-        trimmed.starts_with("MATCH") ||
-        trimmed.starts_with("RETURN") ||
-        trimmed.starts_with("UNWIND") ||
-        trimmed.starts_with("CALL") ||
-        trimmed.starts_with("WITH")
+        match crate::query::parse_query(query) {
+            Ok(parsed) => !parsed.is_write(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -152,6 +168,46 @@ mod tests {
         assert!(!pipeline.is_safe_query("MERGE (n:Person {name: 'Alice'})"));
         assert!(!pipeline.is_safe_query("DROP INDEX my_index"));
         assert!(!pipeline.is_safe_query("REMOVE n.age"));
+    }
+
+    /// The gap the old prefix check left wide open (#1156).
+    ///
+    /// Every case here begins with MATCH, so the previous implementation --
+    /// "safe if it starts with MATCH" -- returned true for all of them. These
+    /// are not exotic: they are the ordinary way to write a destructive
+    /// statement in Cypher, and the NLQ pipeline runs whatever the model
+    /// returns once this says yes.
+    #[test]
+    fn a_write_that_begins_with_match_is_not_safe() {
+        let pipeline = make_pipeline();
+        for q in [
+            "MATCH (n) DETACH DELETE n",
+            "MATCH (n) DELETE n",
+            "MATCH (n:Person) SET n.pwned = 1 RETURN n",
+            "MATCH (a:Person) MERGE (b:Backdoor {x: 1}) RETURN a",
+            "MATCH (n) REMOVE n.age RETURN n",
+        ] {
+            assert!(
+                !pipeline.is_safe_query(q),
+                "accepted a destructive statement because it begins with MATCH: {q}"
+            );
+        }
+    }
+
+    /// Fail closed. The old check accepted unparseable text that began with a
+    /// permitted keyword and left the parser to refuse it later, which makes a
+    /// security decision a side effect of parsing.
+    #[test]
+    fn text_that_does_not_parse_is_not_safe() {
+        let pipeline = make_pipeline();
+        for q in [
+            "MATCH (((",
+            "MATCH n RETURN",
+            "WITH",
+            "",
+        ] {
+            assert!(!pipeline.is_safe_query(q), "accepted unparseable text: {q:?}");
+        }
     }
 
     // --- extract_cypher tests ---
