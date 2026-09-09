@@ -94,6 +94,17 @@ pub use executor::{
 /// Default LRU cache capacity
 const DEFAULT_CACHE_CAPACITY: usize = 1024;
 
+/// Bytes the result cache may hold before it evicts, regardless of entry count.
+///
+/// An entry count cannot bound this cache. Measured on LDBC SF1
+/// (`benches/result_cache_gain.rs`), a 256-row entry costs 8.3 KB and a
+/// 100,000-row entry 32.1 MB -- a **3,867x spread** -- so the same 1024-entry
+/// setting holds 8 MB of one workload or 32.8 GB of another. PERF-10 is a
+/// bytes/edge budget; a cache capped in entries cannot be budgeted against it.
+///
+/// 256 MB by default, overridable with `SAMYAMA_RESULT_CACHE_BYTES`.
+const DEFAULT_RESULT_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Lock-free cache hit/miss counters.
 pub struct CacheStats {
     hits: AtomicU64,
@@ -150,6 +161,12 @@ pub struct QueryEngine {
     /// CH-REGRESS. Opt-in at the call site is a stronger guarantee than a
     /// config flag defaulting to off.
     result_cache: Mutex<LruCache<ResultKey, RecordBatch>>,
+    /// Bytes currently held by `result_cache`, kept in step with it under the
+    /// same lock. Tracked rather than recomputed: summing every entry on each
+    /// insert would walk the whole cache per query.
+    result_cache_bytes: Mutex<usize>,
+    /// The byte ceiling this engine enforces.
+    result_cache_budget: usize,
     /// Hit/miss counters for the result cache, separate from the AST cache's.
     result_stats: CacheStats,
 }
@@ -202,6 +219,10 @@ impl QueryEngine {
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
             row_budget: executor::budget::configured_budget(),
             result_cache: Mutex::new(LruCache::new(cap)),
+            result_cache_bytes: Mutex::new(0),
+            result_cache_budget: std::env::var("SAMYAMA_RESULT_CACHE_BYTES")
+                .ok().and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_RESULT_CACHE_BYTES),
             result_stats: CacheStats::new(),
         }
     }
@@ -350,15 +371,75 @@ impl QueryEngine {
         // nothing when the epoch moved is the honest outcome: the answer is
         // still returned, it is just not remembered.
         if store.epoch() == key.epoch {
-            self.result_cache.lock().unwrap().put(key, batch.clone());
+            self.insert_with_budget(key, batch.clone());
         }
         Ok((batch, false))
+    }
+
+    /// Bytes the result cache currently holds.
+    pub fn result_cache_bytes(&self) -> usize {
+        *self.result_cache_bytes.lock().unwrap()
+    }
+
+    /// The byte ceiling in force for this engine.
+    pub fn result_cache_budget(&self) -> usize {
+        self.result_cache_budget
+    }
+
+    /// Set the result cache's byte ceiling for this engine.
+    ///
+    /// A method rather than only the environment variable, because the budget
+    /// has to be settable per engine: tests run in one process and share it,
+    /// so an env var would make them fight over a global.
+    pub fn with_result_cache_budget(mut self, bytes: usize) -> Self {
+        self.result_cache_budget = bytes;
+        self
+    }
+
+    /// Insert under the byte budget, evicting least-recently-used entries until
+    /// the total fits.
+    ///
+    /// A single answer larger than the whole budget is **not cached at all**
+    /// rather than evicting everything to make room for it. Admitting it would
+    /// flush a warm cache to hold one result that the next query evicts again,
+    /// which is worse than not caching it: the memory spike happens *and* the
+    /// hit rate drops.
+    fn insert_with_budget(&self, key: ResultKey, batch: RecordBatch) {
+        let cost = batch.approx_heap_bytes();
+        if cost > self.result_cache_budget {
+            return;
+        }
+
+        let mut cache = self.result_cache.lock().unwrap();
+        let mut held = self.result_cache_bytes.lock().unwrap();
+
+        // Replacing an existing key returns what it displaced; charge the
+        // difference rather than the new entry, or the total drifts up forever.
+        if let Some(old) = cache.put(key, batch) {
+            *held = held.saturating_sub(old.approx_heap_bytes());
+        }
+        *held += cost;
+
+        while *held > self.result_cache_budget {
+            match cache.pop_lru() {
+                Some((_, evicted)) => {
+                    *held = held.saturating_sub(evicted.approx_heap_bytes());
+                }
+                // Nothing left to evict: the accounting and the map disagree,
+                // so trust the map and reset rather than spin.
+                None => {
+                    *held = 0;
+                    break;
+                }
+            }
+        }
     }
 
     /// Drop every cached result. For tests and for an operator who wants the
     /// memory back; correctness never depends on calling this.
     pub fn clear_result_cache(&self) {
         self.result_cache.lock().unwrap().clear();
+        *self.result_cache_bytes.lock().unwrap() = 0;
     }
 
     /// Parse and execute a write Cypher query (CREATE, DELETE, SET, etc.)

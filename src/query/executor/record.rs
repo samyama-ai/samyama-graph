@@ -673,6 +673,49 @@ impl Value {
     }
 }
 
+impl Value {
+    /// Approximate heap bytes this value owns, for cache accounting.
+    ///
+    /// `NodeRef`/`EdgeRef` own nothing: late materialization (ADR-012) means a
+    /// scan produces those rather than full clones, so a cached scan result is
+    /// far smaller than the nodes it names. That is why the estimate has to walk
+    /// the value rather than multiply rows by a constant.
+    pub fn approx_heap_bytes(&self) -> usize {
+        match self {
+            Value::Node(_, n) => std::mem::size_of_val(&**n)
+                + n.properties.iter().map(|(k, v)| k.capacity() + v.approx_heap_bytes()).sum::<usize>(),
+            Value::Edge(_, e) => std::mem::size_of_val(&**e)
+                + e.properties.iter().map(|(k, v)| k.capacity() + v.approx_heap_bytes()).sum::<usize>(),
+            Value::Property(p) => p.approx_heap_bytes(),
+            Value::Path { nodes, edges } => {
+                nodes.capacity() * std::mem::size_of::<crate::graph::types::NodeId>()
+                    + edges.capacity() * std::mem::size_of::<crate::graph::types::EdgeId>()
+            }
+            Value::List(v) => {
+                v.capacity() * std::mem::size_of::<Value>()
+                    + v.iter().map(|e| e.approx_heap_bytes()).sum::<usize>()
+            }
+            Value::Map(m) => m
+                .iter()
+                .map(|(k, v)| k.capacity() + std::mem::size_of::<Value>() + v.approx_heap_bytes())
+                .sum(),
+            _ => 0,
+        }
+    }
+}
+
+impl Record {
+    /// Approximate heap bytes this record owns.
+    pub fn approx_heap_bytes(&self) -> usize {
+        self.bindings.capacity() * std::mem::size_of::<(std::sync::Arc<str>, Value)>()
+            + self
+                .bindings
+                .iter()
+                .map(|(k, v)| k.len() + v.approx_heap_bytes())
+                .sum::<usize>()
+    }
+}
+
 /// A batch of records (result set)
 #[derive(Debug, Clone)]
 pub struct RecordBatch {
@@ -683,6 +726,19 @@ pub struct RecordBatch {
 }
 
 impl RecordBatch {
+    /// Approximate heap bytes this batch owns.
+    ///
+    /// What a result cache must charge an entry. A row count is not a substitute:
+    /// measured on LDBC SF1, a 256-row entry costs 8.3 KB and a 100,000-row entry
+    /// 32.1 MB -- a 3,867x spread -- so a cache capped in entries can hold 8 MB or
+    /// 32.8 GB at the same setting (`benches/result_cache_gain.rs`).
+    pub fn approx_heap_bytes(&self) -> usize {
+        self.records.capacity() * std::mem::size_of::<Record>()
+            + self.records.iter().map(|r| r.approx_heap_bytes()).sum::<usize>()
+            + self.columns.capacity() * std::mem::size_of::<String>()
+            + self.columns.iter().map(|c| c.capacity()).sum::<usize>()
+    }
+
     /// Create a new empty batch
     pub fn new(columns: Vec<String>) -> Self {
         Self {

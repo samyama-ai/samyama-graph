@@ -446,6 +446,34 @@ impl std::hash::Hash for PropertyValue {
 }
 
 impl PropertyValue {
+    /// Approximate heap bytes this value owns, excluding its own inline size.
+    ///
+    /// For sizing a result cache, where the question is how much a held answer
+    /// costs and being a few percent out does not change a decision. Exact
+    /// accounting would have to walk allocator padding, which no caller needs.
+    pub fn approx_heap_bytes(&self) -> usize {
+        match self {
+            PropertyValue::String(s) => s.capacity(),
+            PropertyValue::Array(v) => {
+                v.capacity() * std::mem::size_of::<PropertyValue>()
+                    + v.iter().map(|e| e.approx_heap_bytes()).sum::<usize>()
+            }
+            PropertyValue::Map(m) => m
+                .iter()
+                .map(|(k, v)| {
+                    k.capacity()
+                        + std::mem::size_of::<PropertyValue>()
+                        + v.approx_heap_bytes()
+                })
+                .sum(),
+            PropertyValue::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
+            // Every other variant is inline scalars.
+            _ => 0,
+        }
+    }
+}
+
+impl PropertyValue {
     /// Check if value is null
     pub fn is_null(&self) -> bool {
         matches!(self, PropertyValue::Null)
