@@ -12,6 +12,15 @@ use std::io::{BufRead, BufReader};
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    // Subcommands are handled before the demo and the server, so `verify` is a
+    // tool that exits with a status rather than a database that starts up.
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.get(1).map(|s| s.as_str()) {
+        Some("verify") => std::process::exit(cmd_verify(&argv)),
+        Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
+        _ => {}
+    }
+
     println!("Samyama Graph Database v{}", samyama::version());
     println!("==========================================");
     println!();
@@ -25,6 +34,129 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama verify <snapshot.sgsnap> --queries <catalog.json>`
+///
+/// Restores the snapshot into a fresh store and runs its shipped catalog. Exits
+/// non-zero on any mismatch, naming the entries that failed and the probable
+/// class -- not a diff, which tells the reader what changed rather than what
+/// broke (#1157).
+fn cmd_verify(argv: &[String]) -> i32 {
+    let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
+    let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("usage: samyama verify <snapshot.sgsnap> --queries <catalog.json>");
+        return 64;
+    };
+    let Some(catalog_path) = flag("--queries") else {
+        eprintln!("verify needs --queries <catalog.json>");
+        return 64;
+    };
+
+    let catalog: samyama::snapshot::verify::QueryCatalog = match std::fs::File::open(catalog_path)
+        .map_err(|e| e.to_string())
+        .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("could not read catalog {catalog_path}: {e}"); return 65; }
+    };
+
+    let mut store = GraphStore::new();
+    let file = match std::fs::File::open(snapshot) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("could not open {snapshot}: {e}"); return 66; }
+    };
+    if let Err(e) = samyama::snapshot::import_tenant(&mut store, file) {
+        // An import that fails is already a failed restore; say so plainly
+        // rather than going on to report every query as broken.
+        eprintln!("restore failed before any query ran: {e}");
+        return 1;
+    }
+
+    let report = match samyama::snapshot::verify::verify(&store, &catalog) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("{e}"); return 65; }
+    };
+
+    let total = report.results.len();
+    let failed: Vec<_> = report.failed().collect();
+    println!("verify {snapshot}");
+    println!("  catalog {catalog_path}: {total} entries");
+    for r in &failed {
+        let class = r.failure.expect("failed entries carry a class");
+        println!("  FAIL {}  expected {} rows, got {}{}",
+                 r.id, r.expected_rows, r.actual_rows,
+                 if r.detail.is_empty() { String::new() } else { format!("  [{}]", r.detail) });
+        println!("       {}", class.explain());
+    }
+    if report.everything_empty {
+        println!("  FAIL every entry returned zero rows. That is what this catalog \
+                  looks like run against an empty graph, so the run is not evidence \
+                  of a good restore whatever the expectations say.");
+    }
+    if report.is_ok() {
+        println!("  OK  {total} entries reproduced");
+        0
+    } else {
+        println!("  {} of {total} entries failed", failed.len().max(1));
+        1
+    }
+}
+
+/// `samyama catalog-build <snapshot.sgsnap> --sql <queries.json> --out <catalog.json>`
+///
+/// Runs a list of queries against a snapshot and records what they returned, so
+/// the snapshot can later prove it still returns it.
+fn cmd_catalog_build(argv: &[String]) -> i32 {
+    let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
+    let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("usage: samyama catalog-build <snapshot.sgsnap> --queries <queries.json> \
+                   --out <catalog.json>");
+        return 64;
+    };
+    let (Some(queries_path), Some(out)) = (flag("--queries"), flag("--out")) else {
+        eprintln!("catalog-build needs --queries <queries.json> and --out <catalog.json>");
+        return 64;
+    };
+
+    // Input shape: [{"id": "...", "cypher": "...", "unanswerable": false}, ...]
+    #[derive(serde::Deserialize)]
+    struct InQuery { id: String, cypher: String, #[serde(default)] unanswerable: bool }
+    let queries: Vec<InQuery> = match std::fs::File::open(queries_path)
+        .map_err(|e| e.to_string())
+        .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
+    {
+        Ok(q) => q,
+        Err(e) => { eprintln!("could not read {queries_path}: {e}"); return 65; }
+    };
+
+    let mut store = GraphStore::new();
+    let file = match std::fs::File::open(snapshot) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("could not open {snapshot}: {e}"); return 66; }
+    };
+    if let Err(e) = samyama::snapshot::import_tenant(&mut store, file) {
+        eprintln!("could not restore {snapshot}: {e}");
+        return 1;
+    }
+
+    let pairs: Vec<(String, String)> =
+        queries.iter().map(|q| (q.id.clone(), q.cypher.clone())).collect();
+    let unanswerable: Vec<String> =
+        queries.iter().filter(|q| q.unanswerable).map(|q| q.id.clone()).collect();
+
+    match samyama::snapshot::verify::build_catalog(&store, &pairs, &unanswerable) {
+        Err(e) => { eprintln!("{e}"); 1 }
+        Ok(catalog) => {
+            let json = serde_json::to_string_pretty(&catalog).expect("serialize");
+            if let Err(e) = std::fs::write(out, json) {
+                eprintln!("could not write {out}: {e}");
+                return 74;
+            }
+            println!("wrote {out}: {} entries", catalog.entries.len());
+            0
+        }
+    }
 }
 
 fn demo_property_graph() {

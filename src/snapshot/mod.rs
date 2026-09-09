@@ -9,6 +9,7 @@
 
 pub mod format;
 pub mod persist;
+pub mod verify;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
