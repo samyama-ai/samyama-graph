@@ -14,7 +14,7 @@ exclude = ["sdk/python"]
 # check. sdk/python is its own workspace (excluded above) and is kept in
 # lockstep by hand — the same guard covers it.
 [workspace.package]
-version = "1.7.1"
+version = "1.8.0"
 
 [package]
 name = "samyama"
