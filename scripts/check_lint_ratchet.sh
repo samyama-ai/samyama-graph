@@ -103,6 +103,16 @@ if [ "$count" -gt "$CEILING" ]; then
   echo "FAIL: $((count - CEILING)) more clippy lints than the ceiling."
   echo "  New code should not add to the backlog. Fix the new warnings, or"
   echo "  raise the ceiling in the same commit and say why."
+  echo
+  # Which ones. A gate that says "one too many" without saying which sends the
+  # reader to reproduce it locally, and a lint set is not identical across
+  # toolchains -- CI reads two more than this machine on the same commit -- so
+  # reproducing it locally is exactly what does not work. Grouped by file, since
+  # a diff against the ceiling is usually a handful of files.
+  echo "  lints by file:"
+  printf '%s\n' "$raw" | grep -E "^[^ ].*: warning: " \
+    | sed -E 's/:[0-9]+:[0-9]+:.*//' | sort | uniq -c | sort -rn \
+    | sed 's/^/    /'
   exit 1
 fi
 
