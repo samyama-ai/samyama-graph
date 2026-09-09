@@ -16,24 +16,67 @@ set -uo pipefail
 
 CEILING="${1:-769}"
 
-# Two different things start with "warning:" — individual lints, and cargo's
-# per-crate summary ("warning: `samyama` (lib) generated 64 warnings"). The count
-# below includes both, which is what the ceiling was set against, so it stays that
-# way until the ceiling is re-measured on CI in the same commit.
+# --- the measurement must be a measurement (#1134) --------------------------
 #
-# It is worth knowing that the two move independently. The summary count is one
-# line per *crate that emitted anything*, so it shifts with toolchain version and
-# with how the workspace is split, neither of which is lint debt. Measured on
-# 2026-09-07 with rustc 1.96.1: 945 total = 799 lints + 146 summaries, while CI on
-# `stable` passed the 769 ceiling on the same commit. A number that differs between
-# a developer's machine and CI teaches people to ignore it, so both are printed.
-raw=$(cargo clippy --workspace --all-targets 2>&1)
-count=$(echo "$raw" | grep -cE "^warning")
-lints=$(echo "$raw" | grep -E "^warning" | grep -vc "generated")
-summaries=$((count - lints))
+# This gate passed on CI while reporting **0 clippy warnings** — run 34305145896,
+# 2026-09-09, on the same tree that reports 952 locally. A ceiling of 769 is
+# trivially satisfied by 0, so the step went green while measuring nothing, and
+# the script's own advice was "lower it to 0 and lock the gain in", which would
+# have made the gate permanently green and then broken the build the moment a
+# real count came back.
+#
+# Zero warnings from a workspace that has 952 of them is not a clean tree. It is
+# a failed measurement, and a gate that cannot tell the two apart is worse than
+# no gate: #1134 records that a local red that CI calls green trains people to
+# ignore the script.
+#
+# So: capture cargo's exit status and its output, and refuse to report a count
+# unless cargo actually said it did something. The previous version discarded
+# both — `raw=$(cargo clippy ... 2>&1)` with no status check — which is why the
+# CI log for that run contains no cargo output at all and the 0 could not be
+# diagnosed from it.
+raw=$(cargo clippy --workspace --all-targets --message-format=short 2>&1)
+status=$?
+
+# `Finished` is cargo's own statement that the check completed. `Checking` and
+# `Compiling` say units were actually analysed rather than served whole from a
+# warm target dir.
+finished=$(printf '%s\n' "$raw" | grep -cE "^\s*(Finished|Checking|Compiling)")
+
+if [ "$status" -ne 0 ]; then
+  echo "FAIL: cargo clippy exited $status — the count below would be an artefact"
+  echo "  of a failed run, not a lint count. Last 40 lines:"
+  printf '%s\n' "$raw" | tail -40
+  exit 1
+fi
+
+if [ "$finished" -eq 0 ]; then
+  echo "FAIL: cargo clippy produced no Finished/Checking/Compiling line, so"
+  echo "  nothing was measured. A count from this run means only that the"
+  echo "  output was empty (#1134). Last 40 lines:"
+  printf '%s\n' "$raw" | tail -40
+  exit 1
+fi
+
+# `--message-format=short` puts one diagnostic per line as
+# `path:line:col: warning: ...`, so the per-crate summary
+# ("warning: `samyama` (lib) generated 64 warnings") is the only thing that can
+# still start the line with `warning`. Counting both was #1134's original
+# complaint: the summary count is one line per crate that emitted anything, so
+# it moves with the toolchain and with how the workspace splits into units,
+# neither of which is lint debt.
+lints=$(printf '%s\n' "$raw" | grep -cE "^[^ ].*: warning: ")
+summaries=$(printf '%s\n' "$raw" | grep -cE "^warning: .* generated .* warning")
+count=$((lints + summaries))
+
 echo "clippy warnings: $count (ceiling $CEILING)"
 echo "  of which lints: $lints, per-crate summaries: $summaries"
+echo "  cargo reported $finished Finished/Checking/Compiling lines"
 
+# The ceiling still applies to the combined count, because that is the number it
+# was set against. Switching it to lints-only needs the lint-only figure read
+# off a CI run in the same commit, and until this script measures at all on CI
+# there is no such figure to read (#1134).
 if [ "$count" -gt "$CEILING" ]; then
   echo "FAIL: $((count - CEILING)) more clippy warnings than the ceiling."
   echo "  New code should not add to the backlog. Fix the new warnings, or"
