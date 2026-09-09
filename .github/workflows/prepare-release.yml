@@ -71,6 +71,29 @@ jobs:
         working-directory: sdk/typescript
         run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
 
+      # The manifests are not the only places the version is published, and
+      # tests/version_consistency.rs guards the rest: api/openapi.yaml (the
+      # document *and* its examples, since an example is what a reader copies),
+      # and the prose in src/lib.rs and CLAUDE.md that names a version. v1.8.0
+      # was prepared without these and the release PR would have gone red on
+      # its own consistency test -- the guard worked, the bump did not.
+      - name: Bump the version locations that are not manifests
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          PREV=$(git show HEAD~1:Cargo.toml 2>/dev/null | grep -m1 '^version = ' | cut -d'"' -f2 || true)
+          [ -n "$PREV" ] || PREV=$(git show origin/main:Cargo.toml | grep -m1 '^version = ' | cut -d'"' -f2)
+          echo "bumping prose and openapi from $PREV to $V"
+          for f in api/openapi.yaml src/lib.rs CLAUDE.md; do
+            [ -f "$f" ] && sed -i "s/${PREV//./\.}/$V/g" "$f"
+          done
+          # Verify rather than assume: a sed that matched nothing is silent.
+          if grep -rn "$PREV" api/openapi.yaml src/lib.rs CLAUDE.md 2>/dev/null; then
+            echo "::error::a version location still names $PREV after the bump"
+            exit 1
+          fi
+          echo "ok: no reference to $PREV remains in the guarded files"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
