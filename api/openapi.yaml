@@ -723,6 +723,13 @@ components:
           type: string
           description: "Target graph/tenant name (default: 'default')"
           default: default
+        cache:
+          type: boolean
+          description: >-
+            Serve this query from the result cache when the graph has not
+            changed since the answer was computed. Omitted means the server
+            default, which is off unless SAMYAMA_RESULT_CACHE=1. Send false to
+            bypass a warm cache for a latency measurement.
 
     QueryResponse:
       type: object
@@ -748,6 +755,45 @@ components:
           items:
             type: array
             items: {}
+        engine_version:
+          type: string
+          description: The build that produced this result (TRUST-06)
+        snapshot_version:
+          type: integer
+          format: int64
+          description: >-
+            The MVCC version the read saw, tying the result to the data that
+            produced it. Identifies the snapshot; it is not a content hash.
+        cached:
+          type: boolean
+          description: >-
+            Whether these rows were served from the result cache rather than
+            computed. A latency measured over a hit is not engine latency.
+        notifications:
+          type: array
+          description: >-
+            Diagnostics the statement produced. Empty for almost every query.
+            A notification reports that the engine made a semantic choice the
+            query did not state and that the choice was observable in the rows.
+          items:
+            $ref: '#/components/schemas/Notification'
+
+    Notification:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Stable identifier a client can match on
+          examples:
+            - "Samyama.Notification.Statement.PathModeAffectsResult"
+        severity:
+          type: string
+          examples:
+            - INFORMATION
+        title:
+          type: string
+        description:
+          type: string
 
     GraphNode:
       type: object
