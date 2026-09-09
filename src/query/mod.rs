@@ -142,6 +142,48 @@ pub struct QueryEngine {
     /// Rows a single operator may produce before the query is refused
     /// (0 = unlimited). See `executor::budget`.
     row_budget: u64,
+    /// Result cache: (normalized query, bound params, graph epoch) -> rows (#1153).
+    ///
+    /// Deliberately **not** consulted by `execute`. A caller opts in by calling
+    /// `execute_cached`, so a benchmark cannot measure the cache by accident --
+    /// which is the failure mode that turns a cache into a fake speedup in
+    /// CH-REGRESS. Opt-in at the call site is a stronger guarantee than a
+    /// config flag defaulting to off.
+    result_cache: Mutex<LruCache<ResultKey, RecordBatch>>,
+    /// Hit/miss counters for the result cache, separate from the AST cache's.
+    result_stats: CacheStats,
+}
+
+/// What a cached result is keyed on.
+///
+/// The epoch is the correctness-critical component: any write to the store
+/// bumps it (`GraphStore::bump_epoch`), so every entry from before that write
+/// is unreachable rather than stale. Coarse on purpose -- a write kills the
+/// whole cache -- because the alternative, tracking which labels and edge types
+/// a query read, is where caches return a wrong answer that looks right.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResultKey {
+    /// Whitespace-normalized query text, as the AST cache uses.
+    query: String,
+    /// Bound parameters, canonicalized. Two calls with the same text and
+    /// different parameters are different questions.
+    params: String,
+    /// The store's data epoch at the time the answer was computed.
+    epoch: u64,
+}
+
+/// Canonical, order-independent rendering of bound parameters.
+///
+/// A `HashMap` iterates in an arbitrary order that changes per process, so
+/// formatting it directly would give the same parameters two different keys
+/// and silently halve the hit rate.
+fn canonical_params(params: &std::collections::HashMap<String, crate::graph::PropertyValue>) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let mut pairs: Vec<(&String, &crate::graph::PropertyValue)> = params.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs.iter().map(|(k, v)| format!("{k}={v:?}")).collect::<Vec<_>>().join("\u{1f}")
 }
 
 impl QueryEngine {
@@ -159,6 +201,8 @@ impl QueryEngine {
             query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
             row_budget: executor::budget::configured_budget(),
+            result_cache: Mutex::new(LruCache::new(cap)),
+            result_stats: CacheStats::new(),
         }
     }
 
@@ -250,6 +294,71 @@ impl QueryEngine {
         let result = executor.with_row_budget(self.row_budget).execute(&query)?;
 
         Ok(result)
+    }
+
+    /// Result-cache statistics, separate from the AST cache's.
+    pub fn result_cache_stats(&self) -> &CacheStats {
+        &self.result_stats
+    }
+
+    /// Entries currently held in the result cache.
+    pub fn result_cache_len(&self) -> usize {
+        self.result_cache.lock().unwrap().len()
+    }
+
+    /// Execute a read-only query, serving it from the result cache when the
+    /// store has not changed since the answer was computed (#1153).
+    ///
+    /// Returns the rows and whether they came from the cache, so the caller can
+    /// say so in the response envelope. A benchmark that reports a cached
+    /// latency as engine latency is the failure this second return value
+    /// exists to make impossible to do silently.
+    ///
+    /// Correctness rests on one rule: `GraphStore::epoch()` changes on every
+    /// write, and it is part of the key. So an entry is never stale -- it is
+    /// unreachable. Nothing here checks whether a write was *relevant* to this
+    /// query, deliberately.
+    ///
+    /// Only the read path has this. `execute_mut` takes `&mut GraphStore` and
+    /// is never cached, so a write cannot be served from a cache by mistake.
+    pub fn execute_cached(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+    ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
+        let query = self.cached_parse(query_str)?;
+        let key = ResultKey {
+            query: query_str.split_whitespace().collect::<Vec<_>>().join(" "),
+            params: canonical_params(&query.params),
+            epoch: store.epoch(),
+        };
+
+        {
+            let mut cache = self.result_cache.lock().unwrap();
+            if let Some(hit) = cache.get(&key) {
+                self.result_stats.record_hit();
+                return Ok((hit.clone(), true));
+            }
+        }
+        self.result_stats.record_miss();
+
+        let batch = self.execute(query_str, store)?;
+
+        // Re-read the epoch rather than reusing the one read above. A write can
+        // land while the query runs, and caching the result under the *old*
+        // epoch would publish an answer computed partly before it. Storing
+        // nothing when the epoch moved is the honest outcome: the answer is
+        // still returned, it is just not remembered.
+        if store.epoch() == key.epoch {
+            self.result_cache.lock().unwrap().put(key, batch.clone());
+        }
+        Ok((batch, false))
+    }
+
+    /// Drop every cached result. For tests and for an operator who wants the
+    /// memory back; correctness never depends on calling this.
+    pub fn clear_result_cache(&self) {
+        self.result_cache.lock().unwrap().clear();
     }
 
     /// Parse and execute a write Cypher query (CREATE, DELETE, SET, etc.)

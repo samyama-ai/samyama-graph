@@ -18,6 +18,23 @@ pub struct QueryRequest {
     pub query: String,
     #[serde(default = "default_graph")]
     pub graph: String,
+    /// Per-query override of the result cache (#1153).
+    ///
+    /// `None` uses the server default, which is off unless
+    /// `SAMYAMA_RESULT_CACHE=1`. `Some(false)` is the bypass the issue requires
+    /// to be query-level rather than config-only: a caller measuring latency
+    /// must be able to opt out of a warm cache without restarting the server.
+    #[serde(default)]
+    pub cache: Option<bool>,
+}
+
+/// Whether the result cache is on for a request that did not say.
+///
+/// Off unless asked for. A benchmark that forgets to set the field measures
+/// the engine, not the cache -- the failure mode is silent and would be
+/// reported as a speedup.
+fn result_cache_default() -> bool {
+    std::env::var("SAMYAMA_RESULT_CACHE").map(|v| v == "1" || v == "true").unwrap_or(false)
 }
 
 fn default_graph() -> String {
@@ -224,6 +241,11 @@ pub struct QueryResponse {
     records: Vec<Vec<serde_json::Value>>,
     /// The build that produced this result (TRUST-06).
     engine_version: &'static str,
+    /// Whether these rows came from the result cache rather than being
+    /// computed (#1153). A latency measured over a hit is not engine latency,
+    /// so the envelope says which it was rather than leaving the caller to
+    /// guess.
+    cached: bool,
     /// Diagnostics the statement produced (#1149). Empty for almost every
     /// query; a notification reports that the engine made a semantic choice the
     /// query did not state and that the choice was observable in the rows.
@@ -298,6 +320,11 @@ pub async fn query_handler(
     // fails with its parse error a beat later, which is where it failed before.
     let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
 
+    // Writes are never served from the result cache -- `execute_mut` has no
+    // cached form, so this is structural rather than a rule to remember.
+    let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
+    let mut served_from_cache = false;
+
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
@@ -316,7 +343,17 @@ pub async fn query_handler(
         (result, props)
     } else {
         let store_guard = state.store.read().await;
-        let result = state.engine.execute(&payload.query, &*store_guard);
+        let result = if use_cache {
+            match state.engine.execute_cached(&payload.query, &*store_guard) {
+                Ok((batch, hit)) => {
+                    served_from_cache = hit;
+                    Ok(batch)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            state.engine.execute(&payload.query, &*store_guard)
+        };
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
         // no provenance at all.
@@ -452,6 +489,7 @@ pub async fn query_handler(
                 columns: batch.columns,
                 records,
                 engine_version: crate::VERSION,
+                cached: served_from_cache,
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
             }).into_response()
@@ -1430,6 +1468,65 @@ mod tests {
         let (rows, codes) = ask(CHAIN, r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="a" RETURN x.name"#).await;
         assert_eq!(rows, 2);
         assert!(codes.is_empty(), "an acyclic graph must be silent: {codes:?}");
+    }
+
+    /// The result cache is opt-in per request, and the envelope says which
+    /// answer you got (#1153).
+    #[tokio::test]
+    async fn the_result_cache_is_opt_in_and_declared_in_the_envelope() {
+        use crate::graph::Label;
+        let mut store = GraphStore::new();
+        for _ in 0..5 {
+            store.create_node_with_labels([Label::new("Row")]);
+        }
+        let state = AppState {
+            store: Arc::new(RwLock::new(store)),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: None,
+        };
+        let engine = state.engine.clone();
+        let app = Router::new()
+            .route("/api/query", axum::routing::post(query_handler))
+            .with_state(state);
+
+        async fn ask(app: &Router, body: &str) -> serde_json::Value {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/query")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        const Q: &str = r#"{"query":"MATCH (n:Row) RETURN count(n) AS n","graph":"default""#;
+
+        // No `cache` field: off. A benchmark that forgets the field must
+        // measure the engine.
+        let j = ask(&app, &format!("{Q}}}")).await;
+        assert_eq!(j["cached"], serde_json::json!(false), "{j}");
+        let j = ask(&app, &format!("{Q}}}")).await;
+        assert_eq!(j["cached"], serde_json::json!(false), "repeat still uncached: {j}");
+        assert_eq!(engine.result_cache_len(), 0, "default path populated the cache");
+
+        // Opt in: first call computes, second is served.
+        let j = ask(&app, &format!("{Q},\"cache\":true}}")).await;
+        assert_eq!(j["cached"], serde_json::json!(false), "first opt-in call: {j}");
+        let j = ask(&app, &format!("{Q},\"cache\":true}}")).await;
+        assert_eq!(j["cached"], serde_json::json!(true), "second opt-in call missed: {j}");
+        let rows_cached = j["records"].clone();
+
+        // Bypass on a warm cache, without restarting anything.
+        let j = ask(&app, &format!("{Q},\"cache\":false}}")).await;
+        assert_eq!(j["cached"], serde_json::json!(false), "bypass was ignored: {j}");
+        assert_eq!(j["records"], rows_cached, "bypass returned different rows");
     }
 
     #[tokio::test]
