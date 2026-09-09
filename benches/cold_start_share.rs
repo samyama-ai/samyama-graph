@@ -84,12 +84,17 @@ fn main() {
     }
 
     println!("\nRestore is paid before any answer and materialized results cannot remove\n\
-              it. So the share above is the ceiling on what #1158 could save, per query,\n\
-              on this snapshot.\n\n\
-              Restore scales with the file; a point lookup does not. On a 10 GB published\n\
-              KG the restore term grows by roughly three orders of magnitude while a\n\
-              cheap query stays put, so these shares are an *upper* bound for the\n\
-              published-KG case #1158 targets. The exception is a genuinely expensive\n\
-              query, where execution dominates and materializing does pay -- which is\n\
-              why the numbers are reported per query rather than averaged.");
+              it. So the share above is the ceiling on what #1158 could save, per query.\n\n\
+              Do not average these. Measured on two snapshots the share moves in opposite\n\
+              directions with size, depending on the query:\n\n\
+                dbms-research   12.2 MB, 18.7k nodes    restore   0.266 s\n\
+                clinical-trials  711 MB, 7.78M nodes    restore 106.320 s\n\n\
+              Restore grew 400x for 415x the nodes -- roughly linear in node count, not in\n\
+              bytes, since the file grew only 58x. A cheap query stays flat so its share\n\
+              collapses: the count aggregate went 4.63% to 0.04%. An expensive query grows\n\
+              faster than restore does: the two-hop went 0.36% to 34.4%, at 56.9 s of\n\
+              execution against 106 s of restore.\n\n\
+              So the answer for #1158 is bimodal, not small. Materializing buys nothing for\n\
+              cheap catalog queries and a great deal for expensive ones, and which of those\n\
+              a KG ships is a property of its catalog, not of the engine.");
 }
