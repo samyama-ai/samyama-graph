@@ -247,6 +247,10 @@ name = "plan_share"
 harness = false
 
 [[bench]]
+name = "result_cache_gain"
+harness = false
+
+[[bench]]
 name = "ldbc_benchmark"
 harness = false
 

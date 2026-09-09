@@ -674,7 +674,7 @@ impl Value {
 }
 
 /// A batch of records (result set)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RecordBatch {
     /// All records in the batch
     pub records: Vec<Record>,
