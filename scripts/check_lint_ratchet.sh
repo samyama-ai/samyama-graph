@@ -111,7 +111,7 @@ if [ "$count" -gt "$CEILING" ]; then
   # a diff against the ceiling is usually a handful of files.
   echo "  lints by file:"
   printf '%s\n' "$raw" | grep -E "^[^ ].*: warning: " \
-    | sed -E 's/:[0-9]+:[0-9]+:.*//' | sort | uniq -c | sort -rn | head -20 \
+    | sed -E 's/:[0-9]+:[0-9]+:.*//' | sort | uniq -c | sort -rn \
     | sed 's/^/    /'
   exit 1
 fi
