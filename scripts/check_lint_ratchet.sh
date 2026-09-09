@@ -38,6 +38,15 @@ CEILING="${1:-769}"
 raw=$(cargo clippy --workspace --all-targets --message-format=short 2>&1)
 status=$?
 
+# Strip ANSI colour before counting anything. This is the whole bug: the
+# workflow sets CARGO_TERM_COLOR=always, so on CI every diagnostic line begins
+# with an escape sequence rather than the literal word, and the original
+# `grep -cE "^warning"` matched **nothing**. The ceiling of 769 was therefore
+# never enforced on CI at all -- the step reported 0 and passed on every commit
+# since it was added. Locally the pipe turns colour off, which is exactly why
+# the two disagreed (#1134).
+raw=$(printf '%s\n' "$raw" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g')
+
 # `Finished` is cargo's own statement that the check completed. `Checking` and
 # `Compiling` say units were actually analysed rather than served whole from a
 # warm target dir.
