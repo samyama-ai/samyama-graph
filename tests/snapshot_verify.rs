@@ -7,7 +7,7 @@
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::snapshot::verify::{
     build_catalog, canonical_hash, verify, CatalogEntry, FailureClass, QueryCatalog,
-    CATALOG_FORMAT,
+    QuerySpec, CATALOG_FORMAT,
 };
 use samyama::query::QueryEngine;
 
@@ -26,17 +26,21 @@ fn seeded() -> GraphStore {
     store
 }
 
-fn queries() -> Vec<(String, String)> {
+fn spec(id: &str, cypher: &str) -> QuerySpec {
+    QuerySpec { id: id.into(), cypher: cypher.into(), unanswerable: false, params: vec![] }
+}
+
+fn queries() -> Vec<QuerySpec> {
     vec![
-        ("q_nodes".into(), "MATCH (t:Thing) RETURN count(t) AS n".into()),
-        ("q_names".into(), "MATCH (t:Thing) RETURN t.name ORDER BY t.name".into()),
-        ("q_edges".into(), "MATCH (:Thing)-[:LINKS]->(:Thing) RETURN count(*) AS n".into()),
+        spec("q_nodes", "MATCH (t:Thing) RETURN count(t) AS n"),
+        spec("q_names", "MATCH (t:Thing) RETURN t.name ORDER BY t.name"),
+        spec("q_edges", "MATCH (:Thing)-[:LINKS]->(:Thing) RETURN count(*) AS n"),
         // Not an aggregate, on purpose. `count(*)` returns one row whether it
         // counted 11 edges or none, so an aggregate alone cannot tell a missing
         // edge type from a changed value.
-        ("q_edge_pairs".into(),
-         "MATCH (a:Thing)-[:LINKS]->(b:Thing) RETURN a.id, b.id ORDER BY a.id".into()),
-        ("q_props".into(), "MATCH (t:Thing) WHERE t.id < 5 RETURN t.id, t.name".into()),
+        spec("q_edge_pairs",
+             "MATCH (a:Thing)-[:LINKS]->(b:Thing) RETURN a.id, b.id ORDER BY a.id"),
+        spec("q_props", "MATCH (t:Thing) WHERE t.id < 5 RETURN t.id, t.name"),
     ]
 }
 
@@ -67,7 +71,7 @@ fn a_sound_round_trip_verifies() {
 fn a_zero_row_entry_is_refused_at_build_time() {
     let store = seeded();
     let mut q = queries();
-    q.push(("q_none".into(), "MATCH (x:Absent) RETURN x".into()));
+    q.push(spec("q_none", "MATCH (x:Absent) RETURN x"));
 
     let err = build_catalog(&store, &q, &[]).expect_err("a 0-row entry must be refused");
     assert!(err.contains("q_none"), "{err}");
@@ -94,6 +98,7 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
             hash: canonical_hash(&QueryEngine::new()
                 .execute("MATCH (x:Absent) RETURN x", &store).unwrap()),
             unanswerable: true,
+            params: vec![],
         }],
     };
     let report = verify(&store, &catalog).expect("verify");
