@@ -38,7 +38,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
-fn pct(v: &mut Vec<f64>, p: f64) -> f64 {
+fn pct(v: &mut [f64], p: f64) -> f64 {
     if v.is_empty() {
         return f64::NAN;
     }
