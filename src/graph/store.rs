@@ -1708,6 +1708,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Set a property directly in the columnar store, bypassing the Node's row HashMap.
     pub fn set_column_property(&mut self, node_id: NodeId, key: &str, value: PropertyValue) {
+        self.bump_epoch();
         let idx = node_id.as_u64() as usize;
         self.node_columns.set_property(idx, key, value.clone());
         self.update_hierarchies_for_property(node_id, key, &value);
