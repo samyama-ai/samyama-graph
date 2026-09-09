@@ -243,6 +243,10 @@ name = "graphalytics_benchmark"
 harness = false
 
 [[bench]]
+name = "plan_share"
+harness = false
+
+[[bench]]
 name = "ldbc_benchmark"
 harness = false
 
