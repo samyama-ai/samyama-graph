@@ -189,11 +189,9 @@ fn built(engine: &QueryEngine) -> GraphStore {
 
 /// Compare every query's answer between two stores, reporting all divergences
 /// rather than the first: one failure per run turns a corpus into a queue.
-fn compare(engine: &QueryEngine, reference: &GraphStore, other: &GraphStore, what: &str) {
-    compare_with(engine, reference, other, what, false)
-}
-
-/// `mask_ts` exists for the restart check alone; see `mask_timestamps`.
+/// `mask_ts` exists for the restart check alone; see `mask_timestamps`. The
+/// snapshot check below builds its own diff loop and does not mask, which is what
+/// holds #1124 in place.
 fn compare_with(
     engine: &QueryEngine,
     reference: &GraphStore,

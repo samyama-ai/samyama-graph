@@ -97,7 +97,7 @@ fn a_snapshot_without_the_fields_still_imports() {
                 while let Some(p) = l.find(&pat) {
                     let tail = &l[p + 1..];
                     let end = tail
-                        .find(|c: char| c == ',' || c == '}')
+                        .find([',', '}'])
                         .map(|c| p + 1 + c)
                         .unwrap_or(l.len());
                     l.replace_range(p..end, "");
