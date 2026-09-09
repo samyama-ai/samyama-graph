@@ -10,6 +10,7 @@
 pub mod format;
 pub mod persist;
 pub mod verify;
+pub mod publish_gate;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
