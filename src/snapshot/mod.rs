@@ -213,6 +213,8 @@ pub fn export_tenant_with_compression(
             id: node.id.as_u64(),
             labels: node.labels.iter().map(|l| l.as_str().to_string()).collect(),
             props,
+            created_at: node.created_at,
+            updated_at: node.updated_at,
         };
         let node_json = serde_json::to_string(&snap_node)?;
         gz.write_all(node_json.as_bytes())?;
@@ -547,6 +549,16 @@ fn import_tenant_inner(
                 if let Some(node) = store.get_node_mut(new_id) {
                     for label in snap_node.labels.iter().skip(1) {
                         node.add_label(label.as_str());
+                    }
+                    // Restore the timestamps the snapshot carries (#1124). Zero
+                    // means the snapshot predates the fields, and writing it back
+                    // would stamp every node of an old file with a false creation
+                    // time, so the node keeps whatever it has in that case.
+                    if snap_node.created_at != 0 {
+                        node.created_at = snap_node.created_at;
+                    }
+                    if snap_node.updated_at != 0 {
+                        node.updated_at = snap_node.updated_at;
                     }
                 }
                 // Every property reaches the ColumnStore, whatever its type.

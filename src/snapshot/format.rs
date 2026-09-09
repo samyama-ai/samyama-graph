@@ -32,6 +32,26 @@ pub struct SnapshotNode {
     pub id: u64,                  // Original NodeId
     pub labels: Vec<String>,
     pub props: HashMap<String, serde_json::Value>,
+    /// Creation timestamp, milliseconds since the epoch (#1124).
+    ///
+    /// Additive, in the same sense as `SnapshotHierarchyIndex` below: a snapshot
+    /// written before this field simply lacks it and defaults to 0, which is the
+    /// value import produced for every node until now, so old files load
+    /// unchanged and the format version does not move. Older readers ignore the
+    /// extra key.
+    ///
+    /// Zero means "not carried", not "created at the epoch". Import leaves the
+    /// node's own timestamp alone rather than writing 0 over it, so a v1 snapshot
+    /// does not stamp every node with a false creation time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at: i64,
+    /// Last-update timestamp, milliseconds since the epoch. See `created_at`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub updated_at: i64,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 /// An edge record in the snapshot
