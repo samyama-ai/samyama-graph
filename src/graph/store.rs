@@ -918,6 +918,20 @@ pub struct GraphStore {
     /// any write that affects label counts, edge counts, or property
     /// distributions. Saves ~5ms of sampling+hashing per planner call.
     statistics_cache: std::sync::RwLock<Option<std::sync::Arc<GraphStatistics>>>,
+    /// Monotonic counter bumped by every change to query-visible data (#1153).
+    ///
+    /// A result cache keyed on `(query, params, epoch)` is only correct if the
+    /// epoch moves for *every* write. That is a stricter requirement than the
+    /// statistics cache has: statistics describe counts and shapes, so a path
+    /// that rewrites a property without changing any count is right to leave
+    /// them alone and wrong to leave this alone. `set_column_property` is
+    /// exactly that path.
+    ///
+    /// `AtomicU64` and not a lock, because reads happen on the hot path of
+    /// every cached query and writes are already inside `&mut self`. Ordering
+    /// is `Relaxed`: a reader that sees a stale epoch re-executes the query,
+    /// which is the safe direction.
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 
@@ -984,6 +998,7 @@ impl GraphStore {
             next_edge_id: 1,
             catalog: GraphCatalog::new(),
             statistics_cache: std::sync::RwLock::new(None),
+            epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1604,6 +1619,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get a mutable node by ID (always latest version)
     pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        // Handing out `&mut Node` is a write, whether or not the caller uses
+        // it. Bumped here because there is no later point at which we learn
+        // what was done with the reference. Over-invalidating costs a re-run;
+        // under-invalidating returns a stale row (#1153).
+        //
+        // This cannot churn the epoch for read queries: `QueryExecutor` holds
+        // `&GraphStore` and so cannot reach any `&mut self` method at all.
+        self.bump_epoch();
         self.nodes.get_mut(id.as_u64() as usize).and_then(|v| v.last_mut())
     }
 
@@ -1685,6 +1708,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Set a property directly in the columnar store, bypassing the Node's row HashMap.
     pub fn set_column_property(&mut self, node_id: NodeId, key: &str, value: PropertyValue) {
+        self.bump_epoch();
         let idx = node_id.as_u64() as usize;
         self.node_columns.set_property(idx, key, value.clone());
         self.update_hierarchies_for_property(node_id, key, &value);
@@ -2401,6 +2425,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get a mutable reference to edge properties (for COW updates).
     /// Returns None if edge doesn't exist.
     pub fn get_edge_properties_mut(&mut self, id: EdgeId) -> Option<&mut PropertyMap> {
+        self.bump_epoch();
         let idx = id.as_u64() as usize;
         if idx >= self.edge_endpoints.len() { return None; }
         let (src, tgt) = self.edge_endpoints[idx];
@@ -3423,7 +3448,26 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// The current data epoch. Changes whenever query-visible data changes.
+    ///
+    /// A cached result carrying a different epoch is dead. The rule is coarse
+    /// on purpose -- any write kills every entry -- because the alternative,
+    /// tracking which labels and edge types a query read, is where caches
+    /// return a wrong answer that looks right.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Declare that query-visible data changed.
+    ///
+    /// `&self` rather than `&mut self` so the paths that hand out an interior
+    /// mutable reference can call it before they give the reference away.
+    pub fn bump_epoch(&self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn invalidate_statistics_cache(&self) {
+        self.bump_epoch();
         *self.statistics_cache.write().unwrap() = None;
         // The derived per-type adjacency goes with it. Hooked here rather than
         // at each mutation site because every path that changes an edge already
@@ -3462,6 +3506,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// So the list lives here, and callers take all of it or none. Each step
     /// no-ops on an empty store, so this is safe to call unconditionally.
     pub fn finish_bulk_load(&mut self) {
+        self.bump_epoch();
         self.compact_adjacency();
         self.rebuild_edge_type_index();
         self.rebuild_catalog();
@@ -3479,6 +3524,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// That is the #303 failure mode in a different statistic: a plan chosen
     /// from statistics that were never computed. Rebuild after any bulk load.
     pub fn rebuild_catalog(&mut self) {
+        self.bump_epoch();
         // The immutable borrow for the scan ends before the assignment.
         let catalog = GraphCatalog::recompute_full(self);
         self.catalog = catalog;
@@ -3523,6 +3569,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// of rebuild_edge_type_index: a post-import scan that brings the HNSW indices
     /// into sync with the node data. No-op when no vector indices are registered.
     pub fn rebuild_vector_index(&mut self) {
+        // A vector query reads the HNSW index, not the node rows, so a
+        // rebuild changes answers without touching any count the statistics
+        // cache watches. Bumped here for the same reason `set_column_property`
+        // is (#1153).
+        self.bump_epoch();
         let index_keys = self.vector_index.list_indices();
         if index_keys.is_empty() {
             return;
@@ -3586,6 +3637,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// register any missing HNSW indices, then populate them.
     /// This is the correct post-import call when no indices were pre-registered.
     pub fn rebuild_vector_index_full(&mut self) -> usize {
+        // A vector query reads the HNSW index, not the node rows, so a
+        // rebuild changes answers without touching any count the statistics
+        // cache watches. Bumped here for the same reason `set_column_property`
+        // is (#1153).
+        self.bump_epoch();
         use std::collections::HashMap as HMap;
 
         // Pass 1: collect (label, property_key, dims) — immutable scan ends before mutations
@@ -3951,6 +4007,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// lives in the memory-efficient CSR format.
     /// Call this after bulk loading (snapshot import, batch CREATE) for memory savings.
     pub fn compact_adjacency(&mut self) {
+        self.bump_epoch();
         let buffer_out: usize = self.outgoing.iter().map(|v| v.len()).sum();
         let buffer_in: usize = self.incoming.iter().map(|v| v.len()).sum();
         if buffer_out == 0 && buffer_in == 0 {
@@ -4056,6 +4113,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Conflict detection: for each entity in the write set, check if it was committed
     /// by another transaction after this transaction started. If so, abort.
     pub fn commit_transaction(&mut self, txn_id: TxnId) -> GraphResult<u64> {
+        self.bump_epoch();
         let txn = self.active_transactions.get(&txn_id)
             .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?
             .clone();
@@ -4137,6 +4195,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     ///
     /// Returns `(nodes_pruned, edge_entries_pruned)`.
     pub fn gc_versions(&mut self, min_version: u64) -> (usize, usize) {
+        self.bump_epoch();
         let mut nodes_pruned = 0usize;
         let mut edges_pruned = 0usize;
 
@@ -4399,6 +4458,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Insert a recovered node (used during recovery from persistence)
     /// Unlike create_node(), this preserves the node's existing ID
     pub fn insert_recovered_node(&mut self, node: Node) {
+        self.bump_epoch();
         let node_id = node.id;
         let idx = node_id.as_u64() as usize;
 
@@ -4441,6 +4501,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Unlike create_edge(), this preserves the edge's existing ID
     /// Note: Source and target nodes must already exist
     pub fn insert_recovered_edge(&mut self, edge: Edge) -> GraphResult<()> {
+        self.bump_epoch();
         let edge_id = edge.id;
         let idx = edge_id.as_u64() as usize;
         let source = edge.source;
@@ -4576,6 +4637,168 @@ fn spawn_auto_embed(
 
 #[cfg(test)]
 mod tests {
+    /// Every public mutator either bumps the data epoch or says why it does not
+    /// (#1153).
+    ///
+    /// A result cache keyed on `(query, params, epoch)` is correct only while
+    /// this holds. The failure it guards against is not a wrong epoch, it is a
+    /// *new* mutation path added later that nobody remembered to hook -- after
+    /// which the cache serves a stale row and every test still passes, because
+    /// nothing in the suite compares a cached answer to a fresh one for a
+    /// mutation path that did not exist when the suite was written.
+    ///
+    /// Reading our own source is deliberate. A runtime test can only cover the
+    /// mutators that exist today; the whole point is to fail when a new one
+    /// arrives.
+    #[test]
+    fn every_mutator_bumps_the_epoch_or_is_listed() {
+        // Allowed not to bump. An entry here is a claim that the function
+        // cannot change what any query returns -- not that it delegates to
+        // something that bumps, which the call-graph walk below already
+        // handles. Keeping delegation out of this list matters: "delegates to
+        // X, which bumps" is exactly the sentence a real gap hides behind
+        // once X stops bumping.
+        const EXEMPT: &[(&str, &str)] = &[
+            ("enable_write_log", "recording flag; the writes it records bump on their own path"),
+            ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
+            ("journal", "appends to the journal, which no query reads"),
+            ("shrink_to_fit", "returns unused capacity; every element and every id is unchanged"),
+            ("intern_edge_type", "adds a type name to the table; no edge exists at that type until the caller creates one, and that path bumps"),
+            ("begin_transaction", "opens a transaction record; nothing is visible until commit_transaction, which bumps"),
+            ("txn_write_node", "records an id in the write set for conflict detection; the write itself bumps"),
+            ("txn_write_edge", "records an id in the write set for conflict detection; the write itself bumps"),
+            ("abort_transaction", "flips the transaction status; it rolls nothing back, so no committed row changes"),
+        ];
+
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/src/graph/store.rs"
+        )).expect("read own source");
+        let lines: Vec<&str> = src.lines().collect();
+
+        // Bounded to the inherent `impl GraphStore` block. A `&mut self` on
+        // GraphStatistics or TypeAdjacency is not a store mutation, and the
+        // test module's own helpers are past the end of it.
+        let start = lines.iter().position(|l| l.starts_with("impl GraphStore {"))
+            .expect("inherent impl GraphStore");
+        let end = lines.iter().enumerate()
+            .position(|(i, l)| i > start && l.starts_with("impl "))
+            .expect("a later impl block closes it");
+
+        struct Fun { name: String, mutator: bool, body: String }
+        let mut funs: Vec<Fun> = Vec::new();
+        let mut i = start;
+        while i < end {
+            let l = lines[i];
+            if !(l.starts_with("    pub fn ") || l.starts_with("    fn ")
+                || l.starts_with("    pub(crate) fn ")) {
+                i += 1;
+                continue;
+            }
+            let name = l.rsplit("fn ").next().unwrap_or("")
+                .split(['(', '<', ' ']).next().unwrap_or("").to_string();
+            // A signature can wrap across lines; read to the opening brace.
+            let mut sig = String::new();
+            let mut j = i;
+            while j < end {
+                sig.push_str(lines[j]);
+                sig.push(' ');
+                if lines[j].contains('{') { break; }
+                j += 1;
+            }
+            // Body ends where brace depth returns to zero.
+            let (mut depth, mut k, mut body) = (0i32, j, String::new());
+            while k < end {
+                depth += lines[k].matches('{').count() as i32
+                       - lines[k].matches('}').count() as i32;
+                body.push_str(lines[k]);
+                body.push('\n');
+                if depth <= 0 { break; }
+                k += 1;
+            }
+            funs.push(Fun { name, mutator: sig.contains("&mut self"), body });
+            i = k + 1;
+        }
+
+        // A function bumps if it calls a bumper, or calls something that does.
+        // Without this closure every delegating mutator needs an EXEMPT entry,
+        // and the list stops meaning "cannot change query results".
+        let mut bumps: std::collections::HashSet<String> =
+            ["bump_epoch", "invalidate_statistics_cache"]
+                .iter().map(|s| s.to_string()).collect();
+        loop {
+            let mut grew = false;
+            for f in &funs {
+                if bumps.contains(&f.name) { continue; }
+                let calls_bumper = bumps.iter().any(|b| f.body.contains(&format!("self.{b}(")));
+                if calls_bumper { bumps.insert(f.name.clone()); grew = true; }
+            }
+            if !grew { break; }
+        }
+
+        let offenders: Vec<&str> = funs.iter()
+            .filter(|f| f.mutator && !bumps.contains(&f.name))
+            .filter(|f| !EXEMPT.iter().any(|(n, _)| *n == f.name))
+            .map(|f| f.name.as_str())
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "these `&mut self` methods on GraphStore change data without reaching \
+             `bump_epoch`, so a result cache keyed on the epoch would serve stale \
+             rows after they run: {offenders:?}\n\nEither call `self.bump_epoch()` \
+             (or a callee that does), or add the name to EXEMPT with a reason saying \
+             why it cannot change what a query returns."
+        );
+
+        // The walk itself has to be load-bearing. If the parse silently found
+        // nothing, every offender list is empty and the test passes forever --
+        // the shape of failure this whole file is here to prevent.
+        let mutators = funs.iter().filter(|f| f.mutator).count();
+        assert!(
+            mutators >= 30,
+            "parsed only {mutators} `&mut self` methods out of impl GraphStore; \
+             the signature scan has drifted and this test is no longer checking \
+             anything"
+        );
+        for (name, _) in EXEMPT {
+            assert!(
+                funs.iter().any(|f| f.name == *name),
+                "EXEMPT lists `{name}`, which no longer exists in impl GraphStore -- \
+                 drop the entry so the list keeps describing the code"
+            );
+        }
+    }
+
+    /// The epoch moves for a property write that changes no count.
+    ///
+    /// `set_column_property` is the case the statistics cache is right to
+    /// ignore and a result cache must not: the row a query returns changes
+    /// while every count stays identical.
+    #[test]
+    fn a_property_write_that_changes_no_count_still_moves_the_epoch() {
+        let mut store = GraphStore::new();
+        let n = store.create_node_with_labels([Label::new("Paper")]);
+        let before = store.epoch();
+        store.set_column_property(n, "title", PropertyValue::String("after".into()));
+        assert!(
+            store.epoch() > before,
+            "columnar property write left the epoch at {before}; a result cache \
+             would keep serving the old title"
+        );
+    }
+
+    /// Reads do not move it, or nothing would ever stay cached.
+    #[test]
+    fn reads_do_not_move_the_epoch() {
+        let mut store = GraphStore::new();
+        let n = store.create_node_with_labels([Label::new("Paper")]);
+        let settled = store.epoch();
+        let _ = store.get_node(n);
+        let _ = store.get_nodes_by_label(&Label::new("Paper"));
+        let _ = store.node_count();
+        assert_eq!(store.epoch(), settled, "a read moved the epoch");
+    }
+
 
     /// The detector detects (#1143).
     ///
