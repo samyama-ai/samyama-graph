@@ -75,8 +75,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # redis-tools (provides redis-cli) is not preinstalled on ubuntu-latest.
+      # The Chrome apt source is dropped for the same reason as in ci.yml.
       - name: Install redis-tools
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
+          sudo apt-get update && sudo apt-get install -y redis-tools
 
       # Pin to the version just built. Pulling `:latest` here could smoke-test
       # a different image than the one this run produced.

@@ -48,7 +48,13 @@ jobs:
       - name: Install system dependencies
         # libclang is required by zstd-sys and is the single most common
         # first-build failure on a clean host (CONTRIBUTING documents it).
+        #
+        # The runner image ships Google's Chrome apt source. Nothing here
+        # installs from it, but `apt-get update` still fetches its index and
+        # fails the whole step with "Hash Sum mismatch" whenever that mirror
+        # is mid-sync. Drop the source so only Ubuntu's archives are consulted.
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev clang libclang-dev
 
