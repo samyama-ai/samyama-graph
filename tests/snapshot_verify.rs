@@ -91,6 +91,7 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
     let catalog = QueryCatalog {
         format: CATALOG_FORMAT.to_string(),
         generated_by: "test".into(),
+        provenance: samyama::snapshot::publish_gate::Provenance::Authored,
         entries: vec![CatalogEntry {
             id: "q_none".into(),
             cypher: "MATCH (x:Absent) RETURN x".into(),
@@ -203,6 +204,7 @@ fn an_unknown_catalog_format_is_refused() {
     let bad = QueryCatalog {
         format: "samyama.queries/99".into(),
         generated_by: "test".into(),
+        provenance: samyama::snapshot::publish_gate::Provenance::Authored,
         entries: vec![],
     };
     let err = verify(&store, &bad).expect_err("unknown format must be refused");

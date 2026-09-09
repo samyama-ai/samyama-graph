@@ -161,7 +161,23 @@ pub struct CatalogEntry {
 pub struct QueryCatalog {
     pub format: String,
     pub generated_by: String,
+    /// Whether the questions were written by us or drawn from traffic (#1159).
+    ///
+    /// Required rather than defaulted, so the safe answer is never the silent
+    /// one. An observed catalog is user text and may not be published without
+    /// an explicit flag.
+    #[serde(default = "default_provenance")]
+    pub provenance: crate::snapshot::publish_gate::Provenance,
     pub entries: Vec<CatalogEntry>,
+}
+
+/// A catalog with no stated provenance is treated as observed.
+///
+/// The unsafe reading is the conservative one here: an authored catalog
+/// mislabelled observed costs a flag, while an observed catalog mislabelled
+/// authored publishes someone's questions.
+fn default_provenance() -> crate::snapshot::publish_gate::Provenance {
+    crate::snapshot::publish_gate::Provenance::Observed
 }
 
 /// What a mismatch most likely means. Named rather than diffed, because a diff
@@ -390,6 +406,7 @@ pub fn build_catalog(
     Ok(QueryCatalog {
         format: CATALOG_FORMAT.to_string(),
         generated_by: format!("samyama {}", crate::VERSION),
+        provenance: crate::snapshot::publish_gate::Provenance::Authored,
         entries,
     })
 }

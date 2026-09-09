@@ -18,6 +18,7 @@ async fn main() {
     match argv.get(1).map(|s| s.as_str()) {
         Some("verify") => std::process::exit(cmd_verify(&argv)),
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
+        Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
         _ => {}
     }
 
@@ -150,6 +151,54 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
             println!("wrote {out}: {} entries", catalog.entries.len());
             0
         }
+    }
+}
+
+/// `samyama catalog-gate <catalog.json> [--allow-observed]`
+///
+/// Refuses to publish a catalog drawn from traffic without an explicit flag,
+/// and scans every question and every parameter sample for personal data
+/// (#1159). A parameter sample is a data excerpt: it exists so the build-time
+/// execution gate has something to run, and on a KG holding personal data it is
+/// a real value about to be published.
+fn cmd_catalog_gate(argv: &[String]) -> i32 {
+    use samyama::snapshot::publish_gate::gate;
+    let Some(path) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("usage: samyama catalog-gate <catalog.json> [--allow-observed]");
+        return 64;
+    };
+    let allow_observed = argv.iter().any(|a| a == "--allow-observed");
+
+    let catalog: samyama::snapshot::verify::QueryCatalog = match std::fs::File::open(path)
+        .map_err(|e| e.to_string())
+        .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("could not read {path}: {e}"); return 65; }
+    };
+
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for e in &catalog.entries {
+        texts.push((e.id.clone(), e.cypher.clone()));
+        for p in &e.params {
+            texts.push((format!("{}.params.{}", e.id, p.name), p.sample.to_string()));
+        }
+    }
+
+    let v = gate(catalog.provenance, &texts, allow_observed);
+    println!("catalog-gate {path}");
+    println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
+    for f in &v.findings {
+        println!("  FINDING {:<16} in {}  {}", f.kind, f.where_, f.excerpt);
+    }
+    for r in &v.reasons {
+        println!("  REFUSED {r}");
+    }
+    if v.publishable {
+        println!("  OK  publishable");
+        0
+    } else {
+        1
     }
 }
 
