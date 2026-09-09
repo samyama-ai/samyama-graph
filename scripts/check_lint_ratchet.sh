@@ -14,7 +14,7 @@
 #   usage: check_lint_ratchet.sh [clippy-ceiling]
 set -uo pipefail
 
-CEILING="${1:-795}"
+CEILING="${1:-796}"
 
 # --- the measurement must be a measurement (#1134) --------------------------
 #
@@ -88,11 +88,17 @@ echo "clippy lints: $count (ceiling $CEILING)"
 echo "  per-crate summaries, not counted: $summaries"
 echo "  cargo reported $finished Finished/Checking/Compiling lines"
 
-# 795 is the lint-only count measured **on CI**, run 34313013867, the first run
-# in which this script measured anything at all. This machine reads 793 on the
-# same commit, so the two now agree to within two lints where before they were
-# 941 apart. The remaining two are a toolchain difference and the ceiling is set
-# from CI's figure, since CI is what gates.
+# 796 is the lint-only count measured **on CI**, on `main`, run 34314866037.
+#
+# The first value here was 795, read from the CI run of the pull request that
+# introduced this counting (34313013867). That was wrong by one, and the reason
+# is worth keeping: GitHub builds a PR as a **merge of the branch into main**, so
+# a figure read there is only valid while main stands still. Three PRs landed
+# between that measurement and the merge, and one of them carried a lint, so main
+# broke on its own gate the moment it went green on the PR.
+#
+# So: when raising or lowering this, read the number from a CI run **on main**,
+# not from a pull request. A PR figure is a forecast.
 if [ "$count" -gt "$CEILING" ]; then
   echo "FAIL: $((count - CEILING)) more clippy lints than the ceiling."
   echo "  New code should not add to the backlog. Fix the new warnings, or"
