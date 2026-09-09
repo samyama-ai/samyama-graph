@@ -247,6 +247,10 @@ name = "plan_share"
 harness = false
 
 [[bench]]
+name = "restore_curve"
+harness = false
+
+[[bench]]
 name = "persist_row_cost"
 harness = false
 
