@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use crate::graph::GraphStore;
-use crate::query::{QueryEngine, RecordBatch};
+use crate::query::RecordBatch;
 
 /// Format identifier written into a catalog, so a reader can refuse a shape it
 /// does not understand rather than misinterpreting it.
