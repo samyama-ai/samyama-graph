@@ -14,7 +14,7 @@
 #   usage: check_lint_ratchet.sh [clippy-ceiling]
 set -uo pipefail
 
-CEILING="${1:-769}"
+CEILING="${1:-795}"
 
 # --- the measurement must be a measurement (#1134) --------------------------
 #
@@ -76,18 +76,25 @@ fi
 # neither of which is lint debt.
 lints=$(printf '%s\n' "$raw" | grep -cE "^[^ ].*: warning: ")
 summaries=$(printf '%s\n' "$raw" | grep -cE "^warning: .* generated .* warning")
-count=$((lints + summaries))
 
-echo "clippy warnings: $count (ceiling $CEILING)"
-echo "  of which lints: $lints, per-crate summaries: $summaries"
+# The ceiling is on lints, not on lints plus summaries. A per-crate summary is
+# one line per crate that emitted anything, so it moves with the toolchain and
+# with how the workspace splits into compilation units, neither of which is lint
+# debt (#1134). It is still printed, because it is what the old combined number
+# was made of and leaving it out would make the two eras look incomparable.
+count=$lints
+
+echo "clippy lints: $count (ceiling $CEILING)"
+echo "  per-crate summaries, not counted: $summaries"
 echo "  cargo reported $finished Finished/Checking/Compiling lines"
 
-# The ceiling still applies to the combined count, because that is the number it
-# was set against. Switching it to lints-only needs the lint-only figure read
-# off a CI run in the same commit, and until this script measures at all on CI
-# there is no such figure to read (#1134).
+# 795 is the lint-only count measured **on CI**, run 34313013867, the first run
+# in which this script measured anything at all. This machine reads 793 on the
+# same commit, so the two now agree to within two lints where before they were
+# 941 apart. The remaining two are a toolchain difference and the ceiling is set
+# from CI's figure, since CI is what gates.
 if [ "$count" -gt "$CEILING" ]; then
-  echo "FAIL: $((count - CEILING)) more clippy warnings than the ceiling."
+  echo "FAIL: $((count - CEILING)) more clippy lints than the ceiling."
   echo "  New code should not add to the backlog. Fix the new warnings, or"
   echo "  raise the ceiling in the same commit and say why."
   exit 1
