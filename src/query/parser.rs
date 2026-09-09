@@ -3878,36 +3878,44 @@ mod tests {
     /// did not parse.
     #[test]
     fn test_path_mode_before_path_variable() {
-        for (q, want_restrictor, want_selector) in [
+        for (q, want_restrictor, want_selector, want_explicit) in [
             (
                 "MATCH TRAIL p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Trail,
                 PathSelector::All,
+                true,
             ),
             (
                 "MATCH ACYCLIC p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Acyclic,
                 PathSelector::All,
+                true,
             ),
             (
                 "MATCH SIMPLE p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Simple,
                 PathSelector::All,
+                true,
             ),
             (
                 "MATCH WALK p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Walk,
                 PathSelector::All,
+                true,
             ),
             (
+                // No restrictor written: Trail is the default, and `explicit` must
+                // stay false so the path-mode notification still fires here.
                 "MATCH ANY SHORTEST p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Trail,
                 PathSelector::AnyShortest,
+                false,
             ),
             (
                 "MATCH ALL SHORTEST TRAIL p = (a)-[:R*1..3]->(b) RETURN p",
                 PathRestrictor::Trail,
                 PathSelector::AllShortest,
+                true,
             ),
         ] {
             let ast = parse_query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
@@ -3915,10 +3923,11 @@ mod tests {
             assert_eq!(pp.path_variable, Some("p".to_string()), "{q}");
             assert_eq!(pp.restrictor, want_restrictor, "{q}");
             assert_eq!(pp.selector, want_selector, "{q}");
-            // A restrictor written in this position is still written, so #1149 must
-            // not treat it as defaulted and warn about it.
-            assert!(pp.restrictor_explicit || !q.contains("TRAIL") && !q.contains("WALK")
-                    && !q.contains("ACYCLIC") && !q.contains("SIMPLE"), "{q}");
+            // A restrictor written in this position is still *written*, so #1149 must
+            // not treat it as defaulted and warn about a mode the user chose. The
+            // table carries the expectation; deriving it by searching `q` for keywords
+            // would re-implement the parser inside its own test.
+            assert_eq!(pp.restrictor_explicit, want_explicit, "{q}");
         }
     }
 
