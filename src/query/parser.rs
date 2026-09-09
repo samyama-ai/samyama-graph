@@ -3871,6 +3871,68 @@ mod tests {
         assert_eq!(call.yield_items.len(), 2);
     }
 
+    /// #1148. ISO/IEC 39075 writes the restrictor before the path variable --
+    /// `MATCH TRAIL p = (...)` -- and so do the worked examples in the standard's
+    /// reference exposition (Deutsch et al., SIGMOD 2022). We accepted only the
+    /// inverted `MATCH p = TRAIL (...)`, so the queries printed in the specification
+    /// did not parse.
+    #[test]
+    fn test_path_mode_before_path_variable() {
+        for (q, want_restrictor, want_selector) in [
+            (
+                "MATCH TRAIL p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Trail,
+                PathSelector::All,
+            ),
+            (
+                "MATCH ACYCLIC p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Acyclic,
+                PathSelector::All,
+            ),
+            (
+                "MATCH SIMPLE p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Simple,
+                PathSelector::All,
+            ),
+            (
+                "MATCH WALK p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Walk,
+                PathSelector::All,
+            ),
+            (
+                "MATCH ANY SHORTEST p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Trail,
+                PathSelector::AnyShortest,
+            ),
+            (
+                "MATCH ALL SHORTEST TRAIL p = (a)-[:R*1..3]->(b) RETURN p",
+                PathRestrictor::Trail,
+                PathSelector::AllShortest,
+            ),
+        ] {
+            let ast = parse_query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
+            let pp = &ast.match_clauses[0].pattern.paths[0];
+            assert_eq!(pp.path_variable, Some("p".to_string()), "{q}");
+            assert_eq!(pp.restrictor, want_restrictor, "{q}");
+            assert_eq!(pp.selector, want_selector, "{q}");
+            // A restrictor written in this position is still written, so #1149 must
+            // not treat it as defaulted and warn about it.
+            assert!(pp.restrictor_explicit || !q.contains("TRAIL") && !q.contains("WALK")
+                    && !q.contains("ACYCLIC") && !q.contains("SIMPLE"), "{q}");
+        }
+    }
+
+    /// The inverted order we used to be alone in accepting keeps working, so
+    /// anything already written against it does not break.
+    #[test]
+    fn test_path_variable_before_path_mode_still_parses() {
+        let ast = parse_query("MATCH p = TRAIL (a)-[:R*1..3]->(b) RETURN p").unwrap();
+        let pp = &ast.match_clauses[0].pattern.paths[0];
+        assert_eq!(pp.path_variable, Some("p".to_string()));
+        assert_eq!(pp.restrictor, PathRestrictor::Trail);
+        assert!(pp.restrictor_explicit);
+    }
+
     #[test]
     fn test_parse_named_path_with_return_p() {
         let query = "MATCH p = (a:Person)-[:KNOWS]->(b:Person) RETURN p";
