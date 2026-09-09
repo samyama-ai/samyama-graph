@@ -181,7 +181,13 @@ create_stmt = { create_clause+ ~ return_clause? ~ order_by_clause? ~ skip_clause
 
 // Pattern matching
 pattern = { named_path ~ ("," ~ named_path)* }
-named_path = { (variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path_modes ~ path) | (variable ~ "=" ~ path) | shortest_path_call | (path_modes ~ path) | path }
+// `path_modes` may precede the path variable or follow it. ISO/IEC 39075 writes
+// the modes first -- `MATCH TRAIL p = (...)` -- and so do the worked examples in
+// the standard's reference exposition; we originally accepted only the inverted
+// form, so the specification's own queries did not parse (#1148). Both are taken.
+// Ordered choice: the modes-first alternative must precede `path_modes ~ path`,
+// which would otherwise consume the modes and then fail on the variable.
+named_path = { (variable ~ "=" ~ shortest_path_call) | (path_modes ~ variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path_modes ~ path) | (path_modes ~ variable ~ "=" ~ path) | (variable ~ "=" ~ path) | shortest_path_call | (path_modes ~ path) | path }
 
 // GQL path selectors and restrictors (ISO/IEC 39075:2024), as a prefix on a path
 // pattern: `MATCH ALL SHORTEST ACYCLIC (a)-[:R*1..3]->(b)`.
