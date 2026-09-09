@@ -119,10 +119,9 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         return 64;
     };
 
-    // Input shape: [{"id": "...", "cypher": "...", "unanswerable": false}, ...]
-    #[derive(serde::Deserialize)]
-    struct InQuery { id: String, cypher: String, #[serde(default)] unanswerable: bool }
-    let queries: Vec<InQuery> = match std::fs::File::open(queries_path)
+    // Input shape: [{"id", "cypher", "unanswerable"?, "params"?}, ...]
+    use samyama::snapshot::verify::QuerySpec;
+    let queries: Vec<QuerySpec> = match std::fs::File::open(queries_path)
         .map_err(|e| e.to_string())
         .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
     {
@@ -140,12 +139,7 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         return 1;
     }
 
-    let pairs: Vec<(String, String)> =
-        queries.iter().map(|q| (q.id.clone(), q.cypher.clone())).collect();
-    let unanswerable: Vec<String> =
-        queries.iter().filter(|q| q.unanswerable).map(|q| q.id.clone()).collect();
-
-    match samyama::snapshot::verify::build_catalog(&store, &pairs, &unanswerable) {
+    match samyama::snapshot::verify::build_catalog(&store, &queries, &[]) {
         Err(e) => { eprintln!("{e}"); 1 }
         Ok(catalog) => {
             let json = serde_json::to_string_pretty(&catalog).expect("serialize");
