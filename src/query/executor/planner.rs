@@ -36,24 +36,28 @@
 //! - **Early LIMIT propagation**: push LIMIT down into the operator tree so that scans
 //!   stop after producing enough records.
 //!
-//! ## Plan Cache
+//! ## There is no plan cache
 //!
-//! Planning is not free -- enumerating plans and computing cost estimates takes time. For
-//! repeated queries (common in applications), the planner caches planning metadata (index
-//! hints, cost estimates) keyed by a hash of the query string. A **generation counter**
-//! (`AtomicU64`) is incremented on schema changes (CREATE INDEX, DROP INDEX) to invalidate
-//! stale cache entries. This uses `AtomicU64` with `Ordering::Relaxed` because exact
-//! ordering is not required -- a stale read just causes one extra re-plan.
+//! This module used to declare one -- `plan_cache`, `cache_generation`,
+//! `PlanCacheEntry` -- and this doc used to describe it working, down to the
+//! generation counter invalidating on `CREATE INDEX`. None of it ran: nothing
+//! inserted, nothing read, and `invalidate_cache()` had one caller, a test that
+//! cleared an empty map and asserted `Ok` (#1152).
 //!
-//! ## Rust Concepts
+//! It is not coming back in that form, for a reason worth writing down.
+//! `ExecutionPlan::root` is an `OperatorBox` -- a tree of **stateful** operators
+//! holding buffers and iterator positions. A plan is consumed by executing it,
+//! so it cannot be stored and replayed. What *could* be cached is the planning
+//! metadata the old doc described, but measurement says that is not where the
+//! time goes: planning a selective read costs 3.5us, and the candidate-plan
+//! search that metadata would skip runs only under `graph_native`, which is off
+//! by default. The default path spends its time constructing the operator tree,
+//! and the operator tree is exactly the part that cannot be reused.
 //!
-//! - **`Mutex<HashMap<u64, PlanCacheEntry>>`**: the plan cache is shared across threads
-//!   (the query engine is `Send + Sync`). `Mutex` provides mutual exclusion -- only one
-//!   thread can read/write the cache at a time. `HashMap<u64, _>` uses a pre-computed hash
-//!   of the query string as the key.
-//! - **`AtomicU64`**: a lock-free atomic integer for the generation counter. Atomics are
-//!   cheaper than mutexes for simple counters because they use CPU-level atomic instructions
-//!   (e.g., `LOCK CMPXCHG` on x86) instead of OS-level locks.
+//! The win it was meant to deliver -- a repeated query not paying to be planned
+//! again -- is delivered instead by the result cache in `QueryEngine`
+//! (`execute_cached`, #1153), which returns the rows and never reaches the
+//! planner at all: 14.8x on that same selective read.
 
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
@@ -570,14 +574,6 @@ impl ExecutionPlan {
     }
 }
 
-/// Simple plan cache entry storing planning metadata
-struct PlanCacheEntry {
-    /// Timestamp when entry was created
-    created_at: std::time::Instant,
-    /// Which index to use (if any): (label, property, op)
-    index_hint: Option<(Label, String)>,
-}
-
 /// Configuration for the query planner (ADR-015)
 #[derive(Debug, Clone)]
 pub struct PlannerConfig {
@@ -600,10 +596,6 @@ impl Default for PlannerConfig {
 pub struct QueryPlanner {
     /// Enable optimization
     _optimize: bool,
-    /// Plan cache: query string hash → planning metadata
-    plan_cache: Mutex<HashMap<u64, PlanCacheEntry>>,
-    /// Cache generation counter (incremented on schema changes)
-    cache_generation: std::sync::atomic::AtomicU64,
     /// Planner configuration (ADR-015)
     config: PlannerConfig,
     /// Whether the query being planned can observe var-length multiplicity.
@@ -669,8 +661,6 @@ impl QueryPlanner {
     pub fn new() -> Self {
         Self {
             _optimize: true,
-            plan_cache: Mutex::new(HashMap::new()),
-            cache_generation: std::sync::atomic::AtomicU64::new(0),
             config: PlannerConfig::default(),
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
@@ -680,8 +670,6 @@ impl QueryPlanner {
     pub fn with_config(config: PlannerConfig) -> Self {
         Self {
             _optimize: true,
-            plan_cache: Mutex::new(HashMap::new()),
-            cache_generation: std::sync::atomic::AtomicU64::new(0),
             config,
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
         }
@@ -851,12 +839,6 @@ impl QueryPlanner {
                 candidate_costs: Vec::new(),
             },
         }
-    }
-
-    /// Invalidate the plan cache (e.g., after CREATE INDEX or schema change)
-    pub fn invalidate_cache(&self) {
-        self.cache_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.plan_cache.lock().unwrap().clear();
     }
 
     /// Plan a query
@@ -7684,20 +7666,6 @@ mod tests {
         let store = GraphStore::new();
         let query = parse_query("MATCH (n) RETURN n").unwrap();
         assert!(planner.plan(&query, &store).is_ok());
-    }
-
-    #[test]
-    fn test_plan_cache_invalidation() {
-        let planner = QueryPlanner::new();
-        let store = GraphStore::new();
-        // Plan a query to populate cache
-        let query = parse_query("MATCH (n:Person) RETURN n").unwrap();
-        planner.plan(&query, &store).unwrap();
-        // Invalidate should not cause errors
-        planner.invalidate_cache();
-        // Re-planning should still work
-        let result = planner.plan(&query, &store);
-        assert!(result.is_ok());
     }
 
     #[test]
