@@ -556,14 +556,7 @@ impl Value {
                 }
             }
             Value::EdgeRef(id, ..) => {
-                let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                if !prop.is_null() {
-                    prop
-                } else if let Some(edge) = store.get_edge(*id) {
-                    edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)
-                } else {
-                    PropertyValue::Null
-                }
+                store.edge_property(*id, property).unwrap_or(PropertyValue::Null)
             }
             // Map property access: `m.a` where `m` is a map, from a literal, an
             // `UNWIND` over a list of maps, or a map-valued node property.
@@ -1360,10 +1353,14 @@ impl PropertyCursor {
                         return value;
                     }
                 }
-                match store.get_edge(*id) {
-                    Some(edge) => edge.get_property(&self.property).cloned().unwrap_or(PropertyValue::Null),
-                    None => PropertyValue::Null,
+                // The column has no value here; read the row map in place.
+                if !store.has_edge(*id) {
+                    return PropertyValue::Null;
                 }
+                store
+                    .get_edge_properties(*id)
+                    .and_then(|props| props.get(&*self.property).cloned())
+                    .unwrap_or(PropertyValue::Null)
             }
             Some(other) => other.resolve_property(&self.property, store),
             None => PropertyValue::Null,
