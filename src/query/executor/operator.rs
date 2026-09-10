@@ -6747,7 +6747,7 @@ impl ExpandOperator {
             match store.get_node(target) {
                 Some(node) => target_props
                     .iter()
-                    .all(|(k, v)| node.get_property(k).map_or(false, |p| p == v)),
+                    .all(|(k, v)| store.node_property(node.id, k).as_ref() == Some(v)),
                 None => false,
             }
         };
@@ -8113,7 +8113,7 @@ impl VarLengthExpandOperator {
                     && self
                         .target_props
                         .iter()
-                        .all(|(k, v)| n.get_property(k).is_some_and(|p| p == v))
+                        .all(|(k, v)| store.node_property(n.id, k).as_ref() == Some(v))
             }
             None => false,
         }
@@ -11775,7 +11775,10 @@ impl PhysicalOperator for CreateConstraintOperator {
         let nodes = store.get_nodes_by_label(&self.label);
         let mut seen_values: std::collections::HashSet<PropertyValue> = std::collections::HashSet::new();
         for node in nodes {
-            if let Some(val) = node.get_property(&self.property) {
+            // Through the store: on a restored graph the row is empty, so this
+            // check saw no values and created a constraint over data that
+            // already violated it (#1187).
+            if let Some(val) = store.node_property(node.id, &self.property) {
                 if !val.is_null() && !seen_values.insert(val.clone()) {
                     return Err(ExecutionError::RuntimeError(format!(
                         "Cannot create unique constraint: duplicate value {:?} for :{}({})",
@@ -11788,12 +11791,14 @@ impl PhysicalOperator for CreateConstraintOperator {
         // Create the constraint
         store.property_index.create_unique_constraint(self.label.clone(), self.property.clone());
 
-        // Backfill constraint index
+        // Backfill constraint index. Through the store, not `node.get_property`:
+        // on a restored graph the row is empty, the backfill saw no existing
+        // values, and the first duplicate of any of them went through (#1187).
         let mut entries = Vec::new();
         let nodes = store.get_nodes_by_label(&self.label);
         for node in nodes {
-            if let Some(val) = node.get_property(&self.property) {
-                entries.push((node.id, val.clone()));
+            if let Some(val) = store.node_property(node.id, &self.property) {
+                entries.push((node.id, val));
             }
         }
         for (node_id, val) in entries {
@@ -14014,11 +14019,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 // an estimate *is* Dijkstra, and a name is not an algorithm.
                 let h: Vec<f64> = (0..view.node_count).map(|i| {
                     heuristic.as_deref().and_then(|prop| {
-                        store.get_node(NodeId::new(view.index_to_node[i]))
-                            .and_then(|n| n.get_property(prop))
+                        store.node_property(NodeId::new(view.index_to_node[i]), prop)
                             .and_then(|v| match v {
-                                PropertyValue::Integer(x) => Some(*x as f64),
-                                PropertyValue::Float(x) => Some(*x),
+                                PropertyValue::Integer(x) => Some(x as f64),
+                                PropertyValue::Float(x) => Some(x),
                                 _ => None,
                             })
                     }).unwrap_or(0.0)
@@ -14766,11 +14770,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 
                 // Single cost (for single objective solvers)
                 if cost_props.len() == 1 {
-                    let cost = node.get_property(&cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
+                    let cost = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
                     single_costs.push(cost);
                 } else if !cost_props.is_empty() {
                     for (i, cp) in cost_props.iter().enumerate() {
-                        let cost = node.get_property(cp).and_then(|v| v.as_float()).unwrap_or(1.0);
+                        let cost = store.node_property(node.id, cp).and_then(|v| v.as_float()).unwrap_or(1.0);
                         multi_costs[i].push(cost);
                     }
                 } else {

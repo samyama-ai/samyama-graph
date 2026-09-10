@@ -4454,6 +4454,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Some(node)
     }
 
+    /// One property of one node, wherever it is held (#1187).
+    ///
+    /// Column first, the row copy as fallback -- the order `resolve_property`
+    /// uses. `Node::get_property` reads only the row, and snapshot import leaves
+    /// the row empty for every scalar, so a caller holding a `&Node` from the
+    /// store and asking it directly gets `None` on any restored graph. Five
+    /// production readers did exactly that; three returned wrong answers.
+    ///
+    /// Per key rather than `node_properties_full`, which builds the whole map --
+    /// the wrong cost for a predicate tested once per candidate node.
+    pub fn node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
+        let v = self.node_columns.get_property(id.as_u64() as usize, key);
+        if !v.is_null() {
+            return Some(v);
+        }
+        self.get_node(id).and_then(|n| n.get_property(key).cloned())
+    }
+
     pub fn node_properties_full(&self, id: NodeId) -> HashMap<String, PropertyValue> {
         let mut out: HashMap<String, PropertyValue> = HashMap::new();
         if let Some(node) = self.get_node(id) {
