@@ -3651,7 +3651,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             if label.is_empty() {
                 continue;
             }
-            for (k, v) in node.properties.iter() {
+            // The merged view, not `node.properties`. Discovery works today only
+            // because snapshot import happens to keep arrays in the row copy as
+            // well as the column; a node whose embedding lives only in the column
+            // -- which is where #545 is taking every property -- would be skipped,
+            // and its index never registered. Nothing would error: vector search
+            // would just return nothing for that label.
+            let props = self.node_properties_full(node.id);
+            for (k, v) in props.iter() {
                 // Discovery *registers* indices, so it must not treat every
                 // numeric list as an embedding -- `{scores: [1, 2, 3]}` would
                 // get an HNSW index built over it. The rule is the one that was
@@ -3855,17 +3862,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             summary.push_str(&format!("  {} ({} edges)\n", pattern, count));
         }
 
+        // Properties come from the merged view, not `node.properties`. Snapshot
+        // import leaves the row copy empty for every scalar -- the values sit in
+        // the column store -- so reading the row listed only a restored node's
+        // arrays and dropped every string and number. This text is what the NLQ
+        // prompt is given as the schema, so a restored KG was described to the
+        // model without most of its properties.
+        //
+        // Sorted before `take`: a HashMap's key order changes per process, so the
+        // same graph produced a different five-key sample on each start.
         summary.push_str("\nKey Properties:\n");
         for (label, node_ids) in &self.label_index {
             if let Some(first_id) = node_ids.iter().next() {
-                if let Some(node) = self.get_node(*first_id) {
-                    let props: Vec<_> = node.properties.keys().take(5).collect();
-                    if !props.is_empty() {
-                        summary.push_str(&format!("  :{} has properties: {}\n",
-                            label.as_str(),
-                            props.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
-                        ));
-                    }
+                let mut keys: Vec<String> =
+                    self.node_properties_full(*first_id).into_keys().collect();
+                keys.sort();
+                keys.truncate(5);
+                if !keys.is_empty() {
+                    summary.push_str(&format!(
+                        "  :{} has properties: {}\n",
+                        label.as_str(),
+                        keys.join(", ")
+                    ));
                 }
             }
         }
@@ -4434,6 +4452,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             node.properties = self.node_properties_full(id);
         }
         Some(node)
+    }
+
+    /// One property of one node, wherever it is held (#1187).
+    ///
+    /// Column first, the row copy as fallback -- the order `resolve_property`
+    /// uses. `Node::get_property` reads only the row, and snapshot import leaves
+    /// the row empty for every scalar, so a caller holding a `&Node` from the
+    /// store and asking it directly gets `None` on any restored graph. Five
+    /// production readers did exactly that; three returned wrong answers.
+    ///
+    /// Per key rather than `node_properties_full`, which builds the whole map --
+    /// the wrong cost for a predicate tested once per candidate node.
+    pub fn node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
+        let v = self.node_columns.get_property(id.as_u64() as usize, key);
+        if !v.is_null() {
+            return Some(v);
+        }
+        self.get_node(id).and_then(|n| n.get_property(key).cloned())
     }
 
     pub fn node_properties_full(&self, id: NodeId) -> HashMap<String, PropertyValue> {

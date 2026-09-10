@@ -6747,7 +6747,7 @@ impl ExpandOperator {
             match store.get_node(target) {
                 Some(node) => target_props
                     .iter()
-                    .all(|(k, v)| node.get_property(k).map_or(false, |p| p == v)),
+                    .all(|(k, v)| store.node_property(node.id, k).as_ref() == Some(v)),
                 None => false,
             }
         };
@@ -8113,7 +8113,7 @@ impl VarLengthExpandOperator {
                     && self
                         .target_props
                         .iter()
-                        .all(|(k, v)| n.get_property(k).is_some_and(|p| p == v))
+                        .all(|(k, v)| store.node_property(n.id, k).as_ref() == Some(v))
             }
             None => false,
         }
@@ -11775,7 +11775,10 @@ impl PhysicalOperator for CreateConstraintOperator {
         let nodes = store.get_nodes_by_label(&self.label);
         let mut seen_values: std::collections::HashSet<PropertyValue> = std::collections::HashSet::new();
         for node in nodes {
-            if let Some(val) = node.get_property(&self.property) {
+            // Through the store: on a restored graph the row is empty, so this
+            // check saw no values and created a constraint over data that
+            // already violated it (#1187).
+            if let Some(val) = store.node_property(node.id, &self.property) {
                 if !val.is_null() && !seen_values.insert(val.clone()) {
                     return Err(ExecutionError::RuntimeError(format!(
                         "Cannot create unique constraint: duplicate value {:?} for :{}({})",
@@ -11788,12 +11791,14 @@ impl PhysicalOperator for CreateConstraintOperator {
         // Create the constraint
         store.property_index.create_unique_constraint(self.label.clone(), self.property.clone());
 
-        // Backfill constraint index
+        // Backfill constraint index. Through the store, not `node.get_property`:
+        // on a restored graph the row is empty, the backfill saw no existing
+        // values, and the first duplicate of any of them went through (#1187).
         let mut entries = Vec::new();
         let nodes = store.get_nodes_by_label(&self.label);
         for node in nodes {
-            if let Some(val) = node.get_property(&self.property) {
-                entries.push((node.id, val.clone()));
+            if let Some(val) = store.node_property(node.id, &self.property) {
+                entries.push((node.id, val));
             }
         }
         for (node_id, val) in entries {
@@ -14014,11 +14019,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 // an estimate *is* Dijkstra, and a name is not an algorithm.
                 let h: Vec<f64> = (0..view.node_count).map(|i| {
                     heuristic.as_deref().and_then(|prop| {
-                        store.get_node(NodeId::new(view.index_to_node[i]))
-                            .and_then(|n| n.get_property(prop))
+                        store.node_property(NodeId::new(view.index_to_node[i]), prop)
                             .and_then(|v| match v {
-                                PropertyValue::Integer(x) => Some(*x as f64),
-                                PropertyValue::Float(x) => Some(*x),
+                                PropertyValue::Integer(x) => Some(x as f64),
+                                PropertyValue::Float(x) => Some(x),
                                 _ => None,
                             })
                     }).unwrap_or(0.0)
@@ -14766,11 +14770,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 
                 // Single cost (for single objective solvers)
                 if cost_props.len() == 1 {
-                    let cost = node.get_property(&cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
+                    let cost = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
                     single_costs.push(cost);
                 } else if !cost_props.is_empty() {
                     for (i, cp) in cost_props.iter().enumerate() {
-                        let cost = node.get_property(cp).and_then(|v| v.as_float()).unwrap_or(1.0);
+                        let cost = store.node_property(node.id, cp).and_then(|v| v.as_float()).unwrap_or(1.0);
                         multi_costs[i].push(cost);
                     }
                 } else {
@@ -16346,14 +16350,34 @@ impl MergeOperator {
         Ok(Some(out))
     }
 
-    fn node_matches(node: &crate::graph::Node, labels: &[Label], props: Option<&HashMap<String, PropertyValue>>) -> bool {
+    /// Whether `node` satisfies a MERGE pattern's labels and properties (#1185).
+    ///
+    /// Columnar store first, row map as fallback -- the same order as
+    /// `exists_node_matches`, fixed for this cause in #346. This check read only
+    /// `node.properties`, and snapshot import leaves that map empty with the
+    /// values in the columns (ADR-021). So on any restored graph every property
+    /// predicate was false, no candidate survived, and MERGE took the create
+    /// branch: the first MERGE of an existing entity made a second one.
+    ///
+    /// The row fallback stays for values the column does not hold, and so this
+    /// reader keeps working while #545 decides whether the row copy goes.
+    fn node_matches(
+        store: &GraphStore,
+        node: &crate::graph::Node,
+        labels: &[Label],
+        props: Option<&HashMap<String, PropertyValue>>,
+    ) -> bool {
         if !labels.iter().all(|l| node.labels.contains(l)) {
             return false;
         }
         match props {
-            Some(required) => required
-                .iter()
-                .all(|(k, v)| node.properties.get(k).map_or(false, |pv| pv == v)),
+            Some(required) => {
+                let idx = node.id.as_u64() as usize;
+                required.iter().all(|(k, v)| match store.node_columns.get_property(idx, k) {
+                    PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
+                    col => &col == v,
+                })
+            }
             None => true,
         }
     }
@@ -16464,14 +16488,14 @@ impl MergeOperator {
             match np.labels.first() {
                 Some(first_label) => {
                     for node in store.get_nodes_by_label(first_label) {
-                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
                             ids.push(node.id);
                         }
                     }
                 }
                 None => {
                     for node in store.all_nodes() {
-                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
                             ids.push(node.id);
                         }
                     }
@@ -16815,7 +16839,7 @@ impl PhysicalOperator for MergeOperator {
                 };
                 candidates
                     .into_iter()
-                    .filter(|node| Self::node_matches(node, labels, props))
+                    .filter(|node| Self::node_matches(store, node, labels, props))
                     .map(|node| node.id)
                     .collect()
             }

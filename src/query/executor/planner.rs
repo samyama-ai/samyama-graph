@@ -4086,7 +4086,7 @@ impl QueryPlanner {
         Some(
             nodes
                 .iter()
-                .filter(|n| n.get_property(key).is_some_and(|p| p == value))
+                .filter(|n| store.node_property(n.id, key).as_ref() == Some(value))
                 .map(|n| n.id)
                 .collect(),
         )

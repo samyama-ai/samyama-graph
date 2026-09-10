@@ -96,9 +96,15 @@ pub async fn export_handler(
             .into_response();
     }
 
+    // Nodes are resolved to the store's merged view *inside* the read guard, so
+    // export renders their real properties without holding the lock through
+    // Parquet encoding (#545).
     let batch = {
         let store_guard = state.store.read().await;
-        state.engine.execute(&payload.query, &*store_guard)
+        state.engine.execute(&payload.query, &*store_guard).map(|mut b| {
+            crate::export::resolve_nodes(&mut b, &*store_guard);
+            b
+        })
     };
     let batch = match batch {
         Ok(b) => b,
