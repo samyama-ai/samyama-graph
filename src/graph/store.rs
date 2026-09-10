@@ -1905,7 +1905,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Null removes, as on the node path above (#952) -- and, as there,
         // a write to an edge that does not exist is still an error.
         if matches!(val, PropertyValue::Null) {
-            if self.get_edge(edge_id).is_none() {
+            if !self.has_edge(edge_id) {
                 return Err(GraphError::EdgeNotFound(edge_id));
             }
             self.remove_edge_property(edge_id, &key_str);
@@ -2424,6 +2424,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Get a mutable reference to edge properties (for COW updates).
     /// Returns None if edge doesn't exist.
+    ///
+    /// Writes through this reach the row map only, and reads try
+    /// `edge_columns` first: a value changed here while a column holds the
+    /// same key is not seen. Set properties with `set_edge_property_sparse` or
+    /// `set_edge_property`, and remove them with `remove_edge_property`.
     pub fn get_edge_properties_mut(&mut self, id: EdgeId) -> Option<&mut PropertyMap> {
         self.bump_epoch();
         let idx = id.as_u64() as usize;
@@ -2472,8 +2477,48 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        // The column as well as the row map. This is the setter CREATE, MERGE
+        // and SET use, and it wrote the row map only, so every relationship
+        // property a query created missed the column that reads try first and
+        // fell back to two hash probes into a per-edge map scattered across the
+        // heap. On a 2M-edge `WHERE r.p ... ORDER BY r.p` scan that fallback was
+        // 63% of the query; peak RSS for the column copy was +0.9%.
+        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value.clone());
         let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
         props.insert(key, value);
+    }
+
+    /// Several properties of one relationship at once, into both stores.
+    ///
+    /// `set_edge_property_sparse` per property, but the statistics cache is
+    /// invalidated and the mutation journalled once per edge rather than once
+    /// per property. For bulk loaders, which used `get_edge_properties_mut`
+    /// because the per-property setter was too slow and so wrote the row map
+    /// only (#1127). A `Null` removes the key, as in the single setter.
+    pub fn set_edge_properties_sparse<K, I>(&mut self, edge_id: EdgeId, props: I)
+    where
+        K: Into<String>,
+        I: IntoIterator<Item = (K, PropertyValue)>,
+    {
+        let idx = edge_id.as_u64() as usize;
+        let mut wrote = false;
+        for (key, value) in props {
+            let key = key.into();
+            if matches!(value, PropertyValue::Null) {
+                self.remove_edge_property(edge_id, &key);
+                continue;
+            }
+            self.edge_columns.set_property(idx, &key, value.clone());
+            self.edge_properties
+                .entry(edge_id)
+                .or_insert_with(PropertyMap::new)
+                .insert(key, value);
+            wrote = true;
+        }
+        if wrote {
+            self.invalidate_statistics_cache();
+            self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        }
     }
 
     /// Check if an edge exists
@@ -2522,6 +2567,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_type_ids[idx] = Self::EDGE_TYPE_UNSET;
         }
         self.edge_properties.remove(&id);
+        // The columns too. The id goes onto `free_edge_ids`, reads try the
+        // column first, and `delete_node` already clears its row; without this
+        // the next relationship to take the id read the deleted one's values --
+        // for a property it never had, and over one it was created with.
+        self.edge_columns.clear_row(idx);
         self.edge_version_log.remove(&id);
 
         // Update catalog triple stats
@@ -4464,6 +4514,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     ///
     /// Per key rather than `node_properties_full`, which builds the whole map --
     /// the wrong cost for a predicate tested once per candidate node.
+    /// One property of one relationship, by reference to where it is stored.
+    ///
+    /// The edge counterpart of `node_property`, and for the same reason:
+    /// `get_edge(id)` answers by building an owned `Edge` -- the type string
+    /// and the whole property map cloned -- and reading one key of it. CREATE,
+    /// MERGE and the bulk loaders write edge properties to the row map only, so
+    /// the column read in front of that fallback misses and the clone ran on
+    /// every read: three per row on a `WHERE r.p ... ORDER BY r.p` scan.
+    pub fn edge_property(&self, id: EdgeId, key: &str) -> Option<PropertyValue> {
+        let v = self.edge_columns.get_property(id.as_u64() as usize, key);
+        if !v.is_null() {
+            return Some(v);
+        }
+        if !self.has_edge(id) {
+            return None;
+        }
+        self.edge_properties.get(&id).and_then(|props| props.get(key).cloned())
+    }
+
     pub fn node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
         let v = self.node_columns.get_property(id.as_u64() as usize, key);
         if !v.is_null() {
@@ -5566,6 +5635,42 @@ mod tests {
         let e2 = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
         let sparse = store.get_edge_properties(e2).unwrap();
         assert_eq!(sparse.get("weight"), Some(&PropertyValue::Float(0.5)));
+    }
+
+    #[test]
+    fn set_edge_properties_sparse_writes_both_stores_and_null_removes() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge(a, b, "R").unwrap();
+        store.set_edge_properties_sparse(
+            eid,
+            [("w", PropertyValue::Float(2.5)), ("k", PropertyValue::Integer(7))],
+        );
+        let idx = eid.as_u64() as usize;
+        assert_eq!(store.edge_columns.get_property(idx, "w"), PropertyValue::Float(2.5));
+        assert_eq!(
+            store.get_edge_properties(eid).and_then(|p| p.get("k").cloned()),
+            Some(PropertyValue::Integer(7))
+        );
+        store.set_edge_properties_sparse(eid, [("w", PropertyValue::Null)]);
+        assert!(store.edge_columns.get_property(idx, "w").is_null());
+        assert_eq!(store.edge_property(eid, "w"), None);
+        assert_eq!(store.edge_property(eid, "k"), Some(PropertyValue::Integer(7)));
+    }
+
+    #[test]
+    fn set_edge_property_sparse_writes_the_column() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let eid = store.create_edge(a, b, "R").unwrap();
+        store.set_edge_property_sparse(eid, "w", PropertyValue::Float(2.5));
+        assert_eq!(
+            store.edge_columns.get_property(eid.as_u64() as usize, "w"),
+            PropertyValue::Float(2.5)
+        );
+        assert_eq!(store.edge_property(eid, "w"), Some(PropertyValue::Float(2.5)));
     }
 
     #[test]

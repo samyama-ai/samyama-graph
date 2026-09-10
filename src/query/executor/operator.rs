@@ -993,7 +993,7 @@ fn read_property(
         Value::NodeRef(id) | Value::Node(id, _) if store.get_node(*id).is_none() => {
             return Err(ExecutionError::EntityNotFound(format!("node {}", id.as_u64())));
         }
-        Value::EdgeRef(id, ..) | Value::Edge(id, _) if store.get_edge(*id).is_none() => {
+        Value::EdgeRef(id, ..) | Value::Edge(id, _) if !store.has_edge(*id) => {
             return Err(ExecutionError::EntityNotFound(format!("relationship {}", id.as_u64())));
         }
         _ => {}
@@ -1275,13 +1275,10 @@ fn exists_for_each_neighbor(
             return;
         }
         if let Some(props) = edge_props {
-            match store.get_edge(eid) {
-                Some(e) => {
-                    if !props.iter().all(|(k, v)| e.properties.get(k).is_some_and(|pv| pv == v)) {
-                        return;
-                    }
-                }
-                None => return,
+            if !store.has_edge(eid)
+                || !props.iter().all(|(k, v)| store.edge_property(eid, k).as_ref() == Some(v))
+            {
+                return;
             }
         }
         match visit(eid, other) {
@@ -7273,11 +7270,9 @@ impl VarLengthExpandOperator {
         if self.edge_properties.is_empty() {
             return true;
         }
-        store.get_edge(eid).is_some_and(|edge| {
-            self.edge_properties
-                .iter()
-                .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
-        })
+        self.edge_properties
+            .iter()
+            .all(|(k, v)| store.edge_property(eid, k).as_ref() == Some(v))
     }
 
     /// Is this segment's relationship variable already bound to a list?
@@ -7465,11 +7460,9 @@ impl VarLengthExpandOperator {
         // question depending on which end the planner anchored.
         let mut with_edge = |nb: NodeId, e: crate::graph::EdgeId| {
             if edge_properties.is_empty()
-                || store.get_edge(e).is_some_and(|edge| {
-                    edge_properties
-                        .iter()
-                        .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
-                })
+                || edge_properties
+                    .iter()
+                    .all(|(k, v)| store.edge_property(e, k).as_ref() == Some(v))
             {
                 visit(nb)
             }
@@ -12894,11 +12887,9 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                     // the first, returned it as an extra row.
                     if !properties.is_empty() {
                         existing_all.retain(|eid| {
-                            store.get_edge(*eid).is_some_and(|e| {
-                                properties.iter().all(|(k, v)| {
-                                    e.properties.get(k).is_some_and(|have| have == v)
-                                })
-                            })
+                            properties
+                                .iter()
+                                .all(|(k, v)| store.edge_property(*eid, k).as_ref() == Some(v))
                         });
                     }
 
@@ -16644,11 +16635,9 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
     ) -> Option<crate::graph::types::EdgeId> {
         let props_ok = |eid: crate::graph::types::EdgeId| {
             props.is_empty()
-                || store.get_edge(eid).is_some_and(|edge| {
-                    props
-                        .iter()
-                        .all(|(k, v)| edge.properties.get(k).is_some_and(|have| have == v))
-                })
+                || props
+                    .iter()
+                    .all(|(k, v)| store.edge_property(eid, k).as_ref() == Some(v))
         };
         let forward = store
             .get_outgoing_edge_targets(src)
