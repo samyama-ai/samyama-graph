@@ -16346,14 +16346,34 @@ impl MergeOperator {
         Ok(Some(out))
     }
 
-    fn node_matches(node: &crate::graph::Node, labels: &[Label], props: Option<&HashMap<String, PropertyValue>>) -> bool {
+    /// Whether `node` satisfies a MERGE pattern's labels and properties (#1185).
+    ///
+    /// Columnar store first, row map as fallback -- the same order as
+    /// `exists_node_matches`, fixed for this cause in #346. This check read only
+    /// `node.properties`, and snapshot import leaves that map empty with the
+    /// values in the columns (ADR-021). So on any restored graph every property
+    /// predicate was false, no candidate survived, and MERGE took the create
+    /// branch: the first MERGE of an existing entity made a second one.
+    ///
+    /// The row fallback stays for values the column does not hold, and so this
+    /// reader keeps working while #545 decides whether the row copy goes.
+    fn node_matches(
+        store: &GraphStore,
+        node: &crate::graph::Node,
+        labels: &[Label],
+        props: Option<&HashMap<String, PropertyValue>>,
+    ) -> bool {
         if !labels.iter().all(|l| node.labels.contains(l)) {
             return false;
         }
         match props {
-            Some(required) => required
-                .iter()
-                .all(|(k, v)| node.properties.get(k).map_or(false, |pv| pv == v)),
+            Some(required) => {
+                let idx = node.id.as_u64() as usize;
+                required.iter().all(|(k, v)| match store.node_columns.get_property(idx, k) {
+                    PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
+                    col => &col == v,
+                })
+            }
             None => true,
         }
     }
@@ -16464,14 +16484,14 @@ impl MergeOperator {
             match np.labels.first() {
                 Some(first_label) => {
                     for node in store.get_nodes_by_label(first_label) {
-                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
                             ids.push(node.id);
                         }
                     }
                 }
                 None => {
                     for node in store.all_nodes() {
-                        if Self::node_matches(node, &np.labels, node_props[i].as_ref()) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
                             ids.push(node.id);
                         }
                     }
@@ -16815,7 +16835,7 @@ impl PhysicalOperator for MergeOperator {
                 };
                 candidates
                     .into_iter()
-                    .filter(|node| Self::node_matches(node, labels, props))
+                    .filter(|node| Self::node_matches(store, node, labels, props))
                     .map(|node| node.id)
                     .collect()
             }
