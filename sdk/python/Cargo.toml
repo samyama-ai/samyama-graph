@@ -2,7 +2,7 @@
 
 [package]
 name = "samyama-python"
-version = "1.7.1"
+version = "1.8.0"
 edition = "2021"
 authors = ["Samyama Graph Database Team"]
 description = "Python bindings for the Samyama Graph Database SDK"
