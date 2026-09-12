@@ -1,6 +1,7 @@
 {
   "suite": "CH-REGRESS",
-  "status": "partial",
+  "status": "pass",
+  "envelope_status": "partial",
   "measured_at": "2026-09-11T21:56:30Z",
   "run_id": "2026-09-11T21:56:30Z-0eb6a55",
   "host": "aws-r6a.4xlarge-spot",
