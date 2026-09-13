@@ -7185,6 +7185,12 @@ pub struct VarLengthExpandOperator {
     /// compare per emitted candidate; membership is a hash lookup. Same
     /// resolution the plain expand uses (#665).
     target_ids: Option<std::collections::HashSet<NodeId>>,
+    /// The per-type index each direction reads instead of the adjacency, with
+    /// the store epoch it was taken at. See `type_index`.
+    out_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    in_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    /// Neighbour walks so far, against `TYPE_INDEX_AFTER_WALKS`.
+    type_walks: std::cell::Cell<usize>,
 }
 
 impl VarLengthExpandOperator {
@@ -7226,6 +7232,9 @@ impl VarLengthExpandOperator {
             target_ids: None,
             track_edges: false,
             starts_clause: false,
+            out_index: std::cell::RefCell::new(None),
+            in_index: std::cell::RefCell::new(None),
+            type_walks: std::cell::Cell::new(0),
         }
     }
 
@@ -7493,13 +7502,81 @@ impl VarLengthExpandOperator {
             }
         };
         match self.direction {
-            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut visit),
-            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut visit),
+            Direction::Outgoing => self.walk_side(node, type_ids, true, store, &mut visit),
+            Direction::Incoming => self.walk_side(node, type_ids, false, store, &mut visit),
             Direction::Both => {
-                store.for_each_outgoing_neighbor(node, type_ids, &mut visit);
-                store.for_each_incoming_neighbor(node, type_ids, &mut visit);
+                self.walk_side(node, type_ids, true, store, &mut visit);
+                self.walk_side(node, type_ids, false, store, &mut visit);
             }
         }
+    }
+
+    /// Walks before this operator builds a type index for itself. One
+    /// anchor's `*1..3` visits a few dozen nodes, where a build costs more than
+    /// it saves; LDBC IC1's reaches ~4,900 (#1197). An index an earlier query
+    /// built is read from the first walk.
+    const TYPE_INDEX_AFTER_WALKS: usize = 256;
+
+    /// One direction of `node`'s neighbours of the segment's type: from the
+    /// per-type index when there is one, else by walking the adjacency and
+    /// type-checking every edge.
+    ///
+    /// The walk was 84.5% of IC1 at SF10: `KNOWS*1..3` type-checked ~1,200
+    /// edges of every visited Person to keep ~60 (#1197). The index holds
+    /// exactly what the walk visits (`tests/type_adjacency.rs`), sorted by
+    /// `(target, edge)`; `ExpandOperator` has read it since #748.
+    fn walk_side(
+        &self,
+        node: NodeId,
+        type_ids: Option<&[u16]>,
+        outgoing: bool,
+        store: &GraphStore,
+        visit: &mut impl FnMut(NodeId, crate::graph::EdgeId),
+    ) {
+        if let Some(index) = self.type_index(type_ids, outgoing, store) {
+            for &(nb, eid) in index.neighbors(node) {
+                visit(nb, eid);
+            }
+        } else if outgoing {
+            store.for_each_outgoing_neighbor(node, type_ids, &mut *visit);
+        } else {
+            store.for_each_incoming_neighbor(node, type_ids, &mut *visit);
+        }
+    }
+
+    /// The per-type index for one direction, when the segment names exactly
+    /// one type and the store has one or builds one.
+    ///
+    /// Kept with the store's epoch and dropped when that moves. The store
+    /// clears its own cache on every write; an `Arc` held here would otherwise
+    /// go on serving the old edges to a query that writes while it reads.
+    fn type_index(
+        &self,
+        type_ids: Option<&[u16]>,
+        outgoing: bool,
+        store: &GraphStore,
+    ) -> Option<std::sync::Arc<crate::graph::TypeAdjacency>> {
+        let [t] = type_ids? else { return None };
+        let slot = if outgoing { &self.out_index } else { &self.in_index };
+        let epoch = store.epoch();
+        if let Some((at, index)) = &*slot.borrow() {
+            if *at == epoch {
+                return index.clone();
+            }
+        }
+        let index = match store.type_adjacency_if_built(*t, outgoing) {
+            Some(index) => Some(index),
+            None => {
+                let walks = self.type_walks.get() + 1;
+                self.type_walks.set(walks);
+                if walks <= Self::TYPE_INDEX_AFTER_WALKS {
+                    return None;
+                }
+                store.type_adjacency(*t, outgoing)
+            }
+        };
+        *slot.borrow_mut() = Some((epoch, index.clone()));
+        index
     }
 
     /// Pin the target to a single node the planner resolved at plan time.

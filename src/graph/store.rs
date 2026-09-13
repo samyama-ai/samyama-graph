@@ -3305,6 +3305,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         built
     }
 
+    /// The index for `(type_id, outgoing)` if one is already built, without
+    /// building it. `None` when none is built or the type was declined.
+    ///
+    /// For a caller whose own work is too small to justify a build but that
+    /// should not walk every edge when an earlier query already paid for one:
+    /// a variable-length expand from a single anchor visits a few dozen nodes
+    /// (#1197).
+    pub fn type_adjacency_if_built(&self, type_id: u16, outgoing: bool) -> Option<std::sync::Arc<TypeAdjacency>> {
+        self.type_adj.read().unwrap().get(&(type_id, outgoing)).cloned().flatten()
+    }
+
     /// Whether `edge_type_index` accounts for every edge in the adjacency.
     ///
     /// `create_edge_stub` (the bulk-load path) deliberately skips that index
