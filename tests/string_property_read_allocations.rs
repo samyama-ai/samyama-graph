@@ -105,8 +105,9 @@ fn sorting_adds_no_allocation_per_row_and_a_string_read_one_copy() {
     let three_overhead = three_keys - project_int;
     assert!(three_overhead < 1.1, "ORDER BY three integers adds {three_overhead:.2} allocator calls per row");
 
-    // Recorded, not bounded: a string sort key still copies its value (#750).
+    // A string sort key is borrowed from its column: it costs nothing beyond
+    // the returned value. It cost one copy per row.
     let string_key_extra = (sort_str - sort_int) - projected_extra;
     eprintln!("a string sort key costs {string_key_extra:.2} copies per row beyond the returned value");
-    assert!(string_key_extra <= 1.05, "a string sort key now costs {string_key_extra:.2} copies per row, more than before");
+    assert!(string_key_extra < 0.05, "a string sort key copies its value: {string_key_extra:.2} per row");
 }

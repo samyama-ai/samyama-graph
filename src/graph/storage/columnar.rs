@@ -515,6 +515,16 @@ impl Column {
         }
     }
 
+    /// The string at `idx`, borrowed, when this is a string column holding
+    /// one. `get` hands back an owned copy, which a caller that only compares
+    /// the value does not need (#750).
+    pub fn get_str(&self, idx: usize) -> Option<&str> {
+        match self {
+            Column::String(m) => m.get(idx).map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
     /// Check if a value exists at the given index.
     pub fn has(&self, idx: usize) -> bool {
         match self {
@@ -618,6 +628,13 @@ impl ColumnStore {
             Some(col) => col.get(idx),
             None => PropertyValue::Null,
         }
+    }
+
+    /// `get_by_id` for a string, borrowed: `None` when the column is not a
+    /// string column or holds nothing at `idx`.
+    #[inline]
+    pub fn get_str_by_id(&self, id: ColumnId, idx: usize) -> Option<&str> {
+        self.columns.get(id.0 as usize)?.get_str(idx)
     }
 
     pub fn set_property(&mut self, idx: usize, key: &str, value: PropertyValue) {

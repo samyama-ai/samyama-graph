@@ -10344,21 +10344,29 @@ impl PhysicalOperator for LimitOperator {
 }
 
 /// Sort operator: ORDER BY n.age ASC
-/// One row's `ORDER BY` key: up to two values inline, more on the heap.
+/// One part of a sort key: a value, or a string borrowed from the column that
+/// holds it. The key lives only while `execute_all` holds the store, so the
+/// borrow is free, and a string key no longer copies its value per row (#750).
+enum KeyPart<'s> {
+    Value(Value),
+    Str(&'s str),
+}
+
+/// One row's `ORDER BY` key: up to two parts inline, more on the heap.
 ///
 /// A `Vec<Value>` per row was one allocator call for every row sorted,
 /// whatever the key's type -- half of what `Sort` added per row (#750). One and
 /// two keys are nearly every `ORDER BY` written.
-enum SortKey {
-    Inline([Value; 2], usize),
-    Heap(Vec<Value>),
+enum SortKey<'s> {
+    Inline([KeyPart<'s>; 2], usize),
+    Heap(Vec<KeyPart<'s>>),
 }
 
-impl SortKey {
-    fn as_slice(&self) -> &[Value] {
+impl<'s> SortKey<'s> {
+    fn as_slice(&self) -> &[KeyPart<'s>] {
         match self {
-            SortKey::Inline(values, n) => &values[..*n],
-            SortKey::Heap(values) => values,
+            SortKey::Inline(parts, n) => &parts[..*n],
+            SortKey::Heap(parts) => parts,
         }
     }
 }
@@ -10419,24 +10427,28 @@ impl SortOperator {
     /// Only plain property expressions take the cursor; anything else -- an
     /// arithmetic expression, a function call -- falls back to `key_of`'s
     /// walker, and produces the same value either way.
-    fn key_of_cached(
+    fn key_of_cached<'s>(
         readers: &mut [PropertyCursor],
         sort_items: &[(Expression, bool)],
         record: &Record,
-        store: &GraphStore,
-    ) -> SortKey {
+        store: &'s GraphStore,
+    ) -> SortKey<'s> {
         let n = sort_items.len();
-        let mut inline = [Value::Null, Value::Null];
+        let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
         let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
         let mut cursor = readers.iter_mut();
         for (i, (expr, _)) in sort_items.iter().enumerate() {
             let value = match expr {
-                // A property is always a `PropertyValue`; the cursor stays.
+                // A property is always a `PropertyValue`; the cursor stays. A
+                // string in a column is borrowed rather than copied.
                 Expression::Property { .. } => {
                     let c = cursor.next().expect("one cursor per property key");
-                    Value::Property(c.read(record, store))
+                    match c.read_str(record, store) {
+                        Some(s) => KeyPart::Str(s),
+                        None => KeyPart::Value(Value::Property(c.read(record, store))),
+                    }
                 }
-                other => Self::evaluate_expression(other, record, store).unwrap_or(Value::Null),
+                other => KeyPart::Value(Self::evaluate_expression(other, record, store).unwrap_or(Value::Null)),
             };
             if n <= 2 {
                 inline[i] = value;
@@ -10451,8 +10463,38 @@ impl SortOperator {
         }
     }
 
+    /// Two key parts, in Cypher's order: `cypher_order_value` on values, and on
+    /// a borrowed string the order its owned form would have.
+    fn cmp_part(x: &KeyPart<'_>, y: &KeyPart<'_>) -> std::cmp::Ordering {
+        match (x, y) {
+            (KeyPart::Value(a), KeyPart::Value(b)) => crate::query::executor::record::cypher_order_value(a, b),
+            (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
+            (KeyPart::Str(a), KeyPart::Value(b)) => Self::cmp_str_value(a, b),
+            (KeyPart::Value(a), KeyPart::Str(b)) => Self::cmp_str_value(b, a).reverse(),
+        }
+    }
+
+    /// A borrowed string against a value: by rank first, as
+    /// `cypher_order_value` does, and within the string rank as strings --
+    /// which is what `PropertyValue`'s order does for two strings.
+    fn cmp_str_value(s: &str, v: &Value) -> std::cmp::Ordering {
+        use crate::query::executor::record::{cypher_order_rank, cypher_order_value};
+        // `String::new()` does not allocate.
+        let as_value = Value::Property(PropertyValue::String(String::new()));
+        let (rs, rv) = (cypher_order_rank(&as_value), cypher_order_rank(v));
+        if rs != rv {
+            return rs.cmp(&rv);
+        }
+        match v {
+            Value::Property(PropertyValue::String(t)) => s.cmp(t.as_str()),
+            // Nothing else shares the string rank today; if something ever
+            // does, compare the owned form rather than guess.
+            other => cypher_order_value(&Value::Property(PropertyValue::String(s.to_string())), other),
+        }
+    }
+
     /// Compare two precomputed keys under the per-column sort directions.
-    fn cmp_keys(a: &[Value], b: &[Value], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+    fn cmp_keys(a: &[KeyPart<'_>], b: &[KeyPart<'_>], items: &[(Expression, bool)]) -> std::cmp::Ordering {
         for (i, (_, ascending)) in items.iter().enumerate() {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
@@ -10463,7 +10505,7 @@ impl SortOperator {
             // `graph::property::cypher_order` for why both orders exist, and
             // `record::cypher_order_value` for the entity ranks it cannot
             // express.
-            let ord = crate::query::executor::record::cypher_order_value(x, y);
+            let ord = Self::cmp_part(x, y);
             if ord != std::cmp::Ordering::Equal {
                 return if *ascending { ord } else { ord.reverse() };
             }
@@ -10481,7 +10523,7 @@ impl SortOperator {
     /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
     /// runs may therefore disagree about *which* — the same latitude the
     /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(SortKey, Record)>, k: usize, items: &[(Expression, bool)]) {
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -10699,7 +10741,7 @@ impl SortOperator {
             })
             .collect();
 
-        let mut keyed: Vec<(SortKey, Record)> = Vec::new();
+        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
