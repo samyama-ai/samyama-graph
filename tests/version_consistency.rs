@@ -135,6 +135,47 @@ fn every_cargo_manifest_carries_the_version_of_record() {
     }
 }
 
+/// Every path dependency between workspace crates that pins a version pins
+/// the version of record.
+///
+/// `prepare-release.yml` bumped each crate's own `version` and left these pins
+/// alone, so on the v1.8.0 branch every crate still declared
+/// `samyama-sdk = { path = ..., version = "1.7.1" }` and the like. It builds —
+/// 1.8.0 satisfies `^1.7.1` — which is why nothing noticed, but the published
+/// crates would each accept any 1.7.x-or-later sibling, and could pair
+/// `samyama-sdk` 1.8.0 with an older algorithms crate on crates.io.
+#[test]
+fn every_internal_dependency_pin_names_the_version_of_record() {
+    let mut checked = 0;
+    for rel in [
+        "Cargo.toml",
+        "cli/Cargo.toml",
+        "crates/samyama-sdk/Cargo.toml",
+        "crates/samyama-optimization/Cargo.toml",
+        "crates/samyama-graph-algorithms/Cargo.toml",
+        "sdk/python/Cargo.toml",
+    ] {
+        for line in read(rel).lines() {
+            let l = line.trim();
+            if !(l.contains("path = ") && l.contains("version = \"")) {
+                continue;
+            }
+            let pinned = l
+                .split("version = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or("");
+            checked += 1;
+            assert_eq!(
+                pinned, VERSION,
+                "{rel}: `{l}` pins {pinned}; the version of record is {VERSION}"
+            );
+        }
+    }
+    // Nine pins exist today; a scan that finds none is not a check.
+    assert!(checked >= 5, "found only {checked} pinned path dependencies — the scan is vacuous");
+}
+
 #[test]
 fn the_python_wheel_reports_the_version_of_record() {
     // PEP 440 permits `1.7.0rc1` where cargo writes `1.7.0-rc1`; the release
