@@ -1458,12 +1458,11 @@ fn exists_expand_hops(
 
             let mut next = bindings.clone();
             if let Some(var) = segment.edge.variable.as_deref() {
-                // Only a pattern that binds the edge needs it materialised.
-                if let Some(edge) = store.get_edge(eid) {
-                    next.bind(
-                        var.to_string(),
-                        Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
-                    );
+                // Only a pattern that binds the edge needs it materialised --
+                // as a reference: `get_edge` copied its whole property map to
+                // hand over three fields (#1190).
+                if let Some(r) = edge_ref(store, eid) {
+                    next.bind(var.to_string(), r);
                 }
             }
 
@@ -5102,6 +5101,19 @@ fn drain_input_for_write(
     Ok(())
 }
 
+/// A relationship as a `Value::EdgeRef`: id, endpoints and type, and nothing
+/// else. `None` when no relationship has the id.
+///
+/// `GraphStore::get_edge` builds an owned `Edge`, copying the type string and
+/// the whole property map, and four sites called it to read these three
+/// fields -- so a query that binds relationships and reads none of their
+/// properties paid for all of them (#1190).
+fn edge_ref(store: &GraphStore, id: crate::graph::EdgeId) -> Option<Value> {
+    let (source, target) = store.get_edge_endpoints(id)?;
+    let edge_type = store.get_edge_type(id)?;
+    Some(Value::EdgeRef(id, source, target, edge_type))
+}
+
 pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
@@ -7349,9 +7361,15 @@ impl VarLengthExpandOperator {
             if seen.contains(eid) {
                 return Ok(());
             }
-            let Some(edge) = store.get_edge(*eid) else { return Ok(()) };
+            // Endpoints and type only. `get_edge` copied the property map too,
+            // for every relationship of every bound list (#1190).
+            let (Some((edge_source, edge_target)), Some(edge_type)) =
+                (store.get_edge_endpoints(*eid), store.get_edge_type(*eid))
+            else {
+                return Ok(());
+            };
             if !self.edge_types.is_empty()
-                && !self.edge_types.iter().any(|t| t.as_str() == edge.edge_type.as_str())
+                && !self.edge_types.iter().any(|t| t.as_str() == edge_type.as_str())
             {
                 return Ok(());
             }
@@ -7363,10 +7381,10 @@ impl VarLengthExpandOperator {
             // directed forms may not, and an edge that does not touch `at` at
             // all fails whichever direction is written.
             let next = match self.direction {
-                Direction::Outgoing if edge.source == at => edge.target,
-                Direction::Incoming if edge.target == at => edge.source,
-                Direction::Both if edge.source == at => edge.target,
-                Direction::Both if edge.target == at => edge.source,
+                Direction::Outgoing if edge_source == at => edge_target,
+                Direction::Incoming if edge_target == at => edge_source,
+                Direction::Both if edge_source == at => edge_target,
+                Direction::Both if edge_target == at => edge_source,
                 _ => return Ok(()),
             };
             seen.push(*eid);
@@ -8270,15 +8288,7 @@ impl VarLengthExpandOperator {
                     Value::List(
                         edges
                             .iter()
-                            .map(|e| match store.get_edge(*e) {
-                                Some(edge) => Value::EdgeRef(
-                                    *e,
-                                    edge.source,
-                                    edge.target,
-                                    edge.edge_type.clone(),
-                                ),
-                                None => Value::Null,
-                            })
+                            .map(|e| edge_ref(store, *e).unwrap_or(Value::Null))
                             .collect(),
                     ),
                 );
@@ -9336,16 +9346,7 @@ impl IdentityKey {
         match self {
             IdentityKey::Node(id) => Value::NodeRef(NodeId(*id)),
             IdentityKey::Edge(id) => {
-                let edge_id = crate::graph::EdgeId(*id);
-                match store.get_edge(edge_id) {
-                    Some(edge) => Value::EdgeRef(
-                        edge_id,
-                        edge.source,
-                        edge.target,
-                        edge.edge_type.clone(),
-                    ),
-                    None => Value::Null,
-                }
+                edge_ref(store, crate::graph::EdgeId(*id)).unwrap_or(Value::Null)
             }
             IdentityKey::Other(value) => (**value).clone(),
         }
