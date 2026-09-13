@@ -10344,6 +10344,25 @@ impl PhysicalOperator for LimitOperator {
 }
 
 /// Sort operator: ORDER BY n.age ASC
+/// One row's `ORDER BY` key: up to two values inline, more on the heap.
+///
+/// A `Vec<Value>` per row was one allocator call for every row sorted,
+/// whatever the key's type -- half of what `Sort` added per row (#750). One and
+/// two keys are nearly every `ORDER BY` written.
+enum SortKey {
+    Inline([Value; 2], usize),
+    Heap(Vec<Value>),
+}
+
+impl SortKey {
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            SortKey::Inline(values, n) => &values[..*n],
+            SortKey::Heap(values) => values,
+        }
+    }
+}
+
 pub struct SortOperator {
     input: OperatorBox,
     sort_items: Vec<(Expression, bool)>, // (expr, ascending)
@@ -10405,22 +10424,31 @@ impl SortOperator {
         sort_items: &[(Expression, bool)],
         record: &Record,
         store: &GraphStore,
-    ) -> Vec<Value> {
-        let mut key = Vec::with_capacity(sort_items.len());
+    ) -> SortKey {
+        let n = sort_items.len();
+        let mut inline = [Value::Null, Value::Null];
+        let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
         let mut cursor = readers.iter_mut();
-        for (expr, _) in sort_items {
-            match expr {
+        for (i, (expr, _)) in sort_items.iter().enumerate() {
+            let value = match expr {
                 // A property is always a `PropertyValue`; the cursor stays.
                 Expression::Property { .. } => {
                     let c = cursor.next().expect("one cursor per property key");
-                    key.push(Value::Property(c.read(record, store)));
+                    Value::Property(c.read(record, store))
                 }
-                other => key.push(
-                    Self::evaluate_expression(other, record, store).unwrap_or(Value::Null),
-                ),
+                other => Self::evaluate_expression(other, record, store).unwrap_or(Value::Null),
+            };
+            if n <= 2 {
+                inline[i] = value;
+            } else {
+                heap.push(value);
             }
         }
-        key
+        if n <= 2 {
+            SortKey::Inline(inline, n)
+        } else {
+            SortKey::Heap(heap)
+        }
     }
 
     /// Compare two precomputed keys under the per-column sort directions.
@@ -10453,7 +10481,7 @@ impl SortOperator {
     /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
     /// runs may therefore disagree about *which* — the same latitude the
     /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(Vec<Value>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    fn trim_to(keyed: &mut Vec<(SortKey, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -10461,7 +10489,7 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(&a.0, &b.0, items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
         keyed.truncate(k);
     }
 
@@ -10567,7 +10595,10 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
-        let record = self.records[self.current].clone();
+        // Moved out, not cloned: each sorted row is read once, and `reset`
+        // clears them. The clone was an allocator call per row, and a copy of
+        // every string the row carried (#750).
+        let record = std::mem::take(&mut self.records[self.current]);
         self.current += 1;
         Ok(Some(record))
     }
@@ -10595,7 +10626,10 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
-        let record = self.records[self.current].clone();
+        // Moved out, not cloned: each sorted row is read once, and `reset`
+        // clears them. The clone was an allocator call per row, and a copy of
+        // every string the row carried (#750).
+        let record = std::mem::take(&mut self.records[self.current]);
         self.current += 1;
         Ok(Some(record))
     }
@@ -10610,7 +10644,7 @@ impl PhysicalOperator for SortOperator {
         }
 
         let end = (self.current + batch_size).min(self.records.len());
-        let batch = self.records[self.current..end].to_vec();
+        let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
         self.current = end;
 
         Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
@@ -10665,7 +10699,7 @@ impl SortOperator {
             })
             .collect();
 
-        let mut keyed: Vec<(Vec<Value>, Record)> = Vec::new();
+        let mut keyed: Vec<(SortKey, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
@@ -10683,7 +10717,7 @@ impl SortOperator {
         }
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(&a.0, &b.0, sort_items));
+        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
 
         self.records = keyed.into_iter().map(|(_, record)| record).collect();
         self.executed = true;
