@@ -353,6 +353,10 @@ pub struct AdjacencyStats {
     /// Approximate bytes saved by storing frozen edges in CSR instead of
     /// Vec-of-Vec (one u32 offset per node vs one Vec header per node).
     pub bytes_saved_estimate: usize,
+    /// Deleted edges still holding an entry in a frozen segment: walked and
+    /// rejected on every traversal until `merge_frozen_segments` drops them
+    /// (#740). Included in `frozen_edges`.
+    pub frozen_dead_edges: usize,
 }
 
 /// Multi-segment frozen CSR — holds one or more immutable CSR segments.
@@ -864,6 +868,10 @@ pub struct GraphStore {
     /// buffer, where deletion really does remove it, so those stay reusable.
     /// The watermark is what separates the two.
     frozen_edge_watermark: u64,
+    /// Deleted edges whose entries are still in a frozen segment, hidden by
+    /// their `EDGE_TYPE_UNSET` tombstone. What `merge_frozen_segments` would
+    /// drop; the measure `merge_frozen_segments_if_needed` judges by (#740).
+    frozen_dead_edges: usize,
 
     /// Label index for fast lookups
     label_index: HashMap<Label, HashSet<NodeId>>,
@@ -988,6 +996,7 @@ impl GraphStore {
             type_adj: std::sync::RwLock::new(HashMap::new()),
             type_adj_live: std::sync::atomic::AtomicBool::new(false),
             frozen_edge_watermark: 0,
+            frozen_dead_edges: 0,
             label_index: HashMap::new(),
             label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
@@ -2617,6 +2626,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // tombstone that hides it and resurrects a deleted edge.
         if id.as_u64() >= self.frozen_edge_watermark {
             self.free_edge_ids.push(id.as_u64());
+        } else {
+            // Below the watermark every id is in a frozen segment: ids that
+            // low are never handed out again until a merge releases them.
+            self.frozen_dead_edges += 1;
         }
 
         // Remove from edge type index
@@ -3504,6 +3517,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             buffer_edges,
             frozen_segments,
             bytes_saved_estimate,
+            frozen_dead_edges: self.frozen_dead_edges,
         }
     }
 
@@ -4083,13 +4097,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let mut out: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
         let mut inc: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
-        let mut kept: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for idx in 0..capacity {
             for seg in &self.frozen_outgoing.segments {
                 for &(t, e) in seg.neighbors(idx) {
                     if live(self, e) {
                         out[idx].push((t, e));
-                        kept.insert(e.as_u64());
                     }
                 }
             }
@@ -4097,7 +4109,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for &(t, e) in buf {
                     if live(self, e) {
                         out[idx].push((t, e));
-                        kept.insert(e.as_u64());
                     }
                 }
             }
@@ -4135,16 +4146,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         // Nothing references a dead id any more, so it can be reused — which is
-        // what #739's watermark had to forbid. Ids below the new watermark that
-        // are *not* in `kept` are free.
+        // what #739's watermark had to forbid. Every tombstoned id is free.
+        //
+        // This also consulted a `HashSet` of every live edge id, built during
+        // the walk above -- one entry per edge in the graph, SipHashed -- but
+        // only live ids went in, and a live id has a type, so the tombstone
+        // test alone always decided.
         for id in 0..self.next_edge_id {
-            if !kept.contains(&id)
-                && self
-                    .edge_type_ids
-                    .get(id as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == Self::EDGE_TYPE_UNSET
+            if self
+                .edge_type_ids
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Self::EDGE_TYPE_UNSET)
+                == Self::EDGE_TYPE_UNSET
             {
                 self.free_edge_ids.push(id);
             }
@@ -4152,6 +4166,31 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.free_edge_ids.sort_unstable();
         self.free_edge_ids.dedup();
         self.frozen_edge_watermark = 0;
+        self.frozen_dead_edges = 0;
+    }
+
+    /// `merge_frozen_segments`, when the frozen tier has split into more than
+    /// `max_segments` segments or more than `max_dead_fraction` of its entries
+    /// belong to deleted edges. Returns whether it merged.
+    ///
+    /// Both costs are per walk: each segment is an offsets lookup per node on
+    /// every expand, and each dead entry is visited and rejected. The merge is
+    /// O(edges) and allocates a whole CSR, so this is for a caller to run at a
+    /// moment of its choosing -- after a batch of deletes, say -- not something
+    /// a query triggers (#740).
+    pub fn merge_frozen_segments_if_needed(&mut self, max_segments: usize, max_dead_fraction: f64) -> bool {
+        let frozen = self.frozen_outgoing.edge_count();
+        if frozen == 0 {
+            return false;
+        }
+        let segments = self.frozen_outgoing.segments.len();
+        let dead = self.frozen_dead_edges as f64 / frozen as f64;
+        if segments > max_segments || dead > max_dead_fraction {
+            self.merge_frozen_segments();
+            true
+        } else {
+            false
+        }
     }
 
     /// Compact the write buffer into the frozen CSR tier.
@@ -4431,6 +4470,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.free_node_ids.clear();
         self.free_edge_ids.clear();
         self.frozen_edge_watermark = 0;
+        self.frozen_dead_edges = 0;
         self.label_index.clear();
         self.edge_type_index.clear();
         self.vector_index = Arc::new(VectorIndexManager::new());
