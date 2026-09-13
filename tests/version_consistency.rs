@@ -153,6 +153,7 @@ fn every_internal_dependency_pin_names_the_version_of_record() {
         "crates/samyama-sdk/Cargo.toml",
         "crates/samyama-optimization/Cargo.toml",
         "crates/samyama-graph-algorithms/Cargo.toml",
+        "crates/samyama-gpu/Cargo.toml",
         "sdk/python/Cargo.toml",
     ] {
         for line in read(rel).lines() {
@@ -172,7 +173,7 @@ fn every_internal_dependency_pin_names_the_version_of_record() {
             );
         }
     }
-    // Nine pins exist today; a scan that finds none is not a check.
+    // Ten pins exist today; a scan that finds none is not a check.
     assert!(checked >= 5, "found only {checked} pinned path dependencies — the scan is vacuous");
 }
 

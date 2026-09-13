@@ -127,16 +127,16 @@ flate2 = "1.0"
 rayon = "1.10"
 
 # Optimization Engine (Phase 7)
-samyama-optimization = { path = "crates/samyama-optimization", version = "1.7.1" }
+samyama-optimization = { path = "crates/samyama-optimization", version = "1.8.0" }
 uuid = { version = "1.8", features = ["v4"] }
 tokio-stream = "0.1"
 futures = "0.3"
-samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.7.1" }
+samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.8.0" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
 
 # GPU acceleration (optional; pulls the wgpu/cudarc dep tree only under --features gpu)
-samyama-gpu = { path = "crates/samyama-gpu", version = "1.7.1", optional = true }
+samyama-gpu = { path = "crates/samyama-gpu", version = "1.8.0", optional = true }
 
 [features]
 default = []
@@ -149,7 +149,7 @@ cuda = ["gpu", "samyama-gpu/cuda"]
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
-samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.1" }
+samyama-sdk = { path = "crates/samyama-sdk", version = "1.8.0" }
 http-body-util = "0.1"
 
 # These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
