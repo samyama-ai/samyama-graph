@@ -11,10 +11,12 @@
 //! 1,332 B/edge against 604 B/edge through the row-map setter for three
 //! properties: 728 B/edge, 55% of what the properties cost.
 //!
-//! The version log still needs one small entry per written edge to mark the
-//! version it was written at, so history reads keep working. That entry is
-//! bookkeeping: a map slot and a one-element `Vec`, well under 128 B. Anything
-//! near the cost of a property map is the copy come back.
+//! At the first version -- which is every store that does not use the
+//! transaction API, since nothing else advances `current_version` -- an entry
+//! says nothing that no entry does not, so none is made: the two setters cost
+//! the same. The bound is 16 B/edge. A version-log entry alone is about 110
+//! (a map slot and a one-element `Vec`); a property map copy is several
+//! hundred.
 //!
 //! Counts bytes through a global allocator, so this file holds one test: a
 //! second test running on another thread would count into the same totals.
@@ -83,7 +85,7 @@ fn property_bytes(write: impl Fn(&mut GraphStore, samyama::graph::EdgeId, String
 }
 
 #[test]
-fn set_edge_property_costs_what_the_row_map_setter_costs_plus_bookkeeping() {
+fn set_edge_property_costs_what_the_row_map_setter_costs() {
     let (row_store, row) = property_bytes(|s, e, k, v| s.set_edge_property_sparse(e, k, v));
     let (full_store, full) = property_bytes(|s, e, k, v| s.set_edge_property(e, k, v).unwrap());
 
@@ -100,9 +102,9 @@ fn set_edge_property_costs_what_the_row_map_setter_costs_plus_bookkeeping() {
          set_edge_property {full_per_edge:.1} B/edge, extra {extra:.1} B/edge"
     );
     assert!(
-        extra <= 128.0,
+        extra <= 16.0,
         "set_edge_property keeps {extra:.1} B/edge more than set_edge_property_sparse \
-         ({full_per_edge:.1} against {row_per_edge:.1}); the version log's bookkeeping is \
-         under 128 B/edge, so this is a copy of the property map"
+         ({full_per_edge:.1} against {row_per_edge:.1}); at the first version it should \
+         keep no version log at all"
     );
 }

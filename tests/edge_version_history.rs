@@ -124,6 +124,53 @@ fn a_write_through_the_mutable_map_after_a_commit_keeps_the_older_value() {
     assert_eq!(at(&store, e, 1, "w"), int(1));
 }
 
+/// The first version keeps no log entry. An edge untouched through version 2
+/// and written at 3 must still read its first value at 1 and at 2.
+#[test]
+fn an_edge_untouched_through_a_version_reads_its_first_value_there() {
+    let (mut store, e) = one_edge();
+    store.set_edge_property(e, "w", 1i64).unwrap();
+    store.current_version = 2;
+    store.current_version = 3;
+    store.set_edge_property(e, "w", 3i64).unwrap();
+
+    assert_eq!(at(&store, e, 1, "w"), int(1));
+    assert_eq!(at(&store, e, 2, "w"), int(1));
+    assert_eq!(at(&store, e, 3, "w"), int(3));
+}
+
+/// An edge created after the first version is not one that has been there
+/// since the first: its writes at its own version start its history.
+#[test]
+fn an_edge_created_after_a_commit_keeps_its_own_history() {
+    let (mut store, a_edge) = one_edge();
+    let (a, b) = store.get_edge_endpoints(a_edge).unwrap();
+    store.current_version = 2;
+    let e = store.create_edge(a, b, "R").unwrap();
+    store.set_edge_property(e, "w", 2i64).unwrap();
+    store.current_version = 3;
+    store.set_edge_property(e, "w", 3i64).unwrap();
+
+    assert_eq!(at(&store, e, 2, "w"), int(2));
+    assert_eq!(at(&store, e, 3, "w"), int(3));
+}
+
+/// Setting a property through the transaction-free path never builds a
+/// version log: after many writes at the first version, a commit and one more
+/// write, history still reads right.
+#[test]
+fn many_first_version_writes_then_a_commit() {
+    let (mut store, e) = one_edge();
+    for i in 0..100i64 {
+        store.set_edge_property(e, "w", i).unwrap();
+    }
+    store.current_version = 2;
+    store.set_edge_property(e, "w", -1i64).unwrap();
+
+    assert_eq!(at(&store, e, 1, "w"), int(99));
+    assert_eq!(at(&store, e, 2, "w"), int(-1));
+}
+
 /// It wrote the journal twice: once itself and once inside
 /// `set_edge_property_sparse`, which it calls.
 #[test]
