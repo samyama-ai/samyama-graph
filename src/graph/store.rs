@@ -2169,8 +2169,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let edge_type = edge_type.into();
         self.invalidate_hierarchies_for_edge_type(&edge_type);
-        let mut edge = Edge::new(edge_id, source, target, edge_type.clone());
-        edge.version = self.current_version;
+        // No `Edge` is built: endpoints, type id and properties each live in
+        // their own array since DS-07c. One was built here anyway -- cloning
+        // the type string and reading the clock -- and dropped unread (#491).
 
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
@@ -2275,8 +2276,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let edge_type = edge_type.into();
         self.invalidate_hierarchies_for_edge_type(&edge_type);
-        let mut edge = Edge::new_with_properties(edge_id, source, target, edge_type.clone(), properties);
-        edge.version = self.current_version;
 
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
@@ -2302,8 +2301,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
-        if !edge.properties.is_empty() {
-            self.edge_properties.insert(edge_id, edge.properties.clone());
+        // The caller's map, moved. It was cloned whole into the row store and
+        // the original dropped with the unused `Edge` (#491).
+        if !properties.is_empty() {
+            self.edge_properties.insert(edge_id, properties);
         }
 
         // Update edge type index. `get_mut` first so the common case -- a type
@@ -4838,6 +4839,9 @@ mod tests {
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
+            ("mark_edge_version", "records the version an edge property write happened at; reads at that version use the live properties either way"),
+            ("seal_edge_version", "copies an edge's live properties into its version-log entry, which then holds the same values it read as before"),
+            ("note_edge_created", "marks a new edge's creation version; reads before it see the live properties with or without the entry"),
             ("journal", "appends to the journal, which no query reads"),
             ("shrink_to_fit", "returns unused capacity; every element and every id is unchanged"),
             ("intern_edge_type", "adds a type name to the table; no edge exists at that type until the caller creates one, and that path bumps"),

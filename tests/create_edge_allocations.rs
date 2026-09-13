@@ -92,6 +92,9 @@ fn creating_a_relationship_costs_about_one_allocation() {
 
     // Still the same graph: every edge is there, typed, and one carries its values.
     assert_eq!(store.edge_count(), 2 * EDGES + 2);
-    let last = store.get_outgoing_edges(a).last().map(|e| e.id).unwrap();
+    let last = last.unwrap();
+    assert_eq!(store.get_edge_endpoints(last), Some((a, b)));
+    assert_eq!(store.get_edge_type(last).map(|t| t.as_str().to_string()), Some("PAID".to_string()));
     assert_eq!(store.edge_property(last, "amount"), Some(PropertyValue::Integer(EDGES as i64 - 1)));
+    assert_eq!(store.edge_property(last, "mcc"), Some(PropertyValue::Integer((EDGES as i64 - 1) % 900)));
 }
