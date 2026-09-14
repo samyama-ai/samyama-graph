@@ -169,6 +169,8 @@ pub struct QueryEngine {
     result_cache_budget: usize,
     /// Hit/miss counters for the result cache, separate from the AST cache's.
     result_stats: CacheStats,
+    /// Record each result's plan hash (TRUST-06). See `with_plan_hash`.
+    plan_hash: bool,
 }
 
 /// What a cached result is keyed on.
@@ -224,6 +226,7 @@ impl QueryEngine {
                 .ok().and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_RESULT_CACHE_BYTES),
             result_stats: CacheStats::new(),
+            plan_hash: false,
         }
     }
 
@@ -234,6 +237,15 @@ impl QueryEngine {
     /// process-wide environment variable and lose the guard everywhere.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan behind every result
+    /// (`RecordBatch::plan_hash`, TRUST-06). Off by default, for the cost
+    /// `QueryExecutor::with_plan_hash` describes; the HTTP server, which
+    /// reports provenance, turns it on.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -312,7 +324,7 @@ impl QueryEngine {
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
             );
         }
-        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
+        let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
 
         Ok(result)
     }
@@ -453,7 +465,7 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
-        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
+        let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
 
         Ok(result)
     }
