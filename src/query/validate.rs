@@ -533,7 +533,7 @@ fn vars_outside_aggregates(expr: &Expression, out: &mut Vec<String>) {
 }
 
 /// Apply `f` to the immediate sub-expressions of `expr`.
-fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
+pub(crate) fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
     match expr {
         Expression::Binary { left, right, .. } => {
             f(left);
@@ -1762,6 +1762,22 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
         }
     }
 
+    /// A FOREACH binds its loop variable and whatever its body's CREATE and
+    /// MERGE patterns name, nested bodies included.
+    fn note_foreach(f: &crate::query::ast::ForeachClause, bound: &mut HashSet<String>) {
+        use crate::query::ast::ForeachBody;
+        bound.insert(f.variable.clone());
+        for clause in &f.body {
+            match clause {
+                ForeachBody::Create(c) => pattern_and_path_variables(&c.pattern, bound),
+                ForeachBody::Merge(m) => pattern_and_path_variables(&m.pattern, bound),
+                ForeachBody::Set(sc) => note_set(sc, bound),
+                ForeachBody::Foreach(inner) => note_foreach(inner, bound),
+                ForeachBody::Remove(_) | ForeachBody::Delete(_) => {}
+            }
+        }
+    }
+
     fn note_clause_binders(query: &Query, bound: &mut HashSet<String>) {
         for mc in &query.match_clauses {
             pattern_and_path_variables(&mc.pattern, bound);
@@ -1786,13 +1802,7 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
             binders(&l.source, bound);
         }
         if let Some(f) = &query.foreach_clause {
-            bound.insert(f.variable.clone());
-            for c in &f.create_clauses {
-                pattern_and_path_variables(&c.pattern, bound);
-            }
-            for sc in &f.set_clauses {
-                note_set(sc, bound);
-            }
+            note_foreach(f, bound);
         }
         if let Some(call) = &query.call_clause {
             for y in &call.yield_items {
@@ -1812,15 +1822,7 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
                     bound.insert(l.variable.clone());
                     binders(&l.source, bound);
                 }
-                Clause::Foreach(f) => {
-                    bound.insert(f.variable.clone());
-                    for cc in &f.create_clauses {
-                        pattern_and_path_variables(&cc.pattern, bound);
-                    }
-                    for sc in &f.set_clauses {
-                        note_set(sc, bound);
-                    }
-                }
+                Clause::Foreach(f) => note_foreach(f, bound),
                 Clause::Call(call) => {
                     for y in &call.yield_items {
                         bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
