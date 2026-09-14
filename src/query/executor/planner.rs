@@ -2547,6 +2547,24 @@ impl QueryPlanner {
             false
         };
 
+        // MERGE is attached second, in the grammar's order for these statements
+        // (`create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~
+        // set_clause* ~ remove_clause*`). It was attached last, so a SET written
+        // after MERGE ran before it -- before the merged node was bound -- and
+        // `UNWIND rows AS r MERGE (n {id: r.id}) SET n.x = r.x` wrote nothing (#1215).
+        // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
+        let is_write = if let Some(merge_clause) = &query.merge_clause {
+            let bound_by_match = {
+                let mut scope: Vec<String> = Vec::new();
+                crate::query::star::bind_match(&mut scope, &query.match_clauses);
+                scope
+            };
+            operator = Self::attach_merge(operator, merge_clause, &bound_by_match);
+            true
+        } else {
+            is_write
+        };
+
         // Handle DELETE clause
         let is_write = if let Some(delete_clause) = &query.delete_clause {
             operator = Self::attach_delete(operator, delete_clause);
@@ -2584,18 +2602,6 @@ impl QueryPlanner {
             is_write
         };
 
-        // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
-        let is_write = if let Some(merge_clause) = &query.merge_clause {
-            let bound_by_match = {
-                let mut scope: Vec<String> = Vec::new();
-                crate::query::star::bind_match(&mut scope, &query.match_clauses);
-                scope
-            };
-            operator = Self::attach_merge(operator, merge_clause, &bound_by_match);
-            true
-        } else {
-            is_write
-        };
 
         // Add RETURN clause if present
         if let Some(return_clause) = &query.return_clause {
