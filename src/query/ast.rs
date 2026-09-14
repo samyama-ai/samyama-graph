@@ -899,17 +899,31 @@ pub enum RemoveItem {
     Label { variable: String, label: Label },
 }
 
-/// FOREACH clause: FOREACH (x IN list | SET x.prop = val)
+/// FOREACH clause: `FOREACH (x IN list | <updating clauses>)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeachClause {
     /// Variable name for each element
     pub variable: String,
     /// List expression to iterate
     pub expression: Expression,
-    /// SET items to apply for each element
-    pub set_clauses: Vec<SetClause>,
-    /// CREATE clauses to apply for each element
-    pub create_clauses: Vec<CreateClause>,
+    /// The updating clauses to run per element, in the order written.
+    pub body: Vec<ForeachBody>,
+}
+
+/// One updating clause in a FOREACH body. The grammar admits exactly these,
+/// so a `RETURN` in the body is a parse error.
+///
+/// One ordered list rather than a field per clause kind: the two fields this
+/// replaced held SET and CREATE only, so DELETE and REMOVE, which the grammar
+/// accepted, had nowhere to go and were dropped (#465).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForeachBody {
+    Set(SetClause),
+    Remove(RemoveClause),
+    Delete(DeleteClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Foreach(Box<ForeachClause>),
 }
 
 /// UNWIND clause: `UNWIND [1,2,3] AS x`
