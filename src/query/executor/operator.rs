@@ -10971,6 +10971,100 @@ impl SortOperator {
 }
 
 /// Index scan operator: MATCH (n:Person) WHERE n.id = 1
+/// A batch lookup: for each input row, evaluate `key`, look it up in the
+/// `label.property` index, and emit the row once per node found with
+/// `variable` bound (#1219).
+///
+/// `UNWIND $rows AS r MATCH (n:N) WHERE n.id = r.id` otherwise joins every
+/// row against a scan of the whole label and filters: on 200,000 nodes, 1,000
+/// rows took 63 s where 1,000 single index lookups took 10 ms. A null key
+/// matches nothing, as `n.id = null` does. Values are matched as the index
+/// stores them, exactly as the literal `IndexScanOperator` matches them.
+pub struct CorrelatedIndexLookupOperator {
+    input: OperatorBox,
+    variable: String,
+    label: Label,
+    property: String,
+    key: Expression,
+    pending: Option<(Record, Vec<NodeId>, usize)>,
+}
+
+impl CorrelatedIndexLookupOperator {
+    pub fn new(input: OperatorBox, variable: String, label: Label, property: String, key: Expression) -> Self {
+        Self { input, variable, label, property, key, pending: None }
+    }
+
+    /// The next output row from the pending input row, if it has one left.
+    fn drain_pending(&mut self, store: &GraphStore) -> Option<Record> {
+        let (row, ids, pos) = self.pending.as_mut()?;
+        while *pos < ids.len() {
+            let id = ids[*pos];
+            *pos += 1;
+            if store.has_node(id) {
+                let mut out = row.clone();
+                out.bind(self.variable.clone(), Value::NodeRef(id));
+                return Some(out);
+            }
+        }
+        self.pending = None;
+        None
+    }
+
+    fn probe(&self, row: &Record, store: &GraphStore) -> ExecutionResult<Vec<NodeId>> {
+        Ok(match eval_expression(&self.key, row, store)? {
+            Value::Property(PropertyValue::Null) | Value::Null => Vec::new(),
+            Value::Property(v) => match store.property_index.get_index(&self.label, &self.property) {
+                Some(index) => index.read().unwrap().get(&v),
+                None => Vec::new(),
+            },
+            // A node, relationship or list is never equal to a stored
+            // property value.
+            _ => Vec::new(),
+        })
+    }
+}
+
+impl PhysicalOperator for CorrelatedIndexLookupOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(out) = self.drain_pending(store) {
+                return Ok(Some(out));
+            }
+            let Some(row) = self.input.next(store)? else { return Ok(None) };
+            let ids = self.probe(&row, store)?;
+            self.pending = Some((row, ids, 0));
+        }
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(out) = self.drain_pending(store) {
+                return Ok(Some(out));
+            }
+            let Some(row) = self.input.next_mut(store, tenant_id)? else { return Ok(None) };
+            let ids = self.probe(&row, store)?;
+            self.pending = Some((row, ids, 0));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.pending = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CorrelatedIndexLookup".to_string(),
+            details: format!("{}:{:?}.{} = <per row>", self.variable, self.label, self.property),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct IndexScanOperator {
     variable: String,
     label: Label,
