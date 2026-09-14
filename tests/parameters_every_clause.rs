@@ -136,3 +136,28 @@ fn where_and_return_parameters_still_work() {
     .unwrap();
     assert_eq!(got, vec!["b!"]);
 }
+
+/// A parameter inside a FOREACH body -- a CREATE property, a SET value, a
+/// nested FOREACH's list -- is bound like one anywhere else.
+#[test]
+fn parameters_inside_a_foreach_body() {
+    let mut s = GraphStore::new();
+    write(
+        &mut s,
+        "FOREACH (x IN [1, 2] | CREATE (:F {v: x, tag: $t}))",
+        params(&[("t", PropertyValue::String("k".into()))]),
+    )
+    .unwrap();
+    assert_eq!(count(&s, "MATCH (f:F {tag: 'k'}) RETURN count(f) AS c"), "2");
+
+    write(
+        &mut s,
+        "FOREACH (x IN [1] | FOREACH (y IN $ys | CREATE (:G {v: y})))",
+        params(&[("ys", PropertyValue::Array(vec![int(5), int(6)]))]),
+    )
+    .unwrap();
+    assert_eq!(count(&s, "MATCH (g:G) RETURN sum(g.v) AS c"), "11");
+
+    write(&mut s, "MATCH (f:F) FOREACH (x IN [1] | SET f.p = $p)", params(&[("p", int(9))])).unwrap();
+    assert_eq!(count(&s, "MATCH (f:F) WHERE f.p = 9 RETURN count(f) AS c"), "2");
+}
