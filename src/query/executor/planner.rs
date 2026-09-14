@@ -1568,7 +1568,50 @@ impl QueryPlanner {
         // the Unwind operator that binds it sits above the matches. The top-level WHERE
         // filter re-applies the full predicate after the Unwind, so dropping it here loses
         // nothing.
-        let late_bound_pre = Self::late_bound_variables(query);
+        let mut late_bound_pre = Self::late_bound_variables(query);
+
+        // A leading UNWIND feeding an OPTIONAL MATCH whose WHERE names the
+        // unwound variable: `UNWIND $rows AS i OPTIONAL MATCH (a:N) WHERE
+        // a.id = i`. The conjunct is the optional match's join condition, but
+        // with the Unwind above the matches it could only be a filter above the
+        // join, and that filter deleted every row the lookup found nothing for
+        // (#1229). Such a query plans the Unwind first, as the outer side of the
+        // join, so the conjunct takes the OPTIONAL MATCH route of #667 like any
+        // other outer variable. Only this shape moves; every other leading
+        // UNWIND keeps its place.
+        let unwind_at_base = match &query.unwind_clause {
+            Some(u)
+                if query.unwind_leading
+                    && query.extra_unwind_clauses.is_empty()
+                    && query.call_clause.is_none()
+                    && query.load_csv_clause.is_none() =>
+            {
+                pre_where_preds.iter().any(|pred| {
+                    let mut vars = HashSet::new();
+                    Self::collect_expression_variables(pred, &mut vars);
+                    vars.contains(&u.variable)
+                        && pre_with_clauses.iter().enumerate().any(|(i, mc)| {
+                            mc.optional && {
+                                let earlier: HashSet<&String> =
+                                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
+                                pre_match_var_sets[i].iter().any(|v| !earlier.contains(v) && vars.contains(v))
+                            }
+                        })
+                })
+            }
+            _ => false,
+        };
+        if unwind_at_base {
+            use crate::query::executor::operator::SingleRowOperator;
+            let u = query.unwind_clause.as_ref().expect("checked above");
+            late_bound_pre.remove(&u.variable);
+            operator = Some(Box::new(UnwindOperator::new(
+                Box::new(SingleRowOperator::new()),
+                u.expression.clone(),
+                u.variable.clone(),
+            )));
+            known_vars.insert(u.variable.clone());
+        }
 
         // Predicates deferred past match planning because they name a leading
         // UNWIND's variable. Kept rather than dropped: the claim above -- that
@@ -1887,7 +1930,7 @@ impl QueryPlanner {
             known_vars.insert(load.variable.clone());
         }
 
-        if unwind_before_barrier {
+        if unwind_before_barrier && !unwind_at_base {
             // A batch lookup against an index is planned as an index probe per
             // unwound row rather than an unwind over a scan of the label (#1219).
             let batch_lookup = match leading_unwind {
@@ -2104,12 +2147,19 @@ impl QueryPlanner {
             // the Unwind and the query died with "Variable not found". Dropping it from the
             // decomposition is safe because the top-level WHERE filter, applied after the
             // Unwind, evaluates the full predicate anyway.
+            //
+            // That holds only for a variable the stage does not know yet. A
+            // leading UNWIND carried through the WITH (`UNWIND ... AS i WITH i
+            // OPTIONAL MATCH (a) WHERE a.id = i`) is already bound below this
+            // barrier, and no later filter re-applies the stage's own WHERE, so
+            // dropping the conjunct lost it: the OPTIONAL MATCH answered every
+            // `(i, a)` pair (#1229).
             let late_bound = Self::late_bound_variables(query);
 
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
-                if pred_vars.iter().any(|v| late_bound.contains(v)) {
+                if pred_vars.iter().any(|v| late_bound.contains(v) && !known_vars.contains(v)) {
                     continue;
                 }
                 // A predicate spanning an OPTIONAL MATCH's own variables and
