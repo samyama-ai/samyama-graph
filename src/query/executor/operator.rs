@@ -2504,7 +2504,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
-    "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
+    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "prank",
     "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
     "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
     "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
@@ -14841,6 +14841,108 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
+    ///
+    /// Principal component analysis over numeric node properties: one row per
+    /// node, `projection` its coordinates on the first `nComponents` components
+    /// (default 2). The algorithm lived in the algorithms crate and the SDK, and
+    /// Cypher refused it as an unknown algorithm (#1022).
+    ///
+    /// Features are read through `node_property` -- the column first -- so a
+    /// graph restored from a snapshot, whose nodes carry no row copy, reads its
+    /// real values. An integer or a float is its value; anything else, or an
+    /// absent property, is 0.0, as in the SDK. Rows are in node-id order.
+    fn execute_pca(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let empty = Record::new();
+        let arg = |i: usize| -> ExecutionResult<Option<Value>> {
+            match self.args.get(i) {
+                Some(e) => eval_expression(e, &empty, store).map(Some),
+                None => Ok(None),
+            }
+        };
+        let label = match arg(0)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => None,
+            Some(Value::Property(PropertyValue::String(s))) => Some(s),
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: the label must be a string or null, got {other:?}"
+                )))
+            }
+        };
+        let name_of = |v: Value| -> ExecutionResult<String> {
+            match v {
+                Value::Property(PropertyValue::String(s)) => Ok(s),
+                other => Err(ExecutionError::TypeError(format!(
+                    "algo.pca: property names must be strings, got {other:?}"
+                ))),
+            }
+        };
+        let properties: Vec<String> = match arg(1)? {
+            Some(Value::List(items)) => items.into_iter().map(name_of).collect::<ExecutionResult<_>>()?,
+            Some(Value::Property(PropertyValue::Array(items))) => items
+                .into_iter()
+                .map(|p| name_of(Value::Property(p)))
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(ExecutionError::RuntimeError(
+                    "algo.pca requires a list of property names: CALL algo.pca('Label', ['a', 'b'], 2)"
+                        .to_string(),
+                ))
+            }
+        };
+        if properties.is_empty() {
+            return Err(ExecutionError::RuntimeError(
+                "algo.pca needs at least one property".to_string(),
+            ));
+        }
+        let mut config = crate::algo::PcaConfig::default();
+        match arg(2)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => {}
+            Some(Value::Property(PropertyValue::Integer(k))) if k >= 1 => config.n_components = k as usize,
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: nComponents must be a positive integer, got {other:?}"
+                )))
+            }
+        }
+
+        let mut ids: Vec<NodeId> = match &label {
+            Some(l) => store.get_nodes_by_label(&Label::new(l.as_str())).into_iter().map(|n| n.id).collect(),
+            None => store.all_nodes().into_iter().map(|n| n.id).collect(),
+        };
+        ids.sort_unstable_by_key(|id| id.as_u64());
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Vec<f64>> = ids
+            .iter()
+            .map(|&id| {
+                properties
+                    .iter()
+                    .map(|p| match store.node_property(id, p) {
+                        Some(PropertyValue::Integer(v)) => v as f64,
+                        Some(PropertyValue::Float(v)) => v,
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let result = crate::algo::pca(&data, config);
+        let projections = result.transform(&data);
+        for (id, projection) in ids.iter().zip(projections) {
+            if let Some(node) = store.get_node(*id) {
+                let mut record = Record::new();
+                record.bind("node".to_string(), Value::Node(*id, Box::new(node.clone())));
+                record.bind(
+                    "projection".to_string(),
+                    Value::List(projection.into_iter().map(|x| Value::Property(PropertyValue::Float(x))).collect()),
+                );
+                self.results.push(record);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -15184,6 +15286,10 @@ impl AlgorithmOperator {
                 | "trianglecount"
                 | "cdlp"
                 | "lcc"
+                // Principal component analysis over numeric node properties
+                // (#1022): in the algorithms crate and the SDK, and refused
+                // here as unknown.
+                | "pca"
                 | "or.solve"
                 // The four causal/temporal primitives (ALGO-15). Reachability
                 // in a temporal graph is not transitive -- an edge that fired
@@ -15286,6 +15392,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 "temporalreachability" => self.execute_temporal_reachability(store, false)?,
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
@@ -15373,6 +15480,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 // The four temporal primitives read the graph and do not write
                 // it, so they run here exactly as they do on the read path.
                 // Adding them to `next` alone left every one of them
