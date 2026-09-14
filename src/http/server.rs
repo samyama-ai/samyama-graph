@@ -203,7 +203,7 @@ impl HttpServer {
 
         let state = AppState {
             store: Arc::clone(&self.store),
-            engine: Arc::new(QueryEngine::new()),
+            engine: Arc::new(QueryEngine::new().with_plan_hash(true)),
             data_path: self.data_path.clone(),
             tenant_manager: self.tenants.clone(),
             embed_pipeline: self.embed_pipeline.clone(),
