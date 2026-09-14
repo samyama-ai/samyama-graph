@@ -16944,6 +16944,37 @@ impl MergeOperator {
         }
     }
 
+    /// Candidate nodes from the property index: when one of `labels` is indexed
+    /// on one of `props`, the ids the index holds for that value; `None` when
+    /// no index applies, and the caller scans as before.
+    ///
+    /// Candidates still pass `node_matches`, whose equality is the index's own
+    /// (`PropertyValue`'s), so the result is the scan's without the scan. A
+    /// batch upsert -- `UNWIND $rows AS r MERGE (n:N {id: r.id})` -- scanned
+    /// the whole label for every row: 27.5 ms per row on 200,000 nodes.
+    fn index_candidates(
+        store: &GraphStore,
+        labels: &[Label],
+        props: Option<&HashMap<String, PropertyValue>>,
+    ) -> Option<Vec<NodeId>> {
+        let props = props?;
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        for label in labels {
+            for key in &keys {
+                let value = &props[*key];
+                if matches!(value, PropertyValue::Null) {
+                    continue;
+                }
+                if let Some(index) = store.property_index.get_index(label, key) {
+                    return Some(index.read().unwrap().get(value));
+                }
+            }
+        }
+        None
+    }
+
+
     /// MERGE over a pattern that contains relationships: find the whole pattern or create
     /// the whole pattern.
     ///
@@ -17047,6 +17078,17 @@ impl MergeOperator {
                 continue;
             }
             let mut ids = Vec::new();
+            if let Some(hits) = Self::index_candidates(store, &np.labels, node_props[i].as_ref()) {
+                for id in hits {
+                    if let Some(node) = store.get_node(id) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
+                    }
+                }
+                candidates.push(ids);
+                continue;
+            }
             match np.labels.first() {
                 Some(first_label) => {
                     for node in store.get_nodes_by_label(first_label) {
@@ -17393,9 +17435,12 @@ impl PhysicalOperator for MergeOperator {
             // node.
             Some(id) => vec![id],
             None => {
-                let candidates: Vec<&crate::graph::Node> = match labels.first() {
-                    Some(first_label) => store.get_nodes_by_label(first_label),
-                    None => store.all_nodes(),
+                let candidates: Vec<&crate::graph::Node> = match Self::index_candidates(store, labels, props) {
+                    Some(hits) => hits.into_iter().filter_map(|id| store.get_node(id)).collect(),
+                    None => match labels.first() {
+                        Some(first_label) => store.get_nodes_by_label(first_label),
+                        None => store.all_nodes(),
+                    },
                 };
                 candidates
                     .into_iter()
