@@ -291,9 +291,12 @@ impl AlgorithmClient for EmbeddedClient {
         let mut data_flat = vec![0.0f64; n * d];
         for (i, node) in nodes.iter().enumerate() {
             for (j, &prop) in properties.iter().enumerate() {
-                data_flat[i * d + j] = match node.get_property(prop) {
-                    Some(PropertyValue::Integer(v)) => *v as f64,
-                    Some(PropertyValue::Float(v)) => *v,
+                // Column first, through the store. `node.get_property` read the
+                // row copy only, which a node restored from a snapshot does not
+                // have, so every feature of an imported graph was 0.0 (#1022).
+                data_flat[i * d + j] = match store.node_property(node.id, prop) {
+                    Some(PropertyValue::Integer(v)) => v as f64,
+                    Some(PropertyValue::Float(v)) => v,
                     _ => 0.0,
                 };
             }
