@@ -5,7 +5,7 @@
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.7.1-blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
@@ -35,9 +35,21 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 
 **Step 2 — Pull the Docker image**
 
+Intel Mac, Windows, and x86 Linux:
+
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.7.1
 ```
+
+Apple Silicon Mac (M1/M2/M3/M4):
+
+```bash
+docker pull --platform linux/amd64 public.ecr.aws/f9f6l5u4/samyama-graph:1.7.1
+```
+
+> 🍎 The image is published for `linux/amd64` only. On Apple Silicon, Docker Desktop runs it
+> under emulation — slower than native, but it works. Keep the `--platform linux/amd64` flag on
+> `docker run` too, or set `platform: linux/amd64` in the compose file as shown below.
 
 **Step 3 — Docker Compose setup**
 
@@ -65,7 +77,8 @@ notepad docker-compose.yml
 version: "3.9"
 services:
   samyama-graph:
-    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.7.1
+    # platform: linux/amd64   # uncomment on Apple Silicon Macs
     container_name: samyama-graph
     restart: unless-stopped
     ports:
@@ -124,10 +137,6 @@ curl -X POST http://localhost:8080/api/query \
   -H 'content-type: application/json' \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
-
-> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
-> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
-> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
 
 **Step 7 — Samyama Visualizer**
 

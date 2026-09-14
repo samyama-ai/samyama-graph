@@ -68,10 +68,12 @@ Note: Stop the conflicting process, or change the host port in `docker-compose.y
 <summary><strong>Issue 4 — Image fails to pull</strong></summary>
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.7.1
 ```
 
 Note: Ensure Docker Desktop is running and you have an active internet connection. The image is public — no credentials are required.
+
+If the error is `no matching manifest for linux/arm64/v8`, you are on an Apple Silicon Mac. The image is published for `linux/amd64` only — add `--platform linux/amd64` to the pull/run command, or `platform: linux/amd64` to the service in `docker-compose.yml`.
 
 </details>
 
