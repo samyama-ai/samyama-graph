@@ -2504,7 +2504,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
-    "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
+    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "prank",
     "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
     "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
     "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
@@ -10480,40 +10480,21 @@ impl SortOperator {
         }
     }
 
-    /// The sort key for one record: each `ORDER BY` expression evaluated once.
+    /// The sort key for one record: each `ORDER BY` expression evaluated once
+    /// (#518), each `x.prop` key through a cursor that located its column once
+    /// (#557).
     ///
-    /// This is the whole of the fix in #518. The comparator used to evaluate
-    /// both sides' expressions on **every comparison**, so a sort of n rows
-    /// performed ~2·n·log₂(n) evaluations rather than n. On LDBC IC9 that was
-    /// 389,461 rows -> ~14.5 million property resolutions where 389,461 would
-    /// do, and `Sort` was 68.6% of the query.
-    fn key_of(&self, record: &Record, store: &GraphStore) -> Vec<Value> {
-        self.sort_items
-            .iter()
-            .map(|(expr, _)| {
-                // Errors are folded to Null, which is what the comparator did
-                // before and what ORDER BY over a missing property means.
-                //
-                // The key is a `Value`, not a `PropertyValue`: going through
-                // `as_property()` turned every node, relationship and path
-                // into `Null` and sorted them all together at the end (#917).
-                Self::evaluate_expression(expr, record, store).unwrap_or(Value::Null)
-            })
-            .collect()
-    }
-
-    /// `key_of`, but reading each `x.prop` key through a cursor that located
-    /// its column once (#557).
-    ///
-    /// Only plain property expressions take the cursor; anything else -- an
-    /// arithmetic expression, a function call -- falls back to `key_of`'s
-    /// walker, and produces the same value either way.
+    /// An evaluation error is returned, not folded to `Null`. Folding made every
+    /// key compare equal, so a failing key sorted by nothing and the rows came
+    /// back in input order -- right count, right contents, wrong answer, no
+    /// error (#987). A *missing* property is not an error: it evaluates to
+    /// null, which is what `ORDER BY` over an absent value means.
     fn key_of_cached<'s>(
         readers: &mut [PropertyCursor],
         sort_items: &[(Expression, bool)],
         record: &Record,
         store: &'s GraphStore,
-    ) -> SortKey<'s> {
+    ) -> ExecutionResult<SortKey<'s>> {
         let n = sort_items.len();
         let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
         let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
@@ -10529,7 +10510,7 @@ impl SortOperator {
                         None => KeyPart::Value(Value::Property(c.read(record, store))),
                     }
                 }
-                other => KeyPart::Value(Self::evaluate_expression(other, record, store).unwrap_or(Value::Null)),
+                other => KeyPart::Value(Self::evaluate_expression(other, record, store)?),
             };
             if n <= 2 {
                 inline[i] = value;
@@ -10537,11 +10518,11 @@ impl SortOperator {
                 heap.push(value);
             }
         }
-        if n <= 2 {
+        Ok(if n <= 2 {
             SortKey::Inline(inline, n)
         } else {
             SortKey::Heap(heap)
-        }
+        })
     }
 
     /// Two key parts, in Cypher's order: `cypher_order_value` on values, and on
@@ -10826,7 +10807,7 @@ impl SortOperator {
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store);
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
                 keyed.push((key, record));
             }
             if let (Some(k), Some(threshold)) = (bound, trim_at) {
@@ -14901,6 +14882,108 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
+    ///
+    /// Principal component analysis over numeric node properties: one row per
+    /// node, `projection` its coordinates on the first `nComponents` components
+    /// (default 2). The algorithm lived in the algorithms crate and the SDK, and
+    /// Cypher refused it as an unknown algorithm (#1022).
+    ///
+    /// Features are read through `node_property` -- the column first -- so a
+    /// graph restored from a snapshot, whose nodes carry no row copy, reads its
+    /// real values. An integer or a float is its value; anything else, or an
+    /// absent property, is 0.0, as in the SDK. Rows are in node-id order.
+    fn execute_pca(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let empty = Record::new();
+        let arg = |i: usize| -> ExecutionResult<Option<Value>> {
+            match self.args.get(i) {
+                Some(e) => eval_expression(e, &empty, store).map(Some),
+                None => Ok(None),
+            }
+        };
+        let label = match arg(0)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => None,
+            Some(Value::Property(PropertyValue::String(s))) => Some(s),
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: the label must be a string or null, got {other:?}"
+                )))
+            }
+        };
+        let name_of = |v: Value| -> ExecutionResult<String> {
+            match v {
+                Value::Property(PropertyValue::String(s)) => Ok(s),
+                other => Err(ExecutionError::TypeError(format!(
+                    "algo.pca: property names must be strings, got {other:?}"
+                ))),
+            }
+        };
+        let properties: Vec<String> = match arg(1)? {
+            Some(Value::List(items)) => items.into_iter().map(name_of).collect::<ExecutionResult<_>>()?,
+            Some(Value::Property(PropertyValue::Array(items))) => items
+                .into_iter()
+                .map(|p| name_of(Value::Property(p)))
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(ExecutionError::RuntimeError(
+                    "algo.pca requires a list of property names: CALL algo.pca('Label', ['a', 'b'], 2)"
+                        .to_string(),
+                ))
+            }
+        };
+        if properties.is_empty() {
+            return Err(ExecutionError::RuntimeError(
+                "algo.pca needs at least one property".to_string(),
+            ));
+        }
+        let mut config = crate::algo::PcaConfig::default();
+        match arg(2)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => {}
+            Some(Value::Property(PropertyValue::Integer(k))) if k >= 1 => config.n_components = k as usize,
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: nComponents must be a positive integer, got {other:?}"
+                )))
+            }
+        }
+
+        let mut ids: Vec<NodeId> = match &label {
+            Some(l) => store.get_nodes_by_label(&Label::new(l.as_str())).into_iter().map(|n| n.id).collect(),
+            None => store.all_nodes().into_iter().map(|n| n.id).collect(),
+        };
+        ids.sort_unstable_by_key(|id| id.as_u64());
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Vec<f64>> = ids
+            .iter()
+            .map(|&id| {
+                properties
+                    .iter()
+                    .map(|p| match store.node_property(id, p) {
+                        Some(PropertyValue::Integer(v)) => v as f64,
+                        Some(PropertyValue::Float(v)) => v,
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let result = crate::algo::pca(&data, config);
+        let projections = result.transform(&data);
+        for (id, projection) in ids.iter().zip(projections) {
+            if let Some(node) = store.get_node(*id) {
+                let mut record = Record::new();
+                record.bind("node".to_string(), Value::Node(*id, Box::new(node.clone())));
+                record.bind(
+                    "projection".to_string(),
+                    Value::List(projection.into_iter().map(|x| Value::Property(PropertyValue::Float(x))).collect()),
+                );
+                self.results.push(record);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -15244,6 +15327,10 @@ impl AlgorithmOperator {
                 | "trianglecount"
                 | "cdlp"
                 | "lcc"
+                // Principal component analysis over numeric node properties
+                // (#1022): in the algorithms crate and the SDK, and refused
+                // here as unknown.
+                | "pca"
                 | "or.solve"
                 // The four causal/temporal primitives (ALGO-15). Reachability
                 // in a temporal graph is not transitive -- an edge that fired
@@ -15346,6 +15433,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 "temporalreachability" => self.execute_temporal_reachability(store, false)?,
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
@@ -15433,6 +15521,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 // The four temporal primitives read the graph and do not write
                 // it, so they run here exactly as they do on the read path.
                 // Adding them to `next` alone left every one of them
@@ -17868,7 +17957,11 @@ impl WithBarrierOperator {
     ///
     /// The projected alias still wins, because `carry_sort_scope` only copies
     /// a name the projection did not already bind.
-    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> Value {
+    ///
+    /// An evaluation error is returned, as in `SortOperator::key_of_cached`:
+    /// folded to `Null`, a failing key sorted by nothing and a failing WHERE
+    /// dropped every row, both silently (#987).
+    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         let mut names = HashSet::new();
         collect_expression_names(expr, &mut names);
         let mut widened: Option<Record> = None;
@@ -17879,7 +17972,7 @@ impl WithBarrierOperator {
             }
         }
         let target = widened.as_ref().unwrap_or(record);
-        Self::evaluate_expression(expr, target, store).unwrap_or(Value::Null)
+        Self::evaluate_expression(expr, target, store)
     }
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
@@ -18039,14 +18132,18 @@ impl WithBarrierOperator {
 
         // Apply WHERE filter (if present in WITH ... WHERE ...)
         if let Some(ref predicate) = self.where_predicate {
-            output_records.retain(|record| {
-                // Through the same widening as the sort: a WITH's WHERE sees
-                // the projected aliases *and* the scope in front of them.
-                matches!(
-                    Self::eval_sort_key(predicate, record, store),
-                    Value::Property(PropertyValue::Boolean(true))
-                )
-            });
+            // Through the same widening as the sort: a WITH's WHERE sees the
+            // projected aliases *and* the scope in front of them. Evaluated
+            // before filtering so an error can stop the query.
+            let keep = output_records
+                .iter()
+                .map(|record| {
+                    Self::eval_sort_key(predicate, record, store)
+                        .map(|v| matches!(v, Value::Property(PropertyValue::Boolean(true))))
+                })
+                .collect::<ExecutionResult<Vec<bool>>>()?;
+            let mut keep = keep.into_iter();
+            output_records.retain(|_| keep.next().unwrap_or(false));
         }
 
         // Apply DISTINCT
@@ -18062,25 +18159,38 @@ impl WithBarrierOperator {
         // Apply ORDER BY
         if !self.sort_items.is_empty() {
             let sort_items = &self.sort_items;
-            output_records.sort_by(|a, b| {
-                for (expr, ascending) in sort_items {
+            // Keys first, once per row: a sort comparator cannot return an
+            // error, and it evaluated every key ~2·log₂(n) times besides (#518).
+            let keys = output_records
+                .iter()
+                .map(|r| {
+                    sort_items
+                        .iter()
+                        .map(|(expr, _)| Self::eval_sort_key(expr, r, store))
+                        .collect::<ExecutionResult<Vec<Value>>>()
+                })
+                .collect::<ExecutionResult<Vec<Vec<Value>>>>()?;
+            let mut keyed: Vec<(Vec<Value>, Record)> =
+                keys.into_iter().zip(output_records.drain(..)).collect();
+            keyed.sort_by(|(ka, _), (kb, _)| {
+                for (i, (_, ascending)) in sort_items.iter().enumerate() {
                     // The projected name wins; the carried pre-projection
                     // binding answers for anything the projection dropped.
-                    let val_a = Self::eval_sort_key(expr, a, store);
-                    let val_b = Self::eval_sort_key(expr, b, store);
+                    let (val_a, val_b) = (&ka[i], &kb[i]);
                     // Cypher's orderability, not the property index's — see
                     // `graph::property::cypher_order`. A WITH ... ORDER BY
                     // sorts here rather than in `SortOperator`, so wiring only
                     // that one left every `WITH` sort on the old order — the
                     // same trap for the entity ranks (#917), which is why both
                     // sites now call the `Value`-level comparison.
-                    let ord = crate::query::executor::record::cypher_order_value(&val_a, &val_b);
+                    let ord = crate::query::executor::record::cypher_order_value(val_a, val_b);
                     if ord != std::cmp::Ordering::Equal {
                         return if *ascending { ord } else { ord.reverse() };
                     }
                 }
                 std::cmp::Ordering::Equal
             });
+            output_records = keyed.into_iter().map(|(_, r)| r).collect();
         }
 
         // The carried pre-projection bindings are the sort's business only.
