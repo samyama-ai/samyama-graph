@@ -113,12 +113,13 @@ fn the_index_is_probed_per_row_when_there_is_one() {
     assert!(plan(&indexed, after_with).contains("CorrelatedIndexLookup"), "{}", plan(&indexed, after_with));
 }
 
-/// Out of scope, and planned as before: a pattern with a relationship.
+/// A pattern with one relationship probes the index, then expands from the
+/// node found (`tests/lookup_then_hop.rs` covers the shapes).
 #[test]
-fn a_pattern_with_a_relationship_keeps_its_plan() {
+fn a_pattern_with_a_relationship_probes_then_expands() {
     let (mut indexed, _) = stores();
     write(&mut indexed, "MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:R]->(b)");
     let q = "UNWIND [1] AS i MATCH (n:N)-[:R]->(m) WHERE n.id = i RETURN m.id AS c";
-    assert!(!plan(&indexed, q).contains("CorrelatedIndexLookup"));
+    assert!(plan(&indexed, q).contains("CorrelatedIndexLookup"), "{}", plan(&indexed, q));
     assert_eq!(rows(&indexed, q), vec!["2"]);
 }

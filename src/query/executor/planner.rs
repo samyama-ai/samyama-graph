@@ -4450,13 +4450,12 @@ impl QueryPlanner {
         }
     }
 
-    /// The node a batch lookup would bind from one pattern: a named node with
-    /// exactly one label (the index covers one label), no relationships, no
-    /// path variable and no inline properties.
+    /// The node a batch lookup would bind from one pattern's start: a named
+    /// node with exactly one label (the index covers one label), no path
+    /// variable and no inline properties. `lookup_hop` judges the rest.
     fn lookup_node(path: &PathPattern) -> Option<(&String, &Label)> {
         let start = &path.start;
-        if !path.segments.is_empty()
-            || path.path_variable.is_some()
+        if path.path_variable.is_some()
             || start.labels.len() != 1
             || start.properties.as_ref().is_some_and(|p| !p.is_empty())
             || start.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
@@ -4464,6 +4463,30 @@ impl QueryPlanner {
             return None;
         }
         Some((start.variable.as_ref()?, &start.labels[0]))
+    }
+
+    /// What follows a lookup node in its pattern: nothing (`Some(None)`), or
+    /// one fixed-length relationship with no properties to a named node with
+    /// no non-literal properties (`Some(Some(segment))`). `None` is a shape
+    /// the lookup does not plan -- a longer path, a variable length, a
+    /// relationship property -- and the general plan takes it.
+    fn lookup_hop(path: &PathPattern) -> Option<Option<&PathSegment>> {
+        match path.segments.as_slice() {
+            [] => Some(None),
+            [seg] => {
+                let (edge, node) = (&seg.edge, &seg.node);
+                if edge.length.is_some()
+                    || edge.properties.as_ref().is_some_and(|p| !p.is_empty())
+                    || edge.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+                    || node.variable.is_none()
+                    || node.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+                {
+                    return None;
+                }
+                Some(Some(seg))
+            }
+            _ => None,
+        }
     }
 
     /// An indexed equality `var.prop = key` among `preds` whose `key` reads
@@ -4504,6 +4527,12 @@ impl QueryPlanner {
     /// Keys come from `preds` and from the clause's own WHERE (`b.id = a.next`
     /// is the clause's own). Returns the positions in `preds` it used. If any
     /// node has no key, `base` comes back and the plan is unchanged.
+    ///
+    /// One pattern may go on by one relationship, `(a:N {id: r.id})-[:R]->(b)`:
+    /// an expand from the looked-up node. Before this it planned as the
+    /// UNWIND over an expand from a scan of `:N`, walking every `:R` of the
+    /// label once per row. One hop at most, so no two relationships of the
+    /// clause need to be kept distinct.
     fn lookup_chain(
         base: OperatorBox,
         match_clause: &MatchClause,
@@ -4520,9 +4549,27 @@ impl QueryPlanner {
         let Some(mut pending) = paths.iter().map(Self::lookup_node).collect::<Option<Vec<_>>>() else {
             return Err(base);
         };
+        let Some(hops) = paths.iter().map(Self::lookup_hop).collect::<Option<Vec<_>>>() else {
+            return Err(base);
+        };
+        let hops: Vec<(String, &PathSegment)> =
+            pending.iter().zip(hops).filter_map(|((v, _), h)| h.map(|s| ((*v).clone(), s))).collect();
+        if hops.len() > 1 {
+            return Err(base);
+        }
         let mut seen = HashSet::new();
         if pending.iter().any(|(v, _)| bound(v) || !seen.insert(v.as_str())) {
             return Err(base);
+        }
+        // A hop binds its target and relationship; neither may already be bound
+        // or be a name the clause binds elsewhere, which would make the expand
+        // a match against it rather than a new binding.
+        for (_, seg) in &hops {
+            let target = seg.node.variable.as_deref().expect("lookup_hop requires a named target");
+            let edge = seg.edge.variable.as_deref();
+            if bound(target) || !seen.insert(target) || edge.is_some_and(|e| bound(e) || !seen.insert(e)) {
+                return Err(base);
+            }
         }
         let mut candidates: Vec<Expression> = preds.to_vec();
         if let Some(w) = own_where {
@@ -4547,6 +4594,28 @@ impl QueryPlanner {
         let mut op = base;
         for (v, l, property, key) in steps {
             op = Box::new(CorrelatedIndexLookupOperator::new(op, v, l, property, key));
+        }
+        for (start, seg) in hops {
+            let target = seg.node.variable.clone().expect("lookup_hop requires a named target");
+            let types = seg.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+            let mut expand =
+                ExpandOperator::new(op, start, target.clone(), seg.edge.variable.clone(), types, seg.edge.direction.clone());
+            if !seg.node.labels.is_empty() {
+                expand = expand.with_target_labels(seg.node.labels.clone());
+            }
+            op = Box::new(expand);
+            if let Some(props) = seg.node.properties.as_ref().filter(|p| !p.is_empty()) {
+                let filter = props
+                    .iter()
+                    .map(|(k, v)| Expression::Binary {
+                        left: Box::new(Expression::Property { variable: target.clone(), property: k.clone() }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expression::Literal(v.clone())),
+                    })
+                    .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
+                    .expect("non-empty properties");
+                op = Box::new(FilterOperator::new(op, filter));
+            }
         }
         if let Some(w) = own_where {
             op = Box::new(FilterOperator::new(op, w.predicate.clone()));
