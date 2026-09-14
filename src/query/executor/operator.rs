@@ -1846,6 +1846,11 @@ fn value_node_id(v: &Value) -> Option<NodeId> {
 /// `p.score = 7` matches a float 7.0 -- `IN` disagreed with `=` about whether
 /// an integer and a float can be equal.
 fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyValue> {
+    // `x IN null` is null, as any comparison with null is (TCK Null3 [4]).
+    // Null is not a list, so it raised "IN requires a list on the right".
+    if matches!(right, PropertyValue::Null) {
+        return Some(PropertyValue::Null);
+    }
     let items = right.as_list_items()?;
     let numeric = |p: &PropertyValue| -> Option<f64> {
         match p {
@@ -4546,6 +4551,9 @@ fn temporal_difference_calendar(
     let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
     };
+    if let Some(d) = named_zone_calendar_difference(a, b)? {
+        return Ok(d);
+    }
 
     // Within one month the calendar answer *is* the elapsed one, and the plain
     // form gives it in the shape the TCK wants: `PT6H`, not `P0M0DT6H`. Going
@@ -4656,6 +4664,94 @@ fn temporal_difference_calendar(
         seconds: nanos / 1_000_000_000,
         nanos: (nanos % 1_000_000_000) as i32,
     })
+}
+
+/// `duration.between` across an offset change in a named zone (#825).
+///
+/// java.time's rule, which Neo4j follows: months and days are counted on the
+/// local date-times, and the remainder is measured on the instant after
+/// adding them to the start with the offset re-resolved there. Counting days
+/// as 86,400 s of elapsed time made Stockholm's 25-hour 2017-10-29 `P1DT1H`,
+/// and `start + P1DT1H` is an hour past the end.
+///
+/// `None` -- the existing path -- unless one named zone is involved and its
+/// offset differs between the two ends. Where the offsets agree, local and
+/// elapsed time agree and so do the two answers; two fixed offsets stay
+/// elapsed time, as they do in Neo4j.
+fn named_zone_calendar_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<Option<PropertyValue>, ExecutionError> {
+    use crate::query::executor::temporal::{resolve_offset, TzSpec};
+    use chrono::{Offset as _, TimeZone as _};
+    const NS: i128 = 1_000_000_000;
+    const DAY: i128 = 86_400 * NS;
+
+    let tz = match (zone_of(a), zone_of(b)) {
+        (Some(TzSpec::Named(x)), Some(TzSpec::Named(y))) if x == y => x,
+        (Some(TzSpec::Named(x)), None) | (None, Some(TzSpec::Named(x))) => x,
+        _ => return Ok(None),
+    };
+    let Some((na, nb)) = zone_aligned_instants(a, b) else {
+        return Ok(None);
+    };
+    let offset_at = |instant: i128| -> Option<i128> {
+        let secs = i64::try_from(instant.div_euclid(NS)).ok()?;
+        let utc = chrono::DateTime::from_timestamp(secs, 0)?.naive_utc();
+        Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc() as i128)
+    };
+    let (Some(oa), Some(ob)) = (offset_at(na), offset_at(nb)) else {
+        return Ok(None);
+    };
+    if oa == ob {
+        return Ok(None);
+    }
+
+    // The calendar count runs on the two ends as local date-times.
+    let (local_a, local_b) = (na + oa * NS, nb + ob * NS);
+    let as_local = |l: i128| -> Option<PropertyValue> {
+        Some(PropertyValue::LocalDateTime {
+            secs: i64::try_from(l.div_euclid(NS)).ok()?,
+            nanos: l.rem_euclid(NS) as u32,
+        })
+    };
+    let (Some(la), Some(lb)) = (as_local(local_a), as_local(local_b)) else {
+        return Ok(None);
+    };
+    let PropertyValue::Duration { months, days, seconds, nanos } =
+        temporal_difference_calendar(&la, &lb)?
+    else {
+        return Ok(None);
+    };
+
+    // start + months + days on the local calendar, then its offset.
+    let out_of_range = || ExecutionError::RuntimeError("date out of range".into());
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let start_date = epoch
+        .checked_add_signed(chrono::Duration::days(local_b.div_euclid(DAY) as i64))
+        .ok_or_else(out_of_range)?;
+    let mid_date = shift_months_clamped(start_date, months)?
+        .checked_add_signed(chrono::Duration::days(days))
+        .ok_or_else(out_of_range)?;
+    let mid_day = mid_date.signed_duration_since(epoch).num_days();
+    let mid_time = local_b.rem_euclid(DAY);
+    let mid_offset = match resolve_offset(&TzSpec::Named(tz), mid_day, mid_time as i64) {
+        Ok(o) => o as i128,
+        // A local time in a spring-forward gap does not exist. java.time moves
+        // it later by the gap, which is the offset from *before* the gap; the
+        // local time read with the later offset is an instant before it.
+        Err(_) => match offset_at(mid_day as i128 * DAY + mid_time - oa.max(ob) * NS) {
+            Some(o) => o,
+            None => return Ok(None),
+        },
+    };
+    let rem = seconds as i128 * NS + nanos as i128 - (oa - mid_offset) * NS;
+    Ok(Some(PropertyValue::Duration {
+        months,
+        days,
+        seconds: (rem / NS) as i64,
+        nanos: (rem % NS) as i32,
+    }))
 }
 
 /// Move a date by whole months, clamping the day into the target month —
@@ -11715,21 +11811,25 @@ impl PhysicalOperator for CreateNodeOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
+            // The nodes this CREATE has made so far, by variable. A later element may
+            // read an earlier one -- `CREATE (a {id: 0}), (:B {ref: a.id})` -- and
+            // evaluating against an empty row made that an error (TCK With2 [1],
+            // WithSkipLimit1 [1], WithSkipLimit2 [2]).
+            let mut scope = Record::new();
             for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
                 // The whole label set at once, which for `CREATE ({...})` is
                 // empty. Passing a "primary" label meant an unlabelled node was
                 // created with `Label("")` (#625).
                 let node_id = store.create_node_with_labels(labels.iter().cloned());
 
-                // A CREATE with no input row has nothing bound, so a non-literal value can
-                // only be a constant (`{n: 1 + 2}`). Anything referring to a variable is an
-                // error rather than a silent null -- quietly storing nothing for a property
-                // is the failure this change exists to remove.
+                // With no input row, only the nodes this CREATE has made so far are
+                // bound. Anything else a value refers to is an error rather than a
+                // silent null -- quietly storing nothing for a property is the failure
+                // this check exists to remove.
                 let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                 if let Some(exprs) = property_exprs {
-                    let empty = Record::new();
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &empty, store).ok().as_ref().and_then(storable_property) {
+                        match eval_expression(expr, &scope, store).ok().as_ref().and_then(storable_property) {
                             Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
@@ -11753,6 +11853,9 @@ impl PhysicalOperator for CreateNodeOperator {
                     }
                 }
 
+                if let Some(v) = variable {
+                    scope.bind(v.clone(), Value::NodeRef(node_id));
+                }
                 self.created_nodes.push((node_id, variable.clone()));
             }
             self.executed = true;
@@ -12754,10 +12857,15 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 // never set (#831).
                 let mut evaluated: Vec<(String, PropertyValue)> = Vec::new();
                 if let Some(exprs) = exprs {
-                    let empty = Record::new();
+                    // The nodes this CREATE made are bound, so `-[:R {w: a.id}]->`
+                    // reads `a` as a later node pattern does.
+                    let mut scope = Record::new();
+                    for (var, id) in &self.var_to_node_id {
+                        scope.bind(var.clone(), Value::NodeRef(*id));
+                    }
                     for (key, expr) in exprs {
                         if let Some(pv) =
-                            storable_property(&eval_expression(expr, &empty, store)?)
+                            storable_property(&eval_expression(expr, &scope, store)?)
                         {
                             evaluated.push((key.clone(), pv));
                         }
@@ -18058,6 +18166,17 @@ impl WithBarrierOperator {
                         states[i].update(&val);
                     }
                 }
+            }
+            // No grouping keys means one group -- the whole input -- even when
+            // the input is empty: `WITH count(*) AS c` over nothing is one row
+            // with c = 0, as it is for RETURN. The group was only ever created
+            // from a row, so over no rows WITH answered no row at all
+            // (TCK With6 [5], WithOrderBy4 [16]).
+            if groups.is_empty() && self.group_by.is_empty() {
+                groups.insert(
+                    Vec::new(),
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect(),
+                );
             }
 
             let mut records = Vec::new();

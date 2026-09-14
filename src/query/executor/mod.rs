@@ -437,7 +437,7 @@ impl<'a> QueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty() || !query.params.is_empty() {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -702,7 +702,7 @@ impl<'a> MutQueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty() || !query.params.is_empty() {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -792,41 +792,240 @@ impl<'a> MutQueryExecutor<'a> {
     }
 }
 
-/// Substitute Expression::Parameter references with Expression::Literal values from the params map.
+/// Substitute `$parameter`s with literals, in every clause that can hold an
+/// expression.
+///
+/// This covered WHERE, RETURN, WITH items, ORDER BY and SET items only.
+/// Everywhere else a parameter reached the operators unresolved and failed
+/// with "Unresolved parameter": `DELETE list[$i]`, `UNWIND $rows`, a MERGE or
+/// CREATE property, FOREACH's list, a CALL argument. The TCK found them once
+/// its harness passed parameters.
 fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
-    // Recursively substitute in WHERE clause
+    use crate::query::ast::Clause;
+    let p = params;
     if let Some(wc) = &mut query.where_clause {
-        substitute_expr(&mut wc.predicate, params)?;
+        substitute_expr(&mut wc.predicate, p)?;
     }
-    // Substitute in RETURN clause
+    if let Some(wc) = &mut query.post_with_where_clause {
+        substitute_expr(&mut wc.predicate, p)?;
+    }
     if let Some(rc) = &mut query.return_clause {
         for item in &mut rc.items {
-            substitute_expr(&mut item.expression, params)?;
+            substitute_expr(&mut item.expression, p)?;
         }
     }
-    // Substitute in WITH clause
     if let Some(wc) = &mut query.with_clause {
-        for item in &mut wc.items {
-            substitute_expr(&mut item.expression, params)?;
-        }
-        if let Some(where_clause) = &mut wc.where_clause {
-            substitute_expr(&mut where_clause.predicate, params)?;
-        }
+        substitute_with(wc, p)?;
     }
-    // Substitute in ORDER BY
     if let Some(ob) = &mut query.order_by {
         for item in &mut ob.items {
-            substitute_expr(&mut item.expression, params)?;
+            substitute_expr(&mut item.expression, p)?;
         }
     }
-    // Substitute in SET clauses
     for sc in &mut query.set_clauses {
-        for item in &mut sc.items {
-            substitute_expr(&mut item.value, params)?;
+        substitute_set(sc, p)?;
+    }
+    for mc in &mut query.match_clauses {
+        substitute_pattern(&mut mc.pattern, p)?;
+    }
+    if let Some(cc) = &mut query.create_clause {
+        substitute_pattern(&mut cc.pattern, p)?;
+    }
+    if let Some(mc) = &mut query.merge_clause {
+        substitute_merge(mc, p)?;
+    }
+    if let Some(dc) = &mut query.delete_clause {
+        for e in &mut dc.expressions {
+            substitute_expr(e, p)?;
+        }
+    }
+    if let Some(fc) = &mut query.foreach_clause {
+        substitute_expr(&mut fc.expression, p)?;
+    }
+    for u in query
+        .unwind_clause
+        .iter_mut()
+        .chain(query.extra_unwind_clauses.iter_mut())
+        .chain(query.post_with_unwind_clauses.iter_mut())
+    {
+        substitute_expr(&mut u.expression, p)?;
+    }
+    if let Some(l) = &mut query.load_csv_clause {
+        substitute_expr(&mut l.source, p)?;
+    }
+    if let Some(c) = &mut query.call_clause {
+        for a in &mut c.arguments {
+            substitute_expr(a, p)?;
+        }
+    }
+    for (wc, unwind, matches, wh) in &mut query.extra_with_stages {
+        substitute_with(wc, p)?;
+        if let Some(u) = unwind {
+            substitute_expr(&mut u.expression, p)?;
+        }
+        for mc in matches {
+            substitute_pattern(&mut mc.pattern, p)?;
+        }
+        if let Some(w) = wh {
+            substitute_expr(&mut w.predicate, p)?;
+        }
+    }
+    for clause in &mut query.clauses {
+        match clause {
+            Clause::Match(mc) => substitute_pattern(&mut mc.pattern, p)?,
+            Clause::Where(w) => substitute_expr(&mut w.predicate, p)?,
+            Clause::Unwind(u) => substitute_expr(&mut u.expression, p)?,
+            Clause::LoadCsv(l) => substitute_expr(&mut l.source, p)?,
+            Clause::With(wc) => substitute_with(wc, p)?,
+            Clause::Create(cc) => substitute_pattern(&mut cc.pattern, p)?,
+            Clause::Merge(mc) => substitute_merge(mc, p)?,
+            Clause::Set(sc) => substitute_set(sc, p)?,
+            Clause::Remove(_) => {}
+            Clause::Delete(dc) => {
+                for e in &mut dc.expressions {
+                    substitute_expr(e, p)?;
+                }
+            }
+            Clause::Foreach(fc) => substitute_expr(&mut fc.expression, p)?,
+            Clause::Call(c) => {
+                for a in &mut c.arguments {
+                    substitute_expr(a, p)?;
+                }
+            }
+            Clause::Return(rc) => {
+                for item in &mut rc.items {
+                    substitute_expr(&mut item.expression, p)?;
+                }
+            }
+        }
+    }
+    resolve_row_count(&mut query.deferred_skip, &mut query.skip, p)?;
+    resolve_row_count(&mut query.deferred_limit, &mut query.limit, p)?;
+    if let Some(inner) = &mut query.call_subquery {
+        substitute_params(inner, p)?;
+    }
+    for (u, _) in &mut query.union_queries {
+        substitute_params(u, p)?;
+    }
+    Ok(())
+}
+
+fn substitute_with(
+    wc: &mut crate::query::ast::WithClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    for item in &mut wc.items {
+        substitute_expr(&mut item.expression, p)?;
+    }
+    if let Some(w) = &mut wc.where_clause {
+        substitute_expr(&mut w.predicate, p)?;
+    }
+    if let Some(ob) = &mut wc.order_by {
+        for item in &mut ob.items {
+            substitute_expr(&mut item.expression, p)?;
+        }
+    }
+    resolve_row_count(&mut wc.deferred_skip, &mut wc.skip, p)?;
+    resolve_row_count(&mut wc.deferred_limit, &mut wc.limit, p)
+}
+
+fn substitute_set(
+    sc: &mut crate::query::ast::SetClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    for item in &mut sc.items {
+        substitute_expr(&mut item.value, p)?;
+    }
+    for item in &mut sc.entity_items {
+        substitute_expr(&mut item.value, p)?;
+    }
+    Ok(())
+}
+
+fn substitute_merge(
+    mc: &mut crate::query::ast::MergeClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    substitute_pattern(&mut mc.pattern, p)?;
+    for item in mc.on_create_set.iter_mut().chain(mc.on_match_set.iter_mut()) {
+        substitute_expr(&mut item.value, p)?;
+    }
+    for item in mc.on_create_entity_set.iter_mut().chain(mc.on_match_entity_set.iter_mut()) {
+        substitute_expr(&mut item.value, p)?;
+    }
+    Ok(())
+}
+
+/// A pattern's property maps. A substituted value is a literal, and it moves
+/// to `properties`, so `(n {name: $n})` plans exactly as `(n {name: 'x'})`.
+fn substitute_pattern(
+    pattern: &mut crate::query::ast::Pattern,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::query::ast::Expression;
+    type Literals = Option<HashMap<String, crate::graph::PropertyValue>>;
+    fn props(
+        literals: &mut Literals,
+        exprs: &mut Option<HashMap<String, Expression>>,
+        p: &HashMap<String, crate::graph::PropertyValue>,
+    ) -> ExecutionResult<()> {
+        let Some(map) = exprs else { return Ok(()) };
+        for e in map.values_mut() {
+            substitute_expr(e, p)?;
+        }
+        let done: Vec<String> = map
+            .iter()
+            .filter(|(_, e)| matches!(e, Expression::Literal(_)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in done {
+            if let Some(Expression::Literal(v)) = map.remove(&k) {
+                literals.get_or_insert_with(HashMap::new).insert(k, v);
+            }
+        }
+        if map.is_empty() {
+            *exprs = None;
+        }
+        Ok(())
+    }
+    for path in &mut pattern.paths {
+        props(&mut path.start.properties, &mut path.start.property_exprs, p)?;
+        for seg in &mut path.segments {
+            props(&mut seg.edge.properties, &mut seg.edge.property_exprs, p)?;
+            props(&mut seg.node.properties, &mut seg.node.property_exprs, p)?;
         }
     }
     Ok(())
 }
+
+/// A deferred SKIP/LIMIT: substitute, evaluate, and check it as a literal
+/// count is checked. A parameter the caller did not supply is an error here,
+/// not a missing SKIP.
+fn resolve_row_count(
+    deferred: &mut Option<crate::query::ast::Expression>,
+    fixed: &mut Option<usize>,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::graph::PropertyValue;
+    let Some(mut e) = deferred.take() else { return Ok(()) };
+    substitute_expr(&mut e, p)?;
+    let v = crate::query::executor::operator::eval_expression(
+        &e,
+        &crate::query::executor::Record::new(),
+        &crate::graph::GraphStore::new(),
+    )?;
+    *fixed = Some(match v {
+        Value::Property(PropertyValue::Integer(n)) if n >= 0 => n as usize,
+        Value::Property(PropertyValue::Float(f)) if f >= 0.0 && f.fract() == 0.0 => f as usize,
+        other => {
+            return Err(ExecutionError::TypeError(format!(
+                "SKIP/LIMIT takes a non-negative whole number, got {other:?}"
+            )))
+        }
+    });
+    Ok(())
+}
+
 
 fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
     use crate::query::ast::Expression;
@@ -836,12 +1035,12 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
         // missing variable at evaluation time (#654).
         Expression::ListExpr(items) => {
             for e in items.iter_mut() {
-                substitute_expr(e, params);
+                substitute_expr(e, params)?;
             }
         }
         Expression::MapExpr(entries) => {
             for (_, e) in entries.iter_mut() {
-                substitute_expr(e, params);
+                substitute_expr(e, params)?;
             }
         }
         Expression::Parameter(name) => {
@@ -904,7 +1103,8 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
             substitute_expr(list_expr, params)?;
             substitute_expr(expression, params)?;
         }
-        Expression::PatternComprehension { filter, projection, .. } => {
+        Expression::PatternComprehension { pattern, filter, projection, .. } => {
+            substitute_pattern(pattern, params)?;
             if let Some(f) = filter {
                 substitute_expr(f, params)?;
             }
@@ -912,7 +1112,13 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
         }
         // Leaf expressions — no substitution needed
         Expression::Variable(_) | Expression::Property { .. } | Expression::Literal(_)
-        | Expression::PathVariable(_) | Expression::ExistsSubquery { .. } => {}
+        | Expression::PathVariable(_) => {}
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
+            substitute_pattern(pattern, params)?;
+            if let Some(w) = where_clause {
+                substitute_expr(&mut w.predicate, params)?;
+            }
+        }
     }
     Ok(())
 }
