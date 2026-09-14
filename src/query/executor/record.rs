@@ -1366,6 +1366,39 @@ impl PropertyCursor {
             None => PropertyValue::Null,
         }
     }
+
+    /// `read`, borrowed, for a value held in a string column. `None` for
+    /// anything else -- another type, a value only in row storage, an absent
+    /// property, a variable that is not a node or relationship -- where the
+    /// caller falls back to `read`. A sort key only compares its string and
+    /// never needs its own copy of it (#750).
+    pub fn read_str<'s>(&mut self, record: &Record, store: &'s GraphStore) -> Option<&'s str> {
+        match record.get(&self.variable) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => {
+                let column = match self.node_column {
+                    Some(c) => c,
+                    None => {
+                        let found = store.node_columns.column_id(&self.property)?;
+                        self.node_column = Some(found);
+                        found
+                    }
+                };
+                store.node_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => {
+                let column = match self.edge_column {
+                    Some(c) => c,
+                    None => {
+                        let found = store.edge_columns.column_id(&self.property)?;
+                        self.edge_column = Some(found);
+                        found
+                    }
+                };
+                store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// One component of a temporal value: `.year`, `.hour`, `.offsetSeconds`, ...
@@ -1460,6 +1493,34 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
     }
 }
 
+/// Where a value ranks in `ORDER BY`, before values of its own rank are
+/// compared with each other. Shared by `cypher_order_value` and the sort key
+/// comparator, which must agree with it (#750).
+///
+/// Ranks are the ascending order in `cypher_order_value`'s documentation.
+/// `Value::List`/`Value::Map` and their `PropertyValue` spellings are the same
+/// type to a query and must rank the same, or `[1]` and a list of nodes sort
+/// into different places.
+pub(crate) fn cypher_order_rank(v: &Value) -> u8 {
+    match v {
+        Value::Map(_) => 0,
+        Value::Node(..) | Value::NodeRef(_) => 1,
+        Value::Edge(..) | Value::EdgeRef(..) => 2,
+        Value::List(_) => 3,
+        Value::Path { .. } => 4,
+        Value::Null => 9,
+        Value::Property(p) => match p {
+            PropertyValue::Map(_) => 0,
+            PropertyValue::Array(_) | PropertyValue::Vector(_) => 3,
+            PropertyValue::String(_) => 5,
+            PropertyValue::Boolean(_) => 6,
+            PropertyValue::Float(f) if f.is_nan() => 8,
+            PropertyValue::Null => 9,
+            _ => 7,
+        },
+    }
+}
+
 /// Cypher's orderability over `Value`, for `ORDER BY`.
 ///
 /// openCypher defines one total order across types, ascending:
@@ -1483,30 +1544,7 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
 pub fn cypher_order_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    // Ranks are the ascending order above. `Value::List`/`Value::Map` and
-    // their `PropertyValue` spellings are the same type to a query and must
-    // rank the same, or `[1]` and a list of nodes sort into different places.
-    fn rank(v: &Value) -> u8 {
-        match v {
-            Value::Map(_) => 0,
-            Value::Node(..) | Value::NodeRef(_) => 1,
-            Value::Edge(..) | Value::EdgeRef(..) => 2,
-            Value::List(_) => 3,
-            Value::Path { .. } => 4,
-            Value::Null => 9,
-            Value::Property(p) => match p {
-                PropertyValue::Map(_) => 0,
-                PropertyValue::Array(_) | PropertyValue::Vector(_) => 3,
-                PropertyValue::String(_) => 5,
-                PropertyValue::Boolean(_) => 6,
-                PropertyValue::Float(f) if f.is_nan() => 8,
-                PropertyValue::Null => 9,
-                _ => 7,
-            },
-        }
-    }
-
-    let (ra, rb) = (rank(a), rank(b));
+    let (ra, rb) = (cypher_order_rank(a), cypher_order_rank(b));
     if ra != rb {
         return ra.cmp(&rb);
     }

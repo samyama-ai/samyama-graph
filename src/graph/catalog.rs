@@ -4,11 +4,13 @@
 //! level, enabling the graph-native planner to accurately estimate cardinalities and choose
 //! optimal traversal directions.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use super::types::{Label, EdgeType, NodeId};
 
 /// A triple pattern representing a (source_label, edge_type, target_label) combination
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriplePattern {
     pub source_label: Label,
     pub edge_type: EdgeType,
@@ -26,6 +28,54 @@ impl TriplePattern {
 }
 
 /// Statistics for a single triple pattern
+/// A triple pattern's three parts, so the catalog maps can be probed with
+/// borrowed labels. Building an owned `TriplePattern` to look one up cloned
+/// three `String`s on every edge insert, for an entry that exists after the
+/// first edge of each shape (#491).
+trait TripleKey {
+    fn parts(&self) -> (&str, &str, &str);
+}
+
+impl TripleKey for TriplePattern {
+    fn parts(&self) -> (&str, &str, &str) {
+        (self.source_label.as_str(), self.edge_type.as_str(), self.target_label.as_str())
+    }
+}
+
+impl TripleKey for (&Label, &EdgeType, &Label) {
+    fn parts(&self) -> (&str, &str, &str) {
+        (self.0.as_str(), self.1.as_str(), self.2.as_str())
+    }
+}
+
+impl<'a> Borrow<dyn TripleKey + 'a> for TriplePattern {
+    fn borrow(&self) -> &(dyn TripleKey + 'a) {
+        self
+    }
+}
+
+// One hash for the owned and the borrowed form: a map finds a key only if both
+// hash the same.
+impl Hash for TriplePattern {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+impl Hash for dyn TripleKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+impl PartialEq for dyn TripleKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for dyn TripleKey + '_ {}
+
 #[derive(Debug, Clone)]
 pub struct TripleStats {
     /// Number of edges matching this triple pattern
@@ -124,17 +174,17 @@ impl GraphCatalog {
     {
         for src_label in src_labels {
             for tgt_label in tgt_labels.clone() {
-                let pattern = TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
+                // Probe by reference; build the owned key only to insert one.
+                let parts = (src_label, edge_type, tgt_label);
+                let key: &dyn TripleKey = &parts;
+                let owned = || TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
 
-                // `entry(k)` takes the key by value, so `entry(pattern.clone())`
-                // clones three Strings on every call whether or not the entry
-                // already exists -- and after the first few edges of a given
-                // (label, type, label) shape it always exists. Three maps meant
-                // nine clones per edge on top of the three in `new` above; the
-                // allocation histogram showed 12 short-string allocations per
-                // edge, all of them here. `get_mut` first, `entry` only on the
-                // genuinely-new path.
-                let src_degree_val = match self.source_degrees.get_mut(&pattern) {
+                // `entry(k)` takes the key by value, so an `entry` per map cloned
+                // three Strings on every call whether or not the entry already
+                // existed -- and after the first few edges of a given (label,
+                // type, label) shape it always does. `get_mut` by the borrowed
+                // key first; `entry(owned())` only on the genuinely-new path.
+                let src_degree_val = match self.source_degrees.get_mut(key) {
                     Some(m) => {
                         let d = m.entry(source_id).or_insert(0);
                         *d += 1;
@@ -143,7 +193,7 @@ impl GraphCatalog {
                     None => {
                         let d = self
                             .source_degrees
-                            .entry(pattern.clone())
+                            .entry(owned())
                             .or_default()
                             .entry(source_id)
                             .or_insert(0);
@@ -153,32 +203,32 @@ impl GraphCatalog {
                 };
                 let new_src_degree = src_degree_val;
 
-                match self.target_degrees.get_mut(&pattern) {
+                match self.target_degrees.get_mut(key) {
                     Some(m) => {
                         *m.entry(target_id).or_insert(0) += 1;
                     }
                     None => {
                         *self
                             .target_degrees
-                            .entry(pattern.clone())
+                            .entry(owned())
                             .or_default()
                             .entry(target_id)
                             .or_insert(0) += 1;
                     }
                 }
 
-                let stats = match self.triple_stats.get_mut(&pattern) {
+                let stats = match self.triple_stats.get_mut(key) {
                     Some(s) => s,
                     None => self
                         .triple_stats
-                        .entry(pattern.clone())
+                        .entry(owned())
                         .or_insert_with(TripleStats::new),
                 };
                 stats.count += 1;
 
                 // Recompute distinct sources/targets from degree maps
-                let src_map = self.source_degrees.get(&pattern).unwrap();
-                let tgt_map = self.target_degrees.get(&pattern).unwrap();
+                let src_map = self.source_degrees.get(key).unwrap();
+                let tgt_map = self.target_degrees.get(key).unwrap();
                 stats.distinct_sources = src_map.len();
                 stats.distinct_targets = tgt_map.len();
 

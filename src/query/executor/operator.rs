@@ -1458,12 +1458,11 @@ fn exists_expand_hops(
 
             let mut next = bindings.clone();
             if let Some(var) = segment.edge.variable.as_deref() {
-                // Only a pattern that binds the edge needs it materialised.
-                if let Some(edge) = store.get_edge(eid) {
-                    next.bind(
-                        var.to_string(),
-                        Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()),
-                    );
+                // Only a pattern that binds the edge needs it materialised --
+                // as a reference: `get_edge` copied its whole property map to
+                // hand over three fields (#1190).
+                if let Some(r) = edge_ref(store, eid) {
+                    next.bind(var.to_string(), r);
                 }
             }
 
@@ -5102,6 +5101,19 @@ fn drain_input_for_write(
     Ok(())
 }
 
+/// A relationship as a `Value::EdgeRef`: id, endpoints and type, and nothing
+/// else. `None` when no relationship has the id.
+///
+/// `GraphStore::get_edge` builds an owned `Edge`, copying the type string and
+/// the whole property map, and four sites called it to read these three
+/// fields -- so a query that binds relationships and reads none of their
+/// properties paid for all of them (#1190).
+fn edge_ref(store: &GraphStore, id: crate::graph::EdgeId) -> Option<Value> {
+    let (source, target) = store.get_edge_endpoints(id)?;
+    let edge_type = store.get_edge_type(id)?;
+    Some(Value::EdgeRef(id, source, target, edge_type))
+}
+
 pub trait PhysicalOperator: Send {
     /// Get the next record from this operator (read-only operations)
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>>;
@@ -7185,6 +7197,12 @@ pub struct VarLengthExpandOperator {
     /// compare per emitted candidate; membership is a hash lookup. Same
     /// resolution the plain expand uses (#665).
     target_ids: Option<std::collections::HashSet<NodeId>>,
+    /// The per-type index each direction reads instead of the adjacency, with
+    /// the store epoch it was taken at. See `type_index`.
+    out_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    in_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    /// Neighbour walks so far, against `TYPE_INDEX_AFTER_WALKS`.
+    type_walks: std::cell::Cell<usize>,
 }
 
 impl VarLengthExpandOperator {
@@ -7226,6 +7244,9 @@ impl VarLengthExpandOperator {
             target_ids: None,
             track_edges: false,
             starts_clause: false,
+            out_index: std::cell::RefCell::new(None),
+            in_index: std::cell::RefCell::new(None),
+            type_walks: std::cell::Cell::new(0),
         }
     }
 
@@ -7340,9 +7361,15 @@ impl VarLengthExpandOperator {
             if seen.contains(eid) {
                 return Ok(());
             }
-            let Some(edge) = store.get_edge(*eid) else { return Ok(()) };
+            // Endpoints and type only. `get_edge` copied the property map too,
+            // for every relationship of every bound list (#1190).
+            let (Some((edge_source, edge_target)), Some(edge_type)) =
+                (store.get_edge_endpoints(*eid), store.get_edge_type(*eid))
+            else {
+                return Ok(());
+            };
             if !self.edge_types.is_empty()
-                && !self.edge_types.iter().any(|t| t.as_str() == edge.edge_type.as_str())
+                && !self.edge_types.iter().any(|t| t.as_str() == edge_type.as_str())
             {
                 return Ok(());
             }
@@ -7354,10 +7381,10 @@ impl VarLengthExpandOperator {
             // directed forms may not, and an edge that does not touch `at` at
             // all fails whichever direction is written.
             let next = match self.direction {
-                Direction::Outgoing if edge.source == at => edge.target,
-                Direction::Incoming if edge.target == at => edge.source,
-                Direction::Both if edge.source == at => edge.target,
-                Direction::Both if edge.target == at => edge.source,
+                Direction::Outgoing if edge_source == at => edge_target,
+                Direction::Incoming if edge_target == at => edge_source,
+                Direction::Both if edge_source == at => edge_target,
+                Direction::Both if edge_target == at => edge_source,
                 _ => return Ok(()),
             };
             seen.push(*eid);
@@ -7446,10 +7473,17 @@ impl VarLengthExpandOperator {
     /// `for_each_neighbor` uses `self.direction`; the reversed BFS needs the
     /// opposite one, and taking the direction as an argument keeps a second
     /// near-copy of the match out of the file.
+    ///
+    /// `out_index` / `in_index` are the per-type indexes for the segment's one
+    /// type, when there are any: read instead of walking every edge and
+    /// type-checking it, as `walk_side` does for the forward walk (#1197).
+    #[allow(clippy::too_many_arguments)]
     fn neighbors_in(
         node: NodeId,
         type_ids: Option<&[u16]>,
         direction: &Direction,
+        out_index: Option<&crate::graph::TypeAdjacency>,
+        in_index: Option<&crate::graph::TypeAdjacency>,
         edge_properties: &std::collections::HashMap<String, PropertyValue>,
         store: &GraphStore,
         visit: &mut impl FnMut(NodeId),
@@ -7467,12 +7501,21 @@ impl VarLengthExpandOperator {
                 visit(nb)
             }
         };
+        let mut side = |outgoing: bool, index: Option<&crate::graph::TypeAdjacency>| match index {
+            Some(index) => {
+                for &(nb, e) in index.neighbors(node) {
+                    with_edge(nb, e);
+                }
+            }
+            None if outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
+            None => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
+        };
         match direction {
-            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
-            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
+            Direction::Outgoing => side(true, out_index),
+            Direction::Incoming => side(false, in_index),
             Direction::Both => {
-                store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge);
-                store.for_each_incoming_neighbor(node, type_ids, &mut with_edge);
+                side(true, out_index);
+                side(false, in_index);
             }
         }
     }
@@ -7493,13 +7536,81 @@ impl VarLengthExpandOperator {
             }
         };
         match self.direction {
-            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut visit),
-            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut visit),
+            Direction::Outgoing => self.walk_side(node, type_ids, true, store, &mut visit),
+            Direction::Incoming => self.walk_side(node, type_ids, false, store, &mut visit),
             Direction::Both => {
-                store.for_each_outgoing_neighbor(node, type_ids, &mut visit);
-                store.for_each_incoming_neighbor(node, type_ids, &mut visit);
+                self.walk_side(node, type_ids, true, store, &mut visit);
+                self.walk_side(node, type_ids, false, store, &mut visit);
             }
         }
+    }
+
+    /// Walks before this operator builds a type index for itself. One
+    /// anchor's `*1..3` visits a few dozen nodes, where a build costs more than
+    /// it saves; LDBC IC1's reaches ~4,900 (#1197). An index an earlier query
+    /// built is read from the first walk.
+    const TYPE_INDEX_AFTER_WALKS: usize = 256;
+
+    /// One direction of `node`'s neighbours of the segment's type: from the
+    /// per-type index when there is one, else by walking the adjacency and
+    /// type-checking every edge.
+    ///
+    /// The walk was 84.5% of IC1 at SF10: `KNOWS*1..3` type-checked ~1,200
+    /// edges of every visited Person to keep ~60 (#1197). The index holds
+    /// exactly what the walk visits (`tests/type_adjacency.rs`), sorted by
+    /// `(target, edge)`; `ExpandOperator` has read it since #748.
+    fn walk_side(
+        &self,
+        node: NodeId,
+        type_ids: Option<&[u16]>,
+        outgoing: bool,
+        store: &GraphStore,
+        visit: &mut impl FnMut(NodeId, crate::graph::EdgeId),
+    ) {
+        if let Some(index) = self.type_index(type_ids, outgoing, store) {
+            for &(nb, eid) in index.neighbors(node) {
+                visit(nb, eid);
+            }
+        } else if outgoing {
+            store.for_each_outgoing_neighbor(node, type_ids, &mut *visit);
+        } else {
+            store.for_each_incoming_neighbor(node, type_ids, &mut *visit);
+        }
+    }
+
+    /// The per-type index for one direction, when the segment names exactly
+    /// one type and the store has one or builds one.
+    ///
+    /// Kept with the store's epoch and dropped when that moves. The store
+    /// clears its own cache on every write; an `Arc` held here would otherwise
+    /// go on serving the old edges to a query that writes while it reads.
+    fn type_index(
+        &self,
+        type_ids: Option<&[u16]>,
+        outgoing: bool,
+        store: &GraphStore,
+    ) -> Option<std::sync::Arc<crate::graph::TypeAdjacency>> {
+        let [t] = type_ids? else { return None };
+        let slot = if outgoing { &self.out_index } else { &self.in_index };
+        let epoch = store.epoch();
+        if let Some((at, index)) = &*slot.borrow() {
+            if *at == epoch {
+                return index.clone();
+            }
+        }
+        let index = match store.type_adjacency_if_built(*t, outgoing) {
+            Some(index) => Some(index),
+            None => {
+                let walks = self.type_walks.get() + 1;
+                self.type_walks.set(walks);
+                if walks <= Self::TYPE_INDEX_AFTER_WALKS {
+                    return None;
+                }
+                store.type_adjacency(*t, outgoing)
+            }
+        };
+        *slot.borrow_mut() = Some((epoch, index.clone()));
+        index
     }
 
     /// Pin the target to a single node the planner resolved at plan time.
@@ -7611,6 +7722,18 @@ impl VarLengthExpandOperator {
                 Direction::Both => Direction::Both,
             };
 
+            // The per-type index, as the forward walk reads it (#1197) --
+            // only the halves this reversed search walks, so a half nothing
+            // needs is never built.
+            let out_index = match reversed {
+                Direction::Incoming => None,
+                _ => self.type_index(type_filter, true, store),
+            };
+            let in_index = match reversed {
+                Direction::Outgoing => None,
+                _ => self.type_index(type_filter, false, store),
+            };
+
             let mut reach: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             visited.insert(target);
@@ -7623,7 +7746,7 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, &self.edge_properties, store, &mut |nb| {
+                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, store, &mut |nb| {
                         if visited.insert(nb) {
                             next.push(nb);
                             if depth >= self.min_hops {
@@ -8193,15 +8316,7 @@ impl VarLengthExpandOperator {
                     Value::List(
                         edges
                             .iter()
-                            .map(|e| match store.get_edge(*e) {
-                                Some(edge) => Value::EdgeRef(
-                                    *e,
-                                    edge.source,
-                                    edge.target,
-                                    edge.edge_type.clone(),
-                                ),
-                                None => Value::Null,
-                            })
+                            .map(|e| edge_ref(store, *e).unwrap_or(Value::Null))
                             .collect(),
                     ),
                 );
@@ -9259,16 +9374,7 @@ impl IdentityKey {
         match self {
             IdentityKey::Node(id) => Value::NodeRef(NodeId(*id)),
             IdentityKey::Edge(id) => {
-                let edge_id = crate::graph::EdgeId(*id);
-                match store.get_edge(edge_id) {
-                    Some(edge) => Value::EdgeRef(
-                        edge_id,
-                        edge.source,
-                        edge.target,
-                        edge.edge_type.clone(),
-                    ),
-                    None => Value::Null,
-                }
+                edge_ref(store, crate::graph::EdgeId(*id)).unwrap_or(Value::Null)
             }
             IdentityKey::Other(value) => (**value).clone(),
         }
@@ -10266,6 +10372,33 @@ impl PhysicalOperator for LimitOperator {
 }
 
 /// Sort operator: ORDER BY n.age ASC
+/// One part of a sort key: a value, or a string borrowed from the column that
+/// holds it. The key lives only while `execute_all` holds the store, so the
+/// borrow is free, and a string key no longer copies its value per row (#750).
+enum KeyPart<'s> {
+    Value(Value),
+    Str(&'s str),
+}
+
+/// One row's `ORDER BY` key: up to two parts inline, more on the heap.
+///
+/// A `Vec<Value>` per row was one allocator call for every row sorted,
+/// whatever the key's type -- half of what `Sort` added per row (#750). One and
+/// two keys are nearly every `ORDER BY` written.
+enum SortKey<'s> {
+    Inline([KeyPart<'s>; 2], usize),
+    Heap(Vec<KeyPart<'s>>),
+}
+
+impl<'s> SortKey<'s> {
+    fn as_slice(&self) -> &[KeyPart<'s>] {
+        match self {
+            SortKey::Inline(parts, n) => &parts[..*n],
+            SortKey::Heap(parts) => parts,
+        }
+    }
+}
+
 pub struct SortOperator {
     input: OperatorBox,
     sort_items: Vec<(Expression, bool)>, // (expr, ascending)
@@ -10322,31 +10455,74 @@ impl SortOperator {
     /// Only plain property expressions take the cursor; anything else -- an
     /// arithmetic expression, a function call -- falls back to `key_of`'s
     /// walker, and produces the same value either way.
-    fn key_of_cached(
+    fn key_of_cached<'s>(
         readers: &mut [PropertyCursor],
         sort_items: &[(Expression, bool)],
         record: &Record,
-        store: &GraphStore,
-    ) -> Vec<Value> {
-        let mut key = Vec::with_capacity(sort_items.len());
+        store: &'s GraphStore,
+    ) -> SortKey<'s> {
+        let n = sort_items.len();
+        let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
+        let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
         let mut cursor = readers.iter_mut();
-        for (expr, _) in sort_items {
-            match expr {
-                // A property is always a `PropertyValue`; the cursor stays.
+        for (i, (expr, _)) in sort_items.iter().enumerate() {
+            let value = match expr {
+                // A property is always a `PropertyValue`; the cursor stays. A
+                // string in a column is borrowed rather than copied.
                 Expression::Property { .. } => {
                     let c = cursor.next().expect("one cursor per property key");
-                    key.push(Value::Property(c.read(record, store)));
+                    match c.read_str(record, store) {
+                        Some(s) => KeyPart::Str(s),
+                        None => KeyPart::Value(Value::Property(c.read(record, store))),
+                    }
                 }
-                other => key.push(
-                    Self::evaluate_expression(other, record, store).unwrap_or(Value::Null),
-                ),
+                other => KeyPart::Value(Self::evaluate_expression(other, record, store).unwrap_or(Value::Null)),
+            };
+            if n <= 2 {
+                inline[i] = value;
+            } else {
+                heap.push(value);
             }
         }
-        key
+        if n <= 2 {
+            SortKey::Inline(inline, n)
+        } else {
+            SortKey::Heap(heap)
+        }
+    }
+
+    /// Two key parts, in Cypher's order: `cypher_order_value` on values, and on
+    /// a borrowed string the order its owned form would have.
+    fn cmp_part(x: &KeyPart<'_>, y: &KeyPart<'_>) -> std::cmp::Ordering {
+        match (x, y) {
+            (KeyPart::Value(a), KeyPart::Value(b)) => crate::query::executor::record::cypher_order_value(a, b),
+            (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
+            (KeyPart::Str(a), KeyPart::Value(b)) => Self::cmp_str_value(a, b),
+            (KeyPart::Value(a), KeyPart::Str(b)) => Self::cmp_str_value(b, a).reverse(),
+        }
+    }
+
+    /// A borrowed string against a value: by rank first, as
+    /// `cypher_order_value` does, and within the string rank as strings --
+    /// which is what `PropertyValue`'s order does for two strings.
+    fn cmp_str_value(s: &str, v: &Value) -> std::cmp::Ordering {
+        use crate::query::executor::record::{cypher_order_rank, cypher_order_value};
+        // `String::new()` does not allocate.
+        let as_value = Value::Property(PropertyValue::String(String::new()));
+        let (rs, rv) = (cypher_order_rank(&as_value), cypher_order_rank(v));
+        if rs != rv {
+            return rs.cmp(&rv);
+        }
+        match v {
+            Value::Property(PropertyValue::String(t)) => s.cmp(t.as_str()),
+            // Nothing else shares the string rank today; if something ever
+            // does, compare the owned form rather than guess.
+            other => cypher_order_value(&Value::Property(PropertyValue::String(s.to_string())), other),
+        }
     }
 
     /// Compare two precomputed keys under the per-column sort directions.
-    fn cmp_keys(a: &[Value], b: &[Value], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+    fn cmp_keys(a: &[KeyPart<'_>], b: &[KeyPart<'_>], items: &[(Expression, bool)]) -> std::cmp::Ordering {
         for (i, (_, ascending)) in items.iter().enumerate() {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
@@ -10357,7 +10533,7 @@ impl SortOperator {
             // `graph::property::cypher_order` for why both orders exist, and
             // `record::cypher_order_value` for the entity ranks it cannot
             // express.
-            let ord = crate::query::executor::record::cypher_order_value(x, y);
+            let ord = Self::cmp_part(x, y);
             if ord != std::cmp::Ordering::Equal {
                 return if *ascending { ord } else { ord.reverse() };
             }
@@ -10375,7 +10551,7 @@ impl SortOperator {
     /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
     /// runs may therefore disagree about *which* — the same latitude the
     /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(Vec<Value>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -10383,7 +10559,7 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(&a.0, &b.0, items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
         keyed.truncate(k);
     }
 
@@ -10489,7 +10665,10 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
-        let record = self.records[self.current].clone();
+        // Moved out, not cloned: each sorted row is read once, and `reset`
+        // clears them. The clone was an allocator call per row, and a copy of
+        // every string the row carried (#750).
+        let record = std::mem::take(&mut self.records[self.current]);
         self.current += 1;
         Ok(Some(record))
     }
@@ -10517,7 +10696,10 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
-        let record = self.records[self.current].clone();
+        // Moved out, not cloned: each sorted row is read once, and `reset`
+        // clears them. The clone was an allocator call per row, and a copy of
+        // every string the row carried (#750).
+        let record = std::mem::take(&mut self.records[self.current]);
         self.current += 1;
         Ok(Some(record))
     }
@@ -10532,7 +10714,7 @@ impl PhysicalOperator for SortOperator {
         }
 
         let end = (self.current + batch_size).min(self.records.len());
-        let batch = self.records[self.current..end].to_vec();
+        let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
         self.current = end;
 
         Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
@@ -10587,7 +10769,7 @@ impl SortOperator {
             })
             .collect();
 
-        let mut keyed: Vec<(Vec<Value>, Record)> = Vec::new();
+        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
@@ -10605,7 +10787,7 @@ impl SortOperator {
         }
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(&a.0, &b.0, sort_items));
+        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
 
         self.records = keyed.into_iter().map(|(_, record)| record).collect();
         self.executed = true;
