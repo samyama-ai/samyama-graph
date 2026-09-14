@@ -43,7 +43,7 @@
 //!   cargo run --release --example tck_runner -- --features PATH --failures-manifest /tmp/f.tsv
 //!   cargo run --release --example tck_runner -- --features PATH --failures-detail /tmp/d.tsv
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -766,6 +766,10 @@ struct Scenario {
     /// cannot see it, and checking it that way would fail correct engines.
     /// Those two stay unchecked, and say so.
     side_effects: Option<(i64, i64, i64, i64)>,
+    /// `And parameters are:` rows as `(name, Cypher literal)`, bound to `$name`
+    /// when the query runs. These scenarios were skipped as "parameters" while
+    /// the engine took parameters all along (`with_params`).
+    params: Vec<(String, String)>,
     /// The `Examples:` blocks of a `Scenario Outline:`, each a header and its
     /// rows. Empty for an ordinary scenario.
     ///
@@ -827,6 +831,7 @@ fn expand_outline(mut s: Scenario) -> Vec<Scenario> {
             c.name = format!("{} [{}]", s.name, row.join(", "));
             c.setup = s.setup.iter().map(|x| subst(x, header, row)).collect();
             c.query = s.query.as_ref().map(|x| subst(x, header, row));
+            c.params = s.params.iter().map(|(k, v)| (subst(k, header, row), subst(v, header, row))).collect();
             c.control_query = s.control_query.as_ref().map(|x| subst(x, header, row));
             c.expect = s.expect.as_ref().map(|e| match e {
                 Expect::Rows { header: h, rows: r, ordered, list_order_insensitive } => Expect::Rows {
@@ -853,6 +858,15 @@ enum Outcome {
     WrongResult,
     Errored,
     Skipped,
+}
+
+/// The setup statement for a named TCK graph, found beside the features:
+/// `<tck>/features/...` -> `<tck>/graphs/<name>/<name>.cypher`.
+fn named_graph_setup(feature: &Path, name: &str) -> Option<String> {
+    let features = feature.ancestors().find(|a| a.file_name().is_some_and(|n| n == "features"))?;
+    let file = features.parent()?.join("graphs").join(name).join(format!("{name}.cypher"));
+    let text = std::fs::read_to_string(file).ok()?;
+    Some(text.trim().trim_end_matches(';').trim().to_string())
 }
 
 fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
@@ -896,6 +910,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 expect: None,
                 unsupported: None,
                 side_effects: None,
+                params: Vec::new(),
                 examples: Vec::new(),
                 is_outline: false,
             });
@@ -930,6 +945,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 expect: None,
                 unsupported: None,
                 side_effects: None,
+                params: Vec::new(),
                 examples: Vec::new(),
                 is_outline: line.starts_with("Scenario Outline:"),
             };
@@ -994,8 +1010,16 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 }
             } else if body.starts_with("there exists a procedure") {
                 s.unsupported = Some("user-defined procedure".into());
-            } else if body.starts_with("the binary-tree") {
-                s.unsupported = Some("named fixture graph".into());
+            } else if body.starts_with("the ") && body.ends_with(" graph") {
+                // A named fixture graph: `Given the binary-tree-1 graph`. The
+                // TCK ships each as `tck/graphs/<name>/<name>.cypher`, one
+                // CREATE statement, which runs as this scenario's setup. These
+                // 19 scenarios were skipped as "named fixture graph".
+                let name = &body["the ".len()..body.len() - " graph".len()];
+                match named_graph_setup(path, name) {
+                    Some(stmt) => s.setup.push(stmt),
+                    None => s.unsupported = Some("named fixture graph".into()),
+                }
             } else if s.unsupported.is_none() {
                 s.unsupported = Some(format!("step: {}", body.chars().take(48).collect::<String>()));
             }
@@ -1063,8 +1087,8 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                     }
                 }
                 (_, Pending::Params) => {
-                    if s.unsupported.is_none() {
-                        s.unsupported = Some("parameters".into());
+                    if cells.len() >= 2 {
+                        s.params.push((cells[0].clone(), cells[1].clone()));
                     }
                 }
                 _ => {}
@@ -1087,6 +1111,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 /// so the only difference between this and a competitor is the engine.
 fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>, String> {
     let query = s.query.as_ref().ok_or("no query")?;
+    let params = scenario_params(s)?;
     let mut store = GraphStore::new();
     for stmt in &s.setup {
         let q = parse_query(stmt).map_err(|_| format!("setup did not parse: {stmt}"))?;
@@ -1095,7 +1120,7 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
     }
     let query: &String = if let Some(control) = &s.control_query {
         let q = parse_query(query).map_err(|e| format!("parse: {e}"))?;
-        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         m.execute(&q).map_err(|e| format!("{e}"))?;
         control
     } else {
@@ -1106,10 +1131,11 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
     // side effect can be checked rather than parsed and discarded (#888).
     let before = (store.node_count() as i64, store.edge_count() as i64);
     let batch = {
-        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         match m.execute(&parsed) {
             Ok(b) => b,
             Err(_) => QueryExecutor::new(&store)
+                .with_params(params.clone())
                 .execute(&parsed)
                 .map_err(|e| format!("exec: {e}"))?,
         }
@@ -1177,6 +1203,39 @@ fn side_effect_mismatch(
     ))
 }
 
+/// A scenario's parameters as the values the executor binds to `$name`.
+///
+/// Each cell is a Cypher literal, so the engine's own parser reads it through
+/// `RETURN <literal>` -- one literal grammar, not a second one kept here.
+fn scenario_params(s: &Scenario) -> Result<HashMap<String, PropertyValue>, String> {
+    fn to_prop(v: &Value) -> Option<PropertyValue> {
+        match v {
+            Value::Property(p) => Some(p.clone()),
+            Value::Null => Some(PropertyValue::Null),
+            Value::List(xs) => xs.iter().map(to_prop).collect::<Option<Vec<_>>>().map(PropertyValue::Array),
+            Value::Map(m) => m
+                .iter()
+                .map(|(k, v)| to_prop(v).map(|p| (k.clone(), p)))
+                .collect::<Option<HashMap<_, _>>>()
+                .map(PropertyValue::Map),
+            _ => None,
+        }
+    }
+    let store = GraphStore::new();
+    let mut out = HashMap::new();
+    for (name, literal) in &s.params {
+        let q = parse_query(&format!("RETURN {literal} AS v"))
+            .map_err(|_| format!("parameter literal did not parse: ${name}"))?;
+        let batch = QueryExecutor::new(&store)
+            .execute(&q)
+            .map_err(|_| format!("parameter literal did not evaluate: ${name}"))?;
+        let v = batch.records.first().and_then(|r| r.get("v")).cloned().unwrap_or(Value::Null);
+        let p = to_prop(&v).ok_or_else(|| format!("parameter is not a property value: ${name}"))?;
+        out.insert(name.clone(), p);
+    }
+    Ok(out)
+}
+
 fn run_scenario(s: &Scenario) -> (Outcome, String) {
     if let Some(why) = &s.unsupported {
         return (Outcome::Skipped, why.clone());
@@ -1186,6 +1245,10 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     };
     let Some(expect) = &s.expect else {
         return (Outcome::Skipped, "no result assertion".into());
+    };
+    let params = match scenario_params(s) {
+        Ok(p) => p,
+        Err(why) => return (Outcome::Skipped, why),
     };
 
     let mut store = GraphStore::new();
@@ -1209,7 +1272,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     // the control query can see.
     let query: &String = if let Some(control) = &s.control_query {
         if let Ok(q) = parse_query(query) {
-            let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+            let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
             if m.execute(&q).is_err() {
                 return (Outcome::Errored, "the query before the control query failed".into());
             }
@@ -1251,10 +1314,10 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     let before_counts = (store.node_count() as i64, store.edge_count() as i64);
 
     let batch = if is_write {
-        let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         m.execute(&parsed)
     } else {
-        QueryExecutor::new(&store).execute(&parsed)
+        QueryExecutor::new(&store).with_params(params.clone()).execute(&parsed)
     };
 
     let batch = match batch {
