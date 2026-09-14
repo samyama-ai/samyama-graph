@@ -716,6 +716,10 @@ pub struct RecordBatch {
     pub records: Vec<Record>,
     /// Column names for the result
     pub columns: Vec<String>,
+    /// Structural hash of the plan that produced these rows (TRUST-06), when
+    /// the executor was asked to record it (`with_plan_hash`). A result served
+    /// from the result cache keeps the hash of the plan that computed it.
+    pub plan_hash: Option<u64>,
 }
 
 impl RecordBatch {
@@ -737,6 +741,7 @@ impl RecordBatch {
         Self {
             records: Vec::new(),
             columns,
+            plan_hash: None,
         }
     }
 

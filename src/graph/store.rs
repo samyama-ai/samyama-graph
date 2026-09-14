@@ -3483,8 +3483,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get total number of edges
+    ///
+    /// Live edges only. A relationship deleted after `compact_adjacency` keeps
+    /// its entry in the frozen segment, behind its tombstone, until a merge;
+    /// counting entries reported it as present, so `edges` in the HTTP stats and
+    /// the type-index completeness check both saw one relationship per such
+    /// delete that the graph did not have (#1096). `frozen_dead_edges` counts
+    /// exactly those entries.
     pub fn edge_count(&self) -> usize {
-        let frozen = self.frozen_outgoing.edge_count();
+        let frozen = self.frozen_outgoing.edge_count() - self.frozen_dead_edges;
         let buffer: usize = self.outgoing.iter().map(|v| v.len()).sum();
         frozen + buffer
     }
