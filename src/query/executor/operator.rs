@@ -10944,6 +10944,35 @@ impl SortOperator {
             })
             .collect();
 
+        // Without a LIMIT reaching this operator, every row is sorted. The rows
+        // and their keys stay where they are and only 4-byte row indices are
+        // sorted, compared through the keys; the index breaks ties, so the
+        // order is stable and deterministic. Sorting (key, record) pairs moved
+        // each pair at every merge step, and once the key was held inline
+        // (#750) a pair was ~130 bytes: LDBC IC9 fully sorts ~467k rows (its
+        // LIMIT sits above a DISTINCT), and its sort went 131 -> 200 ms.
+        if bound.is_none() {
+            let mut keys: Vec<SortKey<'_>> = Vec::new();
+            let mut rows: Vec<Record> = Vec::new();
+            while let Some(batch) = self.input.next_batch(store, batch_size)? {
+                keys.reserve(batch.records.len());
+                rows.reserve(batch.records.len());
+                for record in batch.records {
+                    keys.push(Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?);
+                    rows.push(record);
+                }
+            }
+            let sort_items = &self.sort_items;
+            let mut order: Vec<u32> = (0..keys.len() as u32).collect();
+            order.sort_unstable_by(|&a, &b| {
+                Self::cmp_keys(keys[a as usize].as_slice(), keys[b as usize].as_slice(), sort_items)
+                    .then(a.cmp(&b))
+            });
+            self.records = order.iter().map(|&i| std::mem::take(&mut rows[i as usize])).collect();
+            self.executed = true;
+            return Ok(());
+        }
+
         let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
