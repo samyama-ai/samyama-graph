@@ -11670,21 +11670,25 @@ impl PhysicalOperator for CreateNodeOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
+            // The nodes this CREATE has made so far, by variable. A later element may
+            // read an earlier one -- `CREATE (a {id: 0}), (:B {ref: a.id})` -- and
+            // evaluating against an empty row made that an error (TCK With2 [1],
+            // WithSkipLimit1 [1], WithSkipLimit2 [2]).
+            let mut scope = Record::new();
             for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
                 // The whole label set at once, which for `CREATE ({...})` is
                 // empty. Passing a "primary" label meant an unlabelled node was
                 // created with `Label("")` (#625).
                 let node_id = store.create_node_with_labels(labels.iter().cloned());
 
-                // A CREATE with no input row has nothing bound, so a non-literal value can
-                // only be a constant (`{n: 1 + 2}`). Anything referring to a variable is an
-                // error rather than a silent null -- quietly storing nothing for a property
-                // is the failure this change exists to remove.
+                // With no input row, only the nodes this CREATE has made so far are
+                // bound. Anything else a value refers to is an error rather than a
+                // silent null -- quietly storing nothing for a property is the failure
+                // this check exists to remove.
                 let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                 if let Some(exprs) = property_exprs {
-                    let empty = Record::new();
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &empty, store).ok().as_ref().and_then(storable_property) {
+                        match eval_expression(expr, &scope, store).ok().as_ref().and_then(storable_property) {
                             Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
@@ -11708,6 +11712,9 @@ impl PhysicalOperator for CreateNodeOperator {
                     }
                 }
 
+                if let Some(v) = variable {
+                    scope.bind(v.clone(), Value::NodeRef(node_id));
+                }
                 self.created_nodes.push((node_id, variable.clone()));
             }
             self.executed = true;
@@ -12709,10 +12716,15 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 // never set (#831).
                 let mut evaluated: Vec<(String, PropertyValue)> = Vec::new();
                 if let Some(exprs) = exprs {
-                    let empty = Record::new();
+                    // The nodes this CREATE made are bound, so `-[:R {w: a.id}]->`
+                    // reads `a` as a later node pattern does.
+                    let mut scope = Record::new();
+                    for (var, id) in &self.var_to_node_id {
+                        scope.bind(var.clone(), Value::NodeRef(*id));
+                    }
                     for (key, expr) in exprs {
                         if let Some(pv) =
-                            storable_property(&eval_expression(expr, &empty, store)?)
+                            storable_property(&eval_expression(expr, &scope, store)?)
                         {
                             evaluated.push((key.clone(), pv));
                         }
