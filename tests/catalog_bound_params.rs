@@ -36,6 +36,7 @@ fn param(name: &str, kind: &str, sample: serde_json::Value) -> ParamSpec {
 fn a_bound_parameter_round_trips_through_build_and_verify() {
     let store = seeded();
     let q = vec![QuerySpec {
+        question: String::new(), paraphrases: vec![], difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -56,6 +57,7 @@ fn a_bound_parameter_round_trips_through_build_and_verify() {
 fn a_type_mismatch_is_refused_at_build_rather_than_returning_nothing() {
     let store = seeded();
     let q = vec![QuerySpec {
+        question: String::new(), paraphrases: vec![], difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -73,6 +75,7 @@ fn a_type_mismatch_is_refused_at_build_rather_than_returning_nothing() {
 fn a_float_parameter_matches_an_integer_property() {
     let store = seeded();
     let q = vec![QuerySpec {
+        question: String::new(), paraphrases: vec![], difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -149,6 +152,7 @@ fn hostile_parameter_values_cannot_add_a_clause_or_write() {
 
     for v in HOSTILE {
         let q = vec![QuerySpec {
+            question: String::new(), paraphrases: vec![], difficulty: String::new(),
             id: "hostile".into(),
             cypher: "MATCH (n:P) WHERE n.name = $name RETURN n.name".into(),
             unanswerable: true,

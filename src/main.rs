@@ -188,6 +188,22 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
     let v = gate(catalog.provenance, &texts, allow_observed);
     println!("catalog-gate {path}");
     println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
+    println!("  digest: {}", samyama::snapshot::verify::catalog_digest(
+        &serde_json::to_string(&catalog).unwrap_or_default()));
+
+    // KG-08 conformance, reported always and enforced on request. Reported
+    // always because a catalog that does not meet it is still worth publishing
+    // and the gap should be visible; enforced on request because KG-08 is a
+    // release requirement rather than a safety one.
+    let kg08 = samyama::snapshot::verify::kg08_conformance(&catalog);
+    for p in &kg08 {
+        println!("  KG-08 {p}");
+    }
+    let require_kg08 = argv.iter().any(|a| a == "--kg08");
+    if require_kg08 && !kg08.is_empty() {
+        println!("  REFUSED {} KG-08 problem(s), and --kg08 was given", kg08.len());
+        return 1;
+    }
     for f in &v.findings {
         println!("  FINDING {:<16} in {}  {}", f.kind, f.where_, f.excerpt);
     }

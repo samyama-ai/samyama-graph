@@ -27,7 +27,15 @@ fn seeded() -> GraphStore {
 }
 
 fn spec(id: &str, cypher: &str) -> QuerySpec {
-    QuerySpec { id: id.into(), cypher: cypher.into(), unanswerable: false, params: vec![] }
+    QuerySpec {
+        id: id.into(),
+        question: format!("example question for {id}"),
+        paraphrases: vec![],
+        difficulty: "easy".into(),
+        cypher: cypher.into(),
+        unanswerable: false,
+        params: vec![],
+    }
 }
 
 fn queries() -> Vec<QuerySpec> {
@@ -94,6 +102,9 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
         provenance: samyama::snapshot::publish_gate::Provenance::Authored,
         entries: vec![CatalogEntry {
             id: "q_none".into(),
+            question: "a question with no answer".into(),
+            paraphrases: vec![],
+            difficulty: "easy".into(),
             cypher: "MATCH (x:Absent) RETURN x".into(),
             rows: 0,
             hash: canonical_hash(&QueryEngine::new()
@@ -209,4 +220,57 @@ fn an_unknown_catalog_format_is_refused() {
     };
     let err = verify(&store, &bad).expect_err("unknown format must be refused");
     assert!(err.contains("refusing to guess"), "{err}");
+}
+
+/// KG-08 and DX-08 are already-existing requirements; this makes them checkable
+/// rather than aspirational (#1154).
+#[test]
+fn kg08_conformance_names_what_is_missing() {
+    use samyama::snapshot::verify::kg08_conformance;
+
+    let store = seeded();
+    let small = build_catalog(&store, &queries(), &[]).expect("build");
+    let problems = kg08_conformance(&small);
+
+    // Five entries, all answerable, all labelled easy with a question.
+    assert!(problems.iter().any(|p| p.contains("at least 30")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("unanswerable")), "{problems:?}");
+    assert!(
+        !problems.iter().any(|p| p.contains("difficulty")),
+        "difficulty was labelled but reported missing: {problems:?}"
+    );
+
+    // A missing question is reported per entry.
+    let mut q = queries();
+    q[0].question = String::new();
+    let c = build_catalog(&store, &q, &[]).expect("build");
+    assert!(
+        kg08_conformance(&c).iter().any(|p| p.contains("no question text")),
+        "an entry with no question passed"
+    );
+
+    // An unlabelled difficulty is reported per entry.
+    let mut q = queries();
+    q[1].difficulty = "trivial".into();
+    let c = build_catalog(&store, &q, &[]).expect("build");
+    assert!(
+        kg08_conformance(&c).iter().any(|p| p.contains("difficulty")),
+        "an unrecognised difficulty passed"
+    );
+}
+
+/// The digest is what makes a mismatched snapshot/catalog pair detectable,
+/// given the catalog ships beside the snapshot rather than inside it.
+#[test]
+fn the_catalog_digest_changes_when_the_catalog_does() {
+    use samyama::snapshot::verify::catalog_digest;
+    let store = seeded();
+    let a = build_catalog(&store, &queries(), &[]).expect("build");
+    let mut q = queries();
+    q[0].cypher = "MATCH (t:Thing) RETURN count(t) AS total".into();
+    let b = build_catalog(&store, &q, &[]).expect("build");
+    let sa = serde_json::to_string(&a).unwrap();
+    let sb = serde_json::to_string(&b).unwrap();
+    assert_ne!(catalog_digest(&sa), catalog_digest(&sb), "editing a query left the digest alone");
+    assert_eq!(catalog_digest(&sa), catalog_digest(&sa), "the digest is not stable");
 }

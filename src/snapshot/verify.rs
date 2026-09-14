@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use crate::graph::GraphStore;
-use crate::query::{QueryEngine, RecordBatch};
+use crate::query::RecordBatch;
 
 /// Format identifier written into a catalog, so a reader can refuse a shape it
 /// does not understand rather than misinterpreting it.
@@ -138,6 +138,17 @@ pub fn referenced_params(cypher: &str) -> Vec<String> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogEntry {
     pub id: String,
+    /// The natural-language question, which is what KG-08 and DX-08 are about.
+    /// Empty is allowed so a purely structural catalog stays valid, but the
+    /// KG-08 conformance check requires it.
+    #[serde(default)]
+    pub question: String,
+    /// Other phrasings of the same question.
+    #[serde(default)]
+    pub paraphrases: Vec<String>,
+    /// "easy" | "medium" | "hard". KG-08 asks for difficulty labels.
+    #[serde(default)]
+    pub difficulty: String,
     pub cypher: String,
     /// Rows the query returned against the snapshot this catalog describes.
     pub rows: usize,
@@ -362,6 +373,12 @@ pub fn validate_entry_shape(id: &str, cypher: &str, params: &[ParamSpec]) -> Res
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct QuerySpec {
     pub id: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub paraphrases: Vec<String>,
+    #[serde(default)]
+    pub difficulty: String,
     pub cypher: String,
     #[serde(default)]
     pub unanswerable: bool,
@@ -396,6 +413,9 @@ pub fn build_catalog(
         }
         entries.push(CatalogEntry {
             id: id.clone(),
+            question: q.question.clone(),
+            paraphrases: q.paraphrases.clone(),
+            difficulty: q.difficulty.clone(),
             cypher: cypher.clone(),
             rows,
             hash: canonical_hash(&batch),
@@ -462,4 +482,60 @@ pub fn verify(store: &GraphStore, catalog: &QueryCatalog) -> Result<VerifyReport
     // Guard against the #449 shape: everything answered, nothing returned.
     let everything_empty = !results.is_empty() && results.iter().all(|r| r.actual_rows == 0);
     Ok(VerifyReport { results, everything_empty })
+}
+
+
+/// Whether a catalog meets what KG-08 and DX-08 already require (#1154).
+///
+/// Neither is a new requirement. KG-08 asks for "≥30 queries with gold answers,
+/// difficulty labels, and unanswerable items" per KG; DX-08 for "5 example
+/// questions and expected outputs". Both are recorded as partially met today
+/// because the queries live as prose in READMEs where nothing executes them.
+/// This is the check that makes them true or false rather than aspirational.
+pub fn kg08_conformance(catalog: &QueryCatalog) -> Vec<String> {
+    const MIN_ENTRIES: usize = 30;
+    const DIFFICULTIES: &[&str] = &["easy", "medium", "hard"];
+    let mut problems = Vec::new();
+
+    if catalog.entries.len() < MIN_ENTRIES {
+        problems.push(format!(
+            "KG-08 asks for at least {MIN_ENTRIES} queries; this catalog has {}",
+            catalog.entries.len()
+        ));
+    }
+    if !catalog.entries.iter().any(|e| e.unanswerable) {
+        problems.push(
+            "KG-08 asks for unanswerable items and there are none. They are not \
+             padding: refusing to answer is a correctness behaviour, and a suite \
+             without them cannot tell a model that declines from one that guesses."
+                .to_string(),
+        );
+    }
+    for e in &catalog.entries {
+        if e.question.trim().is_empty() {
+            problems.push(format!("{}: no question text; DX-08 is about the question", e.id));
+        }
+        if !DIFFICULTIES.contains(&e.difficulty.as_str()) {
+            problems.push(format!(
+                "{}: difficulty {:?} is not one of {DIFFICULTIES:?}", e.id, e.difficulty
+            ));
+        }
+    }
+    problems
+}
+
+/// Digest of a catalog file, for the snapshot to reference.
+///
+/// The catalog ships beside the `.sgsnap` rather than inside it: templates are
+/// schema-bound and get edited far more often than the data changes, and
+/// rebuilding a multi-GB artifact to fix a Cypher string is not a good trade
+/// (export runs at ~0.77 MB/s and is CPU-bound, #314). The digest is what makes
+/// a mismatched pair detectable anyway.
+pub fn catalog_digest(serialized: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in serialized.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{h:016x}")
 }
