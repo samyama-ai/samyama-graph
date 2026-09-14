@@ -1675,7 +1675,19 @@ impl QueryPlanner {
                         }
                         Box::new(join) as OperatorBox
                     } else {
-                        Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                        match Self::try_correlated_index_lookup(
+                            existing,
+                            match_clause,
+                            per_match_where[match_idx].as_ref(),
+                            &known_vars,
+                            &mut cross_match_predicates,
+                            store,
+                        ) {
+                            Ok(lookup) => lookup,
+                            Err(existing) => {
+                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                            }
+                        }
                     }
                 }
                 // A *leading* OPTIONAL MATCH has no left side, so there was
@@ -1764,7 +1776,32 @@ impl QueryPlanner {
         }
 
         if unwind_before_barrier {
-            if let Some(unwind) = leading_unwind {
+            // A batch lookup against an index is planned as an index probe per
+            // unwound row rather than an unwind over a scan of the label (#1219).
+            let batch_lookup = match leading_unwind {
+                Some(unwind)
+                    if query.unwind_leading
+                        && query.extra_unwind_clauses.is_empty()
+                        && query.load_csv_clause.is_none()
+                        && query.call_clause.is_none()
+                        && pre_with_clauses.len() == 1 =>
+                {
+                    Self::leading_unwind_index_lookup(
+                        unwind,
+                        &pre_with_clauses[0],
+                        per_match_where[0].as_ref(),
+                        &late_bound_predicates,
+                        store,
+                    )
+                }
+                _ => None,
+            };
+            if let Some(op) = batch_lookup {
+                operator = Some(op);
+                if let Some(unwind) = leading_unwind {
+                    known_vars.insert(unwind.variable.clone());
+                }
+            } else if let Some(unwind) = leading_unwind {
                 use crate::query::executor::operator::SingleRowOperator;
                 let base: OperatorBox = match operator.take() {
                     Some(op) => op,
@@ -2085,7 +2122,18 @@ impl QueryPlanner {
                                 }
                                 Box::new(join) as OperatorBox
                             } else {
-                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                                match Self::try_correlated_index_lookup(
+                                    existing,
+                                    match_clause,
+                                    per_match_where[match_idx].as_ref(),
+                                    &known_vars,
+                                    &mut cross_match_preds,
+                                    store,
+                                ) {
+                                    Ok(lookup) => lookup,
+                                    Err(existing) => Box::new(CartesianProductOperator::new(existing, match_op))
+                                        as OperatorBox,
+                                }
                             }
                         }
                         None => match_op,
@@ -4282,6 +4330,123 @@ impl QueryPlanner {
             }
             result
         }
+    }
+
+    /// The node a batch lookup would bind: one named node with exactly one
+    /// label (the index covers one label), no relationships, no path variable
+    /// and no inline properties.
+    fn lookup_target(match_clause: &MatchClause) -> Option<(&String, &Label)> {
+        let paths = &match_clause.pattern.paths;
+        if match_clause.optional || paths.len() != 1 {
+            return None;
+        }
+        let path = &paths[0];
+        let start = &path.start;
+        if !path.segments.is_empty()
+            || path.path_variable.is_some()
+            || start.labels.len() != 1
+            || start.properties.as_ref().is_some_and(|p| !p.is_empty())
+            || start.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+        {
+            return None;
+        }
+        Some((start.variable.as_ref()?, &start.labels[0]))
+    }
+
+    /// An indexed equality `var.prop = key` among `preds` whose `key` reads
+    /// only variables `bound` accepts: its position, the property, the key.
+    fn lookup_key(
+        var: &str,
+        label: &Label,
+        preds: &[Expression],
+        bound: impl Fn(&str) -> bool,
+        store: &GraphStore,
+    ) -> Option<(usize, String, Expression)> {
+        preds.iter().enumerate().find_map(|(i, pred)| {
+            let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { return None };
+            let (property, key) = match (left.as_ref(), right.as_ref()) {
+                (Expression::Property { variable, property }, key) if variable == var => (property, key),
+                (key, Expression::Property { variable, property }) if variable == var => (property, key),
+                _ => return None,
+            };
+            let mut vars = HashSet::new();
+            Self::collect_expression_variables(key, &mut vars);
+            if vars.is_empty() || vars.contains(var) || !vars.iter().all(|v| bound(v)) {
+                return None;
+            }
+            if !store.property_index.has_index(label, property) {
+                return None;
+            }
+            Some((i, property.clone(), key.clone()))
+        })
+    }
+
+    /// `MATCH ... MATCH (n:N) WHERE n.id = x.id` with `:N(id)` indexed: probe
+    /// the index once per upstream row, instead of joining every row against a
+    /// scan of the label and filtering afterwards (#1219). The equality is
+    /// taken out of `cross_preds`; the node's own WHERE is applied on top.
+    /// Anything that is not the `lookup_target` shape gets `existing` back.
+    fn try_correlated_index_lookup(
+        existing: OperatorBox,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        known_vars: &HashSet<String>,
+        cross_preds: &mut Vec<Expression>,
+        store: &GraphStore,
+    ) -> Result<OperatorBox, OperatorBox> {
+        let Some((var, label)) = Self::lookup_target(match_clause) else { return Err(existing) };
+        if known_vars.contains(var) {
+            return Err(existing);
+        }
+        let Some((i, property, key)) =
+            Self::lookup_key(var, label, cross_preds, |v| known_vars.contains(v), store)
+        else {
+            return Err(existing);
+        };
+        cross_preds.remove(i);
+        let mut op: OperatorBox = Box::new(crate::query::executor::operator::CorrelatedIndexLookupOperator::new(
+            existing,
+            var.clone(),
+            label.clone(),
+            property,
+            key,
+        ));
+        if let Some(w) = own_where {
+            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
+        }
+        Ok(op)
+    }
+
+    /// The leading-UNWIND form: `UNWIND $rows AS r MATCH (n:N) WHERE n.id = r.id`.
+    /// A leading UNWIND is placed above the match plan, so the equality never
+    /// reaches a join site; this builds Unwind -> index probe -> the node's own
+    /// WHERE in place of that plan. The equality stays among the late-bound
+    /// predicates and is checked again on each output row, which cannot change
+    /// an answer.
+    fn leading_unwind_index_lookup(
+        unwind: &UnwindClause,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        late_preds: &[Expression],
+        store: &GraphStore,
+    ) -> Option<OperatorBox> {
+        use crate::query::executor::operator::{CorrelatedIndexLookupOperator, SingleRowOperator};
+        let (var, label) = Self::lookup_target(match_clause)?;
+        if var == &unwind.variable {
+            return None;
+        }
+        let (_, property, key) = Self::lookup_key(var, label, late_preds, |v| v == unwind.variable, store)?;
+        let base: OperatorBox = Box::new(UnwindOperator::new(
+            Box::new(SingleRowOperator::new()),
+            unwind.expression.clone(),
+            unwind.variable.clone(),
+        ));
+        let mut op: OperatorBox =
+            Box::new(CorrelatedIndexLookupOperator::new(base, var.clone(), label.clone(), property, key));
+        if let Some(w) = own_where {
+            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
+        }
+        Some(op)
     }
 
     /// Collect variables referenced by an expression
