@@ -462,6 +462,106 @@ fn multiplicity_is_observable(query: &Query) -> bool {
 }
 
 /// Whether an expression contains an aggregate call, at any depth.
+/// Whether any MATCH carries a non-literal property value. Checked first so
+/// the common query is not copied.
+fn has_hoistable_match_properties(q: &Query) -> bool {
+    fn in_pattern(p: &Pattern) -> bool {
+        p.paths.iter().any(|path| {
+            path.start.property_exprs.is_some()
+                || path
+                    .segments
+                    .iter()
+                    .any(|s| s.node.property_exprs.is_some() || s.edge.property_exprs.is_some())
+        })
+    }
+    q.match_clauses.iter().any(|m| in_pattern(&m.pattern))
+        || q.extra_with_stages.iter().any(|(_, _, ms, _)| ms.iter().any(|m| in_pattern(&m.pattern)))
+        || q.clauses.iter().any(|c| matches!(c, Clause::Match(m) if in_pattern(&m.pattern)))
+}
+
+/// MATCH `(n {k: expr})`, where `expr` is not a literal, as `WHERE n.k = expr`.
+///
+/// Such a property was refused at planning, so the standard batch lookup
+/// `UNWIND $rows AS r MATCH (n:N {id: r.id})` was an error (TCK Unwind1 [6]).
+/// For a MATCH the two forms mean the same thing.
+///
+/// A group's WHERE is shared by all of its MATCH clauses (the parser ANDs
+/// them), and a WHERE shared with an OPTIONAL MATCH filters only the optional
+/// part, so a group containing one is left alone. So is an anonymous node
+/// (nothing to name) and a variable-length relationship (a list, not one
+/// relationship). Those keep the refusal.
+fn hoist_match_property_exprs(q: &mut Query) {
+    let split = q.with_split_index.unwrap_or(q.match_clauses.len()).min(q.match_clauses.len());
+    let (pre, post) = q.match_clauses.split_at_mut(split);
+    hoist_group(pre, &mut q.where_clause);
+    hoist_group(post, &mut q.post_with_where_clause);
+    for (_, _, matches, wh) in &mut q.extra_with_stages {
+        hoist_group(matches, wh);
+    }
+    // In the clause pipeline a MATCH's own WHERE is the clause after it.
+    let mut i = 0;
+    while i < q.clauses.len() {
+        let pred = match &mut q.clauses[i] {
+            Clause::Match(m) => take_conjuncts(std::slice::from_mut(m)),
+            _ => None,
+        };
+        if let Some(pred) = pred {
+            match q.clauses.get_mut(i + 1) {
+                Some(Clause::Where(w)) => and_into(&mut w.predicate, pred),
+                _ => q.clauses.insert(i + 1, Clause::Where(WhereClause { predicate: pred })),
+            }
+        }
+        i += 1;
+    }
+}
+
+fn hoist_group(matches: &mut [MatchClause], wh: &mut Option<WhereClause>) {
+    if let Some(pred) = take_conjuncts(matches) {
+        match wh {
+            Some(w) => and_into(&mut w.predicate, pred),
+            None => *wh = Some(WhereClause { predicate: pred }),
+        }
+    }
+}
+
+/// The `var.key = expr` conjuncts a group's patterns carry, removed from them.
+fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
+    if matches.iter().any(|m| m.optional) {
+        return None;
+    }
+    fn hoist(var: &Option<String>, exprs: &mut Option<HashMap<String, Expression>>, out: &mut Vec<Expression>) {
+        let Some(v) = var else { return };
+        let Some(map) = exprs.take() else { return };
+        let mut entries: Vec<(String, Expression)> = map.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, e) in entries {
+            out.push(Expression::Binary {
+                left: Box::new(Expression::Property { variable: v.clone(), property: k }),
+                op: BinaryOp::Eq,
+                right: Box::new(e),
+            });
+        }
+    }
+    let mut conj = Vec::new();
+    for m in matches.iter_mut() {
+        for path in &mut m.pattern.paths {
+            hoist(&path.start.variable, &mut path.start.property_exprs, &mut conj);
+            for seg in &mut path.segments {
+                if seg.edge.length.is_none() {
+                    hoist(&seg.edge.variable, &mut seg.edge.property_exprs, &mut conj);
+                }
+                hoist(&seg.node.variable, &mut seg.node.property_exprs, &mut conj);
+            }
+        }
+    }
+    conj.into_iter().reduce(|l, r| Expression::Binary { left: Box::new(l), op: BinaryOp::And, right: Box::new(r) })
+}
+
+fn and_into(target: &mut Expression, pred: Expression) {
+    let old = std::mem::replace(target, Expression::Literal(PropertyValue::Null));
+    *target = Expression::Binary { left: Box::new(old), op: BinaryOp::And, right: Box::new(pred) };
+}
+
 fn expression_has_aggregate(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
@@ -982,6 +1082,18 @@ impl QueryPlanner {
         // Checked for *both* paths. It reads `query.clauses` as well as the
         // by-kind fields, so a pipeline query cannot slip a pattern carrying an
         // unevaluated property expression past it.
+        // A MATCH property whose value is not a literal filters like a WHERE, so
+        // it is rewritten into one before the refusal below looks at it. Only
+        // a query that has one is copied.
+        let hoisted;
+        let query = if has_hoistable_match_properties(query) {
+            let mut q = query.clone();
+            hoist_match_property_exprs(&mut q);
+            hoisted = q;
+            &hoisted
+        } else {
+            query
+        };
         Self::reject_unevaluated_property_exprs(query)?;
         if query.needs_clause_pipeline {
             return self.plan_clause_pipeline(query, store);

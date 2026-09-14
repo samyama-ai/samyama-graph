@@ -1647,24 +1647,29 @@ fn a_constant_expression_is_allowed_but_an_unbound_variable_is_refused() {
 }
 
 #[test]
-fn match_refuses_a_non_literal_property_value_and_merge_evaluates_it() {
+fn match_filters_on_a_non_literal_property_value_and_merge_evaluates_it() {
     // The danger both halves guard against is the same: accepting the pattern
     // and dropping the constraint. `MATCH (p:P {n: x})` would then return
     // *every* `:P` — a working-looking query returning too much.
     //
-    // MATCH still refuses, because it still does not evaluate these. MERGE no
-    // longer needs to: #642 resolves the property against the row and uses the
-    // result for the match and the creation alike, which is what makes
-    // `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather than a
-    // node factory. This test used to assert both refused; it now asserts each
-    // does the right thing, which is no longer the same thing.
+    // MATCH now applies the property as a WHERE (`p.n = x`), which is what it
+    // means for a MATCH; it used to refuse because it could not. Where that
+    // rewrite could change meaning -- an OPTIONAL MATCH's group, an anonymous
+    // node -- it still refuses. MERGE resolves the property against the row
+    // (#642) and uses the result for the match and the creation alike, which is
+    // what makes `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather
+    // than a node factory.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     engine.execute_mut("CREATE (:P {n: 1})", &mut s, "default").unwrap();
     engine.execute_mut("CREATE (:P {n: 2})", &mut s, "default").unwrap();
 
+    // One row, not both `:P`: the constraint is applied, not dropped.
+    assert_eq!(bag(&s, "UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
+
+    // Where it cannot be rewritten it is still refused, never silently widened.
     let err = engine
-        .execute("UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v", &s)
+        .execute("UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v", &s)
         .expect_err("must not silently match everything");
     assert!(format!("{err}").contains("WHERE"), "should name the workaround: {err}");
 
