@@ -119,20 +119,21 @@ pub fn export_tenant_with_compression(
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(_nid, eid) in &frozen {
             if !full_edge_ids.contains(eid.as_u64()) {
+                // A frozen entry whose type misses is a relationship deleted
+                // after compaction, kept only behind its tombstone. It is not
+                // in the graph, so it is not counted or written (#1096).
+                let Some(et) = store.get_edge_type(eid) else { continue };
                 adjacency_edge_count += 1;
-                if let Some(et) = store.get_edge_type(eid) {
-                    edge_type_set.insert(et.as_str().to_string());
-                }
+                edge_type_set.insert(et.as_str().to_string());
             }
         }
         // Write buffer outgoing
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(_nid, eid) in buf {
             if !full_edge_ids.contains(eid.as_u64()) {
+                let Some(et) = store.get_edge_type(eid) else { continue };
                 adjacency_edge_count += 1;
-                if let Some(et) = store.get_edge_type(eid) {
-                    edge_type_set.insert(et.as_str().to_string());
-                }
+                edge_type_set.insert(et.as_str().to_string());
             }
         }
     }
@@ -250,9 +251,9 @@ pub fn export_tenant_with_compression(
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(tgt_nid, eid) in &frozen {
             if full_edge_ids.contains(eid.as_u64()) { continue; }
-            let et = store.get_edge_type(eid)
-                .map(|e| e.as_str().to_string())
-                .unwrap_or_default();
+            // Same rule as the count above: no type means deleted. Writing it
+            // with `edge_type: ""` brought it back on import, live (#1096).
+            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
             let snap_edge = SnapshotEdge {
                 t: "e".to_string(),
                 id: eid.as_u64(),
@@ -270,9 +271,9 @@ pub fn export_tenant_with_compression(
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(tgt_nid, eid) in buf {
             if full_edge_ids.contains(eid.as_u64()) { continue; }
-            let et = store.get_edge_type(eid)
-                .map(|e| e.as_str().to_string())
-                .unwrap_or_default();
+            // Same rule as the count above: no type means deleted. Writing it
+            // with `edge_type: ""` brought it back on import, live (#1096).
+            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
             let snap_edge = SnapshotEdge {
                 t: "e".to_string(),
                 id: eid.as_u64(),
