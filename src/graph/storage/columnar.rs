@@ -637,6 +637,13 @@ impl ColumnStore {
         self.columns.get(id.0 as usize)?.get_str(idx)
     }
 
+    /// Whether the column holds strings, so a reader that only borrows
+    /// strings can stop asking a column that never will.
+    #[inline]
+    pub fn is_str_column(&self, id: ColumnId) -> bool {
+        matches!(self.columns.get(id.0 as usize), Some(Column::String(_)))
+    }
+
     pub fn set_property(&mut self, idx: usize, key: &str, value: PropertyValue) {
         if let Some(&ColumnId(slot)) = self.index.get(key) {
             self.columns[slot as usize].set(idx, value);
