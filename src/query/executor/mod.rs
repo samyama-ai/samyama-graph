@@ -840,7 +840,7 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
         }
     }
     if let Some(fc) = &mut query.foreach_clause {
-        substitute_expr(&mut fc.expression, p)?;
+        substitute_foreach(fc, p)?;
     }
     for u in query
         .unwind_clause
@@ -886,7 +886,7 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
                     substitute_expr(e, p)?;
                 }
             }
-            Clause::Foreach(fc) => substitute_expr(&mut fc.expression, p)?,
+            Clause::Foreach(fc) => substitute_foreach(fc, p)?,
             Clause::Call(c) => {
                 for a in &mut c.arguments {
                     substitute_expr(a, p)?;
@@ -906,6 +906,30 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
     }
     for (u, _) in &mut query.union_queries {
         substitute_params(u, p)?;
+    }
+    Ok(())
+}
+
+/// A FOREACH's list and every clause of its body, nested bodies included.
+fn substitute_foreach(
+    fc: &mut crate::query::ast::ForeachClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::query::ast::ForeachBody;
+    substitute_expr(&mut fc.expression, p)?;
+    for clause in &mut fc.body {
+        match clause {
+            ForeachBody::Set(sc) => substitute_set(sc, p)?,
+            ForeachBody::Remove(_) => {}
+            ForeachBody::Delete(dc) => {
+                for e in &mut dc.expressions {
+                    substitute_expr(e, p)?;
+                }
+            }
+            ForeachBody::Create(cc) => substitute_pattern(&mut cc.pattern, p)?,
+            ForeachBody::Merge(mc) => substitute_merge(mc, p)?,
+            ForeachBody::Foreach(inner) => substitute_foreach(inner, p)?,
+        }
     }
     Ok(())
 }
