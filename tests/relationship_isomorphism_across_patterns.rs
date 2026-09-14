@@ -85,6 +85,42 @@ fn optional_match() {
     check("MATCH (p:P {n: 'd'}) OPTIONAL MATCH (p)-[e1]->(x), (x)-[e2]->(y) RETURN count(e2)", &["0"]);
 }
 
+/// Two parallel relationships between the same nodes are two relationships:
+/// the patterns may bind both, in either order, but not one twice.
+#[test]
+fn parallel_relationships() {
+    let mut s = GraphStore::new();
+    let q = "CREATE (x:X {n: 'x'}), (y:Y {n: 'y'}), (x)-[:K]->(y), (x)-[:K]->(y)";
+    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
+    let count = |q: &str| -> String {
+        let out = QueryExecutor::new(&s).execute(&parse_query(q).unwrap()).unwrap();
+        cell(out.records[0].get("c"))
+    };
+    assert_eq!(count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) RETURN count(*) AS c"), "2");
+    // A WHERE that fails when t1 = t2 leaves nothing, with or without the check.
+    assert_eq!(count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) WHERE t1.n < t2.n RETURN count(*) AS c"), "0");
+}
+
+/// The unordered-pairs idiom needs no check: `t1.name < t2.name` already
+/// fails when the two relationships are one (#1233; BI-2's shape). Without
+/// such a WHERE the check stays.
+#[test]
+fn a_where_that_keeps_the_endpoints_apart_needs_no_check() {
+    let s = graph();
+    let plan = |q: &str| -> String {
+        let out = QueryExecutor::new(&s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
+        match out.records[0].get("plan") {
+            Some(Value::Property(PropertyValue::String(t))) => t.clone(),
+            other => panic!("no plan: {other:?}"),
+        }
+    };
+    let pairs = "MATCH (p)-[:K]->(t1), (p)-[:K]->(t2) WHERE t1.n < t2.n RETURN t1.n, t2.n";
+    assert!(!plan(pairs).contains("__iso_rel"), "{}", plan(pairs));
+    check(pairs, &[]);
+    let any = "MATCH (p)-[:K]->(t1), (p)-[:K]->(t2) RETURN t1.n, t2.n";
+    assert!(plan(any).contains("__iso_rel"), "{}", plan(any));
+}
+
 /// Controls, right before and after: separate clauses may reuse a relationship,
 /// disjoint types never collide, and one path was already covered by #684.
 #[test]
