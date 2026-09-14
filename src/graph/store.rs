@@ -353,6 +353,10 @@ pub struct AdjacencyStats {
     /// Approximate bytes saved by storing frozen edges in CSR instead of
     /// Vec-of-Vec (one u32 offset per node vs one Vec header per node).
     pub bytes_saved_estimate: usize,
+    /// Deleted edges still holding an entry in a frozen segment: walked and
+    /// rejected on every traversal until `merge_frozen_segments` drops them
+    /// (#740). Included in `frozen_edges`.
+    pub frozen_dead_edges: usize,
 }
 
 /// Multi-segment frozen CSR — holds one or more immutable CSR segments.
@@ -669,10 +673,14 @@ pub struct Transaction {
 
 /// MVCC version entry for edges. Stores a snapshot of edge properties at a specific version.
 /// Endpoints and type are immutable — only properties are versioned.
+///
+/// `properties` is `None` while nothing has changed the edge since `version`:
+/// the live properties are then this entry's properties. It takes its copy
+/// when the first change at a later version arrives (#602).
 #[derive(Debug, Clone)]
 pub struct EdgeVersionEntry {
     pub version: u64,
-    pub properties: PropertyMap,
+    pub properties: Option<PropertyMap>,
 }
 
 /// Where a loaded graph's bytes are, by structure (`GraphStore::memory_report`).
@@ -860,6 +868,10 @@ pub struct GraphStore {
     /// buffer, where deletion really does remove it, so those stay reusable.
     /// The watermark is what separates the two.
     frozen_edge_watermark: u64,
+    /// Deleted edges whose entries are still in a frozen segment, hidden by
+    /// their `EDGE_TYPE_UNSET` tombstone. What `merge_frozen_segments` would
+    /// drop; the measure `merge_frozen_segments_if_needed` judges by (#740).
+    frozen_dead_edges: usize,
 
     /// Label index for fast lookups
     label_index: HashMap<Label, HashSet<NodeId>>,
@@ -984,6 +996,7 @@ impl GraphStore {
             type_adj: std::sync::RwLock::new(HashMap::new()),
             type_adj_live: std::sync::atomic::AtomicBool::new(false),
             frozen_edge_watermark: 0,
+            frozen_dead_edges: 0,
             label_index: HashMap::new(),
             label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
@@ -1731,6 +1744,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Distinguishes "not set" from "type 0" so v1 full edges fall through to Edge arena.
     const EDGE_TYPE_UNSET: u16 = u16::MAX;
 
+    /// `current_version` of a new store. Only the transaction API advances it.
+    const FIRST_VERSION: u64 = 1;
+
     pub fn get_edge_type(&self, edge_id: EdgeId) -> Option<EdgeType> {
         let idx = edge_id.as_u64() as usize;
         if idx < self.edge_type_ids.len() {
@@ -1883,18 +1899,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Set a property on an edge, updating both columnar and row storage.
     ///
-    /// MVCC contract: the version log records POST-mutation state keyed at
-    /// `current_version`. `get_edge_at_version(eid, V)` finds the entry with
-    /// the largest `version <= V`, which then represents the state as of that
+    /// MVCC contract: the version log has an entry per version the edge was
+    /// written at. `get_edge_at_version(eid, V)` finds the entry with the
+    /// largest `version <= V`, which then represents the state as of that
     /// version. Writes at the same `current_version` coalesce onto the last
-    /// entry instead of creating a new one (intra-transaction updates).
+    /// entry instead of creating a new one (intra-transaction updates). An
+    /// entry holds its properties only once a later version has changed them;
+    /// until then the live properties are its properties (#602). An edge with
+    /// no log has been there, unchanged, since the first version.
     pub fn set_edge_property(
         &mut self,
         edge_id: EdgeId,
         key: impl Into<String>,
         value: impl Into<PropertyValue>,
     ) -> GraphResult<()> {
-        self.invalidate_statistics_cache();
         let key_str = key.into();
         let val = value.into();
         if !property_is_storable(&val) {
@@ -1902,43 +1920,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 "InvalidPropertyType: `{key_str}` cannot hold a map inside a list."
             )));
         }
-        // Null removes, as on the node path above (#952) -- and, as there,
-        // a write to an edge that does not exist is still an error.
+        // A write to an edge that does not exist is an error, for a value as
+        // for Null. Only Null checked: any other value went into the column
+        // and the row map under an id no edge holds, for the next edge to take
+        // that id to read.
+        if !self.has_edge(edge_id) {
+            return Err(GraphError::EdgeNotFound(edge_id));
+        }
+        // Null removes, as on the node path above (#952).
         if matches!(val, PropertyValue::Null) {
-            if !self.has_edge(edge_id) {
-                return Err(GraphError::EdgeNotFound(edge_id));
-            }
             self.remove_edge_property(edge_id, &key_str);
             return Ok(());
         }
-        let idx = edge_id.as_u64() as usize;
-
-        // Apply the mutation to the live stores first so the snapshot below
-        // captures the new state.
-        self.edge_columns.set_property(idx, &key_str, val.clone());
+        // Column, row map, statistics cache and journal. This wrote the column
+        // itself as well, and journalled the edge a second time.
         self.set_edge_property_sparse(edge_id, key_str, val);
-
-        // Record the POST-mutation properties in the version log.
-        let post_props = self
-            .edge_properties
-            .get(&edge_id)
-            .cloned()
-            .unwrap_or_default();
-        let current_version = self.current_version;
-        let version_log = self.edge_version_log.entry(edge_id).or_insert_with(Vec::new);
-        match version_log.last_mut() {
-            Some(last) if last.version == current_version => {
-                last.properties = post_props;
-            }
-            _ => {
-                version_log.push(EdgeVersionEntry {
-                    version: current_version,
-                    properties: post_props,
-                });
-            }
-        }
-
-        self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.mark_edge_version(edge_id);
         Ok(())
     }
 
@@ -2149,6 +2146,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.edge_endpoints[idx] = (source, target);
 
+        self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
@@ -2180,8 +2178,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let edge_type = edge_type.into();
         self.invalidate_hierarchies_for_edge_type(&edge_type);
-        let mut edge = Edge::new(edge_id, source, target, edge_type.clone());
-        edge.version = self.current_version;
+        // No `Edge` is built: endpoints, type id and properties each live in
+        // their own array since DS-07c. One was built here anyway -- cloning
+        // the type string and reading the clock -- and dropped unread (#491).
 
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
@@ -2247,6 +2246,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels = label_set(target).unwrap_or(empty);
         self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
+        self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
@@ -2285,8 +2285,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let edge_type = edge_type.into();
         self.invalidate_hierarchies_for_edge_type(&edge_type);
-        let mut edge = Edge::new_with_properties(edge_id, source, target, edge_type.clone(), properties);
-        edge.version = self.current_version;
 
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
@@ -2312,8 +2310,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
-        if !edge.properties.is_empty() {
-            self.edge_properties.insert(edge_id, edge.properties.clone());
+        // The caller's map, moved. It was cloned whole into the row store and
+        // the original dropped with the unused `Edge` (#491).
+        if !properties.is_empty() {
+            self.edge_properties.insert(edge_id, properties);
         }
 
         // Update edge type index. `get_mut` first so the common case -- a type
@@ -2355,6 +2355,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let tgt_labels = label_set(target).unwrap_or(empty);
         self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
+        self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         Ok(edge_id)
     }
@@ -2387,8 +2388,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                     .find(|v| v.version > version)
                     .map(|v| v.version);
                 if next_version.is_some() || version < self.current_version {
-                    // Historical read — use the snapshot properties
-                    (entry.version, entry.properties.clone())
+                    // Historical read — use the snapshot properties. An entry
+                    // without one has not been changed since its version, so
+                    // the live properties are its properties.
+                    let properties = match &entry.properties {
+                        Some(snapshot) => snapshot.clone(),
+                        None => self.edge_properties.get(&id).cloned().unwrap_or_default(),
+                    };
+                    (entry.version, properties)
                 } else {
                     // Current read — use latest properties
                     (entry.version, self.edge_properties.get(&id).cloned().unwrap_or_default())
@@ -2435,7 +2442,79 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if idx >= self.edge_endpoints.len() { return None; }
         let (src, tgt) = self.edge_endpoints[idx];
         if src.as_u64() == 0 && tgt.as_u64() == 0 { return None; }
+        self.seal_edge_version(id);
         Some(self.edge_properties.entry(id).or_insert_with(PropertyMap::new))
+    }
+
+    /// Note that `edge_id` was written at the current version, for
+    /// `get_edge_at_version`.
+    ///
+    /// The entry carries no properties. While its version is the current one
+    /// nothing reads them: a read at the current version uses the live
+    /// properties, and a historical read picks an older entry. It gets its copy
+    /// from `seal_edge_version` when the first change at a later version
+    /// arrives, before that change is made. Cloning the whole map here on
+    /// every write cost 728 B/edge for three properties (#602).
+    ///
+    /// At the first version there is nothing older to tell apart, so no entry
+    /// is made: an edge with no log reads as unchanged since the first version,
+    /// which is what an entry at the first version would say. Nothing outside
+    /// the transaction API advances `current_version`, so a store that does not
+    /// use it keeps no edge version log at all.
+    fn mark_edge_version(&mut self, edge_id: EdgeId) {
+        let current = self.current_version;
+        if current == Self::FIRST_VERSION {
+            return;
+        }
+        let log = self.edge_version_log.entry(edge_id).or_insert_with(|| Vec::with_capacity(1));
+        if log.last().is_none_or(|last| last.version != current) {
+            log.push(EdgeVersionEntry { version: current, properties: None });
+        }
+    }
+
+    /// An edge created after the first version gets an entry at its creation
+    /// version, so `seal_edge_version` does not take it for one that has been
+    /// there since the first. Reads before that version see the live
+    /// properties, as they did before the log was lazy.
+    fn note_edge_created(&mut self, edge_id: EdgeId) {
+        let current = self.current_version;
+        if current != Self::FIRST_VERSION {
+            self.edge_version_log
+                .insert(edge_id, vec![EdgeVersionEntry { version: current, properties: None }]);
+        }
+    }
+
+    /// Give the newest version-log entry of `edge_id` its own copy of the
+    /// properties, if a later version has begun since it was written. Every
+    /// path that changes an edge's properties calls this first; until one
+    /// does, the live properties are that entry's properties.
+    fn seal_edge_version(&mut self, edge_id: EdgeId) {
+        let current = self.current_version;
+        if current == Self::FIRST_VERSION {
+            return; // no older version to keep
+        }
+        let live = &self.edge_properties;
+        match self.edge_version_log.get_mut(&edge_id) {
+            Some(log) => {
+                if let Some(last) = log.last_mut() {
+                    if last.properties.is_none() && last.version < current {
+                        last.properties = Some(live.get(&edge_id).cloned().unwrap_or_default());
+                    }
+                }
+            }
+            None => {
+                if !self.has_edge(edge_id) {
+                    return;
+                }
+                // There since the first version and unchanged until now.
+                let mut log = Vec::with_capacity(2);
+                log.push(EdgeVersionEntry {
+                    version: Self::FIRST_VERSION,
+                    properties: Some(self.edge_properties.get(&edge_id).cloned().unwrap_or_default()),
+                });
+                self.edge_version_log.insert(edge_id, log);
+            }
+        }
     }
 
     /// Get a lightweight edge view reconstructed from DS-07c fields.
@@ -2477,6 +2556,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.seal_edge_version(edge_id);
         // The column as well as the row map. This is the setter CREATE, MERGE
         // and SET use, and it wrote the row map only, so every relationship
         // property a query created missed the column that reads try first and
@@ -2501,6 +2581,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         I: IntoIterator<Item = (K, PropertyValue)>,
     {
         let idx = edge_id.as_u64() as usize;
+        self.seal_edge_version(edge_id);
         let mut wrote = false;
         for (key, value) in props {
             let key = key.into();
@@ -2544,6 +2625,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // tombstone that hides it and resurrects a deleted edge.
         if id.as_u64() >= self.frozen_edge_watermark {
             self.free_edge_ids.push(id.as_u64());
+        } else {
+            // Below the watermark every id is in a frozen segment: ids that
+            // low are never handed out again until a merge releases them.
+            self.frozen_dead_edges += 1;
         }
 
         // Remove from edge type index
@@ -3232,6 +3317,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         built
     }
 
+    /// The index for `(type_id, outgoing)` if one is already built, without
+    /// building it. `None` when none is built or the type was declined.
+    ///
+    /// For a caller whose own work is too small to justify a build but that
+    /// should not walk every edge when an earlier query already paid for one:
+    /// a variable-length expand from a single anchor visits a few dozen nodes
+    /// (#1197).
+    pub fn type_adjacency_if_built(&self, type_id: u16, outgoing: bool) -> Option<std::sync::Arc<TypeAdjacency>> {
+        self.type_adj.read().unwrap().get(&(type_id, outgoing)).cloned().flatten()
+    }
+
     /// Whether `edge_type_index` accounts for every edge in the adjacency.
     ///
     /// `create_edge_stub` (the bulk-load path) deliberately skips that index
@@ -3420,6 +3516,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             buffer_edges,
             frozen_segments,
             bytes_saved_estimate,
+            frozen_dead_edges: self.frozen_dead_edges,
         }
     }
 
@@ -3999,13 +4096,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let mut out: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
         let mut inc: Vec<Vec<(NodeId, EdgeId)>> = vec![Vec::new(); capacity];
-        let mut kept: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for idx in 0..capacity {
             for seg in &self.frozen_outgoing.segments {
                 for &(t, e) in seg.neighbors(idx) {
                     if live(self, e) {
                         out[idx].push((t, e));
-                        kept.insert(e.as_u64());
                     }
                 }
             }
@@ -4013,7 +4108,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for &(t, e) in buf {
                     if live(self, e) {
                         out[idx].push((t, e));
-                        kept.insert(e.as_u64());
                     }
                 }
             }
@@ -4051,16 +4145,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         // Nothing references a dead id any more, so it can be reused — which is
-        // what #739's watermark had to forbid. Ids below the new watermark that
-        // are *not* in `kept` are free.
+        // what #739's watermark had to forbid. Every tombstoned id is free.
+        //
+        // This also consulted a `HashSet` of every live edge id, built during
+        // the walk above -- one entry per edge in the graph, SipHashed -- but
+        // only live ids went in, and a live id has a type, so the tombstone
+        // test alone always decided.
         for id in 0..self.next_edge_id {
-            if !kept.contains(&id)
-                && self
-                    .edge_type_ids
-                    .get(id as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == Self::EDGE_TYPE_UNSET
+            if self
+                .edge_type_ids
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Self::EDGE_TYPE_UNSET)
+                == Self::EDGE_TYPE_UNSET
             {
                 self.free_edge_ids.push(id);
             }
@@ -4068,6 +4165,31 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.free_edge_ids.sort_unstable();
         self.free_edge_ids.dedup();
         self.frozen_edge_watermark = 0;
+        self.frozen_dead_edges = 0;
+    }
+
+    /// `merge_frozen_segments`, when the frozen tier has split into more than
+    /// `max_segments` segments or more than `max_dead_fraction` of its entries
+    /// belong to deleted edges. Returns whether it merged.
+    ///
+    /// Both costs are per walk: each segment is an offsets lookup per node on
+    /// every expand, and each dead entry is visited and rejected. The merge is
+    /// O(edges) and allocates a whole CSR, so this is for a caller to run at a
+    /// moment of its choosing -- after a batch of deletes, say -- not something
+    /// a query triggers (#740).
+    pub fn merge_frozen_segments_if_needed(&mut self, max_segments: usize, max_dead_fraction: f64) -> bool {
+        let frozen = self.frozen_outgoing.edge_count();
+        if frozen == 0 {
+            return false;
+        }
+        let segments = self.frozen_outgoing.segments.len();
+        let dead = self.frozen_dead_edges as f64 / frozen as f64;
+        if segments > max_segments || dead > max_dead_fraction {
+            self.merge_frozen_segments();
+            true
+        } else {
+            false
+        }
     }
 
     /// Compact the write buffer into the frozen CSR tier.
@@ -4347,6 +4469,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.free_node_ids.clear();
         self.free_edge_ids.clear();
         self.frozen_edge_watermark = 0;
+        self.frozen_dead_edges = 0;
         self.label_index.clear();
         self.edge_type_index.clear();
         self.vector_index = Arc::new(VectorIndexManager::new());
@@ -4766,6 +4889,9 @@ mod tests {
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
+            ("mark_edge_version", "records the version an edge property write happened at; reads at that version use the live properties either way"),
+            ("seal_edge_version", "copies an edge's live properties into its version-log entry, which then holds the same values it read as before"),
+            ("note_edge_created", "marks a new edge's creation version; reads before it see the live properties with or without the entry"),
             ("journal", "appends to the journal, which no query reads"),
             ("shrink_to_fit", "returns unused capacity; every element and every id is unchanged"),
             ("intern_edge_type", "adds a type name to the table; no edge exists at that type until the caller creates one, and that path bumps"),
@@ -7047,7 +7173,7 @@ mod tests {
         store.current_version = 2;
         let current_props = store.edge_properties.get(&eid).cloned().unwrap_or_default();
         store.edge_version_log.entry(eid).or_insert_with(Vec::new).push(
-            EdgeVersionEntry { version: 1, properties: current_props }
+            EdgeVersionEntry { version: 1, properties: Some(current_props) }
         );
         store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(9.9));
 
@@ -7111,19 +7237,19 @@ mod tests {
 
         // Create version log entries
         store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 1, properties: PropertyMap::new() }
+            EdgeVersionEntry { version: 1, properties: Some(PropertyMap::new()) }
         );
         store.current_version = 2;
         let mut props2 = PropertyMap::new();
         props2.insert("w".to_string(), PropertyValue::Float(2.0));
         store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 2, properties: props2 }
+            EdgeVersionEntry { version: 2, properties: Some(props2) }
         );
         store.current_version = 3;
         let mut props3 = PropertyMap::new();
         props3.insert("w".to_string(), PropertyValue::Float(3.0));
         store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 3, properties: props3 }
+            EdgeVersionEntry { version: 3, properties: Some(props3) }
         );
 
         assert_eq!(store.edge_version_log[&eid].len(), 3);
