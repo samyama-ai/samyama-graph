@@ -37,7 +37,7 @@ use std::time::Instant;
 use samyama_sdk::{
     EmbeddedClient, SamyamaClient,
     PersistenceManager, ResourceQuotas,
-    GraphStore, Label, NodeId,
+    GraphStore, Label, NodeId, PropertyValue,
     LLMProvider, NLQConfig,
 };
 
@@ -441,21 +441,25 @@ fn load_relationship_file(
         if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
             if let (Some(from_node), Some(to_node)) = (mappings.find(&from_id), mappings.find(&to_id)) {
                 if let Ok(edge_id) = graph.create_edge(from_node, to_node, edge_type) {
-                    if let Some(props) = graph.get_edge_properties_mut(edge_id) {
-                        for (key, value) in &row {
-                            if *key != from_col && *key != to_col && !value.is_empty() {
-                                if let Ok(n) = value.parse::<f64>() {
-                                    props.insert((*key).into(), n.into());
-                                } else if let Ok(n) = value.parse::<i64>() {
-                                    props.insert((*key).into(), n.into());
-                                } else if *value == "True" || *value == "False" {
-                                    props.insert((*key).into(), (*value == "True").into());
-                                } else {
-                                    props.insert((*key).into(), (*value).into());
-                                }
-                            }
+                    // Collected, then written through the store's batch setter so
+                    // the values reach the columns the query engine reads first
+                    // (#1192). `get_edge_properties_mut` wrote the row map only.
+                    let mut props: Vec<(String, PropertyValue)> = Vec::new();
+                    for (key, value) in &row {
+                        if *key != from_col && *key != to_col && !value.is_empty() {
+                            let v: PropertyValue = if let Ok(n) = value.parse::<f64>() {
+                                n.into()
+                            } else if let Ok(n) = value.parse::<i64>() {
+                                n.into()
+                            } else if *value == "True" || *value == "False" {
+                                (*value == "True").into()
+                            } else {
+                                (*value).into()
+                            };
+                            props.push(((*key).to_string(), v));
                         }
                     }
+                    graph.set_edge_properties_sparse(edge_id, props);
                     count += 1;
                 }
             }
