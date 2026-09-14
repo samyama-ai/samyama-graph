@@ -3727,9 +3727,12 @@ impl QueryPlanner {
                         // distance cannot answer `*2..n` correctly, and no path
                         // variable because a membership test yields no path.
                         if path.path_variable.is_none() && min_hops <= 1 {
-                            if let Some(pinned) =
-                                pinned_node_for(&target_var, &deferred_predicates, store)
-                            {
+                            if let Some(pinned) = pinned_target_for(
+                                &target_var,
+                                &deferred_predicates,
+                                segment.node.properties.as_ref(),
+                                store,
+                            ) {
                                 expand = expand.with_pinned_target(pinned);
                             }
                         }
@@ -4351,18 +4354,8 @@ impl QueryPlanner {
                 // thousands of candidates expands its own neighbourhood to
                 // discover whether that one person is in it.
                 if path.path_variable.is_none() && length.min.unwrap_or(1) <= 1 {
-                    if let Some(pinned) = pinned_node_for(&target.var, path_preds, store)
-                        .or_else(|| target.properties.as_ref().and_then(|props| {
-                            let inline: Vec<Expression> = props.iter().map(|(k, v)| Expression::Binary {
-                                left: Box::new(Expression::Property {
-                                    variable: target.var.clone(),
-                                    property: k.clone(),
-                                }),
-                                op: BinaryOp::Eq,
-                                right: Box::new(Expression::Literal(v.clone())),
-                            }).collect();
-                            pinned_node_for(&target.var, &inline, store)
-                        }))
+                    if let Some(pinned) =
+                        pinned_target_for(&target.var, path_preds, target.properties.as_ref(), store)
                     {
                         expand = expand.with_pinned_target(pinned);
                     }
@@ -5928,6 +5921,37 @@ fn segment_fanout(
             total.min(1e12)
         }
     }
+}
+
+/// `pinned_node_for` over the `WHERE` predicates, then over the target's inline
+/// properties turned into the same equalities.
+///
+/// `(q:P {id: 7})` and `WHERE q.id = 7` pin the same node. Only the anchored
+/// path tried the inline form; on a single-segment pattern the inline
+/// properties were applied as a filter after the walk and never pinned, so the
+/// operator expanded every candidate's neighbourhood instead of answering one
+/// reachability question (#1199). The filter still runs either way: pinning
+/// changes the plan, not the answer.
+fn pinned_target_for(
+    var: &str,
+    preds: &[Expression],
+    inline: Option<&HashMap<String, PropertyValue>>,
+    store: &GraphStore,
+) -> Option<crate::graph::NodeId> {
+    pinned_node_for(var, preds, store).or_else(|| {
+        let inline: Vec<Expression> = inline?
+            .iter()
+            .map(|(k, v)| Expression::Binary {
+                left: Box::new(Expression::Property {
+                    variable: var.to_string(),
+                    property: k.clone(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expression::Literal(v.clone())),
+            })
+            .collect();
+        pinned_node_for(var, &inline, store)
+    })
 }
 
 /// Total intermediate rows for a plan anchored at `nodes[anchor]`.
