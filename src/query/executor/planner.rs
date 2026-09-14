@@ -1571,6 +1571,16 @@ impl QueryPlanner {
         // the Unwind operator that binds it sits above the matches. The top-level WHERE
         // filter re-applies the full predicate after the Unwind, so dropping it here loses
         // nothing.
+        // Which conjuncts were written after an OPTIONAL MATCH, and after which
+        // one (#1231). `pre_with_clauses` carries propagated labels, so the
+        // parser's patterns are compared with the clauses as written.
+        let mut optional_where_left = query.optional_where.clone();
+        let as_written: Vec<&MatchClause> = query.match_clauses[..split].iter().collect();
+        let owners: Vec<Option<usize>> = pre_where_preds
+            .iter()
+            .map(|p| Self::optional_owner(&mut optional_where_left, p, &as_written))
+            .collect();
+
         let mut late_bound_pre = Self::late_bound_variables(query);
 
         // A leading UNWIND feeding an OPTIONAL MATCH whose WHERE names the
@@ -1589,17 +1599,17 @@ impl QueryPlanner {
                     && query.call_clause.is_none()
                     && query.load_csv_clause.is_none() =>
             {
-                pre_where_preds.iter().any(|pred| {
+                pre_where_preds.iter().zip(&owners).any(|(pred, owner)| {
                     let mut vars = HashSet::new();
                     Self::collect_expression_variables(pred, &mut vars);
                     vars.contains(&u.variable)
-                        && pre_with_clauses.iter().enumerate().any(|(i, mc)| {
+                        && (owner.is_some() || pre_with_clauses.iter().enumerate().any(|(i, mc)| {
                             mc.optional && {
                                 let earlier: HashSet<&String> =
                                     pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
                                 pre_match_var_sets[i].iter().any(|v| !earlier.contains(v) && vars.contains(v))
                             }
-                        })
+                        }))
                 })
             }
             _ => false,
@@ -1628,9 +1638,31 @@ impl QueryPlanner {
         let mut optional_join_predicates: Vec<Option<Expression>> =
             vec![None; pre_with_clauses.len()];
 
-        for pred in pre_where_preds {
+        for (k, pred) in pre_where_preds.into_iter().enumerate() {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
+            // Written after an OPTIONAL MATCH: its join condition, unless it can
+            // filter inside the clause (#1231). One naming only outer variables
+            // -- `OPTIONAL MATCH (y) WHERE x.v > 1`, or `WHERE false` -- used to
+            // be scoped by its variables to the outer MATCH and deleted the rows
+            // the OPTIONAL MATCH should have kept with nulls.
+            if let Some(i) = owners[k] {
+                let earlier: HashSet<&String> =
+                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
+                if !Self::inside_optional(&pred_vars, &pre_match_var_sets[i], &earlier)
+                    && !pred_vars.iter().any(|v| late_bound_pre.contains(v))
+                {
+                    optional_join_predicates[i] = Some(match optional_join_predicates[i].take() {
+                        Some(existing) => Expression::Binary {
+                            left: Box::new(existing),
+                            op: BinaryOp::And,
+                            right: Box::new(pred),
+                        },
+                        None => pred,
+                    });
+                    continue;
+                }
+            }
             if pred_vars.iter().any(|v| late_bound_pre.contains(v)) {
                 late_bound_predicates.push(pred);
                 continue;
@@ -2159,11 +2191,33 @@ impl QueryPlanner {
             // `(i, a)` pair (#1229).
             let late_bound = Self::late_bound_variables(query);
 
+            let mut stage_optional_where_left = query.optional_where.clone();
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
                 if pred_vars.iter().any(|v| late_bound.contains(v) && !known_vars.contains(v)) {
                     continue;
+                }
+                // Written after an OPTIONAL MATCH: its join condition unless it
+                // can filter inside the clause (#1231), as before the WITH.
+                if let Some(i) = Self::optional_owner(&mut stage_optional_where_left, &pred, stage_matches) {
+                    let earlier: HashSet<&String> = match_var_sets[..i]
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .chain(known_vars.iter())
+                        .collect();
+                    if !Self::inside_optional(&pred_vars, &match_var_sets[i], &earlier) {
+                        stage_optional_join_predicates[i] =
+                            Some(match stage_optional_join_predicates[i].take() {
+                                Some(existing) => Expression::Binary {
+                                    left: Box::new(existing),
+                                    op: BinaryOp::And,
+                                    right: Box::new(pred),
+                                },
+                                None => pred,
+                            });
+                        continue;
+                    }
                 }
                 // A predicate spanning an OPTIONAL MATCH's own variables and
                 // an outer one is a **join condition**, not a filter above the
@@ -4540,6 +4594,32 @@ impl QueryPlanner {
             }
             _ => None,
         }
+    }
+
+    /// The OPTIONAL MATCH among `clauses` that `pred` was written after, from
+    /// the parser's record (#1231). Takes one occurrence from `left`, so a
+    /// conjunct written after a plain MATCH and again after the OPTIONAL MATCH
+    /// is claimed once.
+    fn optional_owner(
+        left: &mut Vec<(Pattern, Expression)>,
+        pred: &Expression,
+        clauses: &[&MatchClause],
+    ) -> Option<usize> {
+        let pos = left
+            .iter()
+            .position(|(p, e)| e == pred && clauses.iter().any(|mc| mc.optional && mc.pattern == *p))?;
+        let (pattern, _) = left.remove(pos);
+        clauses.iter().position(|mc| mc.optional && mc.pattern == pattern)
+    }
+
+    /// Whether a conjunct owned by the OPTIONAL MATCH `own` names only that
+    /// clause's variables and at least one it introduces -- the one kind that
+    /// can filter inside the clause. Any other conjunct it owns (one naming
+    /// only outer variables, or none) is its join condition (#1231).
+    fn inside_optional(pred_vars: &HashSet<String>, own: &HashSet<String>, earlier: &HashSet<&String>) -> bool {
+        !pred_vars.is_empty()
+            && pred_vars.iter().all(|v| own.contains(v))
+            && pred_vars.iter().any(|v| !earlier.contains(v))
     }
 
     /// An indexed equality `var.prop = key` among `preds` whose `key` reads
@@ -8493,6 +8573,7 @@ mod tests {
 
         // Build a query manually with no MATCH and no CREATE
         let query = crate::query::ast::Query {
+            optional_where: Vec::new(),
             deferred_skip: None,
             deferred_limit: None,
             load_csv_clause: None,
