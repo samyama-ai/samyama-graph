@@ -3097,7 +3097,90 @@ impl QueryPlanner {
         }
     }
 
+    /// Plan one MATCH clause, keeping its relationships distinct across its
+    /// comma-separated patterns (#1233): see `isolate_relationships`.
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        if let Some((clause, distinct)) = Self::isolate_relationships(match_clause) {
+            let plan = self.dispatch_plan_match_inner(&clause, where_clause, store)?;
+            return Ok(Box::new(FilterOperator::new(plan, distinct)));
+        }
+        self.dispatch_plan_match_inner(match_clause, where_clause, store)
+    }
+
+    /// Relationship isomorphism between the comma-separated patterns of one
+    /// MATCH clause (#1233).
+    ///
+    /// A relationship may appear once in a clause. #684 enforces that along one
+    /// path, where the expand carries the relationships the path has walked; the
+    /// patterns of `MATCH (p)-[:K]->(q), (q)-[:K]->(r)` are planned apart and
+    /// joined, so each could claim the same relationship -- a self-loop answered
+    /// `(d, d, d)` where Neo4j finds nothing. This returns the clause with its
+    /// anonymous fixed-length relationships named, and the predicate that every
+    /// two of them in different patterns differ.
+    ///
+    /// Only pairs that could be the same relationship are compared: two with
+    /// disjoint types never are, so `MATCH (a)-[:K]->(b), (a)-[:L]->(c)` gets no
+    /// filter and no extra bindings. A variable-length relationship across
+    /// patterns is not covered. `None` when there is nothing to compare.
+    fn isolate_relationships(match_clause: &MatchClause) -> Option<(MatchClause, Expression)> {
+        let paths = &match_clause.pattern.paths;
+        if paths.len() < 2 {
+            return None;
+        }
+        // (path, segment, variable, types) of every fixed-length relationship.
+        let rels: Vec<(usize, usize, Option<String>, &Vec<EdgeType>)> = paths
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, path)| {
+                path.segments.iter().enumerate().filter(|(_, s)| s.edge.length.is_none()).map(move |(si, s)| {
+                    (pi, si, s.edge.variable.clone(), &s.edge.types)
+                })
+            })
+            .collect();
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
+        let mut pairs = Vec::new();
+        for i in 0..rels.len() {
+            for j in i + 1..rels.len() {
+                let same_name = matches!((&rels[i].2, &rels[j].2), (Some(x), Some(y)) if x == y);
+                if rels[i].0 != rels[j].0 && !same_name && may_share(rels[i].3, rels[j].3) {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        let mut names: Vec<Option<String>> = vec![None; rels.len()];
+        let mut minted = 0;
+        for &(i, j) in &pairs {
+            for k in [i, j] {
+                if names[k].is_none() {
+                    names[k] = Some(match &rels[k].2 {
+                        Some(v) => v.clone(),
+                        None => {
+                            let v = format!("__iso_rel_{minted}");
+                            minted += 1;
+                            clause.pattern.paths[rels[k].0].segments[rels[k].1].edge.variable = Some(v.clone());
+                            v
+                        }
+                    });
+                }
+            }
+        }
+        let distinct = pairs
+            .iter()
+            .map(|&(i, j)| Expression::Binary {
+                left: Box::new(Expression::Variable(names[i].clone().expect("named above"))),
+                op: BinaryOp::Ne,
+                right: Box::new(Expression::Variable(names[j].clone().expect("named above"))),
+            })
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
+            .expect("pairs is not empty");
+        Some((clause, distinct))
+    }
+
+    fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if self.config.graph_native {
             match self.plan_match_native(match_clause, where_clause, store) {
                 Ok(plan) => Ok(plan),
@@ -7423,6 +7506,10 @@ impl QueryPlanner {
             .map(|wc| flatten_and_predicates(&wc.predicate))
             .unwrap_or_default();
 
+        // Relationships distinct across the clause's patterns (#1233).
+        let isolated = Self::isolate_relationships(match_clause);
+        let match_clause = isolated.as_ref().map(|(c, _)| c).unwrap_or(match_clause);
+
         let mut current_op = upstream;
         let mut new_vars = HashSet::new();
 
@@ -7488,6 +7575,9 @@ impl QueryPlanner {
             current_op = Box::new(FilterOperator::new(current_op, filter_expr));
         }
 
+        if let Some((_, distinct)) = &isolated {
+            current_op = Box::new(FilterOperator::new(current_op, distinct.clone()));
+        }
         Ok((current_op, new_vars))
     }
 
