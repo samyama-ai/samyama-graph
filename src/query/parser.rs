@@ -2877,33 +2877,46 @@ fn parse_reduce_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Exp
 }
 
 fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ForeachClause> {
+    use crate::query::ast::ForeachBody;
     let mut variable = None;
     let mut expression = None;
-    let mut set_clauses = Vec::new();
-    let mut create_clauses = Vec::new();
+    // In the order written: a later clause sees what an earlier one did.
+    let mut body = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
             Rule::in_op => {} // skip
             Rule::expression => expression = Some(parse_expression(inner)?),
-            Rule::set_clause => set_clauses.push(parse_set_clause(inner)?),
+            Rule::set_clause => body.push(ForeachBody::Set(parse_set_clause(inner)?)),
+            Rule::remove_clause => body.push(ForeachBody::Remove(parse_remove_clause(inner)?)),
+            Rule::delete_clause => body.push(ForeachBody::Delete(parse_delete_clause(inner)?)),
             Rule::create_clause => {
                 for ci in inner.into_inner() {
                     if ci.as_rule() == Rule::pattern {
-                        create_clauses.push(CreateClause { pattern: parse_pattern(ci)? });
+                        body.push(ForeachBody::Create(CreateClause { pattern: parse_pattern(ci)? }));
                     }
                 }
             }
-            _ => {}
+            Rule::merge_inline => body.push(ForeachBody::Merge(parse_merge_clause(inner)?)),
+            Rule::foreach_clause => {
+                body.push(ForeachBody::Foreach(Box::new(parse_foreach_clause(inner)?)))
+            }
+            // Every rule the grammar admits in a body is handled above. A
+            // catch-all that ignored the rest is how DELETE and REMOVE were
+            // parsed and then dropped (#465).
+            other => {
+                return Err(ParseError::SemanticError(format!(
+                    "FOREACH: unexpected {other:?} in the body"
+                )))
+            }
         }
     }
 
     Ok(ForeachClause {
         variable: variable.ok_or_else(|| ParseError::SemanticError("FOREACH missing variable".to_string()))?,
         expression: expression.ok_or_else(|| ParseError::SemanticError("FOREACH missing expression".to_string()))?,
-        set_clauses,
-        create_clauses,
+        body,
     })
 }
 
@@ -3339,7 +3352,7 @@ mod tests {
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "tag");
-        assert!(!fc.set_clauses.is_empty());
+        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Set(_)]));
     }
 
     #[test]
@@ -3351,7 +3364,7 @@ mod tests {
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "x");
-        assert!(!fc.create_clauses.is_empty());
+        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Create(_)]));
     }
 
     #[test]

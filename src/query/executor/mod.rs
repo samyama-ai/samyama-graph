@@ -225,6 +225,9 @@ pub struct QueryExecutor<'a> {
     params: HashMap<String, crate::graph::PropertyValue>,
     deadline: Option<std::time::Instant>,
     row_budget: u64,
+    /// Record the executed plan's structural hash on the result. See
+    /// `with_plan_hash`.
+    plan_hash: bool,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -236,6 +239,7 @@ impl<'a> QueryExecutor<'a> {
             params: HashMap::new(),
             deadline: None,
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -247,6 +251,7 @@ impl<'a> QueryExecutor<'a> {
             params: HashMap::new(),
             deadline: None,
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -265,6 +270,17 @@ impl<'a> QueryExecutor<'a> {
     /// caller goes through.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan that runs on the result
+    /// (`RecordBatch::plan_hash`, TRUST-06).
+    ///
+    /// Off by default. Describing a plan costs a few microseconds per query,
+    /// which the fastest reads would feel, so only a caller that reports
+    /// provenance -- the HTTP server -- asks for it.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -353,7 +369,7 @@ impl<'a> QueryExecutor<'a> {
             records.retain(|r| seen.insert(r.dedup_key()));
         }
 
-        Ok(RecordBatch { records, columns })
+        Ok(RecordBatch { records, columns, plan_hash: None })
     }
 
     /// Execute a read-only query and return results
@@ -449,10 +465,16 @@ impl<'a> QueryExecutor<'a> {
 
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
+        // TRUST-06: the hash of the plan that runs, taken before it is
+        // consumed. Re-planning later could describe a different plan: the
+        // planner reads statistics that move with the data.
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
-            return Ok(Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget));
+            let mut batch = Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget);
+            batch.plan_hash = plan_hash;
+            return Ok(batch);
         }
 
         // Check if this is a write query - if so, error out
@@ -504,11 +526,13 @@ impl<'a> QueryExecutor<'a> {
 
             let mut record = Record::new();
             record.bind("plan".to_string(), Value::Property(PropertyValue::String(profile_text)));
-            return Ok(RecordBatch { records: vec![record], columns: vec!["plan".to_string()] });
+            return Ok(RecordBatch { records: vec![record], columns: vec!["plan".to_string()], plan_hash });
         }
 
         // Execute the plan
-        self.execute_plan(plan)
+        let mut batch = self.execute_plan(plan)?;
+        batch.plan_hash = plan_hash;
+        Ok(batch)
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
@@ -580,6 +604,7 @@ impl<'a> QueryExecutor<'a> {
         RecordBatch {
             records: vec![record],
             columns: vec!["plan".to_string()],
+            plan_hash: None,
         }
     }
 
@@ -616,6 +641,7 @@ impl<'a> QueryExecutor<'a> {
         Ok(RecordBatch {
             records,
             columns: plan.output_columns,
+            plan_hash: None,
         })
     }
 }
@@ -628,6 +654,8 @@ pub struct MutQueryExecutor<'a> {
     tenant_id: String,
     params: HashMap<String, crate::graph::PropertyValue>,
     row_budget: u64,
+    /// See `QueryExecutor::with_plan_hash`.
+    plan_hash: bool,
 }
 
 impl<'a> MutQueryExecutor<'a> {
@@ -639,6 +667,7 @@ impl<'a> MutQueryExecutor<'a> {
             tenant_id,
             params: HashMap::new(),
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -646,6 +675,17 @@ impl<'a> MutQueryExecutor<'a> {
     /// `0` is off. See `QueryExecutor::with_row_budget`.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan that runs on the result
+    /// (`RecordBatch::plan_hash`, TRUST-06).
+    ///
+    /// Off by default. Describing a plan costs a few microseconds per query,
+    /// which the fastest reads would feel, so only a caller that reports
+    /// provenance -- the HTTP server -- asks for it.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -686,11 +726,15 @@ impl<'a> MutQueryExecutor<'a> {
             let store_ref: &GraphStore = self.store;
             self.planner.plan(query, store_ref)?
         };
+        // TRUST-06, as on the read executor.
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget));
+            let mut batch = QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget);
+            batch.plan_hash = plan_hash;
+            return Ok(batch);
         }
 
         // Execute the plan with mutable access.
@@ -703,7 +747,8 @@ impl<'a> MutQueryExecutor<'a> {
         //
         // The plan is still driven to exhaustion — the rows are what is
         // discarded, not the work. Discarding earlier would skip the writes.
-        let batch = self.execute_plan_mut(plan)?;
+        let mut batch = self.execute_plan_mut(plan)?;
+        batch.plan_hash = plan_hash;
         // Scoped to **data writes**, not to "any query without a RETURN".
         // Two neighbours produce rows with no RETURN and must keep doing so:
         // `CALL … YIELD` yields its results, and DDL such as
@@ -721,7 +766,7 @@ impl<'a> MutQueryExecutor<'a> {
             // return a row where `CREATE (a), (b)` correctly returns none.
             || query.clauses.iter().any(|c| c.is_write());
         if is_data_write && query.return_clause.is_none() && query.call_clause.is_none() {
-            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new() });
+            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new(), plan_hash });
         }
         Ok(batch)
     }
@@ -742,6 +787,7 @@ impl<'a> MutQueryExecutor<'a> {
         Ok(RecordBatch {
             records,
             columns: plan.output_columns,
+            plan_hash: None,
         })
     }
 }

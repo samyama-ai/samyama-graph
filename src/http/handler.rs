@@ -261,6 +261,13 @@ pub struct QueryResponse {
     /// identifies the snapshot, it is not a content hash of it, and calling it
     /// a hash would claim a property it does not have.
     snapshot_version: u64,
+    /// Structural hash of the plan that produced these rows (TRUST-06), as 16
+    /// hex digits. Taken from the plan that ran, not from a re-plan: the
+    /// planner reads statistics that move with the data, so a re-plan could
+    /// describe a different plan. Absent on paths that record none (UNION, a
+    /// CALL subquery).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_hash: Option<String>,
 }
 
 /// Handler for Cypher queries
@@ -498,6 +505,7 @@ pub async fn query_handler(
                 cached: served_from_cache,
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
+                plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
             }).into_response()
         }
         Err(e) => {
@@ -1547,7 +1555,7 @@ mod tests {
         }
         let state = AppState {
             store: Arc::new(RwLock::new(store)),
-            engine: Arc::new(QueryEngine::new()),
+            engine: Arc::new(QueryEngine::new().with_plan_hash(true)),
             data_path: None,
             tenant_manager: None,
             embed_pipeline: None,
@@ -1584,6 +1592,8 @@ mod tests {
         // TRUST-06: a result names the build and the snapshot it came from.
         assert_eq!(json["engine_version"].as_str(), Some(crate::VERSION), "{json}");
         assert!(json["snapshot_version"].is_u64(), "{json}");
+        let h = json["plan_hash"].as_str().expect("plan_hash");
+        assert!(h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()), "{json}");
     }
 
     #[test]
