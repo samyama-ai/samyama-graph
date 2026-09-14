@@ -5157,7 +5157,7 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -5173,7 +5173,7 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -5254,6 +5254,43 @@ pub struct OperatorDescription {
 }
 
 impl OperatorDescription {
+    /// A stable structural digest of the operator tree (TRUST-06).
+    ///
+    /// Covers operator names, their details and the child order -- what EXPLAIN
+    /// prints -- and nothing else: timings, costs and cardinality estimates are
+    /// not part of `describe`. The one data-dependent detail, a materialised
+    /// operator's "N rows", is normalised, so equal plans hash equally as the
+    /// data grows.
+    ///
+    /// FNV-1a, written out rather than `DefaultHasher`, whose algorithm the
+    /// standard library does not promise to keep across releases.
+    pub fn structural_hash(&self) -> u64 {
+        fn mix(mut h: u64, bytes: &[u8]) -> u64 {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        }
+        fn walk(d: &OperatorDescription, mut h: u64) -> u64 {
+            h = mix(h, d.name.as_bytes());
+            h = mix(h, &[0x1f]);
+            let details = d.details.trim();
+            let normalised = match details.strip_suffix(" rows") {
+                Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => "<n> rows",
+                _ => details,
+            };
+            h = mix(h, normalised.as_bytes());
+            h = mix(h, &[0x1e]);
+            h = mix(h, &(d.children.len() as u64).to_le_bytes());
+            for child in &d.children {
+                h = walk(child, h);
+            }
+            mix(h, &[0x1d])
+        }
+        walk(self, 0xcbf2_9ce4_8422_2325)
+    }
+
     /// Format the operator tree as a string
     pub fn format(&self, indent: usize) -> String {
         let mut result = String::new();
@@ -5567,7 +5604,8 @@ impl PhysicalOperator for NodeScanOperator {
 
         Ok(Some(RecordBatch {
             records,
-            columns: vec![self.variable.clone()]
+            columns: vec![self.variable.clone()],
+            plan_hash: None,
         }))
     }
 
@@ -5788,7 +5826,7 @@ impl PhysicalOperator for EdgeTypeCountOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -6139,6 +6177,7 @@ impl PhysicalOperator for FilterOperator {
             Ok(Some(RecordBatch {
                 records: filtered_records,
                 columns: Vec::new(), // Filter doesn't change columns
+                plan_hash: None,
             }))
         }
     }
@@ -7022,6 +7061,7 @@ impl PhysicalOperator for ExpandOperator {
             Ok(Some(RecordBatch {
                 records: expanded_records,
                 columns: Vec::new(), // Columns determined by output variables
+                plan_hash: None,
             }))
         }
     }
@@ -8600,6 +8640,7 @@ impl PhysicalOperator for ProjectOperator {
             Ok(Some(RecordBatch {
                 records: projected_records,
                 columns,
+                plan_hash: None,
             }))
         } else {
             Ok(None)
@@ -9263,7 +9304,7 @@ impl PhysicalOperator for AggregateOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![] }))
+            Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None }))
         }
     }
 
@@ -9284,7 +9325,7 @@ impl PhysicalOperator for AggregateOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -10729,7 +10770,7 @@ impl PhysicalOperator for SortOperator {
         let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
         self.current = end;
 
-        Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+        Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
     }
 
     fn reset(&mut self) {
@@ -10906,7 +10947,7 @@ impl PhysicalOperator for IndexScanOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] }))
+            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None }))
         }
     }
 
@@ -11130,7 +11171,7 @@ impl PhysicalOperator for CartesianProductOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -11325,7 +11366,7 @@ impl PhysicalOperator for JoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -11558,7 +11599,7 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -15564,7 +15605,7 @@ impl PhysicalOperator for SkipOperator {
             if records.is_empty() {
                 continue;
             }
-            return Ok(Some(RecordBatch { records, columns: batch.columns }));
+            return Ok(Some(RecordBatch { records, columns: batch.columns, plan_hash: None }));
         }
     }
 
@@ -16213,7 +16254,7 @@ impl PhysicalOperator for UnwindOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17108,7 +17149,7 @@ impl PhysicalOperator for MergeOperator {
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17246,7 +17287,7 @@ which cannot be stored as a property value"
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17711,7 +17752,7 @@ impl PhysicalOperator for ShortestPathOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -18125,7 +18166,7 @@ impl PhysicalOperator for WithBarrierOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -18254,6 +18295,7 @@ impl PhysicalOperator for ExpandIntoOperator {
             Ok(Some(RecordBatch {
                 records,
                 columns: Vec::new(),
+                plan_hash: None,
             }))
         }
     }
@@ -18339,6 +18381,7 @@ impl PhysicalOperator for NodeByIdOperator {
             Ok(Some(RecordBatch {
                 records,
                 columns: vec![self.variable.clone()],
+                plan_hash: None,
             }))
         }
     }
@@ -20781,7 +20824,7 @@ mod tests {
                     None => break,
                 }
             }
-            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new() })) }
+            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None })) }
         }
 
         fn reset(&mut self) {
