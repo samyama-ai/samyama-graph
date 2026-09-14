@@ -191,6 +191,18 @@ pub struct Query {
     /// Additional WITH stages (for multi-WITH queries like WITH ... MATCH ... WITH ... RETURN)
     /// Each stage: (with_clause, unwind_clause, post_match_clauses, post_where_clause)
     pub extra_with_stages: Vec<(WithClause, Option<UnwindClause>, Vec<MatchClause>, Option<WhereClause>)>,
+    /// The conjuncts of every WHERE written straight after an OPTIONAL MATCH,
+    /// each with that clause's pattern (#1231).
+    ///
+    /// A group's WHEREs are ANDed into one predicate (`where_clause`,
+    /// `post_with_where_clause`, a stage's), and the planner scopes each
+    /// conjunct by the variables it names. That cannot tell `OPTIONAL MATCH
+    /// (y) WHERE x.v > 1` from `MATCH (x) WHERE x.v > 1`: both name only `x`.
+    /// The first belongs to the optional match -- a row failing it keeps its
+    /// outer bindings and gets nulls -- and the second filters. This records
+    /// which is which. The predicate stays in the group's WHERE as well, so a
+    /// reader that does not consult this sees the query as before.
+    pub optional_where: Vec<(Pattern, Expression)>,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -1111,6 +1123,7 @@ impl Query {
             explain: false,
             with_split_index: None,
             post_with_where_clause: None,
+            optional_where: Vec::new(),
             extra_with_stages: Vec::new(),
         }
     }

@@ -1060,9 +1060,27 @@ fn parse_yield_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<YieldItem>
     Ok(YieldItem { name, alias })
 }
 
+/// The AND-conjuncts of a predicate, in order.
+fn and_conjuncts(e: &Expression, out: &mut Vec<Expression>) {
+    match e {
+        Expression::Binary { left, op: BinaryOp::And, right } => {
+            and_conjuncts(left, out);
+            and_conjuncts(right, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
 fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    // The pattern of the OPTIONAL MATCH the next clause follows, if it is one:
+    // its WHERE belongs to it (#1231).
+    let mut after_optional: Option<Pattern> = None;
     for inner in pair.into_inner() {
-        match inner.as_rule() {
+        let rule = inner.as_rule();
+        if rule != Rule::where_clause && rule != Rule::optional_match_clause {
+            after_optional = None;
+        }
+        match rule {
             Rule::match_clause => {
                 for mc_inner in inner.into_inner() {
                     if mc_inner.as_rule() == Rule::pattern {
@@ -1082,6 +1100,7 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                         });
                     }
                 }
+                after_optional = query.match_clauses.last().map(|m| m.pattern.clone());
             }
             Rule::where_clause => {
                 // Cypher permits a `WHERE` after each `MATCH`. The planner
@@ -1092,6 +1111,13 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 // predicate. Dropping the first WHERE was behind OM27's
                 // timeout + wrong-semantics on the v1.0 mega benchmark.
                 let parsed = parse_where_clause(inner)?;
+                if let Some(pattern) = after_optional.take() {
+                    let mut conjuncts = Vec::new();
+                    and_conjuncts(&parsed.predicate, &mut conjuncts);
+                    for c in conjuncts {
+                        query.optional_where.push((pattern.clone(), c));
+                    }
+                }
                 let target = if query.with_split_index.is_some() {
                     &mut query.post_with_where_clause
                 } else {

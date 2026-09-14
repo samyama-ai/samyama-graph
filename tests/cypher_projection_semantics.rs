@@ -1653,9 +1653,10 @@ fn match_filters_on_a_non_literal_property_value_and_merge_evaluates_it() {
     // *every* `:P` — a working-looking query returning too much.
     //
     // MATCH now applies the property as a WHERE (`p.n = x`), which is what it
-    // means for a MATCH; it used to refuse because it could not. Where that
-    // rewrite could change meaning -- an OPTIONAL MATCH's group, an anonymous
-    // node -- it still refuses. MERGE resolves the property against the row
+    // means for a MATCH; it used to refuse because it could not. An OPTIONAL
+    // MATCH gets the same rewrite since #1229, which made its WHERE form keep
+    // the rows the lookup finds nothing for; an anonymous node, with nothing
+    // to name, still refuses. MERGE resolves the property against the row
     // (#642) and uses the result for the match and the creation alike, which is
     // what makes `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather
     // than a node factory.
@@ -1667,11 +1668,11 @@ fn match_filters_on_a_non_literal_property_value_and_merge_evaluates_it() {
     // One row, not both `:P`: the constraint is applied, not dropped.
     assert_eq!(bag(&s, "UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
 
-    // Where it cannot be rewritten it is still refused, never silently widened.
-    let err = engine
-        .execute("UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v", &s)
-        .expect_err("must not silently match everything");
-    assert!(format!("{err}").contains("WHERE"), "should name the workaround: {err}");
+    // OPTIONAL MATCH: the constraint is applied too, never silently widened, and
+    // a row it finds nothing for is kept (#1229).
+    assert_eq!(bag(&s, "UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(*) AS n"), "n=2");
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(p) AS n"), "n=1");
 
     // the WHERE form it points at does work
     assert_eq!(
