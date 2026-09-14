@@ -92,6 +92,19 @@ fn a_where_on_the_optional_side_only() {
     check("UNWIND [1, 2] AS i OPTIONAL MATCH (a:N) WHERE a.id = 5 RETURN i, a.id", &["1|null", "2|null"]);
 }
 
+/// The inline form means the WHERE form; it was refused until the WHERE form
+/// was right. Neo4j 2026.04 answers the first query this way; the other two are
+/// the WHERE forms above written inline.
+#[test]
+fn an_inline_property_from_the_row() {
+    check("UNWIND [1, 99] AS i OPTIONAL MATCH (a:N {id: i}) RETURN i, a.id", &["1|1", "99|null"]);
+    check(
+        "UNWIND [1, 3, 99] AS i OPTIONAL MATCH (a:N {id: i})-[:R]->(b) RETURN i, b.id",
+        &["1|2", "3|null", "99|null"],
+    );
+    check("MATCH (x:K) OPTIONAL MATCH (a:N {id: x.k}) RETURN x.k, a.id", &["1|1", "99|null"]);
+}
+
 /// The upsert idiom: create what the lookup did not find.
 #[test]
 fn creating_what_was_not_found() {

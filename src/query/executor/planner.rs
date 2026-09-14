@@ -485,11 +485,17 @@ fn has_hoistable_match_properties(q: &Query) -> bool {
 /// `UNWIND $rows AS r MATCH (n:N {id: r.id})` was an error (TCK Unwind1 [6]).
 /// For a MATCH the two forms mean the same thing.
 ///
-/// A group's WHERE is shared by all of its MATCH clauses (the parser ANDs
-/// them), and a WHERE shared with an OPTIONAL MATCH filters only the optional
-/// part, so a group containing one is left alone. So is an anonymous node
-/// (nothing to name) and a variable-length relationship (a list, not one
-/// relationship). Those keep the refusal.
+/// An OPTIONAL MATCH is hoisted too: `OPTIONAL MATCH (a:N {id: i})` means
+/// `OPTIONAL MATCH (a:N) WHERE a.id = i`. The group's WHERE is shared by all
+/// of its MATCH clauses (the parser ANDs them), but the decomposition scopes
+/// each conjunct by the variables it names: one spanning an optional clause's
+/// own variables and an outer one becomes that clause's join condition (#667,
+/// and #1229 for an UNWIND variable), and one naming only its own variables is
+/// pushed inside it. Either way a row it finds nothing for keeps its nulls.
+/// This was refused until #1229, when the WHERE form itself deleted those rows.
+///
+/// An anonymous node (nothing to name) and a variable-length relationship (a
+/// list, not one relationship) keep the refusal.
 fn hoist_match_property_exprs(q: &mut Query) {
     let split = q.with_split_index.unwrap_or(q.match_clauses.len()).min(q.match_clauses.len());
     let (pre, post) = q.match_clauses.split_at_mut(split);
@@ -526,9 +532,6 @@ fn hoist_group(matches: &mut [MatchClause], wh: &mut Option<WhereClause>) {
 
 /// The `var.key = expr` conjuncts a group's patterns carry, removed from them.
 fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
-    if matches.iter().any(|m| m.optional) {
-        return None;
-    }
     fn hoist(var: &Option<String>, exprs: &mut Option<HashMap<String, Expression>>, out: &mut Vec<Expression>) {
         let Some(v) = var else { return };
         let Some(map) = exprs.take() else { return };
