@@ -7617,8 +7617,17 @@ impl VarLengthExpandOperator {
     ///
     /// Only valid when the destination really is that one node; the operator
     /// then answers "can this source reach it" rather than enumerating.
+    ///
+    /// Ignored when the operator enumerates trails. A pinned target answers
+    /// "can this source reach it" -- one row per source -- and that is sound
+    /// only when the query cannot count the paths. With trails enumerated,
+    /// `count(q)` over two paths to the pinned node answered 1 instead of 2.
+    /// Every setter that turns enumeration on also drops a pin, so the two are
+    /// never both set whatever order the planner calls them in.
     pub fn with_pinned_target(mut self, target: NodeId) -> Self {
-        self.pinned_target = Some(target);
+        if !self.enumerate_trails {
+            self.pinned_target = Some(target);
+        }
         self
     }
 
@@ -7633,6 +7642,7 @@ impl VarLengthExpandOperator {
         self.selector = selector;
         if selector != crate::query::ast::PathSelector::All {
             self.enumerate_trails = true;
+            self.pinned_target = None;
         }
         self
     }
@@ -7648,6 +7658,7 @@ impl VarLengthExpandOperator {
         self.restrictor = restrictor;
         if restrictor != crate::query::ast::PathRestrictor::Trail {
             self.enumerate_trails = true;
+            self.pinned_target = None;
         }
         self
     }
@@ -7664,6 +7675,7 @@ impl VarLengthExpandOperator {
 
     pub fn with_trail_enumeration(mut self) -> Self {
         self.enumerate_trails = true;
+        self.pinned_target = None;
         self
     }
 
