@@ -2467,7 +2467,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         let log = self.edge_version_log.entry(edge_id).or_insert_with(|| Vec::with_capacity(1));
-        if log.last().map_or(true, |last| last.version != current) {
+        if log.last().is_none_or(|last| last.version != current) {
             log.push(EdgeVersionEntry { version: current, properties: None });
         }
     }
@@ -2479,9 +2479,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     fn note_edge_created(&mut self, edge_id: EdgeId) {
         let current = self.current_version;
         if current != Self::FIRST_VERSION {
-            let mut log = Vec::with_capacity(1);
-            log.push(EdgeVersionEntry { version: current, properties: None });
-            self.edge_version_log.insert(edge_id, log);
+            self.edge_version_log
+                .insert(edge_id, vec![EdgeVersionEntry { version: current, properties: None }]);
         }
     }
 
