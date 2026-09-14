@@ -85,7 +85,10 @@ jobs:
           fi
           git show FETCH_HEAD:RELEASE-GATE.json > RELEASE-GATE.json
           cat RELEASE-GATE.json
-          python3 scripts/check_release_gate.py RELEASE-GATE.json
+          # --commit: the pass must be about this build -- measured on it, or on
+          # an ancestor with no engine change since. A green verdict from an
+          # older main does not vouch for engine code merged after it.
+          python3 scripts/check_release_gate.py RELEASE-GATE.json --commit "$GITHUB_SHA"
 
       - name: Tag and publish the GitHub Release
         if: steps.check.outputs.new == 'true'
