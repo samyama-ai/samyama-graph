@@ -521,12 +521,14 @@ fn resolve_sort_key(
 ) -> Expression {
     match position {
         SortPosition::BeforeProjection => substitute_aliases(key, return_items),
-        SortPosition::AfterProjection => {
-            if let Some((_, alias)) = return_items.iter().find(|(expr, _)| expr == key) {
-                return Expression::Variable(alias.clone());
-            }
-            key.clone()
-        }
+        // Through compound keys, as the WITH path does: `ORDER BY 38 +
+        // avg(p.age) - 1000` names the projected `avg(p.age)` inside an
+        // arithmetic key. Only a whole-key match was rewritten here, so the
+        // inner `avg(p.age)` was evaluated after the projection, where `p` is
+        // gone -- an error that the sort then folded to null, sorting by
+        // nothing (#987). Sub-expressions that match nothing are left alone,
+        // so an unprojected name is still out of scope.
+        SortPosition::AfterProjection => rewrite_sort_key(key, return_items),
     }
 }
 
