@@ -21,7 +21,7 @@
 //! answer.
 
 use samyama::graph::{GraphStore, NodeId, PropertyValue};
-use samyama::query::executor::QueryExecutor;
+use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;
 
 fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
@@ -148,6 +148,55 @@ fn every_var_length_shape_answers_the_same_from_the_index_after_compaction() {
     compare(true);
 }
 
+/// The pinned-target walk: when the destination resolves to one node, the
+/// operator answers "can this source reach it" from one reachability search
+/// out of the target, run once per operator. That search reads the index too.
+///
+/// It makes no forward walks, so it never builds an index itself; a
+/// non-pinned run builds one first.
+#[test]
+fn the_pinned_target_search_answers_the_same_from_the_index() {
+    // Targets each direction can reach from some anchor: person 1 has a KNOWS
+    // edge to 8, and person 0 one to 1.
+    //
+    // The target's equality is in `WHERE`, not inline: on a single-segment
+    // pattern an inline `(q:P {id: 7})` is applied as a filter after the walk
+    // and never pins, while the same equality in `WHERE` does.
+    let shapes = [
+        "MATCH (p:P)-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 7 RETURN count(q)",
+        "MATCH (p:P)-[:KNOWS*1..2]->(q:P) WHERE p.id = {A} AND q.id = 8 RETURN count(q)",
+        "MATCH (p:P)<-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 0 RETURN count(q)",
+    ];
+    // The planner pins a target only through a property index that resolves
+    // it to exactly one node.
+    let (mut walked, mut indexed) = (social(false), social(false));
+    for store in [&mut walked, &mut indexed] {
+        let q = parse_query("CREATE INDEX ON :P(id)").unwrap();
+        MutQueryExecutor::new(store, "default".to_string()).execute(&q).unwrap();
+    }
+    let (walked, indexed) = (walked, indexed);
+    // The shape this test exists for: the planner pinned the target.
+    for shape in shapes {
+        let q = parse_query(&format!("EXPLAIN {}", at(shape, 1))).unwrap();
+        let out = QueryExecutor::new(&walked).execute(&q).unwrap();
+        let plan = format!("{:?}", out.records[0].get("plan"));
+        assert!(plan.contains("target pinned"), "`{shape}` does not run the pinned-target search:\n{plan}");
+    }
+    rows(&indexed, &every_anchor("MATCH (p:P {id: {A}})-[:KNOWS*1..3]-(f) RETURN f.id"));
+    assert!(indexed.type_adjacency_cached() >= 2, "both directions of KNOWS should be indexed");
+    for shape in shapes {
+        // Per anchor only on the walk-only store: over every person the
+        // planner may walk forward from each one, which crosses the build
+        // threshold and would leave that store with an index of its own.
+        let expected: Vec<Vec<String>> = ANCHORS.iter().map(|&a| rows(&walked, &at(shape, a))).collect();
+        assert_eq!(walked.type_adjacency_cached(), 0, "`{shape}` built an index on the walk-only store");
+        assert!(expected.iter().any(|r| r.iter().any(|row| !row.contains("Integer(0)"))), "`{shape}` reached the target from no anchor");
+        for (i, &a) in ANCHORS.iter().enumerate() {
+            assert_eq!(rows(&indexed, &at(shape, a)), expected[i], "`{}`", at(shape, a));
+        }
+    }
+}
+
 /// A relationship created after the index was built must be walked. The store
 /// drops its index on any write; an operator holding one from before must not
 /// keep using it.
@@ -174,3 +223,4 @@ fn an_edge_added_after_the_index_was_built_is_walked() {
     assert!(after.iter().any(|r| r.contains("9999")));
     let _ = PropertyValue::Null;
 }
+

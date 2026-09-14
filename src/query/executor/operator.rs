@@ -7473,10 +7473,17 @@ impl VarLengthExpandOperator {
     /// `for_each_neighbor` uses `self.direction`; the reversed BFS needs the
     /// opposite one, and taking the direction as an argument keeps a second
     /// near-copy of the match out of the file.
+    ///
+    /// `out_index` / `in_index` are the per-type indexes for the segment's one
+    /// type, when there are any: read instead of walking every edge and
+    /// type-checking it, as `walk_side` does for the forward walk (#1197).
+    #[allow(clippy::too_many_arguments)]
     fn neighbors_in(
         node: NodeId,
         type_ids: Option<&[u16]>,
         direction: &Direction,
+        out_index: Option<&crate::graph::TypeAdjacency>,
+        in_index: Option<&crate::graph::TypeAdjacency>,
         edge_properties: &std::collections::HashMap<String, PropertyValue>,
         store: &GraphStore,
         visit: &mut impl FnMut(NodeId),
@@ -7494,12 +7501,21 @@ impl VarLengthExpandOperator {
                 visit(nb)
             }
         };
+        let mut side = |outgoing: bool, index: Option<&crate::graph::TypeAdjacency>| match index {
+            Some(index) => {
+                for &(nb, e) in index.neighbors(node) {
+                    with_edge(nb, e);
+                }
+            }
+            None if outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
+            None => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
+        };
         match direction {
-            Direction::Outgoing => store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge),
-            Direction::Incoming => store.for_each_incoming_neighbor(node, type_ids, &mut with_edge),
+            Direction::Outgoing => side(true, out_index),
+            Direction::Incoming => side(false, in_index),
             Direction::Both => {
-                store.for_each_outgoing_neighbor(node, type_ids, &mut with_edge);
-                store.for_each_incoming_neighbor(node, type_ids, &mut with_edge);
+                side(true, out_index);
+                side(false, in_index);
             }
         }
     }
@@ -7706,6 +7722,18 @@ impl VarLengthExpandOperator {
                 Direction::Both => Direction::Both,
             };
 
+            // The per-type index, as the forward walk reads it (#1197) --
+            // only the halves this reversed search walks, so a half nothing
+            // needs is never built.
+            let out_index = match reversed {
+                Direction::Incoming => None,
+                _ => self.type_index(type_filter, true, store),
+            };
+            let in_index = match reversed {
+                Direction::Outgoing => None,
+                _ => self.type_index(type_filter, false, store),
+            };
+
             let mut reach: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             visited.insert(target);
@@ -7718,7 +7746,7 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, &self.edge_properties, store, &mut |nb| {
+                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, store, &mut |nb| {
                         if visited.insert(nb) {
                             next.push(nb);
                             if depth >= self.min_hops {
