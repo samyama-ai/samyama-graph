@@ -1846,6 +1846,11 @@ fn value_node_id(v: &Value) -> Option<NodeId> {
 /// `p.score = 7` matches a float 7.0 -- `IN` disagreed with `=` about whether
 /// an integer and a float can be equal.
 fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyValue> {
+    // `x IN null` is null, as any comparison with null is (TCK Null3 [4]).
+    // Null is not a list, so it raised "IN requires a list on the right".
+    if matches!(right, PropertyValue::Null) {
+        return Some(PropertyValue::Null);
+    }
     let items = right.as_list_items()?;
     let numeric = |p: &PropertyValue| -> Option<f64> {
         match p {
@@ -18149,6 +18154,17 @@ impl WithBarrierOperator {
                         states[i].update(&val);
                     }
                 }
+            }
+            // No grouping keys means one group -- the whole input -- even when
+            // the input is empty: `WITH count(*) AS c` over nothing is one row
+            // with c = 0, as it is for RETURN. The group was only ever created
+            // from a row, so over no rows WITH answered no row at all
+            // (TCK With6 [5], WithOrderBy4 [16]).
+            if groups.is_empty() && self.group_by.is_empty() {
+                groups.insert(
+                    Vec::new(),
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect(),
+                );
             }
 
             let mut records = Vec::new();
