@@ -104,7 +104,7 @@ match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_cl
 // empty row, the same way a bare RETURN does, so no pattern is required.
 foreach_stmt = { foreach_clause }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
-foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause | merge_inline | foreach_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // LOAD CSV (LANG-09). A reading clause: it produces one row per record, the way
 // UNWIND produces one row per list element, and everything downstream of it is

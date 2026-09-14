@@ -2348,18 +2348,20 @@ fn foreach_set_still_binds_the_loop_variable() {
 }
 
 #[test]
-fn foreach_create_of_a_relationship_is_refused_not_silently_orphaned() {
+fn foreach_create_of_a_relationship_wires_the_bound_node_not_an_orphan() {
     // Only the start node was ever created, so this produced a stray node
-    // instead of an edge. Refusing is the honest answer.
+    // instead of an edge, and was then refused. The body is now planned with
+    // the row's bindings (#465): `p` is the matched node, and each row adds
+    // exactly one :X and one :R from `p` to it -- no stray start node.
     let e = QueryEngine::new();
     let mut s = foreach_store();
     let before = s.node_count();
-    let err = e
-        .execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("relationship pattern inside FOREACH"), "{err}");
-    assert_eq!(s.node_count(), before, "a refused FOREACH must not leave nodes behind");
+    let p = scalar(&s, "MATCH (p:P) RETURN count(p) AS v");
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (:P)-[:R]->(x:X) RETURN count(x) AS v"), p);
+    let p: usize = p.trim_start_matches("v=").parse().unwrap();
+    assert_eq!(s.node_count(), before + p, "one :X per row, and nothing else");
 }
 
 #[test]
