@@ -4403,6 +4403,51 @@ fn shift_temporal(
         (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
     };
 
+    // A date-time in a **named** zone has no single offset, so the shift
+    // cannot be done on the instant alone (#824). Calendar parts -- months and
+    // days -- move the local date-time, and the offset is then re-resolved from
+    // the zone at the new local time; the clock parts are exact and move the
+    // instant. That is java.time's split, which Neo4j follows:
+    //
+    //   2017-10-29T00:00+02:00[Europe/Stockholm] + P1D  = 2017-10-30T00:00+01:00
+    //   2017-10-29T00:00+02:00[Europe/Stockholm] + PT24H = 2017-10-29T23:00+01:00
+    //
+    // Shifting the instant and keeping the old offset gave
+    // 2017-10-30T00:00+02:00 -- an offset Stockholm does not have that day, so
+    // the value read one instant by its zone name and another by its offset.
+    if let PropertyValue::ZonedDateTime { secs, nanos: sub, offset_seconds, zone: Some(name) } = v {
+        if let Ok(crate::query::executor::temporal::TzSpec::Named(tz)) =
+            crate::query::executor::temporal::parse_timezone_spec(name)
+        {
+            const NS: i128 = 1_000_000_000;
+            const DAY: i128 = 86_400 * NS;
+            let local = (*secs as i128 + *offset_seconds as i128) * NS + *sub as i128;
+            let calendar = if drop_date_part { 0 } else { days as i128 * DAY };
+            let new_local = local + month_shift_nanos + calendar;
+            let spec = crate::query::executor::temporal::TzSpec::Named(tz);
+            let off = crate::query::executor::temporal::resolve_offset(
+                &spec,
+                new_local.div_euclid(DAY) as i64,
+                new_local.rem_euclid(DAY) as i64,
+            )?;
+            let instant = new_local - off as i128 * NS + seconds as i128 * NS + nanos as i128;
+            let utc = chrono::DateTime::from_timestamp(
+                instant.div_euclid(NS) as i64,
+                instant.rem_euclid(NS) as u32,
+            )
+            .ok_or_else(|| ExecutionError::RuntimeError("date-time out of range".into()))?
+            .naive_utc();
+            use chrono::{Offset as _, TimeZone as _};
+            let offset_now = tz.offset_from_utc_datetime(&utc).fix().local_minus_utc();
+            return Ok(PropertyValue::ZonedDateTime {
+                secs: instant.div_euclid(NS) as i64,
+                nanos: instant.rem_euclid(NS) as u32,
+                offset_seconds: offset_now,
+                zone: Some(name.clone()),
+            });
+        }
+    }
+
     let total = temporal_epoch_nanos(v)
         .ok_or_else(|| ExecutionError::TypeError("not a temporal value".to_string()))?
         + month_shift_nanos
