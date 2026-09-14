@@ -860,6 +860,15 @@ enum Outcome {
     Skipped,
 }
 
+/// The setup statement for a named TCK graph, found beside the features:
+/// `<tck>/features/...` -> `<tck>/graphs/<name>/<name>.cypher`.
+fn named_graph_setup(feature: &Path, name: &str) -> Option<String> {
+    let features = feature.ancestors().find(|a| a.file_name().is_some_and(|n| n == "features"))?;
+    let file = features.parent()?.join("graphs").join(name).join(format!("{name}.cypher"));
+    let text = std::fs::read_to_string(file).ok()?;
+    Some(text.trim().trim_end_matches(';').trim().to_string())
+}
+
 fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
     let feature = path
         .file_stem()
@@ -1001,8 +1010,16 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                 }
             } else if body.starts_with("there exists a procedure") {
                 s.unsupported = Some("user-defined procedure".into());
-            } else if body.starts_with("the binary-tree") {
-                s.unsupported = Some("named fixture graph".into());
+            } else if body.starts_with("the ") && body.ends_with(" graph") {
+                // A named fixture graph: `Given the binary-tree-1 graph`. The
+                // TCK ships each as `tck/graphs/<name>/<name>.cypher`, one
+                // CREATE statement, which runs as this scenario's setup. These
+                // 19 scenarios were skipped as "named fixture graph".
+                let name = &body["the ".len()..body.len() - " graph".len()];
+                match named_graph_setup(path, name) {
+                    Some(stmt) => s.setup.push(stmt),
+                    None => s.unsupported = Some("named fixture graph".into()),
+                }
             } else if s.unsupported.is_none() {
                 s.unsupported = Some(format!("step: {}", body.chars().take(48).collect::<String>()));
             }
