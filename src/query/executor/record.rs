@@ -1302,6 +1302,12 @@ pub struct PropertyCursor {
     property: Arc<str>,
     node_column: Option<crate::graph::storage::columnar::ColumnId>,
     edge_column: Option<crate::graph::storage::columnar::ColumnId>,
+    /// Whether the node / relationship column holds strings, once known.
+    /// `read_str` stops trying a column that does not: a date or number sort
+    /// key otherwise looked for a string on every row before reading the
+    /// value, ~30 ms of LDBC IC9's ~467k-row sort.
+    node_str: Option<bool>,
+    edge_str: Option<bool>,
 }
 
 impl PropertyCursor {
@@ -1311,6 +1317,8 @@ impl PropertyCursor {
             property: property.into(),
             node_column: None,
             edge_column: None,
+            node_str: None,
+            edge_str: None,
         }
     }
 
@@ -1378,6 +1386,12 @@ impl PropertyCursor {
     /// caller falls back to `read`. A sort key only compares its string and
     /// never needs its own copy of it (#750).
     pub fn read_str<'s>(&mut self, record: &Record, store: &'s GraphStore) -> Option<&'s str> {
+        // Known not to be a string column for nodes, and not known to be one
+        // for relationships: skip the lookup. The caller reads the value
+        // instead, so the answer is the same either way.
+        if self.node_str == Some(false) && self.edge_str != Some(true) {
+            return None;
+        }
         match record.get(&self.variable) {
             Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => {
                 let column = match self.node_column {
@@ -1388,6 +1402,10 @@ impl PropertyCursor {
                         found
                     }
                 };
+                let is_str = *self.node_str.get_or_insert_with(|| store.node_columns.is_str_column(column));
+                if !is_str {
+                    return None;
+                }
                 store.node_columns.get_str_by_id(column, id.as_u64() as usize)
             }
             Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => {
@@ -1399,6 +1417,10 @@ impl PropertyCursor {
                         found
                     }
                 };
+                let is_str = *self.edge_str.get_or_insert_with(|| store.edge_columns.is_str_column(column));
+                if !is_str {
+                    return None;
+                }
                 store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
             }
             _ => None,
