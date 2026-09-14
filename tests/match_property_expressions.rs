@@ -6,9 +6,9 @@
 //! For a MATCH the two forms mean the same thing, so the property becomes
 //! `WHERE n.id = r.id`.
 //!
-//! Where that rewrite could change what the query means it is not made, and
-//! the refusal stands: a group with an OPTIONAL MATCH (its WHERE filters only
-//! the optional part) and an anonymous node (nothing to name in the WHERE).
+//! An OPTIONAL MATCH gets the same rewrite since #1229, which made its WHERE
+//! form keep the rows the lookup finds nothing for. An anonymous node keeps the
+//! refusal: there is nothing to name in the WHERE.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
@@ -95,11 +95,20 @@ fn tck_creating_nodes_from_an_unwound_list() {
     assert_eq!(column(&s, "MATCH (:Year)<-[r:IN]-(:Event) RETURN count(r) AS c").unwrap(), vec!["2"]);
 }
 
-/// Where the rewrite would change meaning, the refusal stands.
+/// An OPTIONAL MATCH means its WHERE form, and keeps the row it finds nothing
+/// for (#1229; `tests/optional_match_unwind_where.rs` covers the shapes).
 #[test]
-fn optional_and_anonymous_patterns_are_still_refused() {
+fn an_optional_pattern_filters_like_its_where() {
     let s = three_ns();
-    assert!(column(&s, "UNWIND [1] AS i OPTIONAL MATCH (n:N {id: i}) RETURN n.v AS c").is_err());
+    assert_eq!(column(&s, "UNWIND [1] AS i OPTIONAL MATCH (n:N {id: i}) RETURN n.v AS c").unwrap(), vec!["a"]);
+    assert_eq!(column(&s, "UNWIND [1, 99] AS i OPTIONAL MATCH (n:N {id: i}) RETURN count(n) AS c").unwrap(), vec!["1"]);
+    assert_eq!(column(&s, "UNWIND [1, 99] AS i OPTIONAL MATCH (n:N {id: i}) RETURN count(*) AS c").unwrap(), vec!["2"]);
+}
+
+/// An anonymous node has nothing to name in a WHERE, so the refusal stands.
+#[test]
+fn an_anonymous_pattern_is_still_refused() {
+    let s = three_ns();
     assert!(column(&s, "UNWIND [1] AS i MATCH (:N {id: i}) RETURN i AS c").is_err());
 }
 
