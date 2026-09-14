@@ -238,10 +238,10 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                 query.order_by = Some(parse_order_by_clause(c)?);
                             }
                             Rule::skip_clause => {
-                                query.skip = parse_row_count(c)?;
+                                (query.skip, query.deferred_skip) = parse_row_count(c)?;
                             }
                             Rule::limit_clause => {
-                                query.limit = parse_row_count(c)?;
+                                (query.limit, query.deferred_limit) = parse_row_count(c)?;
                             }
                             // Anything this builder cannot lower has to be an
                             // error. Falling through silently was the worse
@@ -353,7 +353,32 @@ fn parse_count_literal(text: &str) -> ParseResult<usize> {
 /// Four parse sites did this inline, each testing for `Rule::integer` and
 /// silently ignoring anything else. One implementation now, because "silently
 /// ignoring anything else" is how a LIMIT goes missing.
-fn parse_row_count(pair: pest::iterators::Pair<Rule>) -> ParseResult<Option<usize>> {
+/// SKIP/LIMIT: a count fixed at parse time, or -- when it holds a
+/// `$parameter`, which does not exist until execution -- the expression
+/// itself, resolved when parameters are bound. Evaluating `$s` here made
+/// `SKIP $s` a parse error.
+fn parse_row_count(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<(Option<usize>, Option<Expression>)> {
+    if let Some(e) = pair.clone().into_inner().find(|p| p.as_rule() == Rule::expression) {
+        let expr = parse_expression(e)?;
+        if contains_parameter(&expr) {
+            return Ok((None, Some(expr)));
+        }
+    }
+    parse_row_count_fixed(pair).map(|n| (n, None))
+}
+
+fn contains_parameter(e: &Expression) -> bool {
+    if matches!(e, Expression::Parameter(_)) {
+        return true;
+    }
+    let mut found = false;
+    crate::query::validate::walk_children(e, &mut |c| found = found || contains_parameter(c));
+    found
+}
+
+fn parse_row_count_fixed(pair: pest::iterators::Pair<Rule>) -> ParseResult<Option<usize>> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             // Through `parse_count_literal`, so `LIMIT -1` keeps saying what is
@@ -565,10 +590,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            query.skip = parse_row_count(child)?;
+                            (query.skip, query.deferred_skip) = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            query.limit = parse_row_count(child)?;
+                            (query.limit, query.deferred_limit) = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -584,10 +609,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            query.skip = parse_row_count(child)?;
+                            (query.skip, query.deferred_skip) = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            query.limit = parse_row_count(child)?;
+                            (query.limit, query.deferred_limit) = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -874,10 +899,10 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1176,10 +1201,10 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1215,10 +1240,10 @@ fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) 
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1238,6 +1263,8 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
     let mut order_by = None;
     let mut skip = None;
     let mut limit = None;
+    let mut deferred_skip = None;
+    let mut deferred_limit = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1252,16 +1279,16 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
                 order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                skip = parse_row_count(inner)?;
+                (skip, deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                limit = parse_row_count(inner)?;
+                (limit, deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
     }
 
-    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit })
+    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit, deferred_skip, deferred_limit })
 }
 
 fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteClause> {

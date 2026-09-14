@@ -8,8 +8,8 @@
 //!
 //! Two of the risks the issue lists turned out to be unreachable in this
 //! engine, and that is recorded here as a test rather than as a claim:
-//! `LIMIT $k` and `*1..$n` are both refused, the first by a semantic check and
-//! the second by the grammar.
+//! `LIMIT $k` and `*1..$n` are both refused for a catalog: the first by the
+//! catalog's shape check, the second by the grammar.
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::snapshot::verify::{
@@ -166,14 +166,19 @@ fn hostile_parameter_values_cannot_add_a_clause_or_write() {
     );
 }
 
-/// Recorded as a test because it is the reason DoD 3's two named risks are not
-/// implemented: neither is expressible.
+/// `LIMIT $k` is Cypher and the engine binds it, but a catalog entry may not
+/// use one: it would hand whoever fills the catalog's parameters an unbounded
+/// row-count slot. This was unreachable because the parser refused `LIMIT $k`;
+/// the catalog now refuses it explicitly. `*1..$n` is still refused by the
+/// grammar.
 #[test]
-fn a_parameter_cannot_reach_a_limit_or_a_var_length_bound() {
-    assert!(
-        samyama::query::parse_query("MATCH (n:P) RETURN n.name LIMIT $k").is_err(),
-        "LIMIT $k parsed; an unbounded LIMIT slot would then be reachable"
-    );
+fn a_catalog_refuses_a_row_count_parameter_and_the_grammar_a_var_length_one() {
+    assert!(samyama::query::parse_query("MATCH (n:P) RETURN n.name LIMIT $k").is_ok());
+    for q in ["MATCH (n:P) RETURN n.name LIMIT $k", "MATCH (n:P) RETURN n.name SKIP $k"] {
+        let err = validate_entry_shape("q", q, &[param("k", "integer", json!(3))])
+            .expect_err("a catalog entry with a row-count parameter was accepted");
+        assert!(err.contains("SKIP/LIMIT"), "{err}");
+    }
     assert!(
         samyama::query::parse_query("MATCH (a)-[:R*1..$n]->(b) RETURN a").is_err(),
         "*1..$n parsed; an unbounded var-length exponent would then be reachable"

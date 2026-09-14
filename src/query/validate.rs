@@ -533,7 +533,7 @@ fn vars_outside_aggregates(expr: &Expression, out: &mut Vec<String>) {
 }
 
 /// Apply `f` to the immediate sub-expressions of `expr`.
-fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
+pub(crate) fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
     match expr {
         Expression::Binary { left, right, .. } => {
             f(left);

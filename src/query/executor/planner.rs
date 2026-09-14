@@ -8000,6 +8000,8 @@ mod tests {
 
         // Build a query manually with no MATCH and no CREATE
         let query = crate::query::ast::Query {
+            deferred_skip: None,
+            deferred_limit: None,
             load_csv_clause: None,
             match_clauses: vec![],
             where_clause: None,
