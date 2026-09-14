@@ -17291,13 +17291,22 @@ impl PhysicalOperator for MergeOperator {
     }
 }
 
-/// FOREACH operator: FOREACH (x IN list | SET x.prop = val)
+/// FOREACH operator: `FOREACH (x IN list | <updating clauses>)`.
+///
+/// For each input row, every element of the list runs the body once, and the
+/// input row passes through unchanged: FOREACH binds nothing outside itself.
+///
+/// The body is planned per element from the clauses as written, by the same
+/// planner helpers the top-level SET, REMOVE, DELETE, CREATE and MERGE use
+/// (`QueryPlanner::plan_foreach_body`). It used to carry SET items and CREATE
+/// patterns of its own: the parser dropped DELETE and REMOVE, this operator
+/// dropped `SET n:L` and `SET n = {…}`, and a list of nodes was not iterated.
+/// Each of those reported success and wrote nothing (#465).
 pub struct ForeachOperator {
     input: OperatorBox,
     variable: String,
     list_expr: Expression,
-    set_items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
-    create_patterns: Vec<Pattern>,
+    body: Vec<crate::query::ast::ForeachBody>,
 }
 
 impl ForeachOperator {
@@ -17305,10 +17314,9 @@ impl ForeachOperator {
         input: OperatorBox,
         variable: String,
         list_expr: Expression,
-        set_items: Vec<(String, String, Expression)>,
-        create_patterns: Vec<Pattern>,
+        body: Vec<crate::query::ast::ForeachBody>,
     ) -> Self {
-        Self { input, variable, list_expr, set_items, create_patterns }
+        Self { input, variable, list_expr, body }
     }
 }
 
@@ -17324,93 +17332,33 @@ impl PhysicalOperator for ForeachOperator {
     }
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
-        if let Some(record) = self.input.next_mut(store, tenant_id)? {
-            // Evaluate the list expression
-            let list_val = eval_expression(&self.list_expr, &record, store)?;
-            let items = match list_val {
-                Value::Property(PropertyValue::Array(arr)) => arr,
-                _ => return Ok(Some(record)),
-            };
-
-            // Iterate over list items
-            for item in &items {
-                let mut inner_record = record.clone();
-                inner_record.bind(self.variable.clone(), Value::Property(item.clone()));
-
-                // Execute SET operations
-                for (var, prop, expr) in &self.set_items {
-                    let val = eval_expression(expr, &inner_record, store)?;
-                    let prop_val = match val {
-                        Value::Property(p) => p,
-                        Value::Null => PropertyValue::Null,
-                        _ => continue,
-                    };
-
-                    if let Some(node_val) = inner_record.get(var) {
-                        match node_val {
-                            Value::NodeRef(id) | Value::Node(id, _) => {
-                                let _ = store.set_node_property(tenant_id, *id, prop.to_string(), prop_val.clone());
-                            }
-                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                                let _ = store.set_edge_property(*id, prop.to_string(), prop_val.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Execute CREATE operations
-                for pattern in &self.create_patterns {
-                    for path in &pattern.paths {
-                        // A relationship pattern would need the surrounding
-                        // variables joined up; creating just the start node
-                        // would silently produce an orphan instead of an edge.
-                        if !path.segments.is_empty() {
-                            return Err(ExecutionError::RuntimeError(
-                                "CREATE of a relationship pattern inside FOREACH is not supported"
-                                    .to_string(),
-                            ));
-                        }
-
-                        let node_id =
-                            store.create_node_with_labels(path.start.labels.iter().cloned());
-                        if let Some(props) = &path.start.properties {
-                            for (k, v) in props {
-                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), v.clone());
-                            }
-                        }
-                        // Property values that are expressions rather than
-                        // literals -- crucially including the loop variable
-                        // itself. These live in `property_exprs`, and not
-                        // evaluating them meant `CREATE (:T {i: i})` created
-                        // the node and silently dropped `i` (#467): the right
-                        // number of nodes, none of the data.
-                        if let Some(prop_exprs) = &path.start.property_exprs {
-                            for (k, expr) in prop_exprs {
-                                let val = eval_expression(expr, &inner_record, store)?;
-                                let prop_val = match val {
-                                    Value::Null => PropertyValue::Null,
-                                    other => match storable_property(&other) {
-                                        Some(p) => p,
-                                        None => {
-                                            return Err(ExecutionError::TypeError(format!(
-                                                "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
-which cannot be stored as a property value"
-                                            )))
-                                        }
-                                    },
-                                };
-                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), prop_val);
-                            }
-                        }
-                    }
-                }
+        let Some(record) = self.input.next_mut(store, tenant_id)? else {
+            return Ok(None);
+        };
+        let items: Vec<Value> = match eval_expression(&self.list_expr, &record, store)? {
+            Value::List(items) => items,
+            Value::Property(PropertyValue::Array(arr)) => arr.into_iter().map(Value::Property).collect(),
+            // A null list is an empty one, as it is for UNWIND.
+            Value::Null | Value::Property(PropertyValue::Null) => Vec::new(),
+            other => {
+                return Err(ExecutionError::TypeError(format!(
+                    "FOREACH expects a list, got {other:?}"
+                )))
             }
-
-            Ok(Some(record))
-        } else {
-            Ok(None)
+        };
+        for item in items {
+            let mut inner = record.clone();
+            inner.bind(self.variable.clone(), item);
+            let bound: std::collections::HashSet<String> =
+                inner.bindings().iter().map(|(name, _)| name.to_string()).collect();
+            let mut body = crate::query::executor::planner::QueryPlanner::plan_foreach_body(
+                Box::new(MaterializedOperator::new(vec![inner])),
+                &self.body,
+                &bound,
+            );
+            while body.next_mut(store, tenant_id)?.is_some() {}
         }
+        Ok(Some(record))
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {

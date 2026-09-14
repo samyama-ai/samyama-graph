@@ -1397,23 +1397,11 @@ impl QueryPlanner {
             // upstream needs to supply bindings.
             if query.foreach_clause.is_some() && !Self::has_any_unwind(query) {
                 let foreach_clause = query.foreach_clause.as_ref().expect("checked above");
-                let mut set_items = Vec::new();
-                for set_clause in &foreach_clause.set_clauses {
-                    for item in &set_clause.items {
-                        set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                    }
-                }
-                let create_patterns: Vec<Pattern> = foreach_clause
-                    .create_clauses
-                    .iter()
-                    .map(|c| c.pattern.clone())
-                    .collect();
                 let root: OperatorBox = Box::new(ForeachOperator::new(
                     Box::new(crate::query::executor::operator::SingleRowOperator::new()),
                     foreach_clause.variable.clone(),
                     foreach_clause.expression.clone(),
-                    set_items,
-                    create_patterns,
+                    foreach_clause.body.clone(),
                 ));
                 return Ok(ExecutionPlan {
                     root,
@@ -2388,13 +2376,6 @@ impl QueryPlanner {
 
         // Check if this is a MATCH...CREATE query (create edges between matched nodes)
         let is_write = if let Some(create_clause) = &query.create_clause {
-            // Extract edge creation info from CREATE pattern
-            // Example: MATCH (a:Trial), (b:Condition) CREATE (a)-[:STUDIES]->(b)
-            let create_pattern = &create_clause.pattern;
-
-            // Collect edges to create from the CREATE pattern
-            let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
-
             // Variables the MATCH already bound. Anything else in the CREATE pattern is a
             // *new* node: previously such nodes were dropped on the floor, so
             // `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither node nor edge and
@@ -2447,98 +2428,7 @@ impl QueryPlanner {
                 }
             }
 
-            // Nodes to create per matched row: (handle, labels, properties)
-            let mut nodes_to_create: Vec<(
-                String,
-                Vec<Label>,
-                HashMap<String, PropertyValue>,
-                Option<HashMap<String, Expression>>,
-            )> = Vec::new();
-            let mut anon_seq = 0usize;
-
-            // Assign a handle to a CREATE-pattern node, registering it for creation when
-            // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
-            // can still be wired to them.
-            let mut handle_for = |node: &crate::query::ast::NodePattern,
-                                  nodes_to_create: &mut Vec<(
-                String,
-                Vec<Label>,
-                HashMap<String, PropertyValue>,
-                Option<HashMap<String, Expression>>,
-            )>,
-                                  anon_seq: &mut usize|
-             -> String {
-                match &node.variable {
-                    Some(v) if matched_vars.contains(v) => v.clone(),
-                    // Already registered by an earlier path in this same
-                    // CREATE — reuse it rather than creating a second node.
-                    Some(v) if nodes_to_create.iter().any(|(h, ..)| h == v) => v.clone(),
-                    Some(v) => {
-                        nodes_to_create.push((
-                            v.clone(),
-                            node.labels.clone(),
-                            node.properties.clone().unwrap_or_default(),
-                            node.property_exprs.clone(),
-                        ));
-                        v.clone()
-                    }
-                    None => {
-                        let h = format!("__anon_mcreate_{anon_seq}");
-                        *anon_seq += 1;
-                        nodes_to_create.push((
-                            h.clone(),
-                            node.labels.clone(),
-                            node.properties.clone().unwrap_or_default(),
-                            node.property_exprs.clone(),
-                        ));
-                        h
-                    }
-                }
-            };
-
-            for path in &create_pattern.paths {
-                let mut current_var =
-                    handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
-
-                for segment in &path.segments {
-                    let target_var =
-                        handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
-                    let edge = &segment.edge;
-                    let edge_type = edge.types.first()
-                        .cloned()
-                        .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-                    let edge_properties = edge.properties.clone().unwrap_or_default();
-                    let edge_variable = edge.variable.clone();
-
-                    // Direction comes from the pattern, not from write order.
-                    let (from, to) = match segment.edge.direction {
-                        Direction::Incoming => (target_var.clone(), current_var.clone()),
-                        Direction::Outgoing | Direction::Both => {
-                            (current_var.clone(), target_var.clone())
-                        }
-                    };
-                    edges_to_create.push((
-                        from,
-                        to,
-                        edge_type,
-                        edge_properties,
-                        edge_variable,
-                        edge.property_exprs.clone(),
-                    ));
-
-                    current_var = target_var;
-                }
-            }
-
-            // Wrap the match operator with node+edge creation
-            if !edges_to_create.is_empty() || !nodes_to_create.is_empty() {
-                use crate::query::executor::operator::MatchCreateEdgeOperator;
-                operator = Box::new(MatchCreateEdgeOperator::with_nodes(
-                    operator,
-                    nodes_to_create,
-                    edges_to_create,
-                ));
-            }
+            operator = Self::attach_create(operator, create_clause, &matched_vars);
 
             true // This is a write query
         } else {
@@ -2547,37 +2437,7 @@ impl QueryPlanner {
 
         // Handle DELETE clause
         let is_write = if let Some(delete_clause) = &query.delete_clause {
-            // The read is fully materialised before the delete touches
-            // anything. `MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*)`
-            // counted 1: the first row's delete removed the edge, and the
-            // lazy expansion re-read adjacency to produce the second row and
-            // found nothing left. Cypher's rule is that a write does not
-            // un-produce rows the read had already matched (#899).
-            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
-                operator, 0, None,
-            ));
-            operator = Box::new(DeleteOperator::new(
-                operator,
-                delete_clause.expressions.clone(),
-                delete_clause.detach,
-            ));
-            // ...and the delete is fully applied before anything reads the
-            // graph again. `MATCH (a:A) DELETE a MERGE (a2:A)` matched a node
-            // the DELETE had already removed: rows were pulled one at a time,
-            // so the first row's MERGE ran when only the first node was gone
-            // and matched the second, which was about to be deleted. The
-            // scenario is named for exactly that -- "merges should not be able
-            // to match on deleted nodes" (#994).
-            //
-            // The barrier below materialises the delete's *input*; this one
-            // drains its *output*, which is what makes every deletion happen
-            // before the next clause begins. Both are needed and they solve
-            // opposite halves: #899 stopped a write from un-producing rows the
-            // read had matched, and this stops a later read from seeing rows
-            // the write was about to remove.
-            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
-                operator, 0, None,
-            ));
+            operator = Self::attach_delete(operator, delete_clause);
             true
         } else {
             is_write
@@ -2585,30 +2445,7 @@ impl QueryPlanner {
 
         // Handle SET clauses
         let is_write = if !query.set_clauses.is_empty() {
-            let mut items = Vec::new();
-            let mut label_adds = Vec::new();
-            let mut entity_items = Vec::new();
-            for set_clause in &query.set_clauses {
-                for item in &set_clause.items {
-                    items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                }
-                for item in &set_clause.label_items {
-                    for label in &item.labels {
-                        label_adds.push((item.variable.clone(), label.clone()));
-                    }
-                }
-                for item in &set_clause.entity_items {
-                    entity_items.push((item.variable.clone(), item.merge, item.value.clone()));
-                }
-            }
-            if !items.is_empty() || !entity_items.is_empty() {
-                operator = Box::new(SetPropertyOperator::with_entity_items(
-                    operator, items, entity_items,
-                ));
-            }
-            if !label_adds.is_empty() {
-                operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
-            }
+            operator = Self::attach_set(operator, &query.set_clauses);
             true
         } else {
             is_write
@@ -2616,29 +2453,7 @@ impl QueryPlanner {
 
         // Handle REMOVE clauses
         let is_write = if !query.remove_clauses.is_empty() {
-            let mut items = Vec::new();
-            let mut label_removes = Vec::new();
-            for remove_clause in &query.remove_clauses {
-                for item in &remove_clause.items {
-                    match item {
-                        RemoveItem::Property { variable, property } => {
-                            items.push((variable.clone(), property.clone()));
-                        }
-                        // Previously dropped here while the statement still
-                        // reported a successful write, so `REMOVE n:Label` was
-                        // a silent no-op (#596).
-                        RemoveItem::Label { variable, label } => {
-                            label_removes.push((variable.clone(), label.clone()));
-                        }
-                    }
-                }
-            }
-            if !items.is_empty() {
-                operator = Box::new(RemovePropertyOperator::new(operator, items));
-            }
-            if !label_removes.is_empty() {
-                operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
-            }
+            operator = Self::attach_remove(operator, &query.remove_clauses);
             true
         } else {
             is_write
@@ -2646,21 +2461,11 @@ impl QueryPlanner {
 
         // Handle FOREACH clause
         let is_write = if let Some(foreach_clause) = &query.foreach_clause {
-            let mut set_items = Vec::new();
-            for set_clause in &foreach_clause.set_clauses {
-                for item in &set_clause.items {
-                    set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                }
-            }
-            let create_patterns: Vec<Pattern> = foreach_clause.create_clauses.iter()
-                .map(|c| c.pattern.clone())
-                .collect();
             operator = Box::new(ForeachOperator::new(
                 operator,
                 foreach_clause.variable.clone(),
                 foreach_clause.expression.clone(),
-                set_items,
-                create_patterns,
+                foreach_clause.body.clone(),
             ));
             true
         } else {
@@ -2669,173 +2474,12 @@ impl QueryPlanner {
 
         // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
         let is_write = if let Some(merge_clause) = &query.merge_clause {
-            let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
-                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
-                .collect();
-            let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
-                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
-                .collect();
-
-            // Extract edge patterns from MERGE clause
-            let mut edges_to_merge = Vec::new();
-            // `MERGE p = (a)-[:R]->(b)` binds `p` (#876). An anonymous
-            // relationship inside a named path is given a synthetic handle, for
-            // the same reason `CREATE` gives one to an anonymous node: the path
-            // has to reference it afterwards.
-            let mut merge_named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
-            let mut anon_seq = 0usize;
-            for path in &merge_clause.pattern.paths {
-                let mut current_var = path.start.variable.clone();
-                let mut path_nodes: Vec<String> = current_var.iter().cloned().collect();
-                let mut path_edges: Vec<String> = Vec::new();
-                let mut complete = current_var.is_some();
-                for segment in &path.segments {
-                    let edge = &segment.edge;
-                    let edge_type = edge.types.first().cloned()
-                        .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-                    let edge_props = edge.properties.clone().unwrap_or_default();
-                    let edge_var = match (&edge.variable, &path.path_variable) {
-                        (None, Some(_)) => {
-                            anon_seq += 1;
-                            Some(format!("__merge_path_edge_{anon_seq}"))
-                        }
-                        (other, _) => other.clone(),
-                    };
-                    let target_var = segment.node.variable.clone();
-
-                    match (&target_var, &edge_var) {
-                        (Some(t), Some(e)) => {
-                            path_nodes.push(t.clone());
-                            path_edges.push(e.clone());
-                        }
-                        _ => complete = false,
-                    }
-
-                    if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
-                        // `-[r:T]-` matches a relationship either way round.
-                        // Without this the operator only ever looked for
-                        // `src -> tgt`, so an existing `tgt -> src` did not
-                        // match and MERGE wrote a duplicate beside it (#938).
-                        let undirected =
-                            matches!(edge.direction, crate::query::ast::Direction::Both);
-                        edges_to_merge.push((
-                            src.clone(),
-                            tgt.clone(),
-                            edge_type,
-                            edge_props,
-                            edge_var,
-                            undirected,
-                        ));
-                    }
-                    current_var = target_var;
-                }
-                // A path with an unnameable position is left unbound rather
-                // than bound to a shorter path that looks plausible.
-                if let (Some(pv), true) = (&path.path_variable, complete) {
-                    merge_named_paths.push((pv.clone(), path_nodes, path_edges));
-                }
-            }
-
-            // `MatchMergeEdgeOperator` wires an edge between endpoints that
-            // are **already bound**, which is what this branch is for -- the
-            // `MATCH (a), (b) MERGE (a)-[:R]->(b)` shape. Without a MATCH the
-            // endpoints are not bound by anything, so it wired nothing and
-            // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
-            // silently created no nodes and no edges. That case is a
-            // whole-pattern merge, which `MergeOperator` already does (#642).
-            // `MatchMergeEdgeOperator` wires an edge between endpoints that are
-            // **already bound** -- that is its whole contract, and it is better
-            // at that job than the general path: it binds the relationship
-            // variable, matches an undirected pattern both ways, and runs
-            // ON CREATE / ON MATCH against the relationship.
-            //
-            // The guard was `a MATCH exists`, not `the endpoints are bound`, so
-            // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
-            // nothing -- wired an edge between one endpoint and no other, and
-            // the whole MERGE became a silent no-op returning zero rows (#894).
             let bound_by_match = {
                 let mut scope: Vec<String> = Vec::new();
                 crate::query::star::bind_match(&mut scope, &query.match_clauses);
                 scope
             };
-            let all_endpoints_bound = edges_to_merge
-                .iter()
-                .all(|(src, tgt, ..)| {
-                    bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
-                });
-            if !edges_to_merge.is_empty() && all_endpoints_bound {
-                // Edge MERGE: use MatchMergeEdgeOperator
-                use crate::query::executor::operator::MatchMergeEdgeOperator;
-                // `ON CREATE SET n = {…}` / `n += {…}` (#874).
-                let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
-                    .on_create_entity_set
-                    .iter()
-                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                    .collect();
-                let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
-                    .on_match_entity_set
-                    .iter()
-                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                    .collect();
-                operator = Box::new(
-                    MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
-                        .with_entity_sets(on_create_entity, on_match_entity),
-                );
-                if !merge_named_paths.is_empty() {
-                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
-                        operator,
-                        merge_named_paths.clone(),
-                    ));
-                }
-            } else {
-                // Node-only MERGE, or a whole-pattern MERGE with nothing bound
-                // to hang it off, running once per upstream row.
-                //
-                // The comment here used to say "with input" while the code
-                // assigned over `operator` and threw the input away, so the
-                // MERGE ran exactly once no matter what fed it -- and, more to
-                // the point, could not see the row. That is why
-                // `UNWIND [...] AS x MERGE (n:N {v: x})` had nowhere to read
-                // `x` from (#642).
-                let on_create_labels: Vec<(String, Vec<Label>)> = merge_clause
-                    .on_create_labels
-                    .iter()
-                    .map(|l| (l.variable.clone(), l.labels.clone()))
-                    .collect();
-                let on_match_labels: Vec<(String, Vec<Label>)> = merge_clause
-                    .on_match_labels
-                    .iter()
-                    .map(|l| (l.variable.clone(), l.labels.clone()))
-                    .collect();
-                operator = Box::new(
-                    MergeOperator::new(
-                        merge_clause.pattern.clone(),
-                        on_create,
-                        on_match,
-                        on_create_labels,
-                        on_match_labels,
-                    )
-                    .with_entity_sets(
-                        merge_clause
-                            .on_create_entity_set
-                            .iter()
-                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                            .collect(),
-                        merge_clause
-                            .on_match_entity_set
-                            .iter()
-                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                            .collect(),
-                    )
-                    .with_input(operator),
-                );
-                if !merge_named_paths.is_empty() {
-                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
-                        operator,
-                        merge_named_paths.clone(),
-                    ));
-                }
-            }
+            operator = Self::attach_merge(operator, merge_clause, &bound_by_match);
             true
         } else {
             is_write
@@ -6825,6 +6469,419 @@ impl QueryPlanner {
     /// Extract variable names from a MATCH clause
     fn extract_match_vars(&self, mc: &MatchClause) -> HashSet<String> {
         Self::clause_variables(&mc.pattern)
+    }
+
+    /// `CREATE` over `operator`. A node the pattern names that is not in
+    /// `matched_vars` is created per row; every relationship is wired between
+    /// the handles.
+    fn attach_create(
+        mut operator: OperatorBox,
+        create_clause: &CreateClause,
+        matched_vars: &HashSet<String>,
+    ) -> OperatorBox {
+        let create_pattern = &create_clause.pattern;
+        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
+
+        // Nodes to create per matched row: (handle, labels, properties)
+        let mut nodes_to_create: Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )> = Vec::new();
+        let mut anon_seq = 0usize;
+
+        // Assign a handle to a CREATE-pattern node, registering it for creation when
+        // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
+        // can still be wired to them.
+        let mut handle_for = |node: &crate::query::ast::NodePattern,
+                              nodes_to_create: &mut Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )>,
+                              anon_seq: &mut usize|
+         -> String {
+            match &node.variable {
+                Some(v) if matched_vars.contains(v) => v.clone(),
+                // Already registered by an earlier path in this same
+                // CREATE — reuse it rather than creating a second node.
+                Some(v) if nodes_to_create.iter().any(|(h, ..)| h == v) => v.clone(),
+                Some(v) => {
+                    nodes_to_create.push((
+                        v.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    v.clone()
+                }
+                None => {
+                    let h = format!("__anon_mcreate_{anon_seq}");
+                    *anon_seq += 1;
+                    nodes_to_create.push((
+                        h.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    h
+                }
+            }
+        };
+
+        for path in &create_pattern.paths {
+            let mut current_var =
+                handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
+
+            for segment in &path.segments {
+                let target_var =
+                    handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
+                let edge = &segment.edge;
+                let edge_type = edge.types.first()
+                    .cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let edge_properties = edge.properties.clone().unwrap_or_default();
+                let edge_variable = edge.variable.clone();
+
+                // Direction comes from the pattern, not from write order.
+                let (from, to) = match segment.edge.direction {
+                    Direction::Incoming => (target_var.clone(), current_var.clone()),
+                    Direction::Outgoing | Direction::Both => {
+                        (current_var.clone(), target_var.clone())
+                    }
+                };
+                edges_to_create.push((
+                    from,
+                    to,
+                    edge_type,
+                    edge_properties,
+                    edge_variable,
+                    edge.property_exprs.clone(),
+                ));
+
+                current_var = target_var;
+            }
+        }
+
+        // Wrap the match operator with node+edge creation
+        if !edges_to_create.is_empty() || !nodes_to_create.is_empty() {
+            use crate::query::executor::operator::MatchCreateEdgeOperator;
+            operator = Box::new(MatchCreateEdgeOperator::with_nodes(
+                operator,
+                nodes_to_create,
+                edges_to_create,
+            ));
+        }
+
+        operator
+    }
+
+    /// `DELETE` over `operator`.
+    fn attach_delete(mut operator: OperatorBox, delete_clause: &DeleteClause) -> OperatorBox {
+        // The read is fully materialised before the delete touches
+        // anything. `MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*)`
+        // counted 1: the first row's delete removed the edge, and the
+        // lazy expansion re-read adjacency to produce the second row and
+        // found nothing left. Cypher's rule is that a write does not
+        // un-produce rows the read had already matched (#899).
+        operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+            operator, 0, None,
+        ));
+        operator = Box::new(DeleteOperator::new(
+            operator,
+            delete_clause.expressions.clone(),
+            delete_clause.detach,
+        ));
+        // ...and the delete is fully applied before anything reads the
+        // graph again. `MATCH (a:A) DELETE a MERGE (a2:A)` matched a node
+        // the DELETE had already removed: rows were pulled one at a time,
+        // so the first row's MERGE ran when only the first node was gone
+        // and matched the second, which was about to be deleted. The
+        // scenario is named for exactly that -- "merges should not be able
+        // to match on deleted nodes" (#994).
+        //
+        // The barrier below materialises the delete's *input*; this one
+        // drains its *output*, which is what makes every deletion happen
+        // before the next clause begins. Both are needed and they solve
+        // opposite halves: #899 stopped a write from un-producing rows the
+        // read had matched, and this stops a later read from seeing rows
+        // the write was about to remove.
+        operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+            operator, 0, None,
+        ));
+        operator
+    }
+
+    /// `SET` over `operator`: property and whole-entity items, then labels.
+    fn attach_set(mut operator: OperatorBox, set_clauses: &[SetClause]) -> OperatorBox {
+        let mut items = Vec::new();
+        let mut label_adds = Vec::new();
+        let mut entity_items = Vec::new();
+        for set_clause in set_clauses {
+            for item in &set_clause.items {
+                items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+            }
+            for item in &set_clause.label_items {
+                for label in &item.labels {
+                    label_adds.push((item.variable.clone(), label.clone()));
+                }
+            }
+            for item in &set_clause.entity_items {
+                entity_items.push((item.variable.clone(), item.merge, item.value.clone()));
+            }
+        }
+        if !items.is_empty() || !entity_items.is_empty() {
+            operator = Box::new(SetPropertyOperator::with_entity_items(
+                operator, items, entity_items,
+            ));
+        }
+        if !label_adds.is_empty() {
+            operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
+        }
+        operator
+    }
+
+    /// `REMOVE` over `operator`: properties, then labels.
+    fn attach_remove(mut operator: OperatorBox, remove_clauses: &[RemoveClause]) -> OperatorBox {
+        let mut items = Vec::new();
+        let mut label_removes = Vec::new();
+        for remove_clause in remove_clauses {
+            for item in &remove_clause.items {
+                match item {
+                    RemoveItem::Property { variable, property } => {
+                        items.push((variable.clone(), property.clone()));
+                    }
+                    // Previously dropped here while the statement still
+                    // reported a successful write, so `REMOVE n:Label` was
+                    // a silent no-op (#596).
+                    RemoveItem::Label { variable, label } => {
+                        label_removes.push((variable.clone(), label.clone()));
+                    }
+                }
+            }
+        }
+        if !items.is_empty() {
+            operator = Box::new(RemovePropertyOperator::new(operator, items));
+        }
+        if !label_removes.is_empty() {
+            operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
+        }
+        operator
+    }
+
+    /// `MERGE` over `operator`. `bound_by_match` is what the row already
+    /// binds; a relationship MERGE between bound endpoints wires an edge, and
+    /// anything else is a whole-pattern MERGE per row.
+    fn attach_merge(
+        mut operator: OperatorBox,
+        merge_clause: &MergeClause,
+        bound_by_match: &[String],
+    ) -> OperatorBox {
+        let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
+            .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+            .collect();
+        let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
+            .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+            .collect();
+
+        // Extract edge patterns from MERGE clause
+        let mut edges_to_merge = Vec::new();
+        // `MERGE p = (a)-[:R]->(b)` binds `p` (#876). An anonymous
+        // relationship inside a named path is given a synthetic handle, for
+        // the same reason `CREATE` gives one to an anonymous node: the path
+        // has to reference it afterwards.
+        let mut merge_named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        let mut anon_seq = 0usize;
+        for path in &merge_clause.pattern.paths {
+            let mut current_var = path.start.variable.clone();
+            let mut path_nodes: Vec<String> = current_var.iter().cloned().collect();
+            let mut path_edges: Vec<String> = Vec::new();
+            let mut complete = current_var.is_some();
+            for segment in &path.segments {
+                let edge = &segment.edge;
+                let edge_type = edge.types.first().cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let edge_props = edge.properties.clone().unwrap_or_default();
+                let edge_var = match (&edge.variable, &path.path_variable) {
+                    (None, Some(_)) => {
+                        anon_seq += 1;
+                        Some(format!("__merge_path_edge_{anon_seq}"))
+                    }
+                    (other, _) => other.clone(),
+                };
+                let target_var = segment.node.variable.clone();
+
+                match (&target_var, &edge_var) {
+                    (Some(t), Some(e)) => {
+                        path_nodes.push(t.clone());
+                        path_edges.push(e.clone());
+                    }
+                    _ => complete = false,
+                }
+
+                if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
+                    // `-[r:T]-` matches a relationship either way round.
+                    // Without this the operator only ever looked for
+                    // `src -> tgt`, so an existing `tgt -> src` did not
+                    // match and MERGE wrote a duplicate beside it (#938).
+                    let undirected =
+                        matches!(edge.direction, crate::query::ast::Direction::Both);
+                    edges_to_merge.push((
+                        src.clone(),
+                        tgt.clone(),
+                        edge_type,
+                        edge_props,
+                        edge_var,
+                        undirected,
+                    ));
+                }
+                current_var = target_var;
+            }
+            // A path with an unnameable position is left unbound rather
+            // than bound to a shorter path that looks plausible.
+            if let (Some(pv), true) = (&path.path_variable, complete) {
+                merge_named_paths.push((pv.clone(), path_nodes, path_edges));
+            }
+        }
+
+        // `MatchMergeEdgeOperator` wires an edge between endpoints that
+        // are **already bound**, which is what this branch is for -- the
+        // `MATCH (a), (b) MERGE (a)-[:R]->(b)` shape. Without a MATCH the
+        // endpoints are not bound by anything, so it wired nothing and
+        // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
+        // silently created no nodes and no edges. That case is a
+        // whole-pattern merge, which `MergeOperator` already does (#642).
+        // `MatchMergeEdgeOperator` wires an edge between endpoints that are
+        // **already bound** -- that is its whole contract, and it is better
+        // at that job than the general path: it binds the relationship
+        // variable, matches an undirected pattern both ways, and runs
+        // ON CREATE / ON MATCH against the relationship.
+        //
+        // The guard was `a MATCH exists`, not `the endpoints are bound`, so
+        // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
+        // nothing -- wired an edge between one endpoint and no other, and
+        // the whole MERGE became a silent no-op returning zero rows (#894).
+        let all_endpoints_bound = edges_to_merge
+            .iter()
+            .all(|(src, tgt, ..)| {
+                bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
+            });
+        if !edges_to_merge.is_empty() && all_endpoints_bound {
+            // Edge MERGE: use MatchMergeEdgeOperator
+            use crate::query::executor::operator::MatchMergeEdgeOperator;
+            // `ON CREATE SET n = {…}` / `n += {…}` (#874).
+            let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
+                .on_create_entity_set
+                .iter()
+                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                .collect();
+            let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
+                .on_match_entity_set
+                .iter()
+                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                .collect();
+            operator = Box::new(
+                MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
+                    .with_entity_sets(on_create_entity, on_match_entity),
+            );
+            if !merge_named_paths.is_empty() {
+                operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                    operator,
+                    merge_named_paths.clone(),
+                ));
+            }
+        } else {
+            // Node-only MERGE, or a whole-pattern MERGE with nothing bound
+            // to hang it off, running once per upstream row.
+            //
+            // The comment here used to say "with input" while the code
+            // assigned over `operator` and threw the input away, so the
+            // MERGE ran exactly once no matter what fed it -- and, more to
+            // the point, could not see the row. That is why
+            // `UNWIND [...] AS x MERGE (n:N {v: x})` had nowhere to read
+            // `x` from (#642).
+            let on_create_labels: Vec<(String, Vec<Label>)> = merge_clause
+                .on_create_labels
+                .iter()
+                .map(|l| (l.variable.clone(), l.labels.clone()))
+                .collect();
+            let on_match_labels: Vec<(String, Vec<Label>)> = merge_clause
+                .on_match_labels
+                .iter()
+                .map(|l| (l.variable.clone(), l.labels.clone()))
+                .collect();
+            operator = Box::new(
+                MergeOperator::new(
+                    merge_clause.pattern.clone(),
+                    on_create,
+                    on_match,
+                    on_create_labels,
+                    on_match_labels,
+                )
+                .with_entity_sets(
+                    merge_clause
+                        .on_create_entity_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                        .collect(),
+                    merge_clause
+                        .on_match_entity_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                        .collect(),
+                )
+                .with_input(operator),
+            );
+            if !merge_named_paths.is_empty() {
+                operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                    operator,
+                    merge_named_paths.clone(),
+                ));
+            }
+        }
+        operator
+    }
+
+    /// The body of a `FOREACH`, planned over `operator` clause by clause in
+    /// the order written, with the same helpers the top-level clauses use.
+    ///
+    /// `bound` is every variable the input record carries -- the enclosing
+    /// row's and the loop variable -- so `CREATE (p)-[:R]->()` and
+    /// `MERGE (a)-[:R]->(b)` use those nodes rather than making new ones. A
+    /// node an earlier clause in the body creates is bound for later ones.
+    pub(crate) fn plan_foreach_body(
+        mut operator: OperatorBox,
+        body: &[ForeachBody],
+        bound: &HashSet<String>,
+    ) -> OperatorBox {
+        let mut bound = bound.clone();
+        for clause in body {
+            operator = match clause {
+                ForeachBody::Set(sc) => Self::attach_set(operator, std::slice::from_ref(sc)),
+                ForeachBody::Remove(rc) => Self::attach_remove(operator, std::slice::from_ref(rc)),
+                ForeachBody::Delete(dc) => Self::attach_delete(operator, dc),
+                ForeachBody::Create(cc) => {
+                    let op = Self::attach_create(operator, cc, &bound);
+                    bound.extend(Self::clause_variables(&cc.pattern));
+                    op
+                }
+                ForeachBody::Merge(mc) => {
+                    let scope: Vec<String> = bound.iter().cloned().collect();
+                    let op = Self::attach_merge(operator, mc, &scope);
+                    bound.extend(Self::clause_variables(&mc.pattern));
+                    op
+                }
+                ForeachBody::Foreach(fc) => Box::new(ForeachOperator::new(
+                    operator,
+                    fc.variable.clone(),
+                    fc.expression.clone(),
+                    fc.body.clone(),
+                )),
+            };
+        }
+        operator
     }
 
     /// Every variable a MATCH clause binds, **including the named path**.
