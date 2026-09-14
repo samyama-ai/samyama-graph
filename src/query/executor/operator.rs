@@ -4501,6 +4501,9 @@ fn temporal_difference_calendar(
     let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
     };
+    if let Some(d) = named_zone_calendar_difference(a, b)? {
+        return Ok(d);
+    }
 
     // Within one month the calendar answer *is* the elapsed one, and the plain
     // form gives it in the shape the TCK wants: `PT6H`, not `P0M0DT6H`. Going
@@ -4611,6 +4614,94 @@ fn temporal_difference_calendar(
         seconds: nanos / 1_000_000_000,
         nanos: (nanos % 1_000_000_000) as i32,
     })
+}
+
+/// `duration.between` across an offset change in a named zone (#825).
+///
+/// java.time's rule, which Neo4j follows: months and days are counted on the
+/// local date-times, and the remainder is measured on the instant after
+/// adding them to the start with the offset re-resolved there. Counting days
+/// as 86,400 s of elapsed time made Stockholm's 25-hour 2017-10-29 `P1DT1H`,
+/// and `start + P1DT1H` is an hour past the end.
+///
+/// `None` -- the existing path -- unless one named zone is involved and its
+/// offset differs between the two ends. Where the offsets agree, local and
+/// elapsed time agree and so do the two answers; two fixed offsets stay
+/// elapsed time, as they do in Neo4j.
+fn named_zone_calendar_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<Option<PropertyValue>, ExecutionError> {
+    use crate::query::executor::temporal::{resolve_offset, TzSpec};
+    use chrono::{Offset as _, TimeZone as _};
+    const NS: i128 = 1_000_000_000;
+    const DAY: i128 = 86_400 * NS;
+
+    let tz = match (zone_of(a), zone_of(b)) {
+        (Some(TzSpec::Named(x)), Some(TzSpec::Named(y))) if x == y => x,
+        (Some(TzSpec::Named(x)), None) | (None, Some(TzSpec::Named(x))) => x,
+        _ => return Ok(None),
+    };
+    let Some((na, nb)) = zone_aligned_instants(a, b) else {
+        return Ok(None);
+    };
+    let offset_at = |instant: i128| -> Option<i128> {
+        let secs = i64::try_from(instant.div_euclid(NS)).ok()?;
+        let utc = chrono::DateTime::from_timestamp(secs, 0)?.naive_utc();
+        Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc() as i128)
+    };
+    let (Some(oa), Some(ob)) = (offset_at(na), offset_at(nb)) else {
+        return Ok(None);
+    };
+    if oa == ob {
+        return Ok(None);
+    }
+
+    // The calendar count runs on the two ends as local date-times.
+    let (local_a, local_b) = (na + oa * NS, nb + ob * NS);
+    let as_local = |l: i128| -> Option<PropertyValue> {
+        Some(PropertyValue::LocalDateTime {
+            secs: i64::try_from(l.div_euclid(NS)).ok()?,
+            nanos: l.rem_euclid(NS) as u32,
+        })
+    };
+    let (Some(la), Some(lb)) = (as_local(local_a), as_local(local_b)) else {
+        return Ok(None);
+    };
+    let PropertyValue::Duration { months, days, seconds, nanos } =
+        temporal_difference_calendar(&la, &lb)?
+    else {
+        return Ok(None);
+    };
+
+    // start + months + days on the local calendar, then its offset.
+    let out_of_range = || ExecutionError::RuntimeError("date out of range".into());
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let start_date = epoch
+        .checked_add_signed(chrono::Duration::days(local_b.div_euclid(DAY) as i64))
+        .ok_or_else(out_of_range)?;
+    let mid_date = shift_months_clamped(start_date, months)?
+        .checked_add_signed(chrono::Duration::days(days))
+        .ok_or_else(out_of_range)?;
+    let mid_day = mid_date.signed_duration_since(epoch).num_days();
+    let mid_time = local_b.rem_euclid(DAY);
+    let mid_offset = match resolve_offset(&TzSpec::Named(tz), mid_day, mid_time as i64) {
+        Ok(o) => o as i128,
+        // A local time in a spring-forward gap does not exist. java.time moves
+        // it later by the gap, which is the offset from *before* the gap; the
+        // local time read with the later offset is an instant before it.
+        Err(_) => match offset_at(mid_day as i128 * DAY + mid_time - oa.max(ob) * NS) {
+            Some(o) => o,
+            None => return Ok(None),
+        },
+    };
+    let rem = seconds as i128 * NS + nanos as i128 - (oa - mid_offset) * NS;
+    Ok(Some(PropertyValue::Duration {
+        months,
+        days,
+        seconds: (rem / NS) as i64,
+        nanos: (rem % NS) as i32,
+    }))
 }
 
 /// Move a date by whole months, clamping the day into the target month —
