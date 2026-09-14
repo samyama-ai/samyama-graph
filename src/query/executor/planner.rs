@@ -4450,15 +4450,10 @@ impl QueryPlanner {
         }
     }
 
-    /// The node a batch lookup would bind: one named node with exactly one
-    /// label (the index covers one label), no relationships, no path variable
-    /// and no inline properties.
-    fn lookup_target(match_clause: &MatchClause) -> Option<(&String, &Label)> {
-        let paths = &match_clause.pattern.paths;
-        if match_clause.optional || paths.len() != 1 {
-            return None;
-        }
-        let path = &paths[0];
+    /// The node a batch lookup would bind from one pattern: a named node with
+    /// exactly one label (the index covers one label), no relationships, no
+    /// path variable and no inline properties.
+    fn lookup_node(path: &PathPattern) -> Option<(&String, &Label)> {
         let start = &path.start;
         if !path.segments.is_empty()
             || path.path_variable.is_some()
@@ -4499,11 +4494,70 @@ impl QueryPlanner {
         })
     }
 
-    /// `MATCH ... MATCH (n:N) WHERE n.id = x.id` with `:N(id)` indexed: probe
-    /// the index once per upstream row, instead of joining every row against a
-    /// scan of the label and filtering afterwards (#1219). The equality is
-    /// taken out of `cross_preds`; the node's own WHERE is applied on top.
-    /// Anything that is not the `lookup_target` shape gets `existing` back.
+    /// A MATCH whose every pattern is a `lookup_node`, each pinned by an indexed
+    /// equality to what is already bound -- `bound` upstream, or a node looked
+    /// up earlier in the chain: an index probe per node per row, stacked on
+    /// `base`, with the clause's own WHERE on top (#1219). This is the bulk
+    /// relationship load, `UNWIND $rels AS r MATCH (a:N {id: r.src}),
+    /// (b:N {id: r.dst})`, which otherwise joins two full label scans per row.
+    ///
+    /// Keys come from `preds` and from the clause's own WHERE (`b.id = a.next`
+    /// is the clause's own). Returns the positions in `preds` it used. If any
+    /// node has no key, `base` comes back and the plan is unchanged.
+    fn lookup_chain(
+        base: OperatorBox,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        preds: &[Expression],
+        bound: impl Fn(&str) -> bool,
+        store: &GraphStore,
+    ) -> Result<(OperatorBox, Vec<usize>), OperatorBox> {
+        use crate::query::executor::operator::CorrelatedIndexLookupOperator;
+        let paths = &match_clause.pattern.paths;
+        if match_clause.optional || paths.is_empty() {
+            return Err(base);
+        }
+        let Some(mut pending) = paths.iter().map(Self::lookup_node).collect::<Option<Vec<_>>>() else {
+            return Err(base);
+        };
+        let mut seen = HashSet::new();
+        if pending.iter().any(|(v, _)| bound(v) || !seen.insert(v.as_str())) {
+            return Err(base);
+        }
+        let mut candidates: Vec<Expression> = preds.to_vec();
+        if let Some(w) = own_where {
+            candidates.extend(flatten_and_predicates(&w.predicate));
+        }
+        let mut looked: Vec<String> = Vec::new();
+        let mut steps: Vec<(String, Label, String, Expression)> = Vec::new();
+        let mut used: Vec<usize> = Vec::new();
+        while !pending.is_empty() {
+            let is_bound = |x: &str| bound(x) || looked.iter().any(|y| y == x);
+            let found = pending.iter().enumerate().find_map(|(pos, (v, l))| {
+                Self::lookup_key(v, l, &candidates, is_bound, store).map(|k| (pos, k))
+            });
+            let Some((pos, (i, property, key))) = found else { return Err(base) };
+            let (v, l) = pending.remove(pos);
+            if i < preds.len() {
+                used.push(i);
+            }
+            looked.push(v.clone());
+            steps.push((v.clone(), l.clone(), property, key));
+        }
+        let mut op = base;
+        for (v, l, property, key) in steps {
+            op = Box::new(CorrelatedIndexLookupOperator::new(op, v, l, property, key));
+        }
+        if let Some(w) = own_where {
+            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
+        }
+        Ok((op, used))
+    }
+
+    /// A later MATCH joined to what came before (`MATCH ... MATCH (n:N) WHERE
+    /// n.id = x.id`): the `lookup_chain` over the cross-clause predicates, the
+    /// ones it used taken out of `cross_preds`. `existing` comes back when the
+    /// shape does not apply.
     fn try_correlated_index_lookup(
         existing: OperatorBox,
         match_clause: &MatchClause,
@@ -4512,35 +4566,20 @@ impl QueryPlanner {
         cross_preds: &mut Vec<Expression>,
         store: &GraphStore,
     ) -> Result<OperatorBox, OperatorBox> {
-        let Some((var, label)) = Self::lookup_target(match_clause) else { return Err(existing) };
-        if known_vars.contains(var) {
-            return Err(existing);
-        }
-        let Some((i, property, key)) =
-            Self::lookup_key(var, label, cross_preds, |v| known_vars.contains(v), store)
-        else {
-            return Err(existing);
-        };
-        cross_preds.remove(i);
-        let mut op: OperatorBox = Box::new(crate::query::executor::operator::CorrelatedIndexLookupOperator::new(
-            existing,
-            var.clone(),
-            label.clone(),
-            property,
-            key,
-        ));
-        if let Some(w) = own_where {
-            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
+        let (op, mut used) =
+            Self::lookup_chain(existing, match_clause, own_where, cross_preds, |v| known_vars.contains(v), store)?;
+        used.sort_unstable();
+        for i in used.into_iter().rev() {
+            cross_preds.remove(i);
         }
         Ok(op)
     }
 
     /// The leading-UNWIND form: `UNWIND $rows AS r MATCH (n:N) WHERE n.id = r.id`.
     /// A leading UNWIND is placed above the match plan, so the equality never
-    /// reaches a join site; this builds Unwind -> index probe -> the node's own
-    /// WHERE in place of that plan. The equality stays among the late-bound
-    /// predicates and is checked again on each output row, which cannot change
-    /// an answer.
+    /// reaches a join site; this builds Unwind -> the `lookup_chain` in place
+    /// of that plan. The keys stay among the late-bound predicates and are
+    /// checked again on each output row, which cannot change an answer.
     fn leading_unwind_index_lookup(
         unwind: &UnwindClause,
         match_clause: &MatchClause,
@@ -4548,23 +4587,15 @@ impl QueryPlanner {
         late_preds: &[Expression],
         store: &GraphStore,
     ) -> Option<OperatorBox> {
-        use crate::query::executor::operator::{CorrelatedIndexLookupOperator, SingleRowOperator};
-        let (var, label) = Self::lookup_target(match_clause)?;
-        if var == &unwind.variable {
-            return None;
-        }
-        let (_, property, key) = Self::lookup_key(var, label, late_preds, |v| v == unwind.variable, store)?;
+        use crate::query::executor::operator::SingleRowOperator;
         let base: OperatorBox = Box::new(UnwindOperator::new(
             Box::new(SingleRowOperator::new()),
             unwind.expression.clone(),
             unwind.variable.clone(),
         ));
-        let mut op: OperatorBox =
-            Box::new(CorrelatedIndexLookupOperator::new(base, var.clone(), label.clone(), property, key));
-        if let Some(w) = own_where {
-            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
-        }
-        Some(op)
+        Self::lookup_chain(base, match_clause, own_where, late_preds, |v| v == unwind.variable, store)
+            .ok()
+            .map(|(op, _)| op)
     }
 
     /// Collect variables referenced by an expression
