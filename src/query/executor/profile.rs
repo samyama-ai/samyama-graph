@@ -160,6 +160,12 @@ impl PhysicalOperator for ProfiledOperator {
         self.inner.try_push_limit(n)
     }
 
+    /// Forwarded like `try_push_limit`, so a profiled plan sorts the way the
+    /// unprofiled one does (#593).
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.inner.hint_early_stop(n)
+    }
+
     fn reset(&mut self) {
         self.inner.reset()
     }

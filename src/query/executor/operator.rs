@@ -5369,6 +5369,18 @@ pub trait PhysicalOperator: Send {
         false
     }
 
+    /// A soft form of `try_push_limit`: the consumer above will *probably*
+    /// stop after about `n` rows, but cannot promise it (#593).
+    ///
+    /// `DISTINCT ... LIMIT n` is the case. `Distinct` may drop any number of
+    /// duplicates, so it cannot tell a sort below that only `n` rows matter,
+    /// but it will usually stop soon after `n`. An operator may use this to do
+    /// less work up front, and must still produce every row if asked. Returns
+    /// whether some operator took the hint. Pass-through operators forward it.
+    fn hint_early_stop(&mut self, _n: usize) -> bool {
+        false
+    }
+
     /// Get the next batch of records (Vectorized Execution)
     /// Defaults to accumulating records from next()
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -9043,6 +9055,10 @@ impl PhysicalOperator for ProjectOperator {
         self.input.try_push_limit(n)
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n)
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if let Some(batch) = self.input.next_batch(store, batch_size)? {
             let mut projected_records = Vec::with_capacity(batch.records.len());
@@ -10821,6 +10837,10 @@ impl PhysicalOperator for LimitOperator {
         self.input.try_push_limit(effective)
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(self.limit.min(n))
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if self.count >= self.limit {
             return Ok(None);
@@ -10882,6 +10902,13 @@ impl<'s> SortKey<'s> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Key comparisons made by `SortOperator`, for tests that pin how much of
+    /// its input a bounded or early-stopping sort actually orders.
+    static SORT_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub struct SortOperator {
     input: OperatorBox,
     sort_items: Vec<(Expression, bool)>, // (expr, ascending)
@@ -10896,6 +10923,13 @@ pub struct SortOperator {
     /// be read, so the rest are discarded as they arrive instead of being
     /// sorted and then thrown away (#518).
     limit_hint: Option<usize>,
+    /// A soft bound from `hint_early_stop`: the consumer will probably stop
+    /// after about this many rows but may not (a `Distinct` above, #593). Only
+    /// a head of the rows is ordered up front; see `execute_all`.
+    soft_hint: Option<usize>,
+    /// `records[..sorted_upto]` are in final order. The rest are in input
+    /// order until `sort_tail` runs, which happens only if a read gets there.
+    sorted_upto: usize,
 }
 
 impl SortOperator {
@@ -10907,6 +10941,8 @@ impl SortOperator {
             current: 0,
             executed: false,
             limit_hint: None,
+            soft_hint: None,
+            sorted_upto: 0,
         }
     }
 
@@ -10987,6 +11023,8 @@ impl SortOperator {
 
     /// Compare two precomputed keys under the per-column sort directions.
     fn cmp_keys(a: &[KeyPart<'_>], b: &[KeyPart<'_>], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+        #[cfg(test)]
+        SORT_COMPARISONS.with(|c| c.set(c.get() + 1));
         for (i, (_, ascending)) in items.iter().enumerate() {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
@@ -11120,9 +11158,19 @@ impl PhysicalOperator for SortOperator {
         true
     }
 
+    /// Taken as a reason to order only a head of the rows up front (see
+    /// `execute_all`). Every row is still produced, in the same order.
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.soft_hint = Some(self.soft_hint.map_or(n, |s| s.min(n)));
+        true
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+        }
+        if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
+            self.sort_tail(store)?;
         }
 
         if self.current >= self.records.len() {
@@ -11155,6 +11203,9 @@ impl PhysicalOperator for SortOperator {
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
         }
+        if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
+            self.sort_tail(store)?;
+        }
 
         if self.current >= self.records.len() {
             return Ok(None);
@@ -11177,6 +11228,9 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
+        if self.sorted_upto < self.records.len() && self.current + batch_size > self.sorted_upto {
+            self.sort_tail(store)?;
+        }
         let end = (self.current + batch_size).min(self.records.len());
         let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
         self.current = end;
@@ -11188,9 +11242,11 @@ impl PhysicalOperator for SortOperator {
         self.input.reset();
         self.records.clear();
         self.current = 0;
+        self.sorted_upto = 0;
         self.executed = false;
-        // `limit_hint` is deliberately kept: it is a property of the plan the
-        // planner built, not state from a previous execution.
+        // `limit_hint` and `soft_hint` are deliberately kept: they are
+        // properties of the plan the planner built, not state from a previous
+        // execution.
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -11252,12 +11308,30 @@ impl SortOperator {
                 }
             }
             let sort_items = &self.sort_items;
+            let cmp = |a: &u32, b: &u32| {
+                Self::cmp_keys(keys[*a as usize].as_slice(), keys[*b as usize].as_slice(), sort_items)
+                    .then(a.cmp(b))
+            };
             let mut order: Vec<u32> = (0..keys.len() as u32).collect();
-            order.sort_unstable_by(|&a, &b| {
-                Self::cmp_keys(keys[a as usize].as_slice(), keys[b as usize].as_slice(), sort_items)
-                    .then(a.cmp(&b))
-            });
+            // With an early-stopping consumer above -- `DISTINCT ... ORDER BY ...
+            // LIMIT k`, whose limit cannot pass the Distinct (#522) -- order only
+            // a head: the `head` smallest rows, in exactly the (key, index) order
+            // the full sort gives, found by an O(n) partition. The rest stay in
+            // input order, and `sort_tail` orders them only if a read gets that
+            // far (#593). LDBC IC9 at SF1 sorted 467,427 rows to return 20.
+            let head = self
+                .soft_hint
+                .map(|k| k.saturating_mul(4).max(1024))
+                .filter(|&h| h < order.len());
+            if let Some(h) = head {
+                order.select_nth_unstable_by(h - 1, cmp);
+                order[..h].sort_unstable_by(cmp);
+                order[h..].sort_unstable();
+            } else {
+                order.sort_unstable_by(cmp);
+            }
             self.records = order.iter().map(|&i| std::mem::take(&mut rows[i as usize])).collect();
+            self.sorted_upto = head.unwrap_or(self.records.len());
             self.executed = true;
             return Ok(());
         }
@@ -11283,7 +11357,46 @@ impl SortOperator {
         keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
 
         self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.sorted_upto = self.records.len();
         self.executed = true;
+        Ok(())
+    }
+
+    /// One cursor per property-valued sort key, in key order.
+    fn cursors(sort_items: &[(Expression, bool)]) -> Vec<PropertyCursor> {
+        sort_items
+            .iter()
+            .filter_map(|(expr, _)| match expr {
+                Expression::Property { variable, property } => {
+                    Some(PropertyCursor::new(variable.as_str(), property.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Order the rows past `sorted_upto`, which an early-stopping sort left in
+    /// input order because nothing was expected to read them.
+    ///
+    /// The tail is in ascending input order, so a stable sort by key alone
+    /// breaks ties by input index -- the same total order the full sort uses.
+    /// The output is therefore row for row what it would have been had every
+    /// row been sorted up front.
+    fn sort_tail(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let start = self.sorted_upto;
+        let mut readers = Self::cursors(&self.sort_items);
+        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::with_capacity(self.records.len() - start);
+        for slot in self.records[start..].iter_mut() {
+            let record = std::mem::take(slot);
+            let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
+            keyed.push((key, record));
+        }
+        let sort_items = &self.sort_items;
+        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        for (slot, (_, record)) in self.records[start..].iter_mut().zip(keyed) {
+            *slot = record;
+        }
+        self.sorted_upto = self.records.len();
         Ok(())
     }
 }
@@ -12706,6 +12819,21 @@ impl PhysicalOperator for DistinctOperator {
             }
         }
         Ok(None)
+    }
+
+    /// A limit above cannot become a limit below: `Distinct` may drop any
+    /// number of duplicates, so `n` rows in is not `n` rows out, and refusing
+    /// is what keeps #522's semantics. It does make early stopping likely, and
+    /// says so to the operator below. That lets the sort under `DISTINCT ...
+    /// ORDER BY ... LIMIT k` order a head of its rows instead of all of them
+    /// (#593).
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n);
+        false
+    }
+
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n)
     }
 
     fn reset(&mut self) {
@@ -16203,6 +16331,10 @@ impl PhysicalOperator for SkipOperator {
         self.input.try_push_limit(n.saturating_add(self.skip))
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n.saturating_add(self.skip))
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while self.skipped < self.skip {
             if self.input.next(store)?.is_some() {
@@ -19164,6 +19296,105 @@ mod tests {
         let predicate = Expression::Literal(PropertyValue::Boolean(true)); // always-true
         let mut filter = FilterOperator::new(Box::new(scan), predicate);
         assert!(!filter.try_push_limit(5), "Filter should block push");
+    }
+
+    /// `Limit -> Distinct -> Sort`: the plan of `RETURN DISTINCT ... ORDER BY
+    /// ... LIMIT k`, which is LDBC IC9's shape. `Distinct` has to stay above
+    /// `Sort` (#522), so the hard limit never reaches the sort, and the sort
+    /// ordered every row to hand out k (467,427 of them for 20 on IC9 at SF1).
+    fn distinct_limit_plan(values: &[i64], k: usize) -> LimitOperator {
+        let sort = SortOperator::new(
+            Box::new(MaterializedOperator::new(x_rows(values))),
+            vec![(Expression::Variable("x".to_string()), false)],
+        );
+        let mut limit = LimitOperator::new(Box::new(DistinctOperator::new(Box::new(sort))), k);
+        limit.try_push_limit(k);
+        limit
+    }
+
+    fn x_rows(values: &[i64]) -> Vec<Record> {
+        values
+            .iter()
+            .map(|&v| {
+                let mut r = Record::new();
+                r.bind("x".to_string(), Value::Property(PropertyValue::Integer(v)));
+                r
+            })
+            .collect()
+    }
+
+    fn drain_x(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<i64> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            match r.get("x") {
+                Some(Value::Property(PropertyValue::Integer(i))) => out.push(*i),
+                other => panic!("unexpected x: {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// The reference answer: `Distinct -> Sort` with nothing above it, so the
+    /// sort orders every row, then the first k.
+    fn full_sort_then_k(values: &[i64], k: usize) -> Vec<i64> {
+        let sort = SortOperator::new(
+            Box::new(MaterializedOperator::new(x_rows(values))),
+            vec![(Expression::Variable("x".to_string()), false)],
+        );
+        let mut all = drain_x(&mut DistinctOperator::new(Box::new(sort)), &GraphStore::new());
+        all.truncate(k);
+        all
+    }
+
+    #[test]
+    fn distinct_limit_orders_only_the_head_of_the_sort() {
+        const N: usize = 20_000;
+        let values: Vec<i64> = (0..N).map(|i| ((i * 7919) % N) as i64).collect();
+        let mut plan = distinct_limit_plan(&values, 10);
+        SORT_COMPARISONS.with(|c| c.set(0));
+        let got = drain_x(&mut plan, &GraphStore::new());
+        let comparisons = SORT_COMPARISONS.with(|c| c.get());
+        eprintln!("{comparisons} key comparisons to return 10 of {N} rows through DISTINCT");
+        assert_eq!(got, (0..10).map(|i| (N - 1 - i) as i64).collect::<Vec<_>>());
+        // Ordering everything is ~N·log2(N) ≈ 286k comparisons; the head is O(N).
+        assert!(
+            comparisons < 5 * N as u64,
+            "{comparisons} comparisons to return 10 of {N} rows"
+        );
+    }
+
+    #[test]
+    fn distinct_limit_past_the_sorted_head_matches_a_full_sort() {
+        // 3,000 copies of the largest value: Distinct drops all but one, so the
+        // consumer reads past whatever head the sort ordered first, and the
+        // rest must come out exactly as a full sort orders it.
+        let mut values: Vec<i64> = vec![5_000; 3_000];
+        values.extend((0..5_000).rev());
+        values.extend((0..2_000).map(|i| (i * 37 % 5_000) as i64));
+        for k in [1usize, 10, 100, 4_000] {
+            let mut plan = distinct_limit_plan(&values, k);
+            assert_eq!(drain_x(&mut plan, &GraphStore::new()), full_sort_then_k(&values, k), "k = {k}");
+        }
+    }
+
+    #[test]
+    fn distinct_limit_matches_a_full_sort_on_random_inputs() {
+        let mut seed: u64 = 0x5eed;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as i64
+        };
+        for (n, range) in [(1usize, 5i64), (50, 10), (2_000, 100), (10_000, 50_000)] {
+            let values: Vec<i64> = (0..n).map(|_| next() % range).collect();
+            for k in [1usize, 3, 20, 1_500] {
+                let mut plan = distinct_limit_plan(&values, k);
+                assert_eq!(
+                    drain_x(&mut plan, &GraphStore::new()),
+                    full_sort_then_k(&values, k),
+                    "n = {n}, range = {range}, k = {k}"
+                );
+            }
+        }
     }
 
     #[test]
