@@ -31,12 +31,12 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 **Step 1 — Prerequisites**
 
 - ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No AWS account or credentials needed — the image is publicly available
+- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.8.0` for a reproducible setup)
 
 **Step 2 — Pull the Docker image**
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull ghcr.io/samyama-ai/samyama-graph:latest
 ```
 
 **Step 3 — Docker Compose setup**
@@ -65,7 +65,7 @@ notepad docker-compose.yml
 version: "3.9"
 services:
   samyama-graph:
-    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    image: ghcr.io/samyama-ai/samyama-graph:latest
     container_name: samyama-graph
     restart: unless-stopped
     ports:
