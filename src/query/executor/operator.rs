@@ -377,6 +377,33 @@ fn int_out_of_range(l: i64, op: &str, r: i64) -> ExecutionError {
     ExecutionError::RuntimeError(format!("numeric value out of range: {l} {op} {r}"))
 }
 
+/// A float as Neo4j writes it, which is Java's `Double.toString` (#1241):
+/// `1.0` keeps its `.0`, magnitudes from 10^-3 up to 10^7 are plain decimal,
+/// and anything else is `d.dddE<n>` (`1.0E20`, `1.0E-4`). The digits are the
+/// shortest that round-trip, as in both Rust and current Java. `toString()` and
+/// `'a' + 1.5` both write floats through here.
+pub(crate) fn java_double_string(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+    }
+    let a = f.abs();
+    if (1e-3..1e7).contains(&a) {
+        let s = f.to_string();
+        if s.contains('.') { s } else { format!("{s}.0") }
+    } else {
+        let s = format!("{f:e}");
+        let (mantissa, exp) = s.split_once('e').expect("`{:e}` always has an exponent");
+        let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
+        format!("{mantissa}E{exp}")
+    }
+}
+
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
     // p1 = p2).
@@ -611,6 +638,12 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            // A string and a number concatenate, the number written as Neo4j
+            // writes it: `'a' + 1` is "a1", `'a' + 1.0` is "a1.0" (#1241).
+            (PropertyValue::String(l), PropertyValue::Integer(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::Integer(l), PropertyValue::String(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::String(l), PropertyValue::Float(r)) => PropertyValue::String(format!("{l}{}", java_double_string(*r))),
+            (PropertyValue::Float(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{r}", java_double_string(*l))),
             // List concatenation, and appending or prepending a scalar. Cypher
             // defines all three for `+`; none of them worked (#578).
             (PropertyValue::Array(l), PropertyValue::Array(r)) => {
@@ -2794,13 +2827,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "substring" => {
             if args.len() < 2 { return Err(ExecutionError::bad_argument("substring() requires at least 2 arguments".to_string())); }
             let s = extract_string(&args[0])?;
-            let start = extract_int(&args[1])? as usize;
+            // A negative start or length is refused, as Neo4j does. Cast to
+            // usize it wrapped: `substring('abc', -1)` answered "" (#1241).
+            let start = extract_int(&args[1])?;
+            if start < 0 {
+                return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative start index: {start}")));
+            }
+            let start = start as usize;
             let chars: Vec<char> = s.chars().collect();
             if start >= chars.len() {
                 return Ok(Value::Property(PropertyValue::String(String::new())));
             }
             let result = if args.len() >= 3 {
-                let len = extract_int(&args[2])? as usize;
+                let len = extract_int(&args[2])?;
+                if len < 0 {
+                    return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative length: {len}")));
+                }
+                let len = len as usize;
                 chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
             } else {
                 chars[start..].iter().collect()
@@ -2809,12 +2852,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "left" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("left() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
         }
         "right" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("right() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
             Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
@@ -2841,7 +2892,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let s = match val {
                 Value::Property(PropertyValue::String(s)) => s.clone(),
                 Value::Property(PropertyValue::Integer(i)) => i.to_string(),
-                Value::Property(PropertyValue::Float(f)) => f.to_string(),
+                Value::Property(PropertyValue::Float(f)) => java_double_string(*f),
                 Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
                 Value::Property(PropertyValue::DateTime(millis)) => {
                     use chrono::TimeZone;
@@ -3028,6 +3079,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         // Type/meta functions
         "coalesce" => {
+            // Neo4j refuses `coalesce()` outright; answering null hid the typo (#1241).
+            if args.is_empty() {
+                return Err(ExecutionError::bad_argument("coalesce() requires at least one argument".to_string()));
+            }
             for arg in args {
                 if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
                     return Ok(arg.clone());
