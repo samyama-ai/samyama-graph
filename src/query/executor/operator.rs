@@ -8880,13 +8880,22 @@ impl PhysicalOperator for CorrelatedCallOperator {
 pub struct ProjectOperator {
     /// Input operator
     input: OperatorBox,
-    /// Expressions to project
-    projections: Vec<(Expression, String)>, // (expr, alias)
+    /// Expressions to project, with their output names.
+    ///
+    /// The names are `Arc<str>` because `Record::bind` takes
+    /// `impl Into<Arc<str>>`: binding a `String` alias copied it and then built
+    /// an `Arc<str>` from the copy, two allocator calls per column per row
+    /// before the value was looked at (#612, as #564 was for Expand).
+    projections: Vec<(Expression, std::sync::Arc<str>)>,
 }
 
 impl ProjectOperator {
     /// Create a new project operator
     pub fn new(input: OperatorBox, projections: Vec<(Expression, String)>) -> Self {
+        let projections = projections
+            .into_iter()
+            .map(|(expr, alias)| (expr, std::sync::Arc::from(alias)))
+            .collect();
         Self { input, projections }
     }
 
@@ -8994,7 +9003,7 @@ impl PhysicalOperator for ProjectOperator {
 
             for (expr, alias) in &self.projections {
                 let value = self.evaluate_expression(expr, &record, store)?;
-                new_record.bind(alias.clone(), value);
+                new_record.bind(std::sync::Arc::clone(alias), value);
             }
 
             Ok(Some(new_record))
@@ -9011,13 +9020,13 @@ impl PhysicalOperator for ProjectOperator {
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if let Some(batch) = self.input.next_batch(store, batch_size)? {
             let mut projected_records = Vec::with_capacity(batch.records.len());
-            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.clone()).collect();
+            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.to_string()).collect();
 
             for record in batch.records {
                 let mut new_record = Record::new();
                 for (expr, alias) in &self.projections {
                     let value = self.evaluate_expression(expr, &record, store)?;
-                    new_record.bind(alias.clone(), value);
+                    new_record.bind(std::sync::Arc::clone(alias), value);
                 }
                 projected_records.push(new_record);
             }
@@ -9037,7 +9046,7 @@ impl PhysicalOperator for ProjectOperator {
             let mut new_record = Record::new();
             for (expr, alias) in &self.projections {
                 let value = self.evaluate_expression(expr, &record, store)?;
-                new_record.bind(alias.clone(), value);
+                new_record.bind(std::sync::Arc::clone(alias), value);
             }
             Ok(Some(new_record))
         } else {
@@ -9052,7 +9061,7 @@ impl PhysicalOperator for ProjectOperator {
     fn describe(&self) -> OperatorDescription {
         let cols: Vec<String> = self.projections.iter().map(|(e, a)| {
             let expr_str = format_expression(e);
-            if expr_str == *a { a.clone() } else { format!("{} AS {}", expr_str, a) }
+            if expr_str == **a { a.to_string() } else { format!("{} AS {}", expr_str, a) }
         }).collect();
         OperatorDescription {
             name: "Project".to_string(),
@@ -9544,20 +9553,29 @@ pub struct AggregateOperator {
     input: OperatorBox,
     group_by: Vec<(Expression, String)>, // (expr, alias)
     aggregates: Vec<AggregateFunction>,
+    /// The output names of `group_by` and `aggregates`, shared. Binding the
+    /// `String` aliases cost two allocator calls per output column per group:
+    /// a copy, then an `Arc<str>` built from it (#612, as #564 for Expand).
+    group_names: Vec<std::sync::Arc<str>>,
+    agg_names: Vec<std::sync::Arc<str>>,
     results: std::vec::IntoIter<Record>,
     executed: bool,
 }
 
 impl AggregateOperator {
     pub fn new(
-        input: OperatorBox, 
-        group_by: Vec<(Expression, String)>, 
+        input: OperatorBox,
+        group_by: Vec<(Expression, String)>,
         aggregates: Vec<AggregateFunction>
     ) -> Self {
+        let group_names = group_by.iter().map(|(_, a)| std::sync::Arc::from(a.as_str())).collect();
+        let agg_names = aggregates.iter().map(|a| std::sync::Arc::from(a.alias.as_str())).collect();
         Self {
             input,
             group_by,
             aggregates,
+            group_names,
+            agg_names,
             results: Vec::new().into_iter(),
             executed: false,
         }
@@ -9927,9 +9945,10 @@ impl AggregateOperator {
         // alone is enough to evaluate them.
         let mut merged: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::with_capacity_and_hasher(groups.len(), Default::default());
+        let var_name: std::sync::Arc<str> = std::sync::Arc::from(var);
         for (key, states) in groups {
             let mut probe = Record::new();
-            probe.bind(var.to_string(), key.probe_value(store));
+            probe.bind(std::sync::Arc::clone(&var_name), key.probe_value(store));
             let mut tuple = Vec::with_capacity(self.group_by.len());
             for (expr, _) in &self.group_by {
                 tuple.push(Self::evaluate_expression(expr, &probe, store)?);
@@ -9949,11 +9968,11 @@ impl AggregateOperator {
         let mut output_records = Vec::with_capacity(merged.len());
         for (tuple, states) in merged {
             let mut record = Record::new();
-            for (i, (_, alias)) in self.group_by.iter().enumerate() {
-                record.bind(alias.clone(), tuple[i].clone());
+            for (i, name) in self.group_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), tuple[i].clone());
             }
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -10034,11 +10053,11 @@ impl AggregateOperator {
         let mut output_records = Vec::new();
         for (key, states) in groups {
             let mut record = Record::new();
-            for (i, (_, alias)) in self.group_by.iter().enumerate() {
-                record.bind(alias.clone(), key[i].clone());
+            for (i, name) in self.group_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), key[i].clone());
             }
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -10089,13 +10108,13 @@ impl AggregateOperator {
             }
         }
 
-        let group_alias = &self.group_by[0].1;
+        let group_name = &self.group_names[0];
         let mut output_records = Vec::new();
         for (key, states) in groups {
             let mut record = Record::new();
-            record.bind(group_alias.clone(), key);
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            record.bind(std::sync::Arc::clone(group_name), key);
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -10143,8 +10162,8 @@ impl AggregateOperator {
         }
 
         let mut record = Record::new();
-        for (i, agg) in self.aggregates.iter().enumerate() {
-            record.bind(agg.alias.clone(), states[i].result());
+        for (i, name) in self.agg_names.iter().enumerate() {
+            record.bind(std::sync::Arc::clone(name), states[i].result());
         }
         self.results = vec![record].into_iter();
         self.executed = true;
