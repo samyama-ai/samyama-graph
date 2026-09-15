@@ -1512,7 +1512,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in &labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
             self.catalog.on_label_added(label);
         }
@@ -1603,7 +1603,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in &labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
             // Update catalog label count
             self.catalog.on_label_added(label);
@@ -1770,7 +1770,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_label_bits();
         self.label_index
             .entry(label.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(node_id);
 
         self.catalog.on_label_added(&label);
@@ -2188,7 +2188,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_label_bits();
 
         let prior = self.get_node(node_id).map(|n| (n.labels.contains(&label), n.version));
-        let had = prior.map_or(false, |(had, _)| had);
+        let had = prior.is_some_and(|(had, _)| had);
         if let Some((false, last_write)) = prior {
             if self.undo_needed(node_id, last_write, |e| {
                 matches!(e, NodeUndo::Label { label: l, .. } if *l == label)
@@ -2208,7 +2208,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Update the label index so queries can find this node by the new label
         self.label_index
             .entry(label.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(node_id);
 
         // Update catalog label count
@@ -2344,7 +2344,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             None => {
                 self.edge_type_index
                     .entry(edge_type.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(edge_id);
             }
         }
@@ -2453,7 +2453,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             None => {
                 self.edge_type_index
                     .entry(edge_type.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(edge_id);
             }
         }
@@ -3850,7 +3850,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             let edge_type = self.edge_type_table[type_id as usize].clone();
             self.edge_type_index
                 .entry(edge_type)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(EdgeId::new(idx as u64));
         }
         self.invalidate_statistics_cache();
@@ -4409,7 +4409,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if last_write < v {
             return true;
         }
-        !history.map_or(false, |h| {
+        !history.is_some_and(|h| {
             h.undo.iter().rev().take_while(|e| e.at() == v).any(same)
         })
     }
@@ -4584,7 +4584,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 history.undo.drain(..drop);
                 nodes_pruned += drop;
             }
-            if history.born.map_or(false, |b| b <= min_version) {
+            if history.born.is_some_and(|b| b <= min_version) {
                 history.born = None;
             }
         }
@@ -4890,7 +4890,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
         }
 
@@ -4963,7 +4963,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Update edge type index
         self.edge_type_index
             .entry(self.edge_type_table[type_id as usize].clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(edge_id);
 
         // Update next_edge_id to be higher than any recovered edge
