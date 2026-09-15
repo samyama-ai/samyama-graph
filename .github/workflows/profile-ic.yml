@@ -1,0 +1,72 @@
+name: Profile IC3/IC5/IC9 (throwaway)
+
+# Throwaway branch `profile-ic`, never merged. Profiles the three slowest
+# LDBC SNB-Interactive reads at SF1 (IC5 sets the PERF-19 p95 proxy, #612)
+# on a GitHub runner, because the AWS account is blocked. Parameters are
+# `--derive-params 50`, the same as CH-REGRESS. Runner timings are noisy;
+# the per-operator shares and the perf attribution are what this is for.
+
+on:
+  push:
+    branches: [profile-ic]
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd libzstd-dev clang pkg-config linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -qq zstd libzstd-dev clang pkg-config
+          nproc; free -g; df -h / | tail -1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build ldbc_benchmark (release, line tables for perf)
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: |
+          cargo build --release --bench ldbc_benchmark 2>&1 | tail -2
+          BIN=$(ls -t target/release/deps/ldbc_benchmark-* | grep -v '\.d$' | head -1)
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: LDBC SF1
+        run: |
+          mkdir -p ~/ldbc && cd ~/ldbc
+          curl -sSf --retry 5 -o sf1.tar.zst https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst
+          tar --use-compress-program=unzstd -xf sf1.tar.zst && rm -f sf1.tar.zst
+          echo "D1=$HOME/ldbc/social_network-sf1-CsvBasic-LongDateFormatter" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+      - name: Timing, 11 runs (with peak RSS)
+        run: |
+          /usr/bin/time -v "$BIN" --data-dir "$D1" --derive-params 50 --write-params out/sf1-params.json \
+            --runs 11 --print-runs --query IC3 --query IC5 --query IC9 > out/sf1-timing.log 2>&1 || echo "exit $?"
+          tail -40 out/sf1-timing.log
+
+      - name: Explain and profile
+        run: |
+          "$BIN" --data-dir "$D1" --params-file out/sf1-params.json --explain --query IC3 --query IC5 --query IC9 > out/sf1-explain.log 2>&1 || echo "explain exit $?"
+          "$BIN" --data-dir "$D1" --params-file out/sf1-params.json --profile --query IC3 --query IC5 --query IC9 > out/sf1-profile.log 2>&1 || echo "profile exit $?"
+          cat out/sf1-profile.log | tail -120
+
+      - name: perf on IC5 (300 runs)
+        continue-on-error: true
+        run: |
+          command -v perf || { echo "no perf on this runner"; exit 0; }
+          sudo sysctl -q -w kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
+          perf record -q -F 199 --call-graph dwarf,8192 -o ic5.perf.data -- \
+            "$BIN" --data-dir "$D1" --params-file out/sf1-params.json --runs 300 --query IC5 > out/sf1-ic5-perf-run.log 2>&1
+          perf report -i ic5.perf.data --stdio --no-children --percent-limit 0.5 -g none > out/sf1-ic5-perf-self-all.txt 2>&1 || true
+          perf report -i ic5.perf.data --stdio --no-children --percent-limit 0.5 -g none --time 50%-100% > out/sf1-ic5-perf-self-query.txt 2>&1 || true
+          perf report -i ic5.perf.data --stdio --children --percent-limit 2 -g caller,0.5,callee --time 50%-100% > out/sf1-ic5-perf-tree-query.txt 2>&1 || true
+          head -60 out/sf1-ic5-perf-self-query.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ic-profile-sf1
+          path: out/
