@@ -647,6 +647,10 @@ async fn main() -> Result<(), Error> {
 
     let mut passed = 0usize;
     let mut errors = 0usize;
+    // Reads that returned nothing (#918). They stay `OK` and count as passed,
+    // because CH-BENCH-FIN parses `OK|ERROR` and `passed, N errors` exactly;
+    // they are named in a warning after the summary instead.
+    let mut empty_reads: Vec<&str> = Vec::new();
     let mut last_category = "";
     let bench_start = Instant::now();
 
@@ -682,6 +686,9 @@ async fn main() -> Result<(), Error> {
                 format_ms(result.median),
                 format_ms(result.max));
             passed += 1;
+            if result.rows == 0 && matches!(query.category, "complex" | "simple") {
+                empty_reads.push(query.id);
+            }
         }
     }
 
@@ -693,6 +700,19 @@ async fn main() -> Result<(), Error> {
     println!();
     println!("Summary: {}/{} passed, {} errors (total benchmark time: {})",
         passed, queries.len(), errors, format_duration(bench_time));
+    // A read that returns nothing exercised the parser and the planner and
+    // nothing else, and it is also the fastest row in the table (#918). CR-4,
+    // CR-5 and CR-9 are pinned to ids the synthetic generator does not
+    // guarantee edges for; anchors derived from the data would fix them, and
+    // that needs a CH-REGRESS re-baseline on the fixed host.
+    if !empty_reads.is_empty() {
+        println!(
+            "WARNING: {} read(s) returned 0 rows and measured no traversal: {}. \
+             Their parameters are pinned to ids the generated data does not guarantee (#918).",
+            empty_reads.len(),
+            empty_reads.join(", ")
+        );
+    }
 
     // Cache stats
     let stats = client.cache_stats();
