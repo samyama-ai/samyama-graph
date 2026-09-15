@@ -1,30 +1,27 @@
 name: Profile IC3/IC5/IC9 (throwaway)
 
 # Throwaway branch `profile-ic`, never merged. The AWS account is blocked, so
-# SF1 experiments for #612 run on a GitHub runner.
+# SF1 experiments for #612 and #593 run on a GitHub runner.
 #   run 34950228916  per-operator profile and perf of IC3/IC5/IC9
 #   run 34952633724  IC5 against rewrites of itself (group-by-node was slower)
-#   run 34954700651  IC5 A/B -- INVALID: every allocation count was identical
-#                    between the two binaries, so both ran the same code.
-#   this run         the same A/B with one target dir per tree, and two
-#                    checks that fail the run if the binaries or the V0
-#                    allocation counts are the same.
+#   run 34954700651  IC5 A/B -- INVALID, both arms ran the same code
+#   run 34956715276  IC5 A/B, main vs arc-aliases (#1251): -12%
+#   this run         IC9 A/B, main ff3151c vs ic9-soft-limit (#593), with the
+#                    LDBC bench itself; IC5 is the control (not touched).
 
 on:
   push:
     branches: [profile-ic]
 
 jobs:
-  ic5-ab:
+  ic9-ab:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-        with: { path: prof }
+        with: { ref: ff3151c3ab9f52b8ac639253521761b6c2069b48, path: base }
       - uses: actions/checkout@v4
-        with: { ref: 060ca71d28ca2eebd9517a1cb6dfe62195c22d43, path: base }
-      - uses: actions/checkout@v4
-        with: { ref: arc-aliases, path: arc }
+        with: { ref: ic9-soft-limit, path: fix }
 
       - name: Tools
         run: |
@@ -34,18 +31,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build the example against each tree, separate target dirs
+      - name: Build ldbc_benchmark against each tree, separate target dirs
         run: |
           mkdir -p bin
-          for t in base arc; do
-            cp prof/examples/ic5_variants.rs "$t/examples/"
+          for t in base fix; do
             echo "== $t at $(git -C "$t" log --oneline -1)"
-            grep -c 'Arc::clone(alias)' "$t/src/query/executor/operator.rs" || true
-            (cd "$t" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$t" cargo build --release --example ic5_variants 2>&1 | grep -E 'Compiling samyama v|Finished|^error' )
-            cp "$GITHUB_WORKSPACE/target-$t/release/examples/ic5_variants" "bin/ic5_variants-$t"
+            grep -c 'fn hint_early_stop' "$t/src/query/executor/operator.rs" || true
+            (cd "$t" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$t" cargo build --release --bench ldbc_benchmark 2>&1 | grep -E 'Compiling samyama v|Finished|^error')
+            cp "$(ls -t "$GITHUB_WORKSPACE/target-$t"/release/deps/ldbc_benchmark-* | grep -v '\.d$' | head -1)" "bin/ldbc-$t"
           done
           sha256sum bin/*
-          if cmp -s bin/ic5_variants-base bin/ic5_variants-arc; then echo "FATAL: the two binaries are identical"; exit 1; fi
+          if cmp -s bin/ldbc-base bin/ldbc-fix; then echo "FATAL: the two binaries are identical"; exit 1; fi
 
       - name: LDBC SF1
         run: |
@@ -53,24 +49,22 @@ jobs:
           curl -sSf --retry 5 -o sf1.tar.zst https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst
           tar --use-compress-program=unzstd -xf sf1.tar.zst && rm -f sf1.tar.zst
 
-      - name: A/B, three interleaved rounds
+      - name: A/B, three interleaved rounds (IC9, IC5 as control)
         run: |
           mkdir -p out
+          D=~/ldbc/social_network-sf1-CsvBasic-LongDateFormatter
           for round in 1 2 3; do
-            for t in base arc; do
+            for t in base fix; do
               echo "=== round $round $t"
-              "bin/ic5_variants-$t" --data-dir ~/ldbc/social_network-sf1-CsvBasic-LongDateFormatter 2>/dev/null \
-                | grep -E '^(F|V)[0-9]|equal|multiset'
+              "bin/ldbc-$t" --data-dir "$D" --derive-params 50 --runs 11 --print-runs --query IC9 --query IC5 2>&1 \
+                | grep -E '^\s+Running IC(5|9)\.\.\.IC|runs IC(5|9)|Summary'
             done
-          done | tee out/ic5-ab.log
-          # The fix must show in the allocation count, or the two arms ran the same code.
-          b=$(grep -A20 '=== round 1 base' out/ic5-ab.log | grep -m1 '^V0' | grep -oE 'allocs +[0-9]+' | grep -oE '[0-9]+')
-          a=$(grep -A20 '=== round 1 arc' out/ic5-ab.log | grep -m1 '^V0' | grep -oE 'allocs +[0-9]+' | grep -oE '[0-9]+')
-          echo "V0 allocs: base $b, arc $a"
-          [ -n "$b" ] && [ -n "$a" ] && [ "$b" != "$a" ] || { echo "FATAL: V0 allocation counts are equal or missing"; exit 1; }
+          done | tee out/ic9-ab.log
+          echo "=== profile, fix"
+          "bin/ldbc-fix" --data-dir "$D" --derive-params 50 --profile --query IC9 2>&1 | sed -n '/Profile (per operator)/,/Outside the operator tree/p' | tee -a out/ic9-ab.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ic5-ab-sf1
+          name: ic9-ab-sf1
           path: out/
