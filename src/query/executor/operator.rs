@@ -370,6 +370,13 @@ enum Centrality {
 }
 
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
+/// A 64-bit integer result that does not fit (Neo4j's 22003, "numeric value
+/// out of range"). Wrapping arithmetic answered `9223372036854775807 + 1` with
+/// `-9223372036854775808` in a release build and panicked in a debug one.
+fn int_out_of_range(l: i64, op: &str, r: i64) -> ExecutionError {
+    ExecutionError::RuntimeError(format!("numeric value out of range: {l} {op} {r}"))
+}
+
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
     // p1 = p2).
@@ -599,7 +606,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
         },
         BinaryOp::Add => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l + r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_add(*r).ok_or_else(|| int_out_of_range(*l, "+", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l + r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
@@ -664,7 +671,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l - r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_sub(*r).ok_or_else(|| int_out_of_range(*l, "-", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
@@ -719,7 +726,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 };
                 scale_duration(*months, *days, *seconds, *nanos, f)?
             }
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_mul(*r).ok_or_else(|| int_out_of_range(*l, "*", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
@@ -744,7 +751,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 scale_duration(*months, *days, *seconds, *nanos, 1.0 / f)?
             }
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_div(*r).ok_or_else(|| int_out_of_range(*l, "/", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
@@ -753,7 +760,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         },
         BinaryOp::Mod => match (&left_prop, &right_prop) {
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l % r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_rem(*r).unwrap_or(0)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
@@ -796,7 +803,10 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
             _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
         },
         UnaryOp::Minus => match val {
-            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+            Value::Property(PropertyValue::Integer(i)) => i
+                .checked_neg()
+                .map(|n| Value::Property(PropertyValue::Integer(n)))
+                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
             // -null is null, matching NOT above and the binary arithmetic ops (#457).
             Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
@@ -6199,7 +6209,10 @@ impl FilterOperator {
                     }
                     UnaryOp::Minus => {
                         match val {
-                            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+                            Value::Property(PropertyValue::Integer(i)) => i
+                .checked_neg()
+                .map(|n| Value::Property(PropertyValue::Integer(n)))
+                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
                             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
                             Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                             _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
