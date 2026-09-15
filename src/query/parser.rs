@@ -2585,73 +2585,6 @@ fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResul
     Ok(expr)
 }
 
-/// Map projection, `v {.name, key: expr, other, .*}` (#1239), as the map it
-/// builds: `CASE WHEN v IS NULL THEN null ELSE {name: v.name, key: expr,
-/// other: other} END`. A null `v` projects to null, not to a map of nulls,
-/// which is what an OPTIONAL MATCH that found nothing needs. `.*` alone is
-/// `properties(v)`; `.*` next to other items would need a map union and is
-/// refused rather than answered with half the keys.
-fn parse_map_projection(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
-    let mut parts = pair.into_inner();
-    let var = parts
-        .next()
-        .map(|v| v.as_str().to_string())
-        .ok_or_else(|| ParseError::SemanticError("map projection missing its variable".to_string()))?;
-    let mut entries: Vec<(String, Expression)> = Vec::new();
-    let mut all_properties = false;
-    for item in parts {
-        let Some(part) = item.into_inner().next() else { continue };
-        match part.as_rule() {
-            Rule::map_projection_all => all_properties = true,
-            Rule::map_projection_property => {
-                let key = part.into_inner().next().map(|k| unescape_name(k.as_str())).unwrap_or_default();
-                entries.push((key.clone(), Expression::Property { variable: var.clone(), property: key }));
-            }
-            Rule::map_expr_entry => {
-                let mut key = String::new();
-                let mut value = None;
-                for p in part.into_inner() {
-                    match p.as_rule() {
-                        Rule::property_key => key = unescape_name(p.as_str()),
-                        Rule::string => key = unescape_string_literal(p.as_str())?,
-                        Rule::expression => value = Some(parse_expression(p)?),
-                        _ => {}
-                    }
-                }
-                if let Some(v) = value {
-                    entries.push((key, v));
-                }
-            }
-            Rule::variable => {
-                let name = part.as_str().to_string();
-                entries.push((name.clone(), Expression::Variable(name)));
-            }
-            _ => {}
-        }
-    }
-    let body = match (all_properties, entries.is_empty()) {
-        (true, true) => Expression::Function {
-            name: "properties".to_string(),
-            args: vec![Expression::Variable(var.clone())],
-            distinct: false,
-        },
-        (true, false) => {
-            return Err(ParseError::UnsupportedFeature(
-                "a map projection with `.*` and other items is not supported yet; use `.*` alone or list the keys".to_string(),
-            ))
-        }
-        (false, _) => Expression::MapExpr(entries),
-    };
-    Ok(Expression::Case {
-        operand: None,
-        when_clauses: vec![(
-            Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(Expression::Variable(var)) },
-            Expression::Literal(PropertyValue::Null),
-        )],
-        else_result: Some(Box::new(body)),
-    })
-}
-
 fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -2730,7 +2663,70 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::ListExpr(items));
             }
             Rule::map_projection => {
-                return parse_map_projection(inner);
+                // Map projection, `v {.name, key: expr, other, .*}` (#1239), as the map it
+                // builds: `CASE WHEN v IS NULL THEN null ELSE {name: v.name, key: expr,
+                // other: other} END`. A null `v` projects to null, not to a map of nulls,
+                // which is what an OPTIONAL MATCH that found nothing needs. `.*` alone is
+                // `properties(v)`; `.*` next to other items would need a map union and is
+                // refused rather than answered with half the keys.
+                let mut parts = inner.into_inner();
+                let var = parts
+                    .next()
+                    .map(|v| v.as_str().to_string())
+                    .ok_or_else(|| ParseError::SemanticError("map projection missing its variable".to_string()))?;
+                let mut entries: Vec<(String, Expression)> = Vec::new();
+                let mut all_properties = false;
+                for item in parts {
+                    let Some(part) = item.into_inner().next() else { continue };
+                    match part.as_rule() {
+                        Rule::map_projection_all => all_properties = true,
+                        Rule::map_projection_property => {
+                            let key = part.into_inner().next().map(|k| unescape_name(k.as_str())).unwrap_or_default();
+                            entries.push((key.clone(), Expression::Property { variable: var.clone(), property: key }));
+                        }
+                        Rule::map_expr_entry => {
+                            let mut key = String::new();
+                            let mut value = None;
+                            for p in part.into_inner() {
+                                match p.as_rule() {
+                                    Rule::property_key => key = unescape_name(p.as_str()),
+                                    Rule::string => key = unescape_string_literal(p.as_str())?,
+                                    Rule::expression => value = Some(parse_expression(p)?),
+                                    _ => {}
+                                }
+                            }
+                            if let Some(v) = value {
+                                entries.push((key, v));
+                            }
+                        }
+                        Rule::variable => {
+                            let name = part.as_str().to_string();
+                            entries.push((name.clone(), Expression::Variable(name)));
+                        }
+                        _ => {}
+                    }
+                }
+                let body = match (all_properties, entries.is_empty()) {
+                    (true, true) => Expression::Function {
+                        name: "properties".to_string(),
+                        args: vec![Expression::Variable(var.clone())],
+                        distinct: false,
+                    },
+                    (true, false) => {
+                        return Err(ParseError::UnsupportedFeature(
+                            "a map projection with `.*` and other items is not supported yet; use `.*` alone or list the keys".to_string(),
+                        ))
+                    }
+                    (false, _) => Expression::MapExpr(entries),
+                };
+                return Ok(Expression::Case {
+                    operand: None,
+                    when_clauses: vec![(
+                        Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(Expression::Variable(var)) },
+                        Expression::Literal(PropertyValue::Null),
+                    )],
+                    else_result: Some(Box::new(body)),
+                });
             }
             Rule::map_expr => {
                 let mut entries = Vec::new();
