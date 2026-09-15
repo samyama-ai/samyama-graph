@@ -3109,6 +3109,26 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
         }
     }
 
+    // `exists((n)-->())` is the pattern predicate, not "is the argument null"
+    // (#1255). The argument has already desugared to the EXISTS node, which
+    // evaluates to true or false. Wrapping it in the null-tolerant `exists`
+    // function asked whether that boolean was null, and `false` is not, so the
+    // call was true on every row.
+    //
+    // It becomes `EXISTS { (n)-->() }`, not the bare pattern it was parsed as:
+    // an explicit existence test may be projected by WITH or RETURN, which a
+    // bare pattern may not. Neo4j 2026.04 gives A, B for `WITH n, exists((n)-->(:D))
+    // AS e WHERE e` on #1255's graph.
+    if name.eq_ignore_ascii_case("exists")
+        && !distinct
+        && args.len() == 1
+        && matches!(args[0], Expression::ExistsSubquery { bare_pattern: true, .. })
+    {
+        if let Expression::ExistsSubquery { pattern, where_clause, count, .. } = args.remove(0) {
+            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count });
+        }
+    }
+
     Ok(Expression::Function { name, args, distinct })
 }
 
