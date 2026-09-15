@@ -1175,6 +1175,27 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::call_clause => {
                 query.call_clause = Some(parse_call_clause(inner)?);
             }
+            // `CALL { WITH a, b <statement> }` after MATCH (#1236).
+            Rule::correlated_call => {
+                let mut imports: Option<Vec<String>> = None;
+                let mut body = Query::new();
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::call_imports => {
+                            let vars: Vec<String> = part
+                                .into_inner()
+                                .filter(|v| v.as_rule() == Rule::variable)
+                                .map(|v| v.as_str().to_string())
+                                .collect();
+                            // `WITH *` has no variables: it imports everything.
+                            imports = if vars.is_empty() { None } else { Some(vars) };
+                        }
+                        Rule::statement => parse_statement(part, &mut body)?,
+                        _ => {}
+                    }
+                }
+                query.correlated_call = Some(CorrelatedCall { imports, body: Box::new(body) });
+            }
             Rule::create_clause => {
                 for create_inner in inner.into_inner() {
                     if create_inner.as_rule() == Rule::pattern {
