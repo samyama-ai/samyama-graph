@@ -1,0 +1,69 @@
+name: SF1 memory and RETURN n, before and after the node row copy (throwaway)
+
+# Throwaway branch `measure-row-copy`, never merged. The AWS account is
+# blocked, so the SF1 measurement for #1188 (step 3 of #1200) runs on a GitHub
+# runner, the way #612 and #593 were profiled on `profile-ic`.
+#   base = cfabdc3819750d399a52502e81e9ca26f39d3758 (step 2, #1260)
+#   fix  = d2938f1b0716bcc8c52d62a38212b37fb98f9afb (step 3)
+# The fix tree's benches/memory_footprint.rs is copied into base, so both arms
+# run the same measurement code and only the engine differs. Heap bytes come
+# from a counting allocator and are exact; RSS and latency are host-dependent,
+# so the two arms run on one runner, interleaved.
+
+on:
+  push:
+    branches: [measure-row-copy]
+
+jobs:
+  footprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: cfabdc3819750d399a52502e81e9ca26f39d3758, path: base }
+      - uses: actions/checkout@v4
+        with: { ref: d2938f1b0716bcc8c52d62a38212b37fb98f9afb, path: fix }
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd libzstd-dev clang pkg-config
+          nproc; free -g
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build memory_footprint against each tree, separate target dirs
+        run: |
+          cp fix/benches/memory_footprint.rs base/benches/memory_footprint.rs
+          mkdir -p bin
+          for t in base fix; do
+            echo "== $t at $(git -C "$t" log --oneline -1)"
+            (cd "$t" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$t" cargo build --release --bench memory_footprint 2>&1 | grep -E 'Compiling samyama v|Finished|^error')
+            cp "$(ls -t "$GITHUB_WORKSPACE/target-$t"/release/deps/memory_footprint-* | grep -v '\.d$' | head -1)" "bin/fp-$t"
+          done
+          sha256sum bin/*
+          if cmp -s bin/fp-base bin/fp-fix; then echo "FATAL: the two binaries are identical"; exit 1; fi
+
+      - name: LDBC SF1
+        run: |
+          mkdir -p ~/ldbc && cd ~/ldbc
+          curl -sSf --retry 5 -o sf1.tar.zst https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst
+          tar --use-compress-program=unzstd -xf sf1.tar.zst && rm -f sf1.tar.zst
+
+      - name: Measure, two interleaved rounds
+        run: |
+          mkdir -p out
+          D=~/ldbc/social_network-sf1-CsvBasic-LongDateFormatter
+          for round in 1 2; do
+            for t in base fix; do
+              echo "=== round $round $t"
+              "bin/fp-$t" --ldbc-data "$D" --json "out/$t-r$round.json" --return-n 2>&1 \
+                | sed -n '/^PERF-10/,$p'
+            done
+          done | tee out/footprint.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: row-copy-sf1
+          path: out/
