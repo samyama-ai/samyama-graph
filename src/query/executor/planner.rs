@@ -479,6 +479,44 @@ fn has_hoistable_match_properties(q: &Query) -> bool {
         || q.clauses.iter().any(|c| matches!(c, Clause::Match(m) if in_pattern(&m.pattern)))
 }
 
+/// The top-level conjuncts of the first WHERE that are full `EXISTS { ... }`
+/// subqueries (#1211), each with whether it is negated, and the query without
+/// them. `None` when there are none, so the common case copies nothing. The
+/// validator refuses such a subquery in any other position.
+fn take_exists_bodies(q: &Query) -> Option<(Query, Vec<(Query, bool)>)> {
+    let wc = q.where_clause.as_ref()?;
+    let conjuncts = flatten_and_predicates(&wc.predicate);
+    if !conjuncts.iter().any(|c| exists_body_of(c).is_some()) {
+        return None;
+    }
+    let mut joins = Vec::new();
+    let mut kept: Option<Expression> = None;
+    for c in conjuncts {
+        match exists_body_of(&c) {
+            Some((body, negated)) => joins.push((body.clone(), negated)),
+            None => match kept.as_mut() {
+                Some(k) => and_into(k, c),
+                None => kept = Some(c),
+            },
+        }
+    }
+    let mut out = q.clone();
+    out.where_clause = kept.map(|predicate| WhereClause { predicate });
+    Some((out, joins))
+}
+
+/// `EXISTS { <full body> }` or `NOT EXISTS { <full body> }`.
+fn exists_body_of(e: &Expression) -> Option<(&Query, bool)> {
+    match e {
+        Expression::ExistsSubquery { body: Some(b), count: false, .. } => Some((b, false)),
+        Expression::Unary { op: crate::query::ast::UnaryOp::Not, expr } => match expr.as_ref() {
+            Expression::ExistsSubquery { body: Some(b), count: false, .. } => Some((b, true)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// MATCH `(n {k: expr})`, where `expr` is not a literal, as `WHERE n.k = expr`.
 ///
 /// Such a property was refused at planning, so the standard batch lookup
@@ -1150,6 +1188,18 @@ impl QueryPlanner {
         store: &GraphStore,
         seed: Option<(OperatorBox, HashSet<String>)>,
     ) -> ExecutionResult<ExecutionPlan> {
+        // A full `EXISTS { ... }` in the WHERE is planned as a semi-join, not
+        // evaluated as a predicate (#1211). It is taken out before the WHERE is
+        // pushed down anywhere, and applied after the MATCH (below).
+        let stripped;
+        let (query, semi_joins) = match take_exists_bodies(query) {
+            Some((q, joins)) => {
+                stripped = q;
+                (&stripped, joins)
+            }
+            None => (query, Vec::new()),
+        };
+
         // Handle SHOW INDEXES
         if query.show_indexes {
             return Ok(ExecutionPlan {
@@ -2141,6 +2191,26 @@ impl QueryPlanner {
                     ));
                 }
             }
+        }
+
+        // A full `EXISTS { ... }` from the WHERE, as a semi-join (#1211): each
+        // outer row is kept once when the subquery, planned from that row,
+        // returns a row, or when it returns none if negated. It goes here, after
+        // the pre-WITH MATCH and WHERE and before any WITH, because the WHERE
+        // belongs to the MATCH.
+        for (body_query, negated) in semi_joins {
+            use crate::query::executor::operator::{SeedOperator, SemiApplyOperator};
+            let outer = operator.take().ok_or_else(|| {
+                ExecutionError::PlanningError("EXISTS { } needs a MATCH before it".to_string())
+            })?;
+            let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let body = self.plan_seeded(&body_query, store, Box::new(SeedOperator::new(cell.clone())), known_vars.clone())?;
+            if body.is_write {
+                return Err(ExecutionError::PlanningError(
+                    "an EXISTS { } subquery cannot write".to_string(),
+                ));
+            }
+            operator = Some(Box::new(SemiApplyOperator::new(outer, body.root, cell, negated)));
         }
 
         // 1b. Build ordered list of WITH stages, then apply barriers + post-WITH matches in sequence.
