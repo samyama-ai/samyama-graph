@@ -68,7 +68,7 @@ Note: Stop the conflicting process, or change the host port in `docker-compose.y
 <summary><strong>Issue 4 — Image fails to pull</strong></summary>
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull ghcr.io/samyama-ai/samyama-graph:latest
 ```
 
 Note: Ensure Docker Desktop is running and you have an active internet connection. The image is public — no credentials are required.
