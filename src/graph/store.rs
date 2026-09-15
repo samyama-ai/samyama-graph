@@ -669,6 +669,13 @@ pub struct Transaction {
     pub node_write_set: HashSet<NodeId>,
     /// Set of edge IDs written (created or modified) by this transaction.
     pub edge_write_set: HashSet<EdgeId>,
+    /// Node property writes buffered until commit (#1200 step 4); `None`
+    /// removes the key. No other reader sees them. The transaction itself
+    /// reads them over its snapshot, and commit applies them at a new version.
+    pub node_writes: HashMap<NodeId, HashMap<String, Option<PropertyValue>>>,
+    /// Nodes this transaction created, with their labels. The id is reserved
+    /// when the node is created; the node enters the store at commit.
+    pub created_nodes: Vec<(NodeId, Vec<Label>)>,
 }
 
 /// MVCC version entry for edges. Stores a snapshot of edge properties at a specific version.
@@ -1491,8 +1498,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// (n:Node)` matched nodes nobody labelled (#625). Callers that know the
     /// whole label set should use this.
     pub fn create_node_with_labels(&mut self, labels: impl IntoIterator<Item = Label>) -> NodeId {
-        let labels: Vec<Label> = labels.into_iter().collect();
-        self.invalidate_statistics_cache();
+        let node_id = self.allocate_node_id();
+        self.insert_node_with_labels(node_id, labels.into_iter().collect());
+        node_id
+    }
+
+    /// The id the next node takes: a freed one first, else a new one. Split
+    /// from insertion so a transaction can reserve an id when it creates a
+    /// node and insert the node at commit (#1200 step 4).
+    fn allocate_node_id(&mut self) -> NodeId {
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
         } else {
@@ -1500,8 +1514,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.next_node_id += 1;
             id
         };
-        let node_id = NodeId::new(node_id_u64);
-        let idx = node_id_u64 as usize;
+        NodeId::new(node_id_u64)
+    }
+
+    /// Put a node with exactly these labels into the store under `node_id`,
+    /// which `allocate_node_id` handed out.
+    fn insert_node_with_labels(&mut self, node_id: NodeId, labels: Vec<Label>) {
+        self.invalidate_statistics_cache();
+        let idx = node_id.as_u64() as usize;
 
         let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
@@ -1562,7 +1582,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
-        node_id
     }
 
     /// Create a node with multiple labels and properties
@@ -4442,6 +4461,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             commit_version: None,
             node_write_set: HashSet::new(),
             edge_write_set: HashSet::new(),
+            node_writes: HashMap::new(),
+            created_nodes: Vec::new(),
         };
         self.active_transactions.insert(txn_id, txn);
         txn_id
@@ -4450,13 +4471,37 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get a node visible to the given transaction, respecting its isolation level.
     /// - ReadCommitted: returns the latest committed version.
     /// - SnapshotIsolation: returns the version at txn start.
+    ///
+    /// Over that, the transaction's own buffered writes and the nodes it
+    /// created: a transaction reads its own writes, and nobody else does until
+    /// it commits (#1200 step 4).
     pub fn get_node_for_txn(&self, txn_id: TxnId, node_id: NodeId) -> Option<Node> {
         let txn = self.active_transactions.get(&txn_id)?;
         let read_version = match txn.isolation {
             IsolationLevel::ReadCommitted => self.current_version,
             IsolationLevel::SnapshotIsolation => txn.start_version,
         };
-        self.get_node_at_version(node_id, read_version)
+        let mut node = match txn.created_nodes.iter().find(|(id, _)| *id == node_id) {
+            Some((_, labels)) => {
+                let mut fresh = Node::with_labels(node_id, labels.iter().cloned());
+                fresh.version = read_version;
+                fresh
+            }
+            None => self.get_node_at_version(node_id, read_version)?,
+        };
+        if let Some(writes) = txn.node_writes.get(&node_id) {
+            for (key, value) in writes {
+                match value {
+                    Some(v) => {
+                        node.properties.insert(key.clone(), v.clone());
+                    }
+                    None => {
+                        node.properties.remove(key);
+                    }
+                }
+            }
+        }
+        Some(node)
     }
 
     /// Get an edge visible to the given transaction, respecting its isolation level.
@@ -4481,6 +4526,119 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if let Some(txn) = self.active_transactions.get_mut(&txn_id) {
             txn.edge_write_set.insert(edge_id);
         }
+    }
+
+    /// The transaction, if it exists and is still open.
+    fn active_txn(&self, txn_id: TxnId) -> GraphResult<&Transaction> {
+        let txn = self
+            .active_transactions
+            .get(&txn_id)
+            .ok_or(GraphError::TransactionNotFound(txn_id))?;
+        if txn.status != TxnStatus::Active {
+            return Err(GraphError::TransactionNotActive(txn_id));
+        }
+        Ok(txn)
+    }
+
+    /// Set a node property inside a transaction; `Null` removes it, as on the
+    /// store (#952).
+    ///
+    /// Buffered, not written: no other reader sees it until the commit, which
+    /// applies it at a new version, and an abort drops it (#1200 step 4). The
+    /// transaction reads it back through `get_node_for_txn`.
+    pub fn txn_set_node_property(
+        &mut self,
+        txn_id: TxnId,
+        node_id: NodeId,
+        key: impl Into<String>,
+        value: impl Into<PropertyValue>,
+    ) -> GraphResult<()> {
+        let key = key.into();
+        let value = value.into();
+        if !property_is_storable(&value) {
+            return Err(GraphError::ConstraintViolation(format!(
+                "InvalidPropertyType: `{key}` cannot hold a map inside a list. \
+                 A property is a scalar or a list of scalars."
+            )));
+        }
+        let txn = self.active_txn(txn_id)?;
+        let created_here = txn.created_nodes.iter().any(|(id, _)| *id == node_id);
+        if !created_here && self.get_node(node_id).is_none() {
+            return Err(GraphError::NodeNotFound(node_id));
+        }
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
+        let value = (!matches!(value, PropertyValue::Null)).then_some(value);
+        txn.node_writes.entry(node_id).or_default().insert(key, value);
+        txn.node_write_set.insert(node_id);
+        Ok(())
+    }
+
+    /// Create a node inside a transaction. The id is reserved now and is what
+    /// the node has after commit; until then only this transaction sees the
+    /// node, and a snapshot taken before the commit never does (#1200 step 4).
+    pub fn txn_create_node(
+        &mut self,
+        txn_id: TxnId,
+        labels: impl IntoIterator<Item = Label>,
+    ) -> GraphResult<NodeId> {
+        self.active_txn(txn_id)?;
+        let node_id = self.allocate_node_id();
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
+        txn.created_nodes.push((node_id, labels.into_iter().collect()));
+        txn.node_write_set.insert(node_id);
+        Ok(node_id)
+    }
+
+    /// Apply a committing transaction's buffer at the current version.
+    ///
+    /// All or nothing. On the first error what was applied is put back and the
+    /// created nodes are removed, so a failed commit leaves the current state
+    /// as it was. Transactions carry no tenant, so index events go to
+    /// `"default"`, as writes made through the store's tests do.
+    fn apply_txn_writes(
+        &mut self,
+        created: Vec<(NodeId, Vec<Label>)>,
+        writes: HashMap<NodeId, HashMap<String, Option<PropertyValue>>>,
+    ) -> GraphResult<()> {
+        let mut inserted: Vec<NodeId> = Vec::new();
+        for (id, labels) in created {
+            self.insert_node_with_labels(id, labels);
+            inserted.push(id);
+        }
+        let mut replaced: Vec<(NodeId, String, Option<PropertyValue>)> = Vec::new();
+        let mut result = Ok(());
+        'apply: for (id, props) in writes {
+            for (key, value) in props {
+                let old = self.node_property(id, &key);
+                let step = match value {
+                    Some(v) => self.set_node_property("default", id, key.clone(), v),
+                    None if self.get_node(id).is_none() => Err(GraphError::NodeNotFound(id)),
+                    None => {
+                        self.remove_node_property(id, &key);
+                        Ok(())
+                    }
+                };
+                if let Err(e) = step {
+                    result = Err(e);
+                    break 'apply;
+                }
+                replaced.push((id, key, old));
+            }
+        }
+        if result.is_err() {
+            for (id, key, old) in replaced.into_iter().rev() {
+                match old {
+                    Some(v) => {
+                        let _ = self.set_node_property("default", id, key, v);
+                    }
+                    None => self.remove_node_property(id, &key),
+                }
+            }
+            for id in inserted.into_iter().rev() {
+                let _ = self.delete_node("default", id);
+            }
+        }
+        result
     }
 
     /// Commit a transaction. Returns Err if a write conflict is detected (first-writer-wins).
@@ -4522,9 +4680,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
-        // No conflicts — commit. Bump global version.
+        // No conflicts. The buffer is applied at a new version, so a snapshot
+        // taken before it reads the replaced values through the undo log, and
+        // a node created here is born at it (#1200 step 4).
         self.current_version += 1;
         let commit_version = self.current_version;
+
+        let (created, writes) = match self.active_transactions.get_mut(&txn_id) {
+            Some(t) => (std::mem::take(&mut t.created_nodes), std::mem::take(&mut t.node_writes)),
+            None => (Vec::new(), HashMap::new()),
+        };
+        if let Err(e) = self.apply_txn_writes(created, writes) {
+            if let Some(t) = self.active_transactions.get_mut(&txn_id) {
+                t.status = TxnStatus::Aborted;
+            }
+            return Err(e);
+        }
 
         // Update last-commit tracking for all written entities
         for &nid in &txn.node_write_set {
@@ -4543,9 +4714,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Ok(commit_version)
     }
 
-    /// Abort a transaction, discarding its writes.
-    /// Note: actual rollback of in-place mutations requires version-aware cleanup.
-    /// For now, marks the transaction as aborted so future reads skip its writes.
+    /// Abort a transaction: ROLLBACK. Its writes were only ever buffered, so
+    /// dropping the buffer undoes them, and the ids reserved for nodes it
+    /// created go back to the free list (#1200 step 4).
     pub fn abort_transaction(&mut self, txn_id: TxnId) -> GraphResult<()> {
         let txn = self.active_transactions.get_mut(&txn_id)
             .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?;
@@ -4555,6 +4726,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         txn.status = TxnStatus::Aborted;
+        txn.node_writes.clear();
+        let reserved = std::mem::take(&mut txn.created_nodes);
+        self.free_node_ids.extend(reserved.into_iter().map(|(id, _)| id.as_u64()));
         Ok(())
     }
 
@@ -5089,7 +5263,10 @@ mod tests {
             ("begin_transaction", "opens a transaction record; nothing is visible until commit_transaction, which bumps"),
             ("txn_write_node", "records an id in the write set for conflict detection; the write itself bumps"),
             ("txn_write_edge", "records an id in the write set for conflict detection; the write itself bumps"),
-            ("abort_transaction", "flips the transaction status; it rolls nothing back, so no committed row changes"),
+            ("abort_transaction", "drops the transaction's buffered writes and reserved ids; nothing was applied, so no committed row changes (#1200)"),
+            ("allocate_node_id", "hands out an id; no node exists at it until insert_node_with_labels, which bumps"),
+            ("txn_set_node_property", "buffers a write inside the transaction; no other reader sees it until commit_transaction, which bumps (#1200)"),
+            ("txn_create_node", "reserves an id inside the transaction; the node enters the store at commit_transaction, which bumps (#1200)"),
         ];
 
         let src = std::fs::read_to_string(concat!(
