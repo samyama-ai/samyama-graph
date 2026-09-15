@@ -1172,6 +1172,20 @@ fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
     )))
 }
 
+/// What the pattern walker does with a complete match (#1235, #1243).
+enum MatchSink<'a> {
+    /// `EXISTS { }`: stop at the first.
+    First,
+    /// `COUNT { }`: count every match.
+    Count(&'a std::cell::Cell<i64>),
+    /// A pattern comprehension: evaluate the projection on every match, with
+    /// every variable the pattern bound.
+    Collect {
+        projection: &'a Expression,
+        out: &'a std::cell::RefCell<Vec<Value>>,
+    },
+}
+
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
@@ -1179,14 +1193,15 @@ fn eval_exists_subquery(
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
+    let filter = where_clause.map(|wc| &wc.predicate);
     // `COUNT { ... }` (#1235): the same walk, counting every match instead of
     // stopping at the first.
     if count {
         let matches = std::cell::Cell::new(0i64);
-        exists_start_paths(&pattern.paths, record, &[], where_clause, Some(&matches), store)?;
+        exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Count(&matches), store)?;
         return Ok(Value::Property(PropertyValue::Integer(matches.get())));
     }
-    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, None, store)?;
+    let found = exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::First, store)?;
     Ok(Value::Property(PropertyValue::Boolean(found)))
 }
 
@@ -1202,29 +1217,41 @@ fn eval_exists_subquery(
 /// into the next pattern: a relationship appears once in the subquery, as in
 /// one MATCH clause (#1233).
 ///
-/// With `counter`, every complete match adds one and the walk goes on (`false`
-/// is returned so no caller stops early); `COUNT { }` reads the total (#1235).
+/// `sink` says what a complete match does. `First` stops the walk (EXISTS).
+/// `Count` adds one and goes on, returning `false` so no caller stops early
+/// (`COUNT { }`, #1235). `Collect` evaluates a projection and goes on (a
+/// pattern comprehension, #1243).
 fn exists_start_paths(
     paths: &[crate::query::ast::PathPattern],
     record: &Record,
     visited_edges: &[crate::graph::EdgeId],
-    where_clause: Option<&crate::query::ast::WhereClause>,
-    counter: Option<&std::cell::Cell<i64>>,
+    filter: Option<&Expression>,
+    sink: &MatchSink<'_>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let Some((path, rest)) = paths.split_first() else {
-        let matched = match where_clause {
-            Some(wc) => matches!(
-                eval_expression(&wc.predicate, record, store)?,
+        let matched = match filter {
+            Some(f) => matches!(
+                eval_expression(f, record, store)?,
                 Value::Property(PropertyValue::Boolean(true))
             ),
             None => true,
         };
-        if let (true, Some(c)) = (matched, counter) {
-            c.set(c.get() + 1);
+        if !matched {
             return Ok(false);
         }
-        return Ok(matched);
+        return match sink {
+            MatchSink::First => Ok(true),
+            MatchSink::Count(c) => {
+                c.set(c.get() + 1);
+                Ok(false)
+            }
+            MatchSink::Collect { projection, out } => {
+                let value = eval_expression(projection, record, store)?;
+                out.borrow_mut().push(value);
+                Ok(false)
+            }
+        };
     };
     // Candidate start nodes: pinned when the start variable is already bound
     // (by the outer query or an earlier pattern), otherwise every node
@@ -1247,7 +1274,8 @@ fn exists_start_paths(
         if let Some(var) = path.start.variable.as_deref() {
             bindings.bind(var.to_string(), Value::NodeRef(start_id));
         }
-        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, counter, store)? {
+        let path_start = (start_id, visited_edges.len());
+        if exists_match_segment(path, 0, start_id, path_start, &bindings, visited_edges, filter, rest, sink, store)? {
             return Ok(true);
         }
     }
@@ -1439,15 +1467,23 @@ fn exists_match_segment(
     path: &crate::query::ast::PathPattern,
     seg_idx: usize,
     current: NodeId,
+    path_start: (NodeId, usize),
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
-    where_clause: Option<&crate::query::ast::WhereClause>,
+    filter: Option<&Expression>,
     rest: &[crate::query::ast::PathPattern],
-    counter: Option<&std::cell::Cell<i64>>,
+    sink: &MatchSink<'_>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     if seg_idx == path.segments.len() {
-        return exists_start_paths(rest, bindings, visited_edges, where_clause, counter, store);
+        // `p = (a)-...->(b)`: the path is complete, so bind it before the next
+        // pattern, the WHERE or a projection reads it (#1243).
+        if let Some(pv) = path.path_variable.as_deref() {
+            let mut with_path = bindings.clone();
+            with_path.bind(pv.to_string(), walked_path(store, path_start, visited_edges));
+            return exists_start_paths(rest, &with_path, visited_edges, filter, sink, store);
+        }
+        return exists_start_paths(rest, bindings, visited_edges, filter, sink, store);
     }
 
     let segment = &path.segments[seg_idx];
@@ -1460,7 +1496,7 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, counter, store,
+        path, seg_idx, current, path_start, 0, min_hops, max_hops, bindings, visited_edges, filter, rest, sink, store,
     )
 }
 
@@ -1471,14 +1507,15 @@ fn exists_expand_hops(
     path: &crate::query::ast::PathPattern,
     seg_idx: usize,
     current: NodeId,
+    path_start: (NodeId, usize),
     depth: usize,
     min_hops: usize,
     max_hops: usize,
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
-    where_clause: Option<&crate::query::ast::WhereClause>,
+    filter: Option<&Expression>,
     rest: &[crate::query::ast::PathPattern],
-    counter: Option<&std::cell::Cell<i64>>,
+    sink: &MatchSink<'_>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let segment = &path.segments[seg_idx];
@@ -1498,7 +1535,7 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, counter, store,
+                path, seg_idx + 1, current, path_start, &next, visited_edges, filter, rest, sink, store,
             )? {
                 return Ok(true);
             }
@@ -1558,18 +1595,37 @@ fn exists_expand_hops(
                 path,
                 seg_idx,
                 neighbor,
+                path_start,
                 depth + 1,
                 min_hops,
                 max_hops,
                 &next,
                 &next_visited,
-                where_clause,
+                filter,
                 rest,
-                counter,
+                sink,
                 store,
             )
         },
     )
+}
+
+/// The path a pattern walked: its start node, then each relationship in the
+/// order it was taken and the node it led to. The walk appends as it goes, so
+/// `visited_edges[from..]` are exactly this path's relationships (#1243).
+fn walked_path(store: &GraphStore, path_start: (NodeId, usize), visited_edges: &[crate::graph::EdgeId]) -> Value {
+    let (start, from) = path_start;
+    let edges: Vec<crate::graph::EdgeId> = visited_edges[from..].to_vec();
+    let mut nodes = Vec::with_capacity(edges.len() + 1);
+    let mut at = start;
+    nodes.push(at);
+    for &eid in &edges {
+        if let Some((source, target)) = store.get_edge_endpoints(eid) {
+            at = if source == at { target } else { source };
+        }
+        nodes.push(at);
+    }
+    Value::Path { nodes, edges }
 }
 
 /// Evaluate list comprehension: [x IN list WHERE cond | expr]
@@ -1782,7 +1838,16 @@ fn eval_reduce(
     Ok(acc)
 }
 
-/// Evaluate pattern comprehension: `[(a)-[:REL]->(b) | expr]`
+/// Evaluate a pattern comprehension: `[(a)-[:REL]->(b) WHERE cond | expr]`.
+///
+/// The pattern is matched by the walker EXISTS and COUNT use, and the
+/// projection is collected once per complete match (#1243). The comprehension
+/// used to have a walker of its own that expanded one hop per segment from the
+/// start node:
+/// - a multi-hop pattern lost every later variable ("Variable not found");
+/// - `*`, `*1..3` and `*3..3` were all one hop;
+/// - a target the row had already bound was rebound;
+/// - a named path held one relationship.
 fn eval_pattern_comprehension(
     pattern: &Pattern,
     filter: Option<&Expression>,
@@ -1791,103 +1856,10 @@ fn eval_pattern_comprehension(
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
     // `Vec<Value>`, not `Vec<PropertyValue>`: `[p = (n)-->() | p]` projects
-    // *paths*, and a `PropertyValue` cannot hold one (#662). An all-scalar
-    // comprehension is still returned as a `PropertyValue::Array` at the end,
-    // so nothing that consumed the old shape changes.
-    let mut results: Vec<Value> = Vec::new();
-
-    for path in &pattern.paths {
-        let start_var = path.start.variable.as_deref();
-        let start_labels = &path.start.labels;
-
-        // Get candidate start nodes
-        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
-            if let Some(val) = record.get(var) {
-                match val {
-                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
-                    _ => vec![],
-                }
-            } else if let Some(first_label) = start_labels.first() {
-                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-            } else {
-                store.all_nodes().iter().map(|n| n.id).collect()
-            }
-        } else if let Some(first_label) = start_labels.first() {
-            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-        } else {
-            store.all_nodes().iter().map(|n| n.id).collect()
-        };
-
-        for node_id in &start_node_ids {
-            let node = match store.get_node(*node_id) {
-                Some(n) => n,
-                None => continue,
-            };
-            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
-            if !has_all_labels { continue; }
-
-            if path.segments.is_empty() {
-                let mut temp_record = record.clone();
-                if let Some(var) = start_var {
-                    temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
-                }
-                if let Some(f) = filter {
-                    let cond = eval_expression(f, &temp_record, store)?;
-                    if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
-                }
-                results.push(eval_expression(projection, &temp_record, store)?);
-            } else {
-                // One-hop traversal for pattern comprehension
-                for segment in &path.segments {
-                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
-                    let edges = match segment.edge.direction {
-                        Direction::Outgoing => store.get_outgoing_edges(*node_id),
-                        Direction::Incoming => store.get_incoming_edges(*node_id),
-                        Direction::Both => {
-                            let mut all = store.get_outgoing_edges(*node_id);
-                            all.extend(store.get_incoming_edges(*node_id));
-                            all
-                        }
-                    };
-                    for edge in &edges {
-                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
-                            continue;
-                        }
-                        let target_id = if edge.source == *node_id { edge.target } else { edge.source };
-                        if !segment.node.labels.is_empty() {
-                            if let Some(target) = store.get_node(target_id) {
-                                let matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
-                                if !matches { continue; }
-                            } else { continue; }
-                        }
-                        let mut temp_record = record.clone_with_capacity(2);
-                        if let Some(var) = start_var {
-                            temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
-                        }
-                        if let Some(ref var) = segment.node.variable {
-                            temp_record.bind(var.clone(), Value::NodeRef(target_id));
-                        }
-                        if let Some(ref var) = segment.edge.variable {
-                            temp_record.bind(var.clone(), Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()));
-                        }
-                        // `[p = (a)-->(b) | p]` — the named path, bound for the
-                        // projection to read.
-                        if let Some(ref pv) = path.path_variable {
-                            temp_record.bind(
-                                pv.clone(),
-                                Value::Path { nodes: vec![*node_id, target_id], edges: vec![edge.id] },
-                            );
-                        }
-                        if let Some(f) = filter {
-                            let cond = eval_expression(f, &temp_record, store)?;
-                            if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
-                        }
-                        results.push(eval_expression(projection, &temp_record, store)?);
-                    }
-                }
-            }
-        }
-    }
+    // *paths*, and a `PropertyValue` cannot hold one (#662).
+    let out = std::cell::RefCell::new(Vec::new());
+    exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Collect { projection, out: &out }, store)?;
+    let results = out.into_inner();
 
     // Kept as a `PropertyValue::Array` when every element is a scalar, which
     // is what it always was; only a comprehension projecting entities needs
