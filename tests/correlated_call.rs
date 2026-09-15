@@ -112,6 +112,9 @@ fn refused_shapes() {
     for q in [
         "MATCH (p:P) CALL { WITH nosuch MATCH (nosuch)-[]->(q) RETURN count(q) AS c } RETURN p.n, c",
         "MATCH (p:P) CALL { WITH p MATCH (p)-[]->(q) RETURN count(q) AS c } WITH p, c RETURN p.n, c",
+        // A returned name already bound outside: Neo4j refuses both.
+        "MATCH (p:P) CALL { WITH p MATCH (p)-[]->(q) RETURN p } RETURN p.n",
+        "MATCH (p:P), (q:P) CALL { WITH p MATCH (p)-[]->(r) RETURN r AS q } RETURN p.n",
     ] {
         let r = parse_query(q).map_err(|e| e.to_string()).and_then(|p| QueryExecutor::new(&s).execute(&p).map_err(|e| e.to_string()));
         assert!(r.is_err(), "`{q}` should be refused");

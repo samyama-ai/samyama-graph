@@ -2467,16 +2467,19 @@ impl QueryPlanner {
                     "writes inside CALL { WITH ... } are not supported yet".to_string(),
                 ));
             }
+            // A returned name that is already bound outside is refused, as Neo4j
+            // refuses it: the join would otherwise overwrite the outer value.
             if let Some(rc) = &cc.body.return_clause {
                 for item in &rc.items {
-                    match (&item.alias, &item.expression) {
-                        (Some(a), _) => {
-                            known_vars.insert(a.clone());
-                        }
-                        (None, Expression::Variable(v)) => {
-                            known_vars.insert(v.clone());
-                        }
-                        _ => {}
+                    let name = match (&item.alias, &item.expression) {
+                        (Some(a), _) => a,
+                        (None, Expression::Variable(v)) => v,
+                        _ => continue,
+                    };
+                    if !known_vars.insert(name.clone()) {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "CALL {{ WITH ... }} returns `{name}`, which is already defined outside it"
+                        )));
                     }
                 }
             }
