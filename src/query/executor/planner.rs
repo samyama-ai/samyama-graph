@@ -3204,7 +3204,163 @@ impl QueryPlanner {
         }
     }
 
+    /// Plan one MATCH clause, keeping its relationships distinct across its
+    /// comma-separated patterns (#1233): see `isolate_relationships`.
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        if let Some((clause, distinct)) = Self::isolate_relationships(match_clause, where_clause) {
+            let plan = self.dispatch_plan_match_inner(&clause, where_clause, store)?;
+            return Ok(Box::new(FilterOperator::new(plan, distinct)));
+        }
+        self.dispatch_plan_match_inner(match_clause, where_clause, store)
+    }
+
+    /// Relationship isomorphism between the comma-separated patterns of one
+    /// MATCH clause (#1233).
+    ///
+    /// A relationship may appear once in a clause. #684 enforces that along one
+    /// path, where the expand carries the relationships the path has walked; the
+    /// patterns of `MATCH (p)-[:K]->(q), (q)-[:K]->(r)` are planned apart and
+    /// joined, so each could claim the same relationship -- a self-loop answered
+    /// `(d, d, d)` where Neo4j finds nothing. This returns the clause with its
+    /// anonymous fixed-length relationships named, and the predicate that every
+    /// two of them in different patterns differ.
+    ///
+    /// Only pairs that could be the same relationship are compared: two with
+    /// disjoint types never are, so `MATCH (a)-[:K]->(b), (a)-[:L]->(c)` gets no
+    /// filter and no extra bindings. A variable-length relationship across
+    /// patterns is not covered. `None` when there is nothing to compare.
+    ///
+    /// Nor are pairs the clause's WHERE already keeps apart. Two relationships
+    /// that share an endpoint variable are the same relationship only if their
+    /// other endpoints are the same node, so `(p)-[:HAS_TAG]->(t1),
+    /// (p)-[:HAS_TAG]->(t2) WHERE t1.name < t2.name` -- the usual way to ask
+    /// for unordered pairs -- needs no check: with `t1 = t2` the WHERE is
+    /// `x < x` and fails anyway. The check binds both relationships on every
+    /// row, which cost LDBC BI-2 35% before this rule.
+    fn isolate_relationships(
+        match_clause: &MatchClause,
+        where_clause: Option<&WhereClause>,
+    ) -> Option<(MatchClause, Expression)> {
+        let paths = &match_clause.pattern.paths;
+        if paths.len() < 2 {
+            return None;
+        }
+        // (path, segment, variable, types, endpoint variables) of every
+        // fixed-length relationship.
+        type Rel<'a> = (usize, usize, Option<String>, &'a Vec<EdgeType>, [Option<String>; 2]);
+        let rels: Vec<Rel> = paths
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, path)| {
+                path.segments.iter().enumerate().filter(|(_, s)| s.edge.length.is_none()).map(move |(si, s)| {
+                    let before = if si == 0 { &path.start.variable } else { &path.segments[si - 1].node.variable };
+                    (pi, si, s.edge.variable.clone(), &s.edge.types, [before.clone(), s.node.variable.clone()])
+                })
+            })
+            .collect();
+        let conjuncts = where_clause.map(|w| flatten_and_predicates(&w.predicate)).unwrap_or_default();
+        // The WHERE keeps the pair apart: they share one endpoint variable and
+        // the WHERE makes their other endpoints differ.
+        let kept_apart = |a: &[Option<String>; 2], b: &[Option<String>; 2]| -> bool {
+            let (Some(a0), Some(a1), Some(b0), Some(b1)) = (&a[0], &a[1], &b[0], &b[1]) else { return false };
+            if a0 == a1 || b0 == b1 {
+                return false;
+            }
+            let (x, y) = if a0 == b0 && a1 != b1 {
+                (a1, b1)
+            } else if a0 == b1 && a1 != b0 {
+                (a1, b0)
+            } else if a1 == b0 && a0 != b1 {
+                (a0, b1)
+            } else if a1 == b1 && a0 != b0 {
+                (a0, b0)
+            } else {
+                return false;
+            };
+            conjuncts.iter().any(|c| Self::implies_distinct(c, x, y))
+        };
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
+        let mut pairs = Vec::new();
+        for i in 0..rels.len() {
+            for j in i + 1..rels.len() {
+                let same_name = matches!((&rels[i].2, &rels[j].2), (Some(x), Some(y)) if x == y);
+                if rels[i].0 != rels[j].0
+                    && !same_name
+                    && may_share(rels[i].3, rels[j].3)
+                    && !kept_apart(&rels[i].4, &rels[j].4)
+                {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        let mut names: Vec<Option<String>> = vec![None; rels.len()];
+        let mut minted = 0;
+        for &(i, j) in &pairs {
+            for k in [i, j] {
+                if names[k].is_none() {
+                    names[k] = Some(match &rels[k].2 {
+                        Some(v) => v.clone(),
+                        None => {
+                            let v = format!("__iso_rel_{minted}");
+                            minted += 1;
+                            clause.pattern.paths[rels[k].0].segments[rels[k].1].edge.variable = Some(v.clone());
+                            v
+                        }
+                    });
+                }
+            }
+        }
+        let distinct = pairs
+            .iter()
+            .map(|&(i, j)| Expression::Binary {
+                left: Box::new(Expression::Variable(names[i].clone().expect("named above"))),
+                op: BinaryOp::Ne,
+                right: Box::new(Expression::Variable(names[j].clone().expect("named above"))),
+            })
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
+            .expect("pairs is not empty");
+        Some((clause, distinct))
+    }
+
+    /// Whether the conjunct `c` fails whenever `x` and `y` are the same node:
+    /// `x <> y`, or `L < R`, `L > R`, `L <> R` where `R` is `L` with `x`
+    /// renamed to `y`. With `x = y` both sides are one value, and a strict
+    /// comparison of a value with itself is false or null.
+    fn implies_distinct(c: &Expression, x: &str, y: &str) -> bool {
+        let Expression::Binary { left, op, right } = c else { return false };
+        if !matches!(op, BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt) {
+            return false;
+        }
+        fn rename(e: &Expression, from: &str, to: &str) -> Option<Expression> {
+            // Only the shapes a pair comparison uses: a variable, a property of
+            // one, a function over them. Anything else is not claimed.
+            match e {
+                Expression::Variable(v) => Some(Expression::Variable(if v == from { to.to_string() } else { v.clone() })),
+                Expression::Property { variable, property } => Some(Expression::Property {
+                    variable: if variable == from { to.to_string() } else { variable.clone() },
+                    property: property.clone(),
+                }),
+                Expression::Function { name, args, distinct } => Some(Expression::Function {
+                    name: name.clone(),
+                    args: args.iter().map(|a| rename(a, from, to)).collect::<Option<Vec<_>>>()?,
+                    distinct: *distinct,
+                }),
+                _ => None,
+            }
+        }
+        let pairs_up = |l: &Expression, r: &Expression, a: &str, b: &str| {
+            let mut vars = HashSet::new();
+            Self::collect_expression_variables(l, &mut vars);
+            vars.contains(a) && !vars.contains(b) && rename(l, a, b).as_ref() == Some(r)
+        };
+        pairs_up(left, right, x, y) || pairs_up(left, right, y, x)
+    }
+
+    fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if self.config.graph_native {
             match self.plan_match_native(match_clause, where_clause, store) {
                 Ok(plan) => Ok(plan),
@@ -7556,6 +7712,10 @@ impl QueryPlanner {
             .map(|wc| flatten_and_predicates(&wc.predicate))
             .unwrap_or_default();
 
+        // Relationships distinct across the clause's patterns (#1233).
+        let isolated = Self::isolate_relationships(match_clause, where_clause);
+        let match_clause = isolated.as_ref().map(|(c, _)| c).unwrap_or(match_clause);
+
         let mut current_op = upstream;
         let mut new_vars = HashSet::new();
 
@@ -7621,6 +7781,9 @@ impl QueryPlanner {
             current_op = Box::new(FilterOperator::new(current_op, filter_expr));
         }
 
+        if let Some((_, distinct)) = &isolated {
+            current_op = Box::new(FilterOperator::new(current_op, distinct.clone()));
+        }
         Ok((current_op, new_vars))
     }
 
