@@ -209,6 +209,10 @@ impl PhysicalOperator for BudgetedOperator {
         self.inner.try_push_limit(n)
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.inner.hint_early_stop(n)
+    }
+
     fn reset(&mut self) {
         self.produced = 0;
         self.inner.reset()
