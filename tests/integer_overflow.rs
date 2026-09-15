@@ -3,9 +3,9 @@
 //!
 //! `RETURN 9223372036854775807 + 1` answered -9223372036854775808 in a release
 //! build (wrapping arithmetic) and panicked in a debug one. Neo4j 2026.04.0
-//! raises 22003 "numeric value out of range" for it, for `-9223372036854775807
-//! - 2`, and for `4611686018427387904 * 2`. A result right at the edge of the
-//! range is still a result.
+//! raises 22003 "numeric value out of range" for it, for
+//! `-9223372036854775807 - 2`, and for `4611686018427387904 * 2`. A result
+//! right at the edge of the range is still a result.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::{QueryExecutor, Value};
