@@ -1758,7 +1758,7 @@ mod tests {
         assert!(result.is_ok(), "REMOVE query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert!(!store.node_property(node.id, "temp").is_some());
+        assert!(store.node_property(node.id, "temp").is_none());
     }
 
     #[test]
@@ -5316,11 +5316,11 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert!(nodes.len() >= 3, "Should have 3 Person nodes");
         let alice_id = nodes.iter()
-            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5393,11 +5393,11 @@ mod tests {
         let mut store = build_triangle_graph();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         let alice_id = nodes.iter()
-            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5764,8 +5764,8 @@ mod tests {
         exec_mut(&mut store, "CREATE (a:Person {name: 'A1'})-[:KNOWS]->(b:Person {name: 'B1'})");
         exec_mut(&mut store, "MATCH (a:Person {name: 'A1'})-[r:KNOWS]->(b:Person {name: 'B1'}) DELETE r");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        let a_exists = nodes.iter().any(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("A1")));
-        let b_exists = nodes.iter().any(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("B1")));
+        let a_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("A1")));
+        let b_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("B1")));
         assert!(a_exists, "Node A1 should still exist after edge deletion");
         assert!(b_exists, "Node B1 should still exist after edge deletion");
         let result = exec_read(&store, "MATCH (a:Person {name: 'A1'})-[:KNOWS]->(b:Person) RETURN b.name");
