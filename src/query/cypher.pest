@@ -78,6 +78,10 @@ match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
 
 // CALL subquery: CALL { MATCH ... RETURN ... }
 call_subquery = { ^"CALL" ~ "{" ~ statement ~ "}" }
+// `MATCH ... CALL { WITH a, b <statement> }` (#1236): a subquery run once per
+// row, with `a` and `b` imported from it. `WITH *` imports everything in scope.
+correlated_call = { ^"CALL" ~ "{" ~ ^"WITH" ~ call_imports ~ statement ~ "}" }
+call_imports = { "*" | variable ~ ("," ~ variable)* }
 
 // CALL clause
 call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
@@ -99,7 +103,7 @@ on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ (correlated_call | call_clause)? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A FOREACH with no preceding MATCH/UNWIND. It drives itself off a single
 // empty row, the same way a bare RETURN does, so no pattern is required.
 foreach_stmt = { foreach_clause }

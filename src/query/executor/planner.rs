@@ -1108,7 +1108,48 @@ impl QueryPlanner {
         self.plan_inner(query, store)
     }
 
+    /// Plan `query` to run against one row the caller supplies (#1236): `seed`
+    /// yields that row and `imported` names the variables it binds. The body of
+    /// a correlated `CALL { WITH ... }` is planned this way, so it gets the
+    /// ordinary planner -- indexes, pushdown, expands from a bound start.
+    ///
+    /// The trail-enumeration flag is per query; the outer query is mid-plan,
+    /// so its value is put back afterwards.
+    fn plan_seeded(
+        &self,
+        query: &Query,
+        store: &GraphStore,
+        seed: OperatorBox,
+        imported: HashSet<String>,
+    ) -> ExecutionResult<ExecutionPlan> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let saved = self.trail_enumeration.load(Relaxed);
+        self.trail_enumeration.store(multiplicity_is_observable(query), Relaxed);
+        let hoisted;
+        let query = if has_hoistable_match_properties(query) {
+            let mut q = query.clone();
+            hoist_match_property_exprs(&mut q);
+            hoisted = q;
+            &hoisted
+        } else {
+            query
+        };
+        let result = Self::reject_unevaluated_property_exprs(query)
+            .and_then(|_| self.plan_inner_seeded(query, store, Some((seed, imported))));
+        self.trail_enumeration.store(saved, Relaxed);
+        result
+    }
+
     fn plan_inner(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        self.plan_inner_seeded(query, store, None)
+    }
+
+    fn plan_inner_seeded(
+        &self,
+        query: &Query,
+        store: &GraphStore,
+        seed: Option<(OperatorBox, HashSet<String>)>,
+    ) -> ExecutionResult<ExecutionPlan> {
         // Handle SHOW INDEXES
         if query.show_indexes {
             return Ok(ExecutionPlan {
@@ -1268,31 +1309,38 @@ impl QueryPlanner {
             }
         }
 
-        // ADR-035: answer a reflexive subtree aggregate or enumeration from the OEH
-        // hierarchy index. The detector is conservative — when it returns Some, the
-        // rewrite is answer-preserving and only the cost changes.
-        if let Some(rewrite) = super::hierarchy_detector::detect(query, store) {
-            return Ok(self.plan_hierarchy_rewrite(rewrite));
-        }
+        // The shortcut detectors answer a whole query from an index or a count
+        // and cannot know that a seeded plan's variables are already bound: a
+        // correlated `CALL { WITH p, x MATCH (p)-[]->(x) RETURN count(*) }` came
+        // back as EdgeCount over every relationship (#1236). A seeded plan takes
+        // the general pipeline, which starts from the seed.
+        if seed.is_none() {
+            // ADR-035: answer a reflexive subtree aggregate or enumeration from the OEH
+            // hierarchy index. The detector is conservative — when it returns Some, the
+            // rewrite is answer-preserving and only the cost changes.
+            if let Some(rewrite) = super::hierarchy_detector::detect(query, store) {
+                return Ok(self.plan_hierarchy_rewrite(rewrite));
+            }
 
-        // ADR-017 Phase 1: recognize the adjacency-count-aggregate shape before
-        // the generic planner runs. The detector's constraints are conservative
-        // enough that when it returns Some, the specialized plan is always
-        // correct for the query. The specialized plan short-circuits the
-        // Expand→Aggregate path that causes MB049/MB054 to time out.
-        if let Some(pat) = super::adjacency_agg_detector::detect(query, store) {
-            return self.plan_adjacency_count_aggregate(query, pat);
-        }
-        // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
-        // where an explicit pre-WITH LIMIT caps the work per group but the
-        // second MATCH would otherwise spill billions of edges into the
-        // generic aggregate.
-        if let Some(pat) = super::adjacency_agg_detector::detect_with_binding(query) {
-            return self.plan_adjacency_count_aggregate_with_binding(query, pat);
-        }
-        // Phase 4 (PR-P2.8): aggregate-then-expand. CT20 shape.
-        if let Some(pat) = super::adjacency_agg_detector::detect_aggregate_then_expand(query, store) {
-            return self.plan_aggregate_then_expand(query, pat);
+            // ADR-017 Phase 1: recognize the adjacency-count-aggregate shape before
+            // the generic planner runs. The detector's constraints are conservative
+            // enough that when it returns Some, the specialized plan is always
+            // correct for the query. The specialized plan short-circuits the
+            // Expand→Aggregate path that causes MB049/MB054 to time out.
+            if let Some(pat) = super::adjacency_agg_detector::detect(query, store) {
+                return self.plan_adjacency_count_aggregate(query, pat);
+            }
+            // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
+            // where an explicit pre-WITH LIMIT caps the work per group but the
+            // second MATCH would otherwise spill billions of edges into the
+            // generic aggregate.
+            if let Some(pat) = super::adjacency_agg_detector::detect_with_binding(query) {
+                return self.plan_adjacency_count_aggregate_with_binding(query, pat);
+            }
+            // Phase 4 (PR-P2.8): aggregate-then-expand. CT20 shape.
+            if let Some(pat) = super::adjacency_agg_detector::detect_aggregate_then_expand(query, store) {
+                return self.plan_aggregate_then_expand(query, pat);
+            }
         }
 
         // Handle MERGE-only statement (no MATCH needed).
@@ -1535,8 +1583,15 @@ impl QueryPlanner {
             }
         }
 
-        let mut operator: Option<OperatorBox> = None;
-        let mut known_vars: HashSet<String> = HashSet::new();
+        // The count fast paths below read totals off the store, so they must
+        // not run for a seeded plan, whose variables are already bound.
+        let seeded = seed.is_some();
+        // A seeded plan (#1236) starts from the caller's row, its variables
+        // already bound; anything else starts from nothing.
+        let (mut operator, mut known_vars): (Option<OperatorBox>, HashSet<String>) = match seed {
+            Some((op, vars)) => (Some(op), vars),
+            None => (None, HashSet::new()),
+        };
 
         // Determine split point for WITH barrier
         let split = query.with_split_index.unwrap_or(query.match_clauses.len());
@@ -2378,6 +2433,56 @@ impl QueryPlanner {
 
         // (post-WITH MATCH clauses are now handled in the unified WITH stage loop above)
 
+        // 1b. A correlated `CALL { WITH ... }` subquery, once per row (#1236).
+        if let Some(cc) = &query.correlated_call {
+            use crate::query::executor::operator::{CorrelatedCallOperator, SeedOperator};
+            if query.with_clause.is_some() || !query.extra_with_stages.is_empty() {
+                return Err(ExecutionError::PlanningError(
+                    "a WITH after CALL { WITH ... } is not supported yet".to_string(),
+                ));
+            }
+            if cc.body.match_clauses.is_empty() {
+                return Err(ExecutionError::PlanningError(
+                    "a CALL { WITH ... } body without a MATCH is not supported yet".to_string(),
+                ));
+            }
+            let outer = operator.take().ok_or_else(|| {
+                ExecutionError::PlanningError("CALL { WITH ... } needs a MATCH before it".to_string())
+            })?;
+            let imported: HashSet<String> = match &cc.imports {
+                Some(vars) => {
+                    if let Some(v) = vars.iter().find(|v| !known_vars.contains(*v)) {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "CALL {{ WITH {v} }}: `{v}` is not defined before the subquery"
+                        )));
+                    }
+                    vars.iter().cloned().collect()
+                }
+                None => known_vars.clone(),
+            };
+            let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let body = self.plan_seeded(&cc.body, store, Box::new(SeedOperator::new(cell.clone())), imported)?;
+            if body.is_write {
+                return Err(ExecutionError::PlanningError(
+                    "writes inside CALL { WITH ... } are not supported yet".to_string(),
+                ));
+            }
+            if let Some(rc) = &cc.body.return_clause {
+                for item in &rc.items {
+                    match (&item.alias, &item.expression) {
+                        (Some(a), _) => {
+                            known_vars.insert(a.clone());
+                        }
+                        (None, Expression::Variable(v)) => {
+                            known_vars.insert(v.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            operator = Some(Box::new(CorrelatedCallOperator::new(outer, body.root, cell)));
+        }
+
         // 2. Handle CALL if present
         if let Some(call_clause) = &query.call_clause {
             let call_op = self.plan_call(call_clause)?;
@@ -2815,6 +2920,7 @@ impl QueryPlanner {
             // every write clause, so it is the whole condition.
             let use_label_count = has_aggregation
                 && !is_write
+                && !seeded
                 && aggregates.len() == 1
                 && group_by.is_empty()
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -2852,6 +2958,7 @@ impl QueryPlanner {
             // Detect: one count aggregate, one group-by with type() function, single edge path, no WHERE
             let use_edge_type_count = has_aggregation
                 && !is_write
+                && !seeded
                 && aggregates.len() == 1
                 && group_by.len() == 1
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -2901,6 +3008,7 @@ impl QueryPlanner {
             };
             let use_edge_count = has_aggregation
                 && !is_write
+                && !seeded
                 && aggregates.len() == 1
                 && group_by.is_empty()
                 && matches!(aggregates[0].func, AggregateType::Count)
@@ -8753,6 +8861,7 @@ mod tests {
             skip: None,
             call_clause: None,
             call_subquery: None,
+            correlated_call: None,
             delete_clause: None,
             set_clauses: vec![],
             remove_clauses: vec![],

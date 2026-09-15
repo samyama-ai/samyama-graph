@@ -8698,6 +8698,109 @@ impl PhysicalOperator for VarLengthExpandOperator {
     }
 }
 
+/// The outer row a correlated `CALL { WITH ... }` subquery runs against
+/// (#1236). `CorrelatedCallOperator` puts each outer row in the cell; this
+/// yields it once per reset, so the body's plan starts from that row with the
+/// imported variables bound.
+pub struct SeedOperator {
+    cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    done: bool,
+}
+
+impl SeedOperator {
+    pub fn new(cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>) -> Self {
+        Self { cell, done: false }
+    }
+}
+
+impl PhysicalOperator for SeedOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+        let row = self
+            .cell
+            .lock()
+            .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))?
+            .clone();
+        Ok(row)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Seed".to_string(),
+            details: "the outer row of a CALL { WITH ... }".to_string(),
+            children: vec![],
+        }
+    }
+}
+
+/// `MATCH ... CALL { WITH a <body> } RETURN ...` (#1236). For each outer row,
+/// the body runs against that row and each row it returns is emitted joined to
+/// the outer one. A body that returns nothing drops the outer row, as Cypher's
+/// CALL does; a body that aggregates returns one row per outer row, so
+/// `RETURN count(q) AS c` answers 0 rather than dropping the row.
+pub struct CorrelatedCallOperator {
+    outer: OperatorBox,
+    body: OperatorBox,
+    seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    current: Option<Record>,
+}
+
+impl CorrelatedCallOperator {
+    pub fn new(
+        outer: OperatorBox,
+        body: OperatorBox,
+        seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    ) -> Self {
+        Self { outer, body, seed, current: None }
+    }
+}
+
+impl PhysicalOperator for CorrelatedCallOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(outer_row) = &self.current {
+                if let Some(inner) = self.body.next(store)? {
+                    let mut row = outer_row.clone();
+                    row.merge(inner);
+                    return Ok(Some(row));
+                }
+                self.current = None;
+            }
+            let Some(outer_row) = self.outer.next(store)? else {
+                return Ok(None);
+            };
+            *self
+                .seed
+                .lock()
+                .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))? =
+                Some(outer_row.clone());
+            self.body.reset();
+            self.current = Some(outer_row);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.body.reset();
+        self.current = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CorrelatedCall".to_string(),
+            details: "the subquery runs once per outer row".to_string(),
+            children: vec![self.outer.describe(), self.body.describe()],
+        }
+    }
+}
+
 /// Project operator: RETURN n.name, n.age
 pub struct ProjectOperator {
     /// Input operator
