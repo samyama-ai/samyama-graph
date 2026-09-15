@@ -81,6 +81,12 @@ pub struct Query {
     pub limit: Option<usize>,
     /// SKIP clause (optional)
     pub skip: Option<usize>,
+    /// `SKIP`/`LIMIT` holding a `$parameter`. No parameters exist at parse
+    /// time, so the count is kept as an expression and resolved into
+    /// `skip`/`limit` when parameters are bound; evaluating it at parse time
+    /// made `SKIP $s` a parse error.
+    pub deferred_skip: Option<Expression>,
+    pub deferred_limit: Option<Expression>,
     /// CALL clause (optional)
     pub call_clause: Option<CallClause>,
     /// CALL subquery (optional)
@@ -185,6 +191,18 @@ pub struct Query {
     /// Additional WITH stages (for multi-WITH queries like WITH ... MATCH ... WITH ... RETURN)
     /// Each stage: (with_clause, unwind_clause, post_match_clauses, post_where_clause)
     pub extra_with_stages: Vec<(WithClause, Option<UnwindClause>, Vec<MatchClause>, Option<WhereClause>)>,
+    /// The conjuncts of every WHERE written straight after an OPTIONAL MATCH,
+    /// each with that clause's pattern (#1231).
+    ///
+    /// A group's WHEREs are ANDed into one predicate (`where_clause`,
+    /// `post_with_where_clause`, a stage's), and the planner scopes each
+    /// conjunct by the variables it names. That cannot tell `OPTIONAL MATCH
+    /// (y) WHERE x.v > 1` from `MATCH (x) WHERE x.v > 1`: both name only `x`.
+    /// The first belongs to the optional match -- a row failing it keeps its
+    /// outer bindings and gets nulls -- and the second filters. This records
+    /// which is which. The predicate stays in the group's WHERE as well, so a
+    /// reader that does not consult this sees the query as before.
+    pub optional_where: Vec<(Pattern, Expression)>,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -899,17 +917,31 @@ pub enum RemoveItem {
     Label { variable: String, label: Label },
 }
 
-/// FOREACH clause: FOREACH (x IN list | SET x.prop = val)
+/// FOREACH clause: `FOREACH (x IN list | <updating clauses>)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeachClause {
     /// Variable name for each element
     pub variable: String,
     /// List expression to iterate
     pub expression: Expression,
-    /// SET items to apply for each element
-    pub set_clauses: Vec<SetClause>,
-    /// CREATE clauses to apply for each element
-    pub create_clauses: Vec<CreateClause>,
+    /// The updating clauses to run per element, in the order written.
+    pub body: Vec<ForeachBody>,
+}
+
+/// One updating clause in a FOREACH body. The grammar admits exactly these,
+/// so a `RETURN` in the body is a parse error.
+///
+/// One ordered list rather than a field per clause kind: the two fields this
+/// replaced held SET and CREATE only, so DELETE and REMOVE, which the grammar
+/// accepted, had nowhere to go and were dropped (#465).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForeachBody {
+    Set(SetClause),
+    Remove(RemoveClause),
+    Delete(DeleteClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Foreach(Box<ForeachClause>),
 }
 
 /// UNWIND clause: `UNWIND [1,2,3] AS x`
@@ -964,6 +996,9 @@ pub struct WithClause {
     pub skip: Option<usize>,
     /// LIMIT within WITH
     pub limit: Option<usize>,
+    /// SKIP/LIMIT holding a `$parameter`, resolved when parameters are bound.
+    pub deferred_skip: Option<Expression>,
+    pub deferred_limit: Option<Expression>,
 }
 
 /// ORDER BY clause
@@ -983,6 +1018,18 @@ pub struct OrderByItem {
 }
 
 impl Query {
+    /// Whether a SKIP/LIMIT anywhere in the query waits for a parameter.
+    pub fn has_deferred_row_counts(&self) -> bool {
+        let with = |w: &WithClause| w.deferred_skip.is_some() || w.deferred_limit.is_some();
+        self.deferred_skip.is_some()
+            || self.deferred_limit.is_some()
+            || self.with_clause.as_ref().is_some_and(with)
+            || self.extra_with_stages.iter().any(|(w, ..)| with(w))
+            || self.clauses.iter().any(|c| matches!(c, Clause::With(w) if with(w)))
+            || self.call_subquery.as_deref().is_some_and(Query::has_deferred_row_counts)
+            || self.union_queries.iter().any(|(u, _)| u.has_deferred_row_counts())
+    }
+
     /// Create a new empty query
     /// Whether executing this statement can change the graph.
     ///
@@ -1042,6 +1089,8 @@ impl Query {
             order_by: None,
             limit: None,
             skip: None,
+            deferred_skip: None,
+            deferred_limit: None,
             call_clause: None,
             call_subquery: None,
             delete_clause: None,
@@ -1074,6 +1123,7 @@ impl Query {
             explain: false,
             with_split_index: None,
             post_with_where_clause: None,
+            optional_where: Vec::new(),
             extra_with_stages: Vec::new(),
         }
     }

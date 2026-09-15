@@ -462,6 +462,109 @@ fn multiplicity_is_observable(query: &Query) -> bool {
 }
 
 /// Whether an expression contains an aggregate call, at any depth.
+/// Whether any MATCH carries a non-literal property value. Checked first so
+/// the common query is not copied.
+fn has_hoistable_match_properties(q: &Query) -> bool {
+    fn in_pattern(p: &Pattern) -> bool {
+        p.paths.iter().any(|path| {
+            path.start.property_exprs.is_some()
+                || path
+                    .segments
+                    .iter()
+                    .any(|s| s.node.property_exprs.is_some() || s.edge.property_exprs.is_some())
+        })
+    }
+    q.match_clauses.iter().any(|m| in_pattern(&m.pattern))
+        || q.extra_with_stages.iter().any(|(_, _, ms, _)| ms.iter().any(|m| in_pattern(&m.pattern)))
+        || q.clauses.iter().any(|c| matches!(c, Clause::Match(m) if in_pattern(&m.pattern)))
+}
+
+/// MATCH `(n {k: expr})`, where `expr` is not a literal, as `WHERE n.k = expr`.
+///
+/// Such a property was refused at planning, so the standard batch lookup
+/// `UNWIND $rows AS r MATCH (n:N {id: r.id})` was an error (TCK Unwind1 [6]).
+/// For a MATCH the two forms mean the same thing.
+///
+/// An OPTIONAL MATCH is hoisted too: `OPTIONAL MATCH (a:N {id: i})` means
+/// `OPTIONAL MATCH (a:N) WHERE a.id = i`. The group's WHERE is shared by all
+/// of its MATCH clauses (the parser ANDs them), but the decomposition scopes
+/// each conjunct by the variables it names: one spanning an optional clause's
+/// own variables and an outer one becomes that clause's join condition (#667,
+/// and #1229 for an UNWIND variable), and one naming only its own variables is
+/// pushed inside it. Either way a row it finds nothing for keeps its nulls.
+/// This was refused until #1229, when the WHERE form itself deleted those rows.
+///
+/// An anonymous node (nothing to name) and a variable-length relationship (a
+/// list, not one relationship) keep the refusal.
+fn hoist_match_property_exprs(q: &mut Query) {
+    let split = q.with_split_index.unwrap_or(q.match_clauses.len()).min(q.match_clauses.len());
+    let (pre, post) = q.match_clauses.split_at_mut(split);
+    hoist_group(pre, &mut q.where_clause);
+    hoist_group(post, &mut q.post_with_where_clause);
+    for (_, _, matches, wh) in &mut q.extra_with_stages {
+        hoist_group(matches, wh);
+    }
+    // In the clause pipeline a MATCH's own WHERE is the clause after it.
+    let mut i = 0;
+    while i < q.clauses.len() {
+        let pred = match &mut q.clauses[i] {
+            Clause::Match(m) => take_conjuncts(std::slice::from_mut(m)),
+            _ => None,
+        };
+        if let Some(pred) = pred {
+            match q.clauses.get_mut(i + 1) {
+                Some(Clause::Where(w)) => and_into(&mut w.predicate, pred),
+                _ => q.clauses.insert(i + 1, Clause::Where(WhereClause { predicate: pred })),
+            }
+        }
+        i += 1;
+    }
+}
+
+fn hoist_group(matches: &mut [MatchClause], wh: &mut Option<WhereClause>) {
+    if let Some(pred) = take_conjuncts(matches) {
+        match wh {
+            Some(w) => and_into(&mut w.predicate, pred),
+            None => *wh = Some(WhereClause { predicate: pred }),
+        }
+    }
+}
+
+/// The `var.key = expr` conjuncts a group's patterns carry, removed from them.
+fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
+    fn hoist(var: &Option<String>, exprs: &mut Option<HashMap<String, Expression>>, out: &mut Vec<Expression>) {
+        let Some(v) = var else { return };
+        let Some(map) = exprs.take() else { return };
+        let mut entries: Vec<(String, Expression)> = map.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, e) in entries {
+            out.push(Expression::Binary {
+                left: Box::new(Expression::Property { variable: v.clone(), property: k }),
+                op: BinaryOp::Eq,
+                right: Box::new(e),
+            });
+        }
+    }
+    let mut conj = Vec::new();
+    for m in matches.iter_mut() {
+        for path in &mut m.pattern.paths {
+            hoist(&path.start.variable, &mut path.start.property_exprs, &mut conj);
+            for seg in &mut path.segments {
+                if seg.edge.length.is_none() {
+                    hoist(&seg.edge.variable, &mut seg.edge.property_exprs, &mut conj);
+                }
+                hoist(&seg.node.variable, &mut seg.node.property_exprs, &mut conj);
+            }
+        }
+    }
+    conj.into_iter().reduce(|l, r| Expression::Binary { left: Box::new(l), op: BinaryOp::And, right: Box::new(r) })
+}
+
+fn and_into(target: &mut Expression, pred: Expression) {
+    let old = std::mem::replace(target, Expression::Literal(PropertyValue::Null));
+    *target = Expression::Binary { left: Box::new(old), op: BinaryOp::And, right: Box::new(pred) };
+}
+
 fn expression_has_aggregate(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
@@ -521,12 +624,14 @@ fn resolve_sort_key(
 ) -> Expression {
     match position {
         SortPosition::BeforeProjection => substitute_aliases(key, return_items),
-        SortPosition::AfterProjection => {
-            if let Some((_, alias)) = return_items.iter().find(|(expr, _)| expr == key) {
-                return Expression::Variable(alias.clone());
-            }
-            key.clone()
-        }
+        // Through compound keys, as the WITH path does: `ORDER BY 38 +
+        // avg(p.age) - 1000` names the projected `avg(p.age)` inside an
+        // arithmetic key. Only a whole-key match was rewritten here, so the
+        // inner `avg(p.age)` was evaluated after the projection, where `p` is
+        // gone -- an error that the sort then folded to null, sorting by
+        // nothing (#987). Sub-expressions that match nothing are left alone,
+        // so an unprojected name is still out of scope.
+        SortPosition::AfterProjection => rewrite_sort_key(key, return_items),
     }
 }
 
@@ -980,6 +1085,18 @@ impl QueryPlanner {
         // Checked for *both* paths. It reads `query.clauses` as well as the
         // by-kind fields, so a pipeline query cannot slip a pattern carrying an
         // unevaluated property expression past it.
+        // A MATCH property whose value is not a literal filters like a WHERE, so
+        // it is rewritten into one before the refusal below looks at it. Only
+        // a query that has one is copied.
+        let hoisted;
+        let query = if has_hoistable_match_properties(query) {
+            let mut q = query.clone();
+            hoist_match_property_exprs(&mut q);
+            hoisted = q;
+            &hoisted
+        } else {
+            query
+        };
         Self::reject_unevaluated_property_exprs(query)?;
         if query.needs_clause_pipeline {
             return self.plan_clause_pipeline(query, store);
@@ -1395,23 +1512,11 @@ impl QueryPlanner {
             // upstream needs to supply bindings.
             if query.foreach_clause.is_some() && !Self::has_any_unwind(query) {
                 let foreach_clause = query.foreach_clause.as_ref().expect("checked above");
-                let mut set_items = Vec::new();
-                for set_clause in &foreach_clause.set_clauses {
-                    for item in &set_clause.items {
-                        set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                    }
-                }
-                let create_patterns: Vec<Pattern> = foreach_clause
-                    .create_clauses
-                    .iter()
-                    .map(|c| c.pattern.clone())
-                    .collect();
                 let root: OperatorBox = Box::new(ForeachOperator::new(
                     Box::new(crate::query::executor::operator::SingleRowOperator::new()),
                     foreach_clause.variable.clone(),
                     foreach_clause.expression.clone(),
-                    set_items,
-                    create_patterns,
+                    foreach_clause.body.clone(),
                 ));
                 return Ok(ExecutionPlan {
                     root,
@@ -1466,7 +1571,60 @@ impl QueryPlanner {
         // the Unwind operator that binds it sits above the matches. The top-level WHERE
         // filter re-applies the full predicate after the Unwind, so dropping it here loses
         // nothing.
-        let late_bound_pre = Self::late_bound_variables(query);
+        // Which conjuncts were written after an OPTIONAL MATCH, and after which
+        // one (#1231). `pre_with_clauses` carries propagated labels, so the
+        // parser's patterns are compared with the clauses as written.
+        let mut optional_where_left = query.optional_where.clone();
+        let as_written: Vec<&MatchClause> = query.match_clauses[..split].iter().collect();
+        let owners: Vec<Option<usize>> = pre_where_preds
+            .iter()
+            .map(|p| Self::optional_owner(&mut optional_where_left, p, &as_written))
+            .collect();
+
+        let mut late_bound_pre = Self::late_bound_variables(query);
+
+        // A leading UNWIND feeding an OPTIONAL MATCH whose WHERE names the
+        // unwound variable: `UNWIND $rows AS i OPTIONAL MATCH (a:N) WHERE
+        // a.id = i`. The conjunct is the optional match's join condition, but
+        // with the Unwind above the matches it could only be a filter above the
+        // join, and that filter deleted every row the lookup found nothing for
+        // (#1229). Such a query plans the Unwind first, as the outer side of the
+        // join, so the conjunct takes the OPTIONAL MATCH route of #667 like any
+        // other outer variable. Only this shape moves; every other leading
+        // UNWIND keeps its place.
+        let unwind_at_base = match &query.unwind_clause {
+            Some(u)
+                if query.unwind_leading
+                    && query.extra_unwind_clauses.is_empty()
+                    && query.call_clause.is_none()
+                    && query.load_csv_clause.is_none() =>
+            {
+                pre_where_preds.iter().zip(&owners).any(|(pred, owner)| {
+                    let mut vars = HashSet::new();
+                    Self::collect_expression_variables(pred, &mut vars);
+                    vars.contains(&u.variable)
+                        && (owner.is_some() || pre_with_clauses.iter().enumerate().any(|(i, mc)| {
+                            mc.optional && {
+                                let earlier: HashSet<&String> =
+                                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
+                                pre_match_var_sets[i].iter().any(|v| !earlier.contains(v) && vars.contains(v))
+                            }
+                        }))
+                })
+            }
+            _ => false,
+        };
+        if unwind_at_base {
+            use crate::query::executor::operator::SingleRowOperator;
+            let u = query.unwind_clause.as_ref().expect("checked above");
+            late_bound_pre.remove(&u.variable);
+            operator = Some(Box::new(UnwindOperator::new(
+                Box::new(SingleRowOperator::new()),
+                u.expression.clone(),
+                u.variable.clone(),
+            )));
+            known_vars.insert(u.variable.clone());
+        }
 
         // Predicates deferred past match planning because they name a leading
         // UNWIND's variable. Kept rather than dropped: the claim above -- that
@@ -1480,9 +1638,31 @@ impl QueryPlanner {
         let mut optional_join_predicates: Vec<Option<Expression>> =
             vec![None; pre_with_clauses.len()];
 
-        for pred in pre_where_preds {
+        for (k, pred) in pre_where_preds.into_iter().enumerate() {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
+            // Written after an OPTIONAL MATCH: its join condition, unless it can
+            // filter inside the clause (#1231). One naming only outer variables
+            // -- `OPTIONAL MATCH (y) WHERE x.v > 1`, or `WHERE false` -- used to
+            // be scoped by its variables to the outer MATCH and deleted the rows
+            // the OPTIONAL MATCH should have kept with nulls.
+            if let Some(i) = owners[k] {
+                let earlier: HashSet<&String> =
+                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
+                if !Self::inside_optional(&pred_vars, &pre_match_var_sets[i], &earlier)
+                    && !pred_vars.iter().any(|v| late_bound_pre.contains(v))
+                {
+                    optional_join_predicates[i] = Some(match optional_join_predicates[i].take() {
+                        Some(existing) => Expression::Binary {
+                            left: Box::new(existing),
+                            op: BinaryOp::And,
+                            right: Box::new(pred),
+                        },
+                        None => pred,
+                    });
+                    continue;
+                }
+            }
             if pred_vars.iter().any(|v| late_bound_pre.contains(v)) {
                 late_bound_predicates.push(pred);
                 continue;
@@ -1685,7 +1865,19 @@ impl QueryPlanner {
                         }
                         Box::new(join) as OperatorBox
                     } else {
-                        Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                        match Self::try_correlated_index_lookup(
+                            existing,
+                            match_clause,
+                            per_match_where[match_idx].as_ref(),
+                            &known_vars,
+                            &mut cross_match_predicates,
+                            store,
+                        ) {
+                            Ok(lookup) => lookup,
+                            Err(existing) => {
+                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                            }
+                        }
                     }
                 }
                 // A *leading* OPTIONAL MATCH has no left side, so there was
@@ -1773,8 +1965,33 @@ impl QueryPlanner {
             known_vars.insert(load.variable.clone());
         }
 
-        if unwind_before_barrier {
-            if let Some(unwind) = leading_unwind {
+        if unwind_before_barrier && !unwind_at_base {
+            // A batch lookup against an index is planned as an index probe per
+            // unwound row rather than an unwind over a scan of the label (#1219).
+            let batch_lookup = match leading_unwind {
+                Some(unwind)
+                    if query.unwind_leading
+                        && query.extra_unwind_clauses.is_empty()
+                        && query.load_csv_clause.is_none()
+                        && query.call_clause.is_none()
+                        && pre_with_clauses.len() == 1 =>
+                {
+                    Self::leading_unwind_index_lookup(
+                        unwind,
+                        &pre_with_clauses[0],
+                        per_match_where[0].as_ref(),
+                        &late_bound_predicates,
+                        store,
+                    )
+                }
+                _ => None,
+            };
+            if let Some(op) = batch_lookup {
+                operator = Some(op);
+                if let Some(unwind) = leading_unwind {
+                    known_vars.insert(unwind.variable.clone());
+                }
+            } else if let Some(unwind) = leading_unwind {
                 use crate::query::executor::operator::SingleRowOperator;
                 let base: OperatorBox = match operator.take() {
                     Some(op) => op,
@@ -1965,13 +2182,42 @@ impl QueryPlanner {
             // the Unwind and the query died with "Variable not found". Dropping it from the
             // decomposition is safe because the top-level WHERE filter, applied after the
             // Unwind, evaluates the full predicate anyway.
+            //
+            // That holds only for a variable the stage does not know yet. A
+            // leading UNWIND carried through the WITH (`UNWIND ... AS i WITH i
+            // OPTIONAL MATCH (a) WHERE a.id = i`) is already bound below this
+            // barrier, and no later filter re-applies the stage's own WHERE, so
+            // dropping the conjunct lost it: the OPTIONAL MATCH answered every
+            // `(i, a)` pair (#1229).
             let late_bound = Self::late_bound_variables(query);
 
+            let mut stage_optional_where_left = query.optional_where.clone();
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
-                if pred_vars.iter().any(|v| late_bound.contains(v)) {
+                if pred_vars.iter().any(|v| late_bound.contains(v) && !known_vars.contains(v)) {
                     continue;
+                }
+                // Written after an OPTIONAL MATCH: its join condition unless it
+                // can filter inside the clause (#1231), as before the WITH.
+                if let Some(i) = Self::optional_owner(&mut stage_optional_where_left, &pred, stage_matches) {
+                    let earlier: HashSet<&String> = match_var_sets[..i]
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .chain(known_vars.iter())
+                        .collect();
+                    if !Self::inside_optional(&pred_vars, &match_var_sets[i], &earlier) {
+                        stage_optional_join_predicates[i] =
+                            Some(match stage_optional_join_predicates[i].take() {
+                                Some(existing) => Expression::Binary {
+                                    left: Box::new(existing),
+                                    op: BinaryOp::And,
+                                    right: Box::new(pred),
+                                },
+                                None => pred,
+                            });
+                        continue;
+                    }
                 }
                 // A predicate spanning an OPTIONAL MATCH's own variables and
                 // an outer one is a **join condition**, not a filter above the
@@ -2095,7 +2341,18 @@ impl QueryPlanner {
                                 }
                                 Box::new(join) as OperatorBox
                             } else {
-                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                                match Self::try_correlated_index_lookup(
+                                    existing,
+                                    match_clause,
+                                    per_match_where[match_idx].as_ref(),
+                                    &known_vars,
+                                    &mut cross_match_preds,
+                                    store,
+                                ) {
+                                    Ok(lookup) => lookup,
+                                    Err(existing) => Box::new(CartesianProductOperator::new(existing, match_op))
+                                        as OperatorBox,
+                                }
                             }
                         }
                         None => match_op,
@@ -2386,13 +2643,6 @@ impl QueryPlanner {
 
         // Check if this is a MATCH...CREATE query (create edges between matched nodes)
         let is_write = if let Some(create_clause) = &query.create_clause {
-            // Extract edge creation info from CREATE pattern
-            // Example: MATCH (a:Trial), (b:Condition) CREATE (a)-[:STUDIES]->(b)
-            let create_pattern = &create_clause.pattern;
-
-            // Collect edges to create from the CREATE pattern
-            let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
-
             // Variables the MATCH already bound. Anything else in the CREATE pattern is a
             // *new* node: previously such nodes were dropped on the floor, so
             // `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither node nor edge and
@@ -2445,137 +2695,34 @@ impl QueryPlanner {
                 }
             }
 
-            // Nodes to create per matched row: (handle, labels, properties)
-            let mut nodes_to_create: Vec<(
-                String,
-                Vec<Label>,
-                HashMap<String, PropertyValue>,
-                Option<HashMap<String, Expression>>,
-            )> = Vec::new();
-            let mut anon_seq = 0usize;
-
-            // Assign a handle to a CREATE-pattern node, registering it for creation when
-            // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
-            // can still be wired to them.
-            let mut handle_for = |node: &crate::query::ast::NodePattern,
-                                  nodes_to_create: &mut Vec<(
-                String,
-                Vec<Label>,
-                HashMap<String, PropertyValue>,
-                Option<HashMap<String, Expression>>,
-            )>,
-                                  anon_seq: &mut usize|
-             -> String {
-                match &node.variable {
-                    Some(v) if matched_vars.contains(v) => v.clone(),
-                    // Already registered by an earlier path in this same
-                    // CREATE — reuse it rather than creating a second node.
-                    Some(v) if nodes_to_create.iter().any(|(h, ..)| h == v) => v.clone(),
-                    Some(v) => {
-                        nodes_to_create.push((
-                            v.clone(),
-                            node.labels.clone(),
-                            node.properties.clone().unwrap_or_default(),
-                            node.property_exprs.clone(),
-                        ));
-                        v.clone()
-                    }
-                    None => {
-                        let h = format!("__anon_mcreate_{anon_seq}");
-                        *anon_seq += 1;
-                        nodes_to_create.push((
-                            h.clone(),
-                            node.labels.clone(),
-                            node.properties.clone().unwrap_or_default(),
-                            node.property_exprs.clone(),
-                        ));
-                        h
-                    }
-                }
-            };
-
-            for path in &create_pattern.paths {
-                let mut current_var =
-                    handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
-
-                for segment in &path.segments {
-                    let target_var =
-                        handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
-                    let edge = &segment.edge;
-                    let edge_type = edge.types.first()
-                        .cloned()
-                        .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-                    let edge_properties = edge.properties.clone().unwrap_or_default();
-                    let edge_variable = edge.variable.clone();
-
-                    // Direction comes from the pattern, not from write order.
-                    let (from, to) = match segment.edge.direction {
-                        Direction::Incoming => (target_var.clone(), current_var.clone()),
-                        Direction::Outgoing | Direction::Both => {
-                            (current_var.clone(), target_var.clone())
-                        }
-                    };
-                    edges_to_create.push((
-                        from,
-                        to,
-                        edge_type,
-                        edge_properties,
-                        edge_variable,
-                        edge.property_exprs.clone(),
-                    ));
-
-                    current_var = target_var;
-                }
-            }
-
-            // Wrap the match operator with node+edge creation
-            if !edges_to_create.is_empty() || !nodes_to_create.is_empty() {
-                use crate::query::executor::operator::MatchCreateEdgeOperator;
-                operator = Box::new(MatchCreateEdgeOperator::with_nodes(
-                    operator,
-                    nodes_to_create,
-                    edges_to_create,
-                ));
-            }
+            operator = Self::attach_create(operator, create_clause, &matched_vars);
 
             true // This is a write query
         } else {
             false
         };
 
+        // MERGE is attached second, in the grammar's order for these statements
+        // (`create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~
+        // set_clause* ~ remove_clause*`). It was attached last, so a SET written
+        // after MERGE ran before it -- before the merged node was bound -- and
+        // `UNWIND rows AS r MERGE (n {id: r.id}) SET n.x = r.x` wrote nothing (#1215).
+        // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
+        let is_write = if let Some(merge_clause) = &query.merge_clause {
+            let bound_by_match = {
+                let mut scope: Vec<String> = Vec::new();
+                crate::query::star::bind_match(&mut scope, &query.match_clauses);
+                scope
+            };
+            operator = Self::attach_merge(operator, merge_clause, &bound_by_match);
+            true
+        } else {
+            is_write
+        };
+
         // Handle DELETE clause
         let is_write = if let Some(delete_clause) = &query.delete_clause {
-            // The read is fully materialised before the delete touches
-            // anything. `MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*)`
-            // counted 1: the first row's delete removed the edge, and the
-            // lazy expansion re-read adjacency to produce the second row and
-            // found nothing left. Cypher's rule is that a write does not
-            // un-produce rows the read had already matched (#899).
-            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
-                operator, 0, None,
-            ));
-            operator = Box::new(DeleteOperator::new(
-                operator,
-                delete_clause.expressions.clone(),
-                delete_clause.detach,
-            ));
-            // ...and the delete is fully applied before anything reads the
-            // graph again. `MATCH (a:A) DELETE a MERGE (a2:A)` matched a node
-            // the DELETE had already removed: rows were pulled one at a time,
-            // so the first row's MERGE ran when only the first node was gone
-            // and matched the second, which was about to be deleted. The
-            // scenario is named for exactly that -- "merges should not be able
-            // to match on deleted nodes" (#994).
-            //
-            // The barrier below materialises the delete's *input*; this one
-            // drains its *output*, which is what makes every deletion happen
-            // before the next clause begins. Both are needed and they solve
-            // opposite halves: #899 stopped a write from un-producing rows the
-            // read had matched, and this stops a later read from seeing rows
-            // the write was about to remove.
-            operator = Box::new(crate::query::executor::operator::EagerOperator::new(
-                operator, 0, None,
-            ));
+            operator = Self::attach_delete(operator, delete_clause);
             true
         } else {
             is_write
@@ -2583,30 +2730,7 @@ impl QueryPlanner {
 
         // Handle SET clauses
         let is_write = if !query.set_clauses.is_empty() {
-            let mut items = Vec::new();
-            let mut label_adds = Vec::new();
-            let mut entity_items = Vec::new();
-            for set_clause in &query.set_clauses {
-                for item in &set_clause.items {
-                    items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                }
-                for item in &set_clause.label_items {
-                    for label in &item.labels {
-                        label_adds.push((item.variable.clone(), label.clone()));
-                    }
-                }
-                for item in &set_clause.entity_items {
-                    entity_items.push((item.variable.clone(), item.merge, item.value.clone()));
-                }
-            }
-            if !items.is_empty() || !entity_items.is_empty() {
-                operator = Box::new(SetPropertyOperator::with_entity_items(
-                    operator, items, entity_items,
-                ));
-            }
-            if !label_adds.is_empty() {
-                operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
-            }
+            operator = Self::attach_set(operator, &query.set_clauses);
             true
         } else {
             is_write
@@ -2614,29 +2738,7 @@ impl QueryPlanner {
 
         // Handle REMOVE clauses
         let is_write = if !query.remove_clauses.is_empty() {
-            let mut items = Vec::new();
-            let mut label_removes = Vec::new();
-            for remove_clause in &query.remove_clauses {
-                for item in &remove_clause.items {
-                    match item {
-                        RemoveItem::Property { variable, property } => {
-                            items.push((variable.clone(), property.clone()));
-                        }
-                        // Previously dropped here while the statement still
-                        // reported a successful write, so `REMOVE n:Label` was
-                        // a silent no-op (#596).
-                        RemoveItem::Label { variable, label } => {
-                            label_removes.push((variable.clone(), label.clone()));
-                        }
-                    }
-                }
-            }
-            if !items.is_empty() {
-                operator = Box::new(RemovePropertyOperator::new(operator, items));
-            }
-            if !label_removes.is_empty() {
-                operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
-            }
+            operator = Self::attach_remove(operator, &query.remove_clauses);
             true
         } else {
             is_write
@@ -2644,200 +2746,17 @@ impl QueryPlanner {
 
         // Handle FOREACH clause
         let is_write = if let Some(foreach_clause) = &query.foreach_clause {
-            let mut set_items = Vec::new();
-            for set_clause in &foreach_clause.set_clauses {
-                for item in &set_clause.items {
-                    set_items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
-                }
-            }
-            let create_patterns: Vec<Pattern> = foreach_clause.create_clauses.iter()
-                .map(|c| c.pattern.clone())
-                .collect();
             operator = Box::new(ForeachOperator::new(
                 operator,
                 foreach_clause.variable.clone(),
                 foreach_clause.expression.clone(),
-                set_items,
-                create_patterns,
+                foreach_clause.body.clone(),
             ));
             true
         } else {
             is_write
         };
 
-        // Handle MERGE clause in MATCH context (CY-13: edge MERGE with bound variables)
-        let is_write = if let Some(merge_clause) = &query.merge_clause {
-            let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
-                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
-                .collect();
-            let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
-                .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
-                .collect();
-
-            // Extract edge patterns from MERGE clause
-            let mut edges_to_merge = Vec::new();
-            // `MERGE p = (a)-[:R]->(b)` binds `p` (#876). An anonymous
-            // relationship inside a named path is given a synthetic handle, for
-            // the same reason `CREATE` gives one to an anonymous node: the path
-            // has to reference it afterwards.
-            let mut merge_named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
-            let mut anon_seq = 0usize;
-            for path in &merge_clause.pattern.paths {
-                let mut current_var = path.start.variable.clone();
-                let mut path_nodes: Vec<String> = current_var.iter().cloned().collect();
-                let mut path_edges: Vec<String> = Vec::new();
-                let mut complete = current_var.is_some();
-                for segment in &path.segments {
-                    let edge = &segment.edge;
-                    let edge_type = edge.types.first().cloned()
-                        .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-                    let edge_props = edge.properties.clone().unwrap_or_default();
-                    let edge_var = match (&edge.variable, &path.path_variable) {
-                        (None, Some(_)) => {
-                            anon_seq += 1;
-                            Some(format!("__merge_path_edge_{anon_seq}"))
-                        }
-                        (other, _) => other.clone(),
-                    };
-                    let target_var = segment.node.variable.clone();
-
-                    match (&target_var, &edge_var) {
-                        (Some(t), Some(e)) => {
-                            path_nodes.push(t.clone());
-                            path_edges.push(e.clone());
-                        }
-                        _ => complete = false,
-                    }
-
-                    if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
-                        // `-[r:T]-` matches a relationship either way round.
-                        // Without this the operator only ever looked for
-                        // `src -> tgt`, so an existing `tgt -> src` did not
-                        // match and MERGE wrote a duplicate beside it (#938).
-                        let undirected =
-                            matches!(edge.direction, crate::query::ast::Direction::Both);
-                        edges_to_merge.push((
-                            src.clone(),
-                            tgt.clone(),
-                            edge_type,
-                            edge_props,
-                            edge_var,
-                            undirected,
-                        ));
-                    }
-                    current_var = target_var;
-                }
-                // A path with an unnameable position is left unbound rather
-                // than bound to a shorter path that looks plausible.
-                if let (Some(pv), true) = (&path.path_variable, complete) {
-                    merge_named_paths.push((pv.clone(), path_nodes, path_edges));
-                }
-            }
-
-            // `MatchMergeEdgeOperator` wires an edge between endpoints that
-            // are **already bound**, which is what this branch is for -- the
-            // `MATCH (a), (b) MERGE (a)-[:R]->(b)` shape. Without a MATCH the
-            // endpoints are not bound by anything, so it wired nothing and
-            // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
-            // silently created no nodes and no edges. That case is a
-            // whole-pattern merge, which `MergeOperator` already does (#642).
-            // `MatchMergeEdgeOperator` wires an edge between endpoints that are
-            // **already bound** -- that is its whole contract, and it is better
-            // at that job than the general path: it binds the relationship
-            // variable, matches an undirected pattern both ways, and runs
-            // ON CREATE / ON MATCH against the relationship.
-            //
-            // The guard was `a MATCH exists`, not `the endpoints are bound`, so
-            // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
-            // nothing -- wired an edge between one endpoint and no other, and
-            // the whole MERGE became a silent no-op returning zero rows (#894).
-            let bound_by_match = {
-                let mut scope: Vec<String> = Vec::new();
-                crate::query::star::bind_match(&mut scope, &query.match_clauses);
-                scope
-            };
-            let all_endpoints_bound = edges_to_merge
-                .iter()
-                .all(|(src, tgt, ..)| {
-                    bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
-                });
-            if !edges_to_merge.is_empty() && all_endpoints_bound {
-                // Edge MERGE: use MatchMergeEdgeOperator
-                use crate::query::executor::operator::MatchMergeEdgeOperator;
-                // `ON CREATE SET n = {…}` / `n += {…}` (#874).
-                let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
-                    .on_create_entity_set
-                    .iter()
-                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                    .collect();
-                let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
-                    .on_match_entity_set
-                    .iter()
-                    .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                    .collect();
-                operator = Box::new(
-                    MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
-                        .with_entity_sets(on_create_entity, on_match_entity),
-                );
-                if !merge_named_paths.is_empty() {
-                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
-                        operator,
-                        merge_named_paths.clone(),
-                    ));
-                }
-            } else {
-                // Node-only MERGE, or a whole-pattern MERGE with nothing bound
-                // to hang it off, running once per upstream row.
-                //
-                // The comment here used to say "with input" while the code
-                // assigned over `operator` and threw the input away, so the
-                // MERGE ran exactly once no matter what fed it -- and, more to
-                // the point, could not see the row. That is why
-                // `UNWIND [...] AS x MERGE (n:N {v: x})` had nowhere to read
-                // `x` from (#642).
-                let on_create_labels: Vec<(String, Vec<Label>)> = merge_clause
-                    .on_create_labels
-                    .iter()
-                    .map(|l| (l.variable.clone(), l.labels.clone()))
-                    .collect();
-                let on_match_labels: Vec<(String, Vec<Label>)> = merge_clause
-                    .on_match_labels
-                    .iter()
-                    .map(|l| (l.variable.clone(), l.labels.clone()))
-                    .collect();
-                operator = Box::new(
-                    MergeOperator::new(
-                        merge_clause.pattern.clone(),
-                        on_create,
-                        on_match,
-                        on_create_labels,
-                        on_match_labels,
-                    )
-                    .with_entity_sets(
-                        merge_clause
-                            .on_create_entity_set
-                            .iter()
-                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                            .collect(),
-                        merge_clause
-                            .on_match_entity_set
-                            .iter()
-                            .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
-                            .collect(),
-                    )
-                    .with_input(operator),
-                );
-                if !merge_named_paths.is_empty() {
-                    operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
-                        operator,
-                        merge_named_paths.clone(),
-                    ));
-                }
-            }
-            true
-        } else {
-            is_write
-        };
 
         // Add RETURN clause if present
         if let Some(return_clause) = &query.return_clause {
@@ -3285,7 +3204,163 @@ impl QueryPlanner {
         }
     }
 
+    /// Plan one MATCH clause, keeping its relationships distinct across its
+    /// comma-separated patterns (#1233): see `isolate_relationships`.
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        if let Some((clause, distinct)) = Self::isolate_relationships(match_clause, where_clause) {
+            let plan = self.dispatch_plan_match_inner(&clause, where_clause, store)?;
+            return Ok(Box::new(FilterOperator::new(plan, distinct)));
+        }
+        self.dispatch_plan_match_inner(match_clause, where_clause, store)
+    }
+
+    /// Relationship isomorphism between the comma-separated patterns of one
+    /// MATCH clause (#1233).
+    ///
+    /// A relationship may appear once in a clause. #684 enforces that along one
+    /// path, where the expand carries the relationships the path has walked; the
+    /// patterns of `MATCH (p)-[:K]->(q), (q)-[:K]->(r)` are planned apart and
+    /// joined, so each could claim the same relationship -- a self-loop answered
+    /// `(d, d, d)` where Neo4j finds nothing. This returns the clause with its
+    /// anonymous fixed-length relationships named, and the predicate that every
+    /// two of them in different patterns differ.
+    ///
+    /// Only pairs that could be the same relationship are compared: two with
+    /// disjoint types never are, so `MATCH (a)-[:K]->(b), (a)-[:L]->(c)` gets no
+    /// filter and no extra bindings. A variable-length relationship across
+    /// patterns is not covered. `None` when there is nothing to compare.
+    ///
+    /// Nor are pairs the clause's WHERE already keeps apart. Two relationships
+    /// that share an endpoint variable are the same relationship only if their
+    /// other endpoints are the same node, so `(p)-[:HAS_TAG]->(t1),
+    /// (p)-[:HAS_TAG]->(t2) WHERE t1.name < t2.name` -- the usual way to ask
+    /// for unordered pairs -- needs no check: with `t1 = t2` the WHERE is
+    /// `x < x` and fails anyway. The check binds both relationships on every
+    /// row, which cost LDBC BI-2 35% before this rule.
+    fn isolate_relationships(
+        match_clause: &MatchClause,
+        where_clause: Option<&WhereClause>,
+    ) -> Option<(MatchClause, Expression)> {
+        let paths = &match_clause.pattern.paths;
+        if paths.len() < 2 {
+            return None;
+        }
+        // (path, segment, variable, types, endpoint variables) of every
+        // fixed-length relationship.
+        type Rel<'a> = (usize, usize, Option<String>, &'a Vec<EdgeType>, [Option<String>; 2]);
+        let rels: Vec<Rel> = paths
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, path)| {
+                path.segments.iter().enumerate().filter(|(_, s)| s.edge.length.is_none()).map(move |(si, s)| {
+                    let before = if si == 0 { &path.start.variable } else { &path.segments[si - 1].node.variable };
+                    (pi, si, s.edge.variable.clone(), &s.edge.types, [before.clone(), s.node.variable.clone()])
+                })
+            })
+            .collect();
+        let conjuncts = where_clause.map(|w| flatten_and_predicates(&w.predicate)).unwrap_or_default();
+        // The WHERE keeps the pair apart: they share one endpoint variable and
+        // the WHERE makes their other endpoints differ.
+        let kept_apart = |a: &[Option<String>; 2], b: &[Option<String>; 2]| -> bool {
+            let (Some(a0), Some(a1), Some(b0), Some(b1)) = (&a[0], &a[1], &b[0], &b[1]) else { return false };
+            if a0 == a1 || b0 == b1 {
+                return false;
+            }
+            let (x, y) = if a0 == b0 && a1 != b1 {
+                (a1, b1)
+            } else if a0 == b1 && a1 != b0 {
+                (a1, b0)
+            } else if a1 == b0 && a0 != b1 {
+                (a0, b1)
+            } else if a1 == b1 && a0 != b0 {
+                (a0, b0)
+            } else {
+                return false;
+            };
+            conjuncts.iter().any(|c| Self::implies_distinct(c, x, y))
+        };
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
+        let mut pairs = Vec::new();
+        for i in 0..rels.len() {
+            for j in i + 1..rels.len() {
+                let same_name = matches!((&rels[i].2, &rels[j].2), (Some(x), Some(y)) if x == y);
+                if rels[i].0 != rels[j].0
+                    && !same_name
+                    && may_share(rels[i].3, rels[j].3)
+                    && !kept_apart(&rels[i].4, &rels[j].4)
+                {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        let mut names: Vec<Option<String>> = vec![None; rels.len()];
+        let mut minted = 0;
+        for &(i, j) in &pairs {
+            for k in [i, j] {
+                if names[k].is_none() {
+                    names[k] = Some(match &rels[k].2 {
+                        Some(v) => v.clone(),
+                        None => {
+                            let v = format!("__iso_rel_{minted}");
+                            minted += 1;
+                            clause.pattern.paths[rels[k].0].segments[rels[k].1].edge.variable = Some(v.clone());
+                            v
+                        }
+                    });
+                }
+            }
+        }
+        let distinct = pairs
+            .iter()
+            .map(|&(i, j)| Expression::Binary {
+                left: Box::new(Expression::Variable(names[i].clone().expect("named above"))),
+                op: BinaryOp::Ne,
+                right: Box::new(Expression::Variable(names[j].clone().expect("named above"))),
+            })
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
+            .expect("pairs is not empty");
+        Some((clause, distinct))
+    }
+
+    /// Whether the conjunct `c` fails whenever `x` and `y` are the same node:
+    /// `x <> y`, or `L < R`, `L > R`, `L <> R` where `R` is `L` with `x`
+    /// renamed to `y`. With `x = y` both sides are one value, and a strict
+    /// comparison of a value with itself is false or null.
+    fn implies_distinct(c: &Expression, x: &str, y: &str) -> bool {
+        let Expression::Binary { left, op, right } = c else { return false };
+        if !matches!(op, BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt) {
+            return false;
+        }
+        fn rename(e: &Expression, from: &str, to: &str) -> Option<Expression> {
+            // Only the shapes a pair comparison uses: a variable, a property of
+            // one, a function over them. Anything else is not claimed.
+            match e {
+                Expression::Variable(v) => Some(Expression::Variable(if v == from { to.to_string() } else { v.clone() })),
+                Expression::Property { variable, property } => Some(Expression::Property {
+                    variable: if variable == from { to.to_string() } else { variable.clone() },
+                    property: property.clone(),
+                }),
+                Expression::Function { name, args, distinct } => Some(Expression::Function {
+                    name: name.clone(),
+                    args: args.iter().map(|a| rename(a, from, to)).collect::<Option<Vec<_>>>()?,
+                    distinct: *distinct,
+                }),
+                _ => None,
+            }
+        }
+        let pairs_up = |l: &Expression, r: &Expression, a: &str, b: &str| {
+            let mut vars = HashSet::new();
+            Self::collect_expression_variables(l, &mut vars);
+            vars.contains(a) && !vars.contains(b) && rename(l, a, b).as_ref() == Some(r)
+        };
+        pairs_up(left, right, x, y) || pairs_up(left, right, y, x)
+    }
+
+    fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if self.config.graph_native {
             match self.plan_match_native(match_clause, where_clause, store) {
                 Ok(plan) => Ok(plan),
@@ -3725,9 +3800,12 @@ impl QueryPlanner {
                         // distance cannot answer `*2..n` correctly, and no path
                         // variable because a membership test yields no path.
                         if path.path_variable.is_none() && min_hops <= 1 {
-                            if let Some(pinned) =
-                                pinned_node_for(&target_var, &deferred_predicates, store)
-                            {
+                            if let Some(pinned) = pinned_target_for(
+                                &target_var,
+                                &deferred_predicates,
+                                segment.node.properties.as_ref(),
+                                store,
+                            ) {
                                 expand = expand.with_pinned_target(pinned);
                             }
                         }
@@ -4349,18 +4427,8 @@ impl QueryPlanner {
                 // thousands of candidates expands its own neighbourhood to
                 // discover whether that one person is in it.
                 if path.path_variable.is_none() && length.min.unwrap_or(1) <= 1 {
-                    if let Some(pinned) = pinned_node_for(&target.var, path_preds, store)
-                        .or_else(|| target.properties.as_ref().and_then(|props| {
-                            let inline: Vec<Expression> = props.iter().map(|(k, v)| Expression::Binary {
-                                left: Box::new(Expression::Property {
-                                    variable: target.var.clone(),
-                                    property: k.clone(),
-                                }),
-                                op: BinaryOp::Eq,
-                                right: Box::new(Expression::Literal(v.clone())),
-                            }).collect();
-                            pinned_node_for(&target.var, &inline, store)
-                        }))
+                    if let Some(pinned) =
+                        pinned_target_for(&target.var, path_preds, target.properties.as_ref(), store)
                     {
                         expand = expand.with_pinned_target(pinned);
                     }
@@ -4643,6 +4711,249 @@ impl QueryPlanner {
             }
             result
         }
+    }
+
+    /// The node a batch lookup would bind from one pattern's start: a named
+    /// node with exactly one label (the index covers one label), no path
+    /// variable and no inline properties. `lookup_hop` judges the rest.
+    fn lookup_node(path: &PathPattern) -> Option<(&String, &Label)> {
+        let start = &path.start;
+        if path.path_variable.is_some()
+            || start.labels.len() != 1
+            || start.properties.as_ref().is_some_and(|p| !p.is_empty())
+            || start.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+        {
+            return None;
+        }
+        Some((start.variable.as_ref()?, &start.labels[0]))
+    }
+
+    /// What follows a lookup node in its pattern: nothing (`Some(None)`), or
+    /// one fixed-length relationship with no properties to a named node with
+    /// no non-literal properties (`Some(Some(segment))`). `None` is a shape
+    /// the lookup does not plan -- a longer path, a variable length, a
+    /// relationship property -- and the general plan takes it.
+    fn lookup_hop(path: &PathPattern) -> Option<Option<&PathSegment>> {
+        match path.segments.as_slice() {
+            [] => Some(None),
+            [seg] => {
+                let (edge, node) = (&seg.edge, &seg.node);
+                if edge.length.is_some()
+                    || edge.properties.as_ref().is_some_and(|p| !p.is_empty())
+                    || edge.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+                    || node.variable.is_none()
+                    || node.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+                {
+                    return None;
+                }
+                Some(Some(seg))
+            }
+            _ => None,
+        }
+    }
+
+    /// The OPTIONAL MATCH among `clauses` that `pred` was written after, from
+    /// the parser's record (#1231). Takes one occurrence from `left`, so a
+    /// conjunct written after a plain MATCH and again after the OPTIONAL MATCH
+    /// is claimed once.
+    fn optional_owner(
+        left: &mut Vec<(Pattern, Expression)>,
+        pred: &Expression,
+        clauses: &[&MatchClause],
+    ) -> Option<usize> {
+        let pos = left
+            .iter()
+            .position(|(p, e)| e == pred && clauses.iter().any(|mc| mc.optional && mc.pattern == *p))?;
+        let (pattern, _) = left.remove(pos);
+        clauses.iter().position(|mc| mc.optional && mc.pattern == pattern)
+    }
+
+    /// Whether a conjunct owned by the OPTIONAL MATCH `own` names only that
+    /// clause's variables and at least one it introduces -- the one kind that
+    /// can filter inside the clause. Any other conjunct it owns (one naming
+    /// only outer variables, or none) is its join condition (#1231).
+    fn inside_optional(pred_vars: &HashSet<String>, own: &HashSet<String>, earlier: &HashSet<&String>) -> bool {
+        !pred_vars.is_empty()
+            && pred_vars.iter().all(|v| own.contains(v))
+            && pred_vars.iter().any(|v| !earlier.contains(v))
+    }
+
+    /// An indexed equality `var.prop = key` among `preds` whose `key` reads
+    /// only variables `bound` accepts: its position, the property, the key.
+    fn lookup_key(
+        var: &str,
+        label: &Label,
+        preds: &[Expression],
+        bound: impl Fn(&str) -> bool,
+        store: &GraphStore,
+    ) -> Option<(usize, String, Expression)> {
+        preds.iter().enumerate().find_map(|(i, pred)| {
+            let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { return None };
+            let (property, key) = match (left.as_ref(), right.as_ref()) {
+                (Expression::Property { variable, property }, key) if variable == var => (property, key),
+                (key, Expression::Property { variable, property }) if variable == var => (property, key),
+                _ => return None,
+            };
+            let mut vars = HashSet::new();
+            Self::collect_expression_variables(key, &mut vars);
+            if vars.is_empty() || vars.contains(var) || !vars.iter().all(|v| bound(v)) {
+                return None;
+            }
+            if !store.property_index.has_index(label, property) {
+                return None;
+            }
+            Some((i, property.clone(), key.clone()))
+        })
+    }
+
+    /// A MATCH whose every pattern is a `lookup_node`, each pinned by an indexed
+    /// equality to what is already bound -- `bound` upstream, or a node looked
+    /// up earlier in the chain: an index probe per node per row, stacked on
+    /// `base`, with the clause's own WHERE on top (#1219). This is the bulk
+    /// relationship load, `UNWIND $rels AS r MATCH (a:N {id: r.src}),
+    /// (b:N {id: r.dst})`, which otherwise joins two full label scans per row.
+    ///
+    /// Keys come from `preds` and from the clause's own WHERE (`b.id = a.next`
+    /// is the clause's own). Returns the positions in `preds` it used. If any
+    /// node has no key, `base` comes back and the plan is unchanged.
+    ///
+    /// One pattern may go on by one relationship, `(a:N {id: r.id})-[:R]->(b)`:
+    /// an expand from the looked-up node. Before this it planned as the
+    /// UNWIND over an expand from a scan of `:N`, walking every `:R` of the
+    /// label once per row. One hop at most, so no two relationships of the
+    /// clause need to be kept distinct.
+    fn lookup_chain(
+        base: OperatorBox,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        preds: &[Expression],
+        bound: impl Fn(&str) -> bool,
+        store: &GraphStore,
+    ) -> Result<(OperatorBox, Vec<usize>), OperatorBox> {
+        use crate::query::executor::operator::CorrelatedIndexLookupOperator;
+        let paths = &match_clause.pattern.paths;
+        if match_clause.optional || paths.is_empty() {
+            return Err(base);
+        }
+        let Some(mut pending) = paths.iter().map(Self::lookup_node).collect::<Option<Vec<_>>>() else {
+            return Err(base);
+        };
+        let Some(hops) = paths.iter().map(Self::lookup_hop).collect::<Option<Vec<_>>>() else {
+            return Err(base);
+        };
+        let hops: Vec<(String, &PathSegment)> =
+            pending.iter().zip(hops).filter_map(|((v, _), h)| h.map(|s| ((*v).clone(), s))).collect();
+        if hops.len() > 1 {
+            return Err(base);
+        }
+        let mut seen = HashSet::new();
+        if pending.iter().any(|(v, _)| bound(v) || !seen.insert(v.as_str())) {
+            return Err(base);
+        }
+        // A hop binds its target and relationship; neither may already be bound
+        // or be a name the clause binds elsewhere, which would make the expand
+        // a match against it rather than a new binding.
+        for (_, seg) in &hops {
+            let target = seg.node.variable.as_deref().expect("lookup_hop requires a named target");
+            let edge = seg.edge.variable.as_deref();
+            if bound(target) || !seen.insert(target) || edge.is_some_and(|e| bound(e) || !seen.insert(e)) {
+                return Err(base);
+            }
+        }
+        let mut candidates: Vec<Expression> = preds.to_vec();
+        if let Some(w) = own_where {
+            candidates.extend(flatten_and_predicates(&w.predicate));
+        }
+        let mut looked: Vec<String> = Vec::new();
+        let mut steps: Vec<(String, Label, String, Expression)> = Vec::new();
+        let mut used: Vec<usize> = Vec::new();
+        while !pending.is_empty() {
+            let is_bound = |x: &str| bound(x) || looked.iter().any(|y| y == x);
+            let found = pending.iter().enumerate().find_map(|(pos, (v, l))| {
+                Self::lookup_key(v, l, &candidates, is_bound, store).map(|k| (pos, k))
+            });
+            let Some((pos, (i, property, key))) = found else { return Err(base) };
+            let (v, l) = pending.remove(pos);
+            if i < preds.len() {
+                used.push(i);
+            }
+            looked.push(v.clone());
+            steps.push((v.clone(), l.clone(), property, key));
+        }
+        let mut op = base;
+        for (v, l, property, key) in steps {
+            op = Box::new(CorrelatedIndexLookupOperator::new(op, v, l, property, key));
+        }
+        for (start, seg) in hops {
+            let target = seg.node.variable.clone().expect("lookup_hop requires a named target");
+            let types = seg.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+            let mut expand =
+                ExpandOperator::new(op, start, target.clone(), seg.edge.variable.clone(), types, seg.edge.direction.clone());
+            if !seg.node.labels.is_empty() {
+                expand = expand.with_target_labels(seg.node.labels.clone());
+            }
+            op = Box::new(expand);
+            if let Some(props) = seg.node.properties.as_ref().filter(|p| !p.is_empty()) {
+                let filter = props
+                    .iter()
+                    .map(|(k, v)| Expression::Binary {
+                        left: Box::new(Expression::Property { variable: target.clone(), property: k.clone() }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expression::Literal(v.clone())),
+                    })
+                    .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
+                    .expect("non-empty properties");
+                op = Box::new(FilterOperator::new(op, filter));
+            }
+        }
+        if let Some(w) = own_where {
+            op = Box::new(FilterOperator::new(op, w.predicate.clone()));
+        }
+        Ok((op, used))
+    }
+
+    /// A later MATCH joined to what came before (`MATCH ... MATCH (n:N) WHERE
+    /// n.id = x.id`): the `lookup_chain` over the cross-clause predicates, the
+    /// ones it used taken out of `cross_preds`. `existing` comes back when the
+    /// shape does not apply.
+    fn try_correlated_index_lookup(
+        existing: OperatorBox,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        known_vars: &HashSet<String>,
+        cross_preds: &mut Vec<Expression>,
+        store: &GraphStore,
+    ) -> Result<OperatorBox, OperatorBox> {
+        let (op, mut used) =
+            Self::lookup_chain(existing, match_clause, own_where, cross_preds, |v| known_vars.contains(v), store)?;
+        used.sort_unstable();
+        for i in used.into_iter().rev() {
+            cross_preds.remove(i);
+        }
+        Ok(op)
+    }
+
+    /// The leading-UNWIND form: `UNWIND $rows AS r MATCH (n:N) WHERE n.id = r.id`.
+    /// A leading UNWIND is placed above the match plan, so the equality never
+    /// reaches a join site; this builds Unwind -> the `lookup_chain` in place
+    /// of that plan. The keys stay among the late-bound predicates and are
+    /// checked again on each output row, which cannot change an answer.
+    fn leading_unwind_index_lookup(
+        unwind: &UnwindClause,
+        match_clause: &MatchClause,
+        own_where: Option<&WhereClause>,
+        late_preds: &[Expression],
+        store: &GraphStore,
+    ) -> Option<OperatorBox> {
+        use crate::query::executor::operator::SingleRowOperator;
+        let base: OperatorBox = Box::new(UnwindOperator::new(
+            Box::new(SingleRowOperator::new()),
+            unwind.expression.clone(),
+            unwind.variable.clone(),
+        ));
+        Self::lookup_chain(base, match_clause, own_where, late_preds, |v| v == unwind.variable, store)
+            .ok()
+            .map(|(op, _)| op)
     }
 
     /// Collect variables referenced by an expression
@@ -5928,6 +6239,37 @@ fn segment_fanout(
     }
 }
 
+/// `pinned_node_for` over the `WHERE` predicates, then over the target's inline
+/// properties turned into the same equalities.
+///
+/// `(q:P {id: 7})` and `WHERE q.id = 7` pin the same node. Only the anchored
+/// path tried the inline form; on a single-segment pattern the inline
+/// properties were applied as a filter after the walk and never pinned, so the
+/// operator expanded every candidate's neighbourhood instead of answering one
+/// reachability question (#1199). The filter still runs either way: pinning
+/// changes the plan, not the answer.
+fn pinned_target_for(
+    var: &str,
+    preds: &[Expression],
+    inline: Option<&HashMap<String, PropertyValue>>,
+    store: &GraphStore,
+) -> Option<crate::graph::NodeId> {
+    pinned_node_for(var, preds, store).or_else(|| {
+        let inline: Vec<Expression> = inline?
+            .iter()
+            .map(|(k, v)| Expression::Binary {
+                left: Box::new(Expression::Property {
+                    variable: var.to_string(),
+                    property: k.clone(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expression::Literal(v.clone())),
+            })
+            .collect();
+        pinned_node_for(var, &inline, store)
+    })
+}
+
 /// Total intermediate rows for a plan anchored at `nodes[anchor]`.
 ///
 /// The sum of every operator's output, not just the scan's. That distinction
@@ -6801,6 +7143,419 @@ impl QueryPlanner {
         Self::clause_variables(&mc.pattern)
     }
 
+    /// `CREATE` over `operator`. A node the pattern names that is not in
+    /// `matched_vars` is created per row; every relationship is wired between
+    /// the handles.
+    fn attach_create(
+        mut operator: OperatorBox,
+        create_clause: &CreateClause,
+        matched_vars: &HashSet<String>,
+    ) -> OperatorBox {
+        let create_pattern = &create_clause.pattern;
+        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
+
+        // Nodes to create per matched row: (handle, labels, properties)
+        let mut nodes_to_create: Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )> = Vec::new();
+        let mut anon_seq = 0usize;
+
+        // Assign a handle to a CREATE-pattern node, registering it for creation when
+        // the MATCH did not bind it. Anonymous nodes get a synthetic handle so an edge
+        // can still be wired to them.
+        let mut handle_for = |node: &crate::query::ast::NodePattern,
+                              nodes_to_create: &mut Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )>,
+                              anon_seq: &mut usize|
+         -> String {
+            match &node.variable {
+                Some(v) if matched_vars.contains(v) => v.clone(),
+                // Already registered by an earlier path in this same
+                // CREATE — reuse it rather than creating a second node.
+                Some(v) if nodes_to_create.iter().any(|(h, ..)| h == v) => v.clone(),
+                Some(v) => {
+                    nodes_to_create.push((
+                        v.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    v.clone()
+                }
+                None => {
+                    let h = format!("__anon_mcreate_{anon_seq}");
+                    *anon_seq += 1;
+                    nodes_to_create.push((
+                        h.clone(),
+                        node.labels.clone(),
+                        node.properties.clone().unwrap_or_default(),
+                        node.property_exprs.clone(),
+                    ));
+                    h
+                }
+            }
+        };
+
+        for path in &create_pattern.paths {
+            let mut current_var =
+                handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
+
+            for segment in &path.segments {
+                let target_var =
+                    handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
+                let edge = &segment.edge;
+                let edge_type = edge.types.first()
+                    .cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let edge_properties = edge.properties.clone().unwrap_or_default();
+                let edge_variable = edge.variable.clone();
+
+                // Direction comes from the pattern, not from write order.
+                let (from, to) = match segment.edge.direction {
+                    Direction::Incoming => (target_var.clone(), current_var.clone()),
+                    Direction::Outgoing | Direction::Both => {
+                        (current_var.clone(), target_var.clone())
+                    }
+                };
+                edges_to_create.push((
+                    from,
+                    to,
+                    edge_type,
+                    edge_properties,
+                    edge_variable,
+                    edge.property_exprs.clone(),
+                ));
+
+                current_var = target_var;
+            }
+        }
+
+        // Wrap the match operator with node+edge creation
+        if !edges_to_create.is_empty() || !nodes_to_create.is_empty() {
+            use crate::query::executor::operator::MatchCreateEdgeOperator;
+            operator = Box::new(MatchCreateEdgeOperator::with_nodes(
+                operator,
+                nodes_to_create,
+                edges_to_create,
+            ));
+        }
+
+        operator
+    }
+
+    /// `DELETE` over `operator`.
+    fn attach_delete(mut operator: OperatorBox, delete_clause: &DeleteClause) -> OperatorBox {
+        // The read is fully materialised before the delete touches
+        // anything. `MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*)`
+        // counted 1: the first row's delete removed the edge, and the
+        // lazy expansion re-read adjacency to produce the second row and
+        // found nothing left. Cypher's rule is that a write does not
+        // un-produce rows the read had already matched (#899).
+        operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+            operator, 0, None,
+        ));
+        operator = Box::new(DeleteOperator::new(
+            operator,
+            delete_clause.expressions.clone(),
+            delete_clause.detach,
+        ));
+        // ...and the delete is fully applied before anything reads the
+        // graph again. `MATCH (a:A) DELETE a MERGE (a2:A)` matched a node
+        // the DELETE had already removed: rows were pulled one at a time,
+        // so the first row's MERGE ran when only the first node was gone
+        // and matched the second, which was about to be deleted. The
+        // scenario is named for exactly that -- "merges should not be able
+        // to match on deleted nodes" (#994).
+        //
+        // The barrier below materialises the delete's *input*; this one
+        // drains its *output*, which is what makes every deletion happen
+        // before the next clause begins. Both are needed and they solve
+        // opposite halves: #899 stopped a write from un-producing rows the
+        // read had matched, and this stops a later read from seeing rows
+        // the write was about to remove.
+        operator = Box::new(crate::query::executor::operator::EagerOperator::new(
+            operator, 0, None,
+        ));
+        operator
+    }
+
+    /// `SET` over `operator`: property and whole-entity items, then labels.
+    fn attach_set(mut operator: OperatorBox, set_clauses: &[SetClause]) -> OperatorBox {
+        let mut items = Vec::new();
+        let mut label_adds = Vec::new();
+        let mut entity_items = Vec::new();
+        for set_clause in set_clauses {
+            for item in &set_clause.items {
+                items.push((item.variable.clone(), item.property.clone(), item.value.clone()));
+            }
+            for item in &set_clause.label_items {
+                for label in &item.labels {
+                    label_adds.push((item.variable.clone(), label.clone()));
+                }
+            }
+            for item in &set_clause.entity_items {
+                entity_items.push((item.variable.clone(), item.merge, item.value.clone()));
+            }
+        }
+        if !items.is_empty() || !entity_items.is_empty() {
+            operator = Box::new(SetPropertyOperator::with_entity_items(
+                operator, items, entity_items,
+            ));
+        }
+        if !label_adds.is_empty() {
+            operator = Box::new(LabelMutationOperator::new(operator, label_adds, Vec::new()));
+        }
+        operator
+    }
+
+    /// `REMOVE` over `operator`: properties, then labels.
+    fn attach_remove(mut operator: OperatorBox, remove_clauses: &[RemoveClause]) -> OperatorBox {
+        let mut items = Vec::new();
+        let mut label_removes = Vec::new();
+        for remove_clause in remove_clauses {
+            for item in &remove_clause.items {
+                match item {
+                    RemoveItem::Property { variable, property } => {
+                        items.push((variable.clone(), property.clone()));
+                    }
+                    // Previously dropped here while the statement still
+                    // reported a successful write, so `REMOVE n:Label` was
+                    // a silent no-op (#596).
+                    RemoveItem::Label { variable, label } => {
+                        label_removes.push((variable.clone(), label.clone()));
+                    }
+                }
+            }
+        }
+        if !items.is_empty() {
+            operator = Box::new(RemovePropertyOperator::new(operator, items));
+        }
+        if !label_removes.is_empty() {
+            operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
+        }
+        operator
+    }
+
+    /// `MERGE` over `operator`. `bound_by_match` is what the row already
+    /// binds; a relationship MERGE between bound endpoints wires an edge, and
+    /// anything else is a whole-pattern MERGE per row.
+    fn attach_merge(
+        mut operator: OperatorBox,
+        merge_clause: &MergeClause,
+        bound_by_match: &[String],
+    ) -> OperatorBox {
+        let on_create: Vec<(String, String, Expression)> = merge_clause.on_create_set.iter()
+            .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+            .collect();
+        let on_match: Vec<(String, String, Expression)> = merge_clause.on_match_set.iter()
+            .map(|s| (s.variable.clone(), s.property.clone(), s.value.clone()))
+            .collect();
+
+        // Extract edge patterns from MERGE clause
+        let mut edges_to_merge = Vec::new();
+        // `MERGE p = (a)-[:R]->(b)` binds `p` (#876). An anonymous
+        // relationship inside a named path is given a synthetic handle, for
+        // the same reason `CREATE` gives one to an anonymous node: the path
+        // has to reference it afterwards.
+        let mut merge_named_paths: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        let mut anon_seq = 0usize;
+        for path in &merge_clause.pattern.paths {
+            let mut current_var = path.start.variable.clone();
+            let mut path_nodes: Vec<String> = current_var.iter().cloned().collect();
+            let mut path_edges: Vec<String> = Vec::new();
+            let mut complete = current_var.is_some();
+            for segment in &path.segments {
+                let edge = &segment.edge;
+                let edge_type = edge.types.first().cloned()
+                    .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
+                let edge_props = edge.properties.clone().unwrap_or_default();
+                let edge_var = match (&edge.variable, &path.path_variable) {
+                    (None, Some(_)) => {
+                        anon_seq += 1;
+                        Some(format!("__merge_path_edge_{anon_seq}"))
+                    }
+                    (other, _) => other.clone(),
+                };
+                let target_var = segment.node.variable.clone();
+
+                match (&target_var, &edge_var) {
+                    (Some(t), Some(e)) => {
+                        path_nodes.push(t.clone());
+                        path_edges.push(e.clone());
+                    }
+                    _ => complete = false,
+                }
+
+                if let (Some(src), Some(tgt)) = (&current_var, &target_var) {
+                    // `-[r:T]-` matches a relationship either way round.
+                    // Without this the operator only ever looked for
+                    // `src -> tgt`, so an existing `tgt -> src` did not
+                    // match and MERGE wrote a duplicate beside it (#938).
+                    let undirected =
+                        matches!(edge.direction, crate::query::ast::Direction::Both);
+                    edges_to_merge.push((
+                        src.clone(),
+                        tgt.clone(),
+                        edge_type,
+                        edge_props,
+                        edge_var,
+                        undirected,
+                    ));
+                }
+                current_var = target_var;
+            }
+            // A path with an unnameable position is left unbound rather
+            // than bound to a shorter path that looks plausible.
+            if let (Some(pv), true) = (&path.path_variable, complete) {
+                merge_named_paths.push((pv.clone(), path_nodes, path_edges));
+            }
+        }
+
+        // `MatchMergeEdgeOperator` wires an edge between endpoints that
+        // are **already bound**, which is what this branch is for -- the
+        // `MATCH (a), (b) MERGE (a)-[:R]->(b)` shape. Without a MATCH the
+        // endpoints are not bound by anything, so it wired nothing and
+        // `UNWIND [...] AS i MERGE (:A {id: i})-[:R]->(:B {id: i})`
+        // silently created no nodes and no edges. That case is a
+        // whole-pattern merge, which `MergeOperator` already does (#642).
+        // `MatchMergeEdgeOperator` wires an edge between endpoints that are
+        // **already bound** -- that is its whole contract, and it is better
+        // at that job than the general path: it binds the relationship
+        // variable, matches an undirected pattern both ways, and runs
+        // ON CREATE / ON MATCH against the relationship.
+        //
+        // The guard was `a MATCH exists`, not `the endpoints are bound`, so
+        // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
+        // nothing -- wired an edge between one endpoint and no other, and
+        // the whole MERGE became a silent no-op returning zero rows (#894).
+        let all_endpoints_bound = edges_to_merge
+            .iter()
+            .all(|(src, tgt, ..)| {
+                bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
+            });
+        if !edges_to_merge.is_empty() && all_endpoints_bound {
+            // Edge MERGE: use MatchMergeEdgeOperator
+            use crate::query::executor::operator::MatchMergeEdgeOperator;
+            // `ON CREATE SET n = {…}` / `n += {…}` (#874).
+            let on_create_entity: Vec<(String, bool, Expression)> = merge_clause
+                .on_create_entity_set
+                .iter()
+                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                .collect();
+            let on_match_entity: Vec<(String, bool, Expression)> = merge_clause
+                .on_match_entity_set
+                .iter()
+                .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                .collect();
+            operator = Box::new(
+                MatchMergeEdgeOperator::new(operator, edges_to_merge, on_create, on_match)
+                    .with_entity_sets(on_create_entity, on_match_entity),
+            );
+            if !merge_named_paths.is_empty() {
+                operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                    operator,
+                    merge_named_paths.clone(),
+                ));
+            }
+        } else {
+            // Node-only MERGE, or a whole-pattern MERGE with nothing bound
+            // to hang it off, running once per upstream row.
+            //
+            // The comment here used to say "with input" while the code
+            // assigned over `operator` and threw the input away, so the
+            // MERGE ran exactly once no matter what fed it -- and, more to
+            // the point, could not see the row. That is why
+            // `UNWIND [...] AS x MERGE (n:N {v: x})` had nowhere to read
+            // `x` from (#642).
+            let on_create_labels: Vec<(String, Vec<Label>)> = merge_clause
+                .on_create_labels
+                .iter()
+                .map(|l| (l.variable.clone(), l.labels.clone()))
+                .collect();
+            let on_match_labels: Vec<(String, Vec<Label>)> = merge_clause
+                .on_match_labels
+                .iter()
+                .map(|l| (l.variable.clone(), l.labels.clone()))
+                .collect();
+            operator = Box::new(
+                MergeOperator::new(
+                    merge_clause.pattern.clone(),
+                    on_create,
+                    on_match,
+                    on_create_labels,
+                    on_match_labels,
+                )
+                .with_entity_sets(
+                    merge_clause
+                        .on_create_entity_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                        .collect(),
+                    merge_clause
+                        .on_match_entity_set
+                        .iter()
+                        .map(|i| (i.variable.clone(), i.merge, i.value.clone()))
+                        .collect(),
+                )
+                .with_input(operator),
+            );
+            if !merge_named_paths.is_empty() {
+                operator = Box::new(crate::query::executor::operator::BindPathOperator::new(
+                    operator,
+                    merge_named_paths.clone(),
+                ));
+            }
+        }
+        operator
+    }
+
+    /// The body of a `FOREACH`, planned over `operator` clause by clause in
+    /// the order written, with the same helpers the top-level clauses use.
+    ///
+    /// `bound` is every variable the input record carries -- the enclosing
+    /// row's and the loop variable -- so `CREATE (p)-[:R]->()` and
+    /// `MERGE (a)-[:R]->(b)` use those nodes rather than making new ones. A
+    /// node an earlier clause in the body creates is bound for later ones.
+    pub(crate) fn plan_foreach_body(
+        mut operator: OperatorBox,
+        body: &[ForeachBody],
+        bound: &HashSet<String>,
+    ) -> OperatorBox {
+        let mut bound = bound.clone();
+        for clause in body {
+            operator = match clause {
+                ForeachBody::Set(sc) => Self::attach_set(operator, std::slice::from_ref(sc)),
+                ForeachBody::Remove(rc) => Self::attach_remove(operator, std::slice::from_ref(rc)),
+                ForeachBody::Delete(dc) => Self::attach_delete(operator, dc),
+                ForeachBody::Create(cc) => {
+                    let op = Self::attach_create(operator, cc, &bound);
+                    bound.extend(Self::clause_variables(&cc.pattern));
+                    op
+                }
+                ForeachBody::Merge(mc) => {
+                    let scope: Vec<String> = bound.iter().cloned().collect();
+                    let op = Self::attach_merge(operator, mc, &scope);
+                    bound.extend(Self::clause_variables(&mc.pattern));
+                    op
+                }
+                ForeachBody::Foreach(fc) => Box::new(ForeachOperator::new(
+                    operator,
+                    fc.variable.clone(),
+                    fc.expression.clone(),
+                    fc.body.clone(),
+                )),
+            };
+        }
+        operator
+    }
+
     /// Every variable a MATCH clause binds, **including the named path**.
     ///
     /// Leaving the path variable out is what made
@@ -6957,6 +7712,10 @@ impl QueryPlanner {
             .map(|wc| flatten_and_predicates(&wc.predicate))
             .unwrap_or_default();
 
+        // Relationships distinct across the clause's patterns (#1233).
+        let isolated = Self::isolate_relationships(match_clause, where_clause);
+        let match_clause = isolated.as_ref().map(|(c, _)| c).unwrap_or(match_clause);
+
         let mut current_op = upstream;
         let mut new_vars = HashSet::new();
 
@@ -7022,6 +7781,9 @@ impl QueryPlanner {
             current_op = Box::new(FilterOperator::new(current_op, filter_expr));
         }
 
+        if let Some((_, distinct)) = &isolated {
+            current_op = Box::new(FilterOperator::new(current_op, distinct.clone()));
+        }
         Ok((current_op, new_vars))
     }
 
@@ -7974,6 +8736,9 @@ mod tests {
 
         // Build a query manually with no MATCH and no CREATE
         let query = crate::query::ast::Query {
+            optional_where: Vec::new(),
+            deferred_skip: None,
+            deferred_limit: None,
             load_csv_clause: None,
             match_clauses: vec![],
             where_clause: None,

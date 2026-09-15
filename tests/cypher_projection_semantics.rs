@@ -1647,26 +1647,32 @@ fn a_constant_expression_is_allowed_but_an_unbound_variable_is_refused() {
 }
 
 #[test]
-fn match_refuses_a_non_literal_property_value_and_merge_evaluates_it() {
+fn match_filters_on_a_non_literal_property_value_and_merge_evaluates_it() {
     // The danger both halves guard against is the same: accepting the pattern
     // and dropping the constraint. `MATCH (p:P {n: x})` would then return
     // *every* `:P` — a working-looking query returning too much.
     //
-    // MATCH still refuses, because it still does not evaluate these. MERGE no
-    // longer needs to: #642 resolves the property against the row and uses the
-    // result for the match and the creation alike, which is what makes
-    // `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather than a
-    // node factory. This test used to assert both refused; it now asserts each
-    // does the right thing, which is no longer the same thing.
+    // MATCH now applies the property as a WHERE (`p.n = x`), which is what it
+    // means for a MATCH; it used to refuse because it could not. An OPTIONAL
+    // MATCH gets the same rewrite since #1229, which made its WHERE form keep
+    // the rows the lookup finds nothing for; an anonymous node, with nothing
+    // to name, still refuses. MERGE resolves the property against the row
+    // (#642) and uses the result for the match and the creation alike, which is
+    // what makes `UNWIND $rows AS row MERGE (n {id: row.id})` an upsert rather
+    // than a node factory.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     engine.execute_mut("CREATE (:P {n: 1})", &mut s, "default").unwrap();
     engine.execute_mut("CREATE (:P {n: 2})", &mut s, "default").unwrap();
 
-    let err = engine
-        .execute("UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v", &s)
-        .expect_err("must not silently match everything");
-    assert!(format!("{err}").contains("WHERE"), "should name the workaround: {err}");
+    // One row, not both `:P`: the constraint is applied, not dropped.
+    assert_eq!(bag(&s, "UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
+
+    // OPTIONAL MATCH: the constraint is applied too, never silently widened, and
+    // a row it finds nothing for is kept (#1229).
+    assert_eq!(bag(&s, "UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(*) AS n"), "n=2");
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(p) AS n"), "n=1");
 
     // the WHERE form it points at does work
     assert_eq!(
@@ -2343,18 +2349,20 @@ fn foreach_set_still_binds_the_loop_variable() {
 }
 
 #[test]
-fn foreach_create_of_a_relationship_is_refused_not_silently_orphaned() {
+fn foreach_create_of_a_relationship_wires_the_bound_node_not_an_orphan() {
     // Only the start node was ever created, so this produced a stray node
-    // instead of an edge. Refusing is the honest answer.
+    // instead of an edge, and was then refused. The body is now planned with
+    // the row's bindings (#465): `p` is the matched node, and each row adds
+    // exactly one :X and one :R from `p` to it -- no stray start node.
     let e = QueryEngine::new();
     let mut s = foreach_store();
     let before = s.node_count();
-    let err = e
-        .execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("relationship pattern inside FOREACH"), "{err}");
-    assert_eq!(s.node_count(), before, "a refused FOREACH must not leave nodes behind");
+    let p = scalar(&s, "MATCH (p:P) RETURN count(p) AS v");
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
+        .unwrap();
+    assert_eq!(scalar(&s, "MATCH (:P)-[:R]->(x:X) RETURN count(x) AS v"), p);
+    let p: usize = p.trim_start_matches("v=").parse().unwrap();
+    assert_eq!(s.node_count(), before + p, "one :X per row, and nothing else");
 }
 
 #[test]

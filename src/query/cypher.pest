@@ -104,7 +104,7 @@ match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_cl
 // empty row, the same way a bare RETURN does, so no pattern is required.
 foreach_stmt = { foreach_clause }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
-foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause | merge_inline | foreach_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // LOAD CSV (LANG-09). A reading clause: it produces one row per record, the way
 // UNWIND produces one row per list element, and everything downstream of it is
@@ -322,6 +322,7 @@ primary = {
     parameter |
     value |
     list_expr |
+    map_projection |
     map_expr |
     variable |
     pattern_predicate |
@@ -470,6 +471,13 @@ map_entry = { (string | property_key) ~ ":" ~ value }
 list_expr = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
 map_expr = { "{" ~ (map_expr_entry ~ ("," ~ map_expr_entry)*)? ~ "}" }
 map_expr_entry = { (string | property_key) ~ ":" ~ expression }
+// Map projection, `p {.name, .*, key: expr, other}` (#1239). Ahead of
+// `variable` in `primary`, and behind `exists_subquery`, so `EXISTS {` stays a
+// subquery.
+map_projection = { variable ~ "{" ~ (map_projection_item ~ ("," ~ map_projection_item)*)? ~ "}" }
+map_projection_item = { map_projection_all | map_projection_property | map_expr_entry | variable }
+map_projection_all = { "." ~ "*" }
+map_projection_property = { "." ~ property_key }
 
 // Variable names
 variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
