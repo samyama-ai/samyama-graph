@@ -3,9 +3,11 @@ name: Tag Release
 # Stage 2 of 2. Fires on every push to main; does nothing unless the
 # workspace version in Cargo.toml is one that has no tag yet — which in
 # practice means "a prepare-release.yml PR just merged." When that happens
-# this is what actually cuts `vX.Y.Z` and publishes the GitHub Release, the
-# one event that fires publish-crate.yml, publish-pypi.yml, publish-npm.yml
-# and publish-docker.yml.
+# this is what actually cuts `vX.Y.Z`, publishes the GitHub Release, and
+# dispatches publish-crate.yml, publish-pypi.yml, publish-npm.yml and
+# publish-docker.yml on the new tag. It has to dispatch them: a Release made
+# with GITHUB_TOKEN starts no workflows, so their `release: published`
+# trigger never fires for a Release made here (v1.8.0 published nothing, #1249).
 #
 # This is the piece that used to be an unautomated hand step: someone edited
 # version files, then separately ran `git tag` and filled in the GitHub
@@ -31,6 +33,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: write   # gh workflow run, for the four publish workflows
 
     steps:
       - uses: actions/checkout@v4
@@ -105,3 +108,21 @@ jobs:
           gh release create "v$VERSION" \
             --title "Samyama Graph v$VERSION" \
             --generate-notes
+
+      # GitHub starts no workflow from an event GITHUB_TOKEN raised, so the
+      # Release above reaches none of the publish workflows. A dispatch is the
+      # one exception. Each runs on the tag, so it builds exactly what was
+      # tagged. If this Release is ever made with another token, the release
+      # event fires as well. That is harmless: every publish skips a version
+      # already on its registry, and Docker overwrites its own tags.
+      - name: Dispatch the publish workflows on the new tag
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-crate.yml  --ref "v$VERSION" -f dry_run=false
+          gh workflow run publish-pypi.yml   --ref "v$VERSION" -f target=pypi
+          gh workflow run publish-npm.yml    --ref "v$VERSION" -f dry_run=false
+          gh workflow run publish-docker.yml --ref "v$VERSION"

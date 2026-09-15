@@ -31,6 +31,8 @@ env:
 jobs:
   publish:
     name: Publish to npm
+    # kg-snapshots-v* data releases are Releases too; only a v* tag is an engine release.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -61,13 +63,30 @@ jobs:
       # sits outside the cargo workspace and is bumped by hand. Checked
       # explicitly against the release tag for the same reason as the crates
       # and PyPI guards: npm also refuses to re-publish an existing version.
+      # A dispatch runs on a tag when tag-release.yml sends it (#1249), and is
+      # checked the same way. A real upload from a branch is refused.
       - name: Verify package version matches the release tag
-        if: github.event_name == 'release'
         working-directory: ${{ env.SDK_DIR }}
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG="${{ github.event.release.tag_name }}"
+          if [ "$EVENT" = "release" ]; then
+            TAG=$RELEASE_TAG
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG=$REF_NAME
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "dry run on branch $REF_NAME: no tag to check"
+            exit 0
+          else
+            echo "::error::a real publish must run on a v* tag, not the branch $REF_NAME"
+            exit 1
+          fi
           if [ "${TAG#v}" != "$PKG_VERSION" ]; then
             echo "::error::package.json is $PKG_VERSION, release tag is $TAG"
             exit 1

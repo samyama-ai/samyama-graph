@@ -5,7 +5,8 @@ name: Prepare Release
 # running `git tag`, and filling in the GitHub Release UI — the actual source
 # of the staleness this repo's whole publish pipeline was built to fix. This
 # workflow does the bump and opens the PR; tag-release.yml (stage 2) does the
-# tag and the Release once that PR lands on main. Nothing publishes from this
+# tag and the Release once that PR lands on main, then dispatches the four
+# publish workflows on the tag. Nothing publishes from this
 # workflow directly — main requires a reviewed PR and a green CI check, and
 # this respects that rather than bypassing it.
 #
@@ -150,7 +151,7 @@ jobs:
             to `${{ inputs.version }}` and refreshes `Cargo.lock`.
 
             Merging this to `main` is what triggers `tag-release.yml`, which
-            tags `v${{ inputs.version }}` and publishes a GitHub Release. That
-            Release is what fires the four publish workflows (crates.io,
-            PyPI, npm, Docker) — nothing publishes until this merges.
+            tags `v${{ inputs.version }}`, publishes a GitHub Release, and then
+            dispatches the four publish workflows (crates.io, PyPI, npm,
+            Docker) on the tag — nothing publishes until this merges.
           labels: release
