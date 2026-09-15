@@ -1588,15 +1588,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.node_columns.set_property(idx, key, value.clone());
         }
 
-        // Kept before the move so the index event below is built from the
-        // properties *as given* rather than read back off the node. Reading them
-        // back ties indexing to the row copy: with the row empty — which is what a
-        // snapshot-imported graph looks like, and what removing the duplication in
-        // #1123 would make every graph look like — the event carries nothing and
-        // the index silently never learns the values (#1132).
-        let indexed_properties = properties.clone();
+        // The index event below is built from the properties *as given*, never
+        // read back off the node (#1132): the row is left empty, because the
+        // column above is the only copy of every value (#1188).
+        let indexed_properties = properties;
 
-        let mut node = Node::new_with_properties(node_id, labels.clone(), properties);
+        let mut node = Node::new_with_properties(node_id, labels.clone(), PropertyMap::new());
         node.version = self.current_version;
         self.note_node_birth(node_id);
 
@@ -1919,17 +1916,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
-        // What this write replaces, kept while an earlier version can still read
-        // it (#1200). Before the column write, since the old value is read there.
+        // The value this write replaces, read before the column is overwritten.
+        // The column holds the current value and the row does not (#1188), so the
+        // index learns what to drop, and history what to keep, from here.
         let last_write = self
             .get_node(node_id)
             .ok_or(GraphError::NodeNotFound(node_id))?
             .version;
+        let old_val = self.node_property(node_id, &key_str);
         if self.undo_needed(node_id, last_write, |e| {
             matches!(e, NodeUndo::Property { key, .. } if *key == key_str)
         }) {
-            let old = self.node_property(node_id, &key_str);
             let at = self.current_version;
+            let old = old_val.clone();
             self.push_node_undo(node_id, NodeUndo::Property { at, key: key_str.clone(), old });
         }
 
@@ -1940,7 +1939,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Scoped so the mutable borrow of `self.nodes` ends here; the indexing
         // below needs `&self` and the node's labels at the same time, which is
         // fine as two shared borrows but not while this one is live.
-        let old_val = {
+        {
             let current_version = self.current_version;
             let node = self
                 .nodes
@@ -1950,8 +1949,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             // In place. The history of this write is the undo entry above, not
             // a copy of the whole node pushed as a new version (#1200).
             node.version = current_version;
-            node.set_property(key_str.clone(), val.clone())
-        };
+            node.updated_at = chrono::Utc::now().timestamp_millis();
+            // No row copy: the column is the only one (#1188). A value put in
+            // the row directly through `get_node_mut` is superseded by this
+            // write, so it goes rather than shadowing the column in the map.
+            node.remove_property(&key_str);
+        }
 
         // Record the new value so subsequent writes can see it. Without this the
         // constraint index only ever holds what the backfill put there at CREATE
@@ -4793,19 +4796,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// while `RETURN n` returned an empty property bag for every node (#1125) — one
     /// of the pair was moved to the columnar store and the other was not.
     ///
-    /// The merge runs only when the columns hold a key the row does not, so a graph
-    /// built by `CREATE` — where `set_node_property` writes both — pays a key scan
-    /// and no rebuild.
+    /// Store writes keep no row copy (#1188), so every column value is filled
+    /// in, and a column value wins over a row value for the same key, as in
+    /// `node_properties_merged`. Row-only keys, written through `get_node_mut`,
+    /// are kept.
     pub fn node_materialized(&self, id: NodeId) -> Option<Node> {
         let mut node = self.get_node(id)?.clone();
         let idx = id.as_u64() as usize;
-        if self
-            .node_columns
-            .get_property_keys(idx)
-            .iter()
-            .any(|k| !node.properties.contains_key(k))
-        {
-            node.properties = self.node_properties_full(id);
+        for key in self.node_columns.get_property_keys(idx) {
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                node.properties.insert(key, value);
+            }
         }
         Some(node)
     }
@@ -4854,10 +4856,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 out.insert(k.clone(), v.clone());
             }
         }
+        // The column wins on a clash: it holds the current value, and a row value
+        // for the same key is one a store write has since superseded (#1188).
         let idx = id.as_u64() as usize;
         for key in self.node_columns.get_property_keys(idx) {
-            out.entry(key.clone())
-                .or_insert_with(|| self.node_columns.get_property(idx, &key));
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                out.insert(key, value);
+            }
         }
         out
     }
@@ -5274,8 +5280,8 @@ mod tests {
 
         let node = store.get_node(node_id).unwrap();
         assert_eq!(node.label_count(), 2);
-        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
-        assert_eq!(node.get_property("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -5597,7 +5603,7 @@ mod tests {
         store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
-            node.get_property("age"),
+            store.node_property(node.id, "age").as_ref(),
             Some(&PropertyValue::Integer(30))
         );
 
@@ -5605,7 +5611,7 @@ mod tests {
         store.set_node_property("default", id, "age", PropertyValue::Integer(31)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
-            node.get_property("age"),
+            store.node_property(node.id, "age").as_ref(),
             Some(&PropertyValue::Integer(31))
         );
 
@@ -6047,13 +6053,13 @@ mod tests {
         // Same version update — in-place
         store.set_node_property("default", id, "name", PropertyValue::String("Bob".to_string())).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(node.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
 
         // Add another property
         store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(node.get_property("age"), Some(&PropertyValue::Integer(30)));
-        assert_eq!(node.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(30)));
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
     }
 
     // ========== Coverage Enhancement Tests ==========
@@ -6414,7 +6420,7 @@ mod tests {
 
         // Latest version should be Bob
         let latest = store.get_node(id).unwrap();
-        assert_eq!(latest.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(latest.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
         assert_eq!(latest.version, 2);
 
         // Version 1 should still be Alice
@@ -7262,7 +7268,7 @@ mod tests {
 
         // Current version sees "Bob"
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("Bob"));
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
@@ -7412,7 +7418,7 @@ mod tests {
 
         // Latest still works
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("v3"));
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("v3"));
     }
 
     #[test]

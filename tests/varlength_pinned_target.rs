@@ -238,8 +238,7 @@ fn walk(store: &GraphStore, min: usize, max: usize, dir: Direction, pin: Option<
                 .map(Value::Property)
                 .unwrap_or(Value::Property(PropertyValue::Null)),
             Value::NodeRef(id) => store
-                .get_node(*id)
-                .and_then(|nd| nd.properties.get("n").cloned())
+                .node_property(*id, "n")
                 .map(Value::Property)
                 .unwrap_or(Value::Property(PropertyValue::Null)),
             other => other.clone(),

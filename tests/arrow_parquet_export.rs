@@ -56,7 +56,7 @@ fn fixture() -> GraphStore {
         .get_nodes_by_label(&samyama::graph::types::Label::new("Doc"))
         .iter()
         .filter(|n| {
-            !matches!(n.get_property("ord"), Some(PropertyValue::Integer(2)))
+            !matches!(store.node_property(n.id, "ord"), Some(PropertyValue::Integer(2)))
         })
         .map(|n| n.id)
         .collect();

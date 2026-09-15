@@ -1468,7 +1468,7 @@ mod tests {
         // The node should have been processed
         let node = store.get_node(alice).unwrap();
         assert_eq!(
-            node.properties.get("processed"),
+            store.node_property(node.id, "processed").as_ref(),
             Some(&PropertyValue::Boolean(true))
         );
     }
@@ -1735,7 +1735,7 @@ mod tests {
         assert!(result.is_ok(), "SET query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert_eq!(node.properties.get("age"), Some(&PropertyValue::Integer(31)));
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(31)));
     }
 
     #[test]
@@ -1748,7 +1748,7 @@ mod tests {
             node.set_property("temp", "temporary");
         }
 
-        assert!(store.get_node(alice).unwrap().properties.contains_key("temp"));
+        assert!(store.node_property(alice, "temp").is_some());
 
         let query = parse_query(
             "MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.temp"
@@ -1758,7 +1758,7 @@ mod tests {
         assert!(result.is_ok(), "REMOVE query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert!(!node.properties.contains_key("temp"));
+        assert!(!store.node_property(node.id, "temp").is_some());
     }
 
     #[test]
@@ -2493,8 +2493,8 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
-        assert_eq!(node.properties.get("name").unwrap().as_string(), Some("Alice"));
-        assert_eq!(node.properties.get("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -2547,7 +2547,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
         exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 30");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -2556,7 +2556,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
         exec_mut(&mut store, "MATCH (n:Person) SET n.email = 'alice@example.com'");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("email").unwrap().as_string(), Some("alice@example.com"));
+        assert_eq!(store.node_property(nodes[0].id, "email").as_ref().unwrap().as_string(), Some("alice@example.com"));
     }
 
     #[test]
@@ -2565,7 +2565,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
         exec_mut(&mut store, "MATCH (n:Person) REMOVE n.age");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert!(nodes[0].properties.get("age").is_none());
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none());
     }
 
     #[test]
@@ -2588,7 +2588,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
@@ -2598,7 +2598,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("seen").unwrap().as_integer(), Some(1));
+        assert_eq!(store.node_property(nodes[0].id, "seen").as_ref().unwrap().as_integer(), Some(1));
     }
 
     #[test]
@@ -2607,7 +2607,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Bob'})");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Bob"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
@@ -2918,7 +2918,7 @@ mod tests {
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params);
         executor.execute(&query).unwrap();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("senior"));
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("senior"));
     }
 
     // ========== Batch 5: UNION ==========
@@ -4462,8 +4462,8 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
-        assert_eq!(nodes[0].properties.get("city").unwrap().as_string(), Some("NYC"));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     // --- DETACH DELETE with multiple edges ---
@@ -5316,11 +5316,11 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert!(nodes.len() >= 3, "Should have 3 Person nodes");
         let alice_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5393,11 +5393,11 @@ mod tests {
         let mut store = build_triangle_graph();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         let alice_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5706,8 +5706,8 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("MergeTest"));
-        assert_eq!(nodes[0].properties.get("created"), Some(&PropertyValue::Boolean(true)));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("MergeTest"));
+        assert_eq!(store.node_property(nodes[0].id, "created").as_ref(), Some(&PropertyValue::Boolean(true)));
     }
 
     #[test]
@@ -5720,7 +5720,7 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "MERGE should not create a duplicate");
-        assert_eq!(nodes[0].properties.get("matched"), Some(&PropertyValue::Boolean(true)),
+        assert_eq!(store.node_property(nodes[0].id, "matched").as_ref(), Some(&PropertyValue::Boolean(true)),
             "ON MATCH SET should have set matched property");
     }
 
@@ -5732,7 +5732,7 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("new"),
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("new"),
             "First MERGE should trigger ON CREATE SET");
 
         exec_mut(&mut store,
@@ -5740,7 +5740,7 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "Should not create a duplicate");
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("existing"),
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("existing"),
             "Second MERGE should trigger ON MATCH SET");
     }
 
@@ -5764,8 +5764,8 @@ mod tests {
         exec_mut(&mut store, "CREATE (a:Person {name: 'A1'})-[:KNOWS]->(b:Person {name: 'B1'})");
         exec_mut(&mut store, "MATCH (a:Person {name: 'A1'})-[r:KNOWS]->(b:Person {name: 'B1'}) DELETE r");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        let a_exists = nodes.iter().any(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("A1")));
-        let b_exists = nodes.iter().any(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("B1")));
+        let a_exists = nodes.iter().any(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("A1")));
+        let b_exists = nodes.iter().any(|n| store.node_property(n.id, "name").as_ref().map_or(false, |v| v.as_string() == Some("B1")));
         assert!(a_exists, "Node A1 should still exist after edge deletion");
         assert!(b_exists, "Node B1 should still exist after edge deletion");
         let result = exec_read(&store, "MATCH (a:Person {name: 'A1'})-[:KNOWS]->(b:Person) RETURN b.name");
@@ -5791,9 +5791,9 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        let age = nodes[0].properties.get("age");
+        let age = store.node_property(nodes[0].id, "age");
         if let Some(val) = age {
-            assert_eq!(val, &PropertyValue::Null, "Setting to null should make property Null");
+            assert_eq!(val, PropertyValue::Null, "Setting to null should make property Null");
         }
     }
 
@@ -5805,8 +5805,8 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
-        assert_eq!(nodes[0].properties.get("city").unwrap().as_string(), Some("NYC"));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     #[test]
@@ -5816,7 +5816,7 @@ mod tests {
         exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 35");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(35));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(35));
     }
 
     #[test]
@@ -5839,9 +5839,9 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].properties.get("age").is_none(), "age property should be removed");
-        assert!(nodes[0].properties.get("name").is_some(), "name property should still exist");
-        assert!(nodes[0].properties.get("city").is_some(), "city property should still exist");
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age property should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name property should still exist");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_some(), "city property should still exist");
     }
 
     #[test]
@@ -5852,7 +5852,7 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
@@ -5863,10 +5863,10 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].properties.get("age").is_none(), "age should be removed");
-        assert!(nodes[0].properties.get("city").is_none(), "city should be removed");
-        assert!(nodes[0].properties.get("name").is_some(), "name should still exist");
-        assert!(nodes[0].properties.get("score").is_some(), "score should still exist");
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age should be removed");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_none(), "city should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name should still exist");
+        assert!(store.node_property(nodes[0].id, "score").as_ref().is_some(), "score should still exist");
     }
 
     #[test]
