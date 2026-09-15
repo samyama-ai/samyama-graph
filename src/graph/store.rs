@@ -2474,11 +2474,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
-        // The caller's map, moved. It was cloned whole into the row store and
-        // the original dropped with the unused `Edge` (#491).
-        if !properties.is_empty() {
-            self.edge_properties.insert(edge_id, properties);
-        }
+        // No row copy: the columns above hold every value (#545, #1200 step 5).
+        drop(properties);
 
         // Update edge type index. `get_mut` first so the common case -- a type
         // already seen, which after the first few edges is every case -- does
@@ -2549,7 +2546,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if version < born {
             return None; // the edge did not exist at this version
         }
-        let mut properties = self.edge_properties.get(&id).cloned().unwrap_or_default();
+        let mut properties = self.edge_properties_merged(id);
         let mut edge_version = born;
         if let Some(history) = history {
             for entry in history.undo.iter().rev().take_while(|e| e.at() > version) {
@@ -2638,7 +2635,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         let at = self.current_version;
-        let old = self.edge_properties.get(&edge_id).and_then(|p| p.get(key).cloned());
+        let old = self.edge_property(edge_id, key);
         let entry = EdgeUndo::Property { at, key: key.to_string(), old };
         self.edge_history.entry(edge_id).or_default().undo.push(entry);
     }
@@ -2650,7 +2647,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         let at = self.current_version;
-        let old = self.edge_properties.get(&edge_id).cloned().unwrap_or_default();
+        let old = self.edge_properties_merged(edge_id);
         self.edge_history.entry(edge_id).or_default().undo.push(EdgeUndo::Map { at, old });
     }
 
@@ -2706,15 +2703,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
         self.log_edge_write(edge_id, &key);
-        // The column as well as the row map. This is the setter CREATE, MERGE
-        // and SET use, and it wrote the row map only, so every relationship
-        // property a query created missed the column that reads try first and
-        // fell back to two hash probes into a per-edge map scattered across the
-        // heap. On a 2M-edge `WHERE r.p ... ORDER BY r.p` scan that fallback was
-        // 63% of the query; peak RSS for the column copy was +0.9%.
-        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value.clone());
-        let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
-        props.insert(key, value);
+        // The column only. This is the setter CREATE, MERGE and SET use. It
+        // once wrote the row map only, so reads fell back to a per-edge map
+        // scattered across the heap (63% of a 2M-edge `WHERE r.p ... ORDER BY
+        // r.p` scan); then it wrote both, which stored every value twice. The
+        // column is now the only copy (#545, #1200 step 5). A value put in the
+        // row through `get_edge_properties_mut` is superseded, so it goes.
+        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value);
+        if let Some(props) = self.edge_properties.get_mut(&edge_id) {
+            props.remove(&key);
+        }
     }
 
     /// Several properties of one relationship at once, into both stores.
@@ -2738,11 +2736,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 continue;
             }
             self.log_edge_write(edge_id, &key);
-            self.edge_columns.set_property(idx, &key, value.clone());
-            self.edge_properties
-                .entry(edge_id)
-                .or_insert_with(PropertyMap::new)
-                .insert(key, value);
+            // The column only, as in the single setter (#545).
+            self.edge_columns.set_property(idx, &key, value);
+            if let Some(row) = self.edge_properties.get_mut(&edge_id) {
+                row.remove(&key);
+            }
             wrote = true;
         }
         if wrote {
@@ -5006,6 +5004,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// MERGE and the bulk loaders write edge properties to the row map only, so
     /// the column read in front of that fallback misses and the clone ran on
     /// every read: three per row on a `WHERE r.p ... ORDER BY r.p` scan.
+    /// Every property of a relationship: the row map, which only
+    /// `get_edge_properties_mut` still writes, overlaid by the column, which
+    /// holds every value a store write made (#545, #1200 step 5). The column
+    /// wins on a clash, as in `node_properties_merged`.
+    pub fn edge_properties_merged(&self, id: EdgeId) -> PropertyMap {
+        let mut out = self.edge_properties.get(&id).cloned().unwrap_or_default();
+        let idx = id.as_u64() as usize;
+        for key in self.edge_columns.get_property_keys(idx) {
+            let value = self.edge_columns.get_property(idx, &key);
+            if !value.is_null() {
+                out.insert(key, value);
+            }
+        }
+        out
+    }
+
     pub fn edge_property(&self, id: EdgeId, key: &str) -> Option<PropertyValue> {
         let v = self.edge_columns.get_property(id.as_u64() as usize, key);
         if !v.is_null() {
@@ -6129,12 +6143,13 @@ mod tests {
         let mut props = PropertyMap::new();
         props.insert("weight".into(), PropertyValue::Float(0.5));
         let e2 = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
-        let sparse = store.get_edge_properties(e2).unwrap();
-        assert_eq!(sparse.get("weight"), Some(&PropertyValue::Float(0.5)));
+        // The column holds it; the row keeps no copy (#545, #1200 step 5).
+        assert_eq!(store.edge_property(e2, "weight"), Some(PropertyValue::Float(0.5)));
+        assert!(store.get_edge_properties(e2).is_none_or(|p| p.is_empty()));
     }
 
     #[test]
-    fn set_edge_properties_sparse_writes_both_stores_and_null_removes() {
+    fn set_edge_properties_sparse_writes_the_column_and_null_removes() {
         let mut store = GraphStore::new();
         let a = store.create_node("A");
         let b = store.create_node("B");
@@ -6145,9 +6160,10 @@ mod tests {
         );
         let idx = eid.as_u64() as usize;
         assert_eq!(store.edge_columns.get_property(idx, "w"), PropertyValue::Float(2.5));
-        assert_eq!(
-            store.get_edge_properties(eid).and_then(|p| p.get("k").cloned()),
-            Some(PropertyValue::Integer(7))
+        assert_eq!(store.edge_property(eid, "k"), Some(PropertyValue::Integer(7)));
+        assert!(
+            store.get_edge_properties(eid).is_none_or(|p| p.is_empty()),
+            "the row keeps a second copy (#545)"
         );
         store.set_edge_properties_sparse(eid, [("w", PropertyValue::Null)]);
         assert!(store.edge_columns.get_property(idx, "w").is_null());
@@ -6181,8 +6197,8 @@ mod tests {
 
         // Add property via sparse map
         store.set_edge_property_sparse(eid, "key", PropertyValue::String("val".into()));
-        let props = store.get_edge_properties(eid).unwrap();
-        assert_eq!(props.get("key"), Some(&PropertyValue::String("val".into())));
+        assert_eq!(store.edge_property(eid, "key"), Some(PropertyValue::String("val".into())));
+        assert!(store.get_edge_properties(eid).is_none_or(|p| p.is_empty()), "the row keeps a second copy");
     }
 
     #[test]
