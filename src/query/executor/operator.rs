@@ -1135,36 +1135,63 @@ fn eval_exists_subquery(
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    for path in &pattern.paths {
-        // Candidate start nodes: pinned when the start variable is already bound
-        // by the outer query, otherwise every node carrying the required label.
-        let start_candidates: Vec<NodeId> =
-            match path.start.variable.as_deref().and_then(|v| record.get(v)) {
-                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
-                // Bound to something that is not a node — cannot match.
-                Some(_) => continue,
-                None => match path.start.labels.first() {
-                    Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
-                    None => store.all_nodes().iter().map(|n| n.id).collect(),
-                },
-            };
+    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, store)?;
+    Ok(Value::Property(PropertyValue::Boolean(found)))
+}
 
-        for start_id in start_candidates {
-            if !exists_node_matches(store, start_id, &path.start) {
-                continue;
-            }
-
-            let mut bindings = record.clone();
-            if let Some(var) = path.start.variable.as_deref() {
-                bindings.bind(var.to_string(), Value::NodeRef(start_id));
-            }
-
-            if exists_match_segment(path, 0, start_id, &bindings, &[], where_clause, store)? {
-                return Ok(Value::Property(PropertyValue::Boolean(true)));
-            }
+/// Match `paths` as one match: the first from `record`'s bindings, and each
+/// later one from the bindings the earlier ones made, with the WHERE evaluated
+/// once every pattern has matched (#1244).
+///
+/// The patterns of an EXISTS are joined, not alternatives. Trying each on its
+/// own and answering true when any matched made `EXISTS { (x)-[:T]->(),
+/// (x)-[:U]->() }` hold for a node with either relationship, inverted `NOT
+/// EXISTS` with it, and evaluated the WHERE before a later pattern had bound
+/// its variables ("Variable not found"). Relationships already walked carry
+/// into the next pattern: a relationship appears once in the subquery, as in
+/// one MATCH clause (#1233).
+fn exists_start_paths(
+    paths: &[crate::query::ast::PathPattern],
+    record: &Record,
+    visited_edges: &[crate::graph::EdgeId],
+    where_clause: Option<&crate::query::ast::WhereClause>,
+    store: &GraphStore,
+) -> ExecutionResult<bool> {
+    let Some((path, rest)) = paths.split_first() else {
+        return Ok(match where_clause {
+            Some(wc) => matches!(
+                eval_expression(&wc.predicate, record, store)?,
+                Value::Property(PropertyValue::Boolean(true))
+            ),
+            None => true,
+        });
+    };
+    // Candidate start nodes: pinned when the start variable is already bound
+    // (by the outer query or an earlier pattern), otherwise every node
+    // carrying the required label.
+    let start_candidates: Vec<NodeId> = match path.start.variable.as_deref().and_then(|v| record.get(v)) {
+        Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
+        // Bound to something that is not a node: this pattern, and so the
+        // whole match, cannot hold.
+        Some(_) => return Ok(false),
+        None => match path.start.labels.first() {
+            Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
+            None => store.all_nodes().iter().map(|n| n.id).collect(),
+        },
+    };
+    for start_id in start_candidates {
+        if !exists_node_matches(store, start_id, &path.start) {
+            continue;
+        }
+        let mut bindings = record.clone();
+        if let Some(var) = path.start.variable.as_deref() {
+            bindings.bind(var.to_string(), Value::NodeRef(start_id));
+        }
+        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, store)? {
+            return Ok(true);
         }
     }
-    Ok(Value::Property(PropertyValue::Boolean(false)))
+    Ok(false)
 }
 
 /// Check a node against a pattern's labels and inline property constraints.
@@ -1345,6 +1372,9 @@ fn exists_for_each_neighbor(
 
 /// Match `path.segments[seg_idx..]` starting from `current`. Once every segment
 /// is consumed, the inner WHERE is evaluated with all subquery variables bound.
+/// `rest` is the EXISTS's patterns after this one; the match continues into
+/// them once this path is complete (#1244).
+#[allow(clippy::too_many_arguments)]
 fn exists_match_segment(
     path: &crate::query::ast::PathPattern,
     seg_idx: usize,
@@ -1352,16 +1382,11 @@ fn exists_match_segment(
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
+    rest: &[crate::query::ast::PathPattern],
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     if seg_idx == path.segments.len() {
-        return Ok(match where_clause {
-            Some(wc) => matches!(
-                eval_expression(&wc.predicate, bindings, store)?,
-                Value::Property(PropertyValue::Boolean(true))
-            ),
-            None => true,
-        });
+        return exists_start_paths(rest, bindings, visited_edges, where_clause, store);
     }
 
     let segment = &path.segments[seg_idx];
@@ -1374,7 +1399,7 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, store,
+        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, store,
     )
 }
 
@@ -1391,6 +1416,7 @@ fn exists_expand_hops(
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
+    rest: &[crate::query::ast::PathPattern],
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let segment = &path.segments[seg_idx];
@@ -1410,7 +1436,7 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, &next, visited_edges, where_clause, store,
+                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, store,
             )? {
                 return Ok(true);
             }
@@ -1476,6 +1502,7 @@ fn exists_expand_hops(
                 &next,
                 &next_visited,
                 where_clause,
+                rest,
                 store,
             )
         },
