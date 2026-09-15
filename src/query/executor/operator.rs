@@ -7318,6 +7318,15 @@ pub struct VarLengthExpandOperator {
     /// friend" but "is *this one node* reachable from each friend", and those
     /// have very different costs.
     pinned_target: Option<NodeId>,
+    /// The node this row already binds the target variable to, if it does
+    /// (#1237). Set per input record by `expand_from_inner`.
+    ///
+    /// A pattern that names its target twice -- `(x)-[*]->(x)`, or a target an
+    /// earlier clause bound -- asks for walks that *end* there. The walk used
+    /// to rebind the variable to wherever each path stopped, so the second
+    /// `(x)` constrained nothing: `MATCH (x:N)-[:T*]->(x)` counted every `:T`
+    /// path of a graph with no `:T` cycle.
+    bound_end: Option<NodeId>,
     /// Nodes from which `pinned_target` is reachable within the hop bounds,
     /// computed once on first use.
     ///
@@ -7419,6 +7428,7 @@ impl VarLengthExpandOperator {
             selector: crate::query::ast::PathSelector::default(),
             type_ids: None,
             pinned_target: None,
+            bound_end: None,
             target_reach: None,
             enumerate_trails: false,
             target_props: Vec::new(),
@@ -8222,6 +8232,7 @@ impl VarLengthExpandOperator {
     }
 
     fn expand_from_inner(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        self.bound_end = None;
         // `MATCH (first)-[rs*]->(second)` where `rs` is *already bound* to a
         // list of relationships is not a search at all. openCypher reads it as
         // "the walk is exactly `rs`", so there is one candidate path and the
@@ -8243,6 +8254,15 @@ impl VarLengthExpandOperator {
         let source_id = source_val.node_id().ok_or_else(|| {
             ExecutionError::TypeError(format!("{} is not a node", self.source_var))
         })?;
+
+        // The target variable already bound on this row -- the pattern's own
+        // start in `(x)-[*]->(x)`, or an earlier clause's -- is where every
+        // match must end (#1237). `emit_ok` enforces it.
+        self.bound_end = record.get(&self.target_var).and_then(|v| v.node_id());
+        // Back to the start: the BFS marks the source visited and can never
+        // reach it again, so a cycle is only found by enumerating trails, which
+        // repeat nodes and not relationships.
+        let closes_on_source = self.bound_end == Some(source_id);
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
@@ -8338,14 +8358,14 @@ impl VarLengthExpandOperator {
         // here; `A(1,n)` is what `expand_trails` already computes, since its emit
         // test is `depth >= min_hops` and its first depth is 1. So the two halves
         // cannot diverge again: there is only one traversal.
-        if self.enumerate_trails && self.min_hops == 0 {
+        if (self.enumerate_trails || closes_on_source) && self.min_hops == 0 {
             if self.emit_ok(source_id, store) {
                 let empty = std::collections::HashMap::new();
                 self.buffer(record, source_id, &empty, source_id, store);
             }
             return self.expand_trails(record, source_id, store);
         }
-        if self.min_hops >= 2 || (self.enumerate_trails && self.min_hops >= 1) {
+        if self.min_hops >= 2 || ((self.enumerate_trails || closes_on_source) && self.min_hops >= 1) {
             return self.expand_trails(record, source_id, store);
         }
 
@@ -8403,6 +8423,12 @@ impl VarLengthExpandOperator {
 
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
+        // A target the row already binds: only that node ends a match (#1237).
+        if let Some(bound) = self.bound_end {
+            if node != bound {
+                return false;
+            }
+        }
         // Cheapest discriminator first: a plan-time set settles it without
         // touching the node at all.
         if let Some(ids) = &self.target_ids {
