@@ -4,9 +4,11 @@ name: Profile IC3/IC5/IC9 (throwaway)
 # SF1 experiments for #612 run on a GitHub runner.
 #   run 34950228916  per-operator profile and perf of IC3/IC5/IC9
 #   run 34952633724  IC5 against rewrites of itself (group-by-node was slower)
-#   this run         IC5 A/B, main 060ca71 against branch arc-aliases (shared
-#                    output names in Project/Aggregate), same runner,
-#                    interleaved rounds.
+#   run 34954700651  IC5 A/B -- INVALID: every allocation count was identical
+#                    between the two binaries, so both ran the same code.
+#   this run         the same A/B with one target dir per tree, and two
+#                    checks that fail the run if the binaries or the V0
+#                    allocation counts are the same.
 
 on:
   push:
@@ -15,9 +17,7 @@ on:
 jobs:
   ic5-ab:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with: { path: prof }
@@ -34,15 +34,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build the example against both trees (one target dir, deps once)
+      - name: Build the example against each tree, separate target dirs
         run: |
           mkdir -p bin
           for t in base arc; do
             cp prof/examples/ic5_variants.rs "$t/examples/"
-            (cd "$t" && git log --oneline -1 && cargo build --release --example ic5_variants 2>&1 | tail -1)
-            cp "$CARGO_TARGET_DIR/release/examples/ic5_variants" "bin/ic5_variants-$t"
+            echo "== $t at $(git -C "$t" log --oneline -1)"
+            grep -c 'Arc::clone(alias)' "$t/src/query/executor/operator.rs" || true
+            (cd "$t" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$t" cargo build --release --example ic5_variants 2>&1 | grep -E 'Compiling samyama v|Finished|^error' )
+            cp "$GITHUB_WORKSPACE/target-$t/release/examples/ic5_variants" "bin/ic5_variants-$t"
           done
-          ls -la bin
+          sha256sum bin/*
+          if cmp -s bin/ic5_variants-base bin/ic5_variants-arc; then echo "FATAL: the two binaries are identical"; exit 1; fi
 
       - name: LDBC SF1
         run: |
@@ -60,6 +63,11 @@ jobs:
                 | grep -E '^(F|V)[0-9]|equal|multiset'
             done
           done | tee out/ic5-ab.log
+          # The fix must show in the allocation count, or the two arms ran the same code.
+          b=$(grep -A20 '=== round 1 base' out/ic5-ab.log | grep -m1 '^V0' | grep -oE 'allocs +[0-9]+' | grep -oE '[0-9]+')
+          a=$(grep -A20 '=== round 1 arc' out/ic5-ab.log | grep -m1 '^V0' | grep -oE 'allocs +[0-9]+' | grep -oE '[0-9]+')
+          echo "V0 allocs: base $b, arc $a"
+          [ -n "$b" ] && [ -n "$a" ] && [ "$b" != "$a" ] || { echo "FATAL: V0 allocation counts are equal or missing"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         if: always()
