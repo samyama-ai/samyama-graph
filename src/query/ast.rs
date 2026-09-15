@@ -676,6 +676,9 @@ pub enum Expression {
         /// tell them apart, and applying it to both rejects every
         /// `EXISTS { MATCH (n)-->(m) ... }` — which is what happened (#798).
         bare_pattern: bool,
+        /// `COUNT { ... }` (#1235): the number of matches, not whether one
+        /// exists. Same pattern, same walk, an integer instead of a boolean.
+        count: bool,
     },
     /// List comprehension: [x IN list WHERE cond | expr]
     ListComprehension {
