@@ -356,7 +356,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 ## The 30-Second Tour
 
-**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,760 of 3,763, at 96.6% coverage of the 3,897-scenario corpus, measured 2026-08-30), and **none of the three remaining failures is a wrong answer** — all three raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
+**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,845 of 3,847, at 98.7% coverage of the 3,897-scenario corpus, measured 2026-09-15), and **neither of the two remaining failures is a wrong answer** — both raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
 
 ```cypher
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
