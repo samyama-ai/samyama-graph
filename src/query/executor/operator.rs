@@ -370,6 +370,40 @@ enum Centrality {
 }
 
 /// Shared binary operator evaluation used by Project, Aggregate, and Sort operators
+/// A 64-bit integer result that does not fit (Neo4j's 22003, "numeric value
+/// out of range"). Wrapping arithmetic answered `9223372036854775807 + 1` with
+/// `-9223372036854775808` in a release build and panicked in a debug one.
+fn int_out_of_range(l: i64, op: &str, r: i64) -> ExecutionError {
+    ExecutionError::RuntimeError(format!("numeric value out of range: {l} {op} {r}"))
+}
+
+/// A float as Neo4j writes it, which is Java's `Double.toString` (#1241):
+/// `1.0` keeps its `.0`, magnitudes from 10^-3 up to 10^7 are plain decimal,
+/// and anything else is `d.dddE<n>` (`1.0E20`, `1.0E-4`). The digits are the
+/// shortest that round-trip, as in both Rust and current Java. `toString()` and
+/// `'a' + 1.5` both write floats through here.
+pub(crate) fn java_double_string(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+    }
+    let a = f.abs();
+    if (1e-3..1e7).contains(&a) {
+        let s = f.to_string();
+        if s.contains('.') { s } else { format!("{s}.0") }
+    } else {
+        let s = format!("{f:e}");
+        let (mantissa, exp) = s.split_once('e').expect("`{:e}` always has an exponent");
+        let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
+        format!("{mantissa}E{exp}")
+    }
+}
+
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
     // p1 = p2).
@@ -599,11 +633,17 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
         },
         BinaryOp::Add => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l + r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_add(*r).ok_or_else(|| int_out_of_range(*l, "+", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l + r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            // A string and a number concatenate, the number written as Neo4j
+            // writes it: `'a' + 1` is "a1", `'a' + 1.0` is "a1.0" (#1241).
+            (PropertyValue::String(l), PropertyValue::Integer(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::Integer(l), PropertyValue::String(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::String(l), PropertyValue::Float(r)) => PropertyValue::String(format!("{l}{}", java_double_string(*r))),
+            (PropertyValue::Float(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{r}", java_double_string(*l))),
             // List concatenation, and appending or prepending a scalar. Cypher
             // defines all three for `+`; none of them worked (#578).
             (PropertyValue::Array(l), PropertyValue::Array(r)) => {
@@ -664,7 +704,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l - r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_sub(*r).ok_or_else(|| int_out_of_range(*l, "-", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
@@ -719,7 +759,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 };
                 scale_duration(*months, *days, *seconds, *nanos, f)?
             }
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l * r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_mul(*r).ok_or_else(|| int_out_of_range(*l, "*", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
@@ -744,7 +784,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 scale_duration(*months, *days, *seconds, *nanos, 1.0 / f)?
             }
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Division by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l / r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_div(*r).ok_or_else(|| int_out_of_range(*l, "/", *r))?),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
@@ -753,7 +793,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         },
         BinaryOp::Mod => match (&left_prop, &right_prop) {
             (PropertyValue::Integer(_), PropertyValue::Integer(0)) => return Err(ExecutionError::RuntimeError("Modulo by zero".to_string())),
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l % r),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_rem(*r).unwrap_or(0)),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
@@ -796,7 +836,10 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
             _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
         },
         UnaryOp::Minus => match val {
-            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+            Value::Property(PropertyValue::Integer(i)) => i
+                .checked_neg()
+                .map(|n| Value::Property(PropertyValue::Integer(n)))
+                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
             // -null is null, matching NOT above and the binary arithmetic ops (#457).
             Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
@@ -1054,8 +1097,8 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
             let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause, .. } => {
-            eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+        Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+            eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
             eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -1129,42 +1172,114 @@ fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
     )))
 }
 
+/// What the pattern walker does with a complete match (#1235, #1243).
+enum MatchSink<'a> {
+    /// `EXISTS { }`: stop at the first.
+    First,
+    /// `COUNT { }`: count every match.
+    Count(&'a std::cell::Cell<i64>),
+    /// A pattern comprehension: evaluate the projection on every match, with
+    /// every variable the pattern bound.
+    Collect {
+        projection: &'a Expression,
+        out: &'a std::cell::RefCell<Vec<Value>>,
+    },
+}
+
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
+    count: bool,
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    for path in &pattern.paths {
-        // Candidate start nodes: pinned when the start variable is already bound
-        // by the outer query, otherwise every node carrying the required label.
-        let start_candidates: Vec<NodeId> =
-            match path.start.variable.as_deref().and_then(|v| record.get(v)) {
-                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
-                // Bound to something that is not a node — cannot match.
-                Some(_) => continue,
-                None => match path.start.labels.first() {
-                    Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
-                    None => store.all_nodes().iter().map(|n| n.id).collect(),
-                },
-            };
+    let filter = where_clause.map(|wc| &wc.predicate);
+    // `COUNT { ... }` (#1235): the same walk, counting every match instead of
+    // stopping at the first.
+    if count {
+        let matches = std::cell::Cell::new(0i64);
+        exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Count(&matches), store)?;
+        return Ok(Value::Property(PropertyValue::Integer(matches.get())));
+    }
+    let found = exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::First, store)?;
+    Ok(Value::Property(PropertyValue::Boolean(found)))
+}
 
-        for start_id in start_candidates {
-            if !exists_node_matches(store, start_id, &path.start) {
-                continue;
+/// Match `paths` as one match: the first from `record`'s bindings, and each
+/// later one from the bindings the earlier ones made, with the WHERE evaluated
+/// once every pattern has matched (#1244).
+///
+/// The patterns of an EXISTS are joined, not alternatives. Trying each on its
+/// own and answering true when any matched made `EXISTS { (x)-[:T]->(),
+/// (x)-[:U]->() }` hold for a node with either relationship, inverted `NOT
+/// EXISTS` with it, and evaluated the WHERE before a later pattern had bound
+/// its variables ("Variable not found"). Relationships already walked carry
+/// into the next pattern: a relationship appears once in the subquery, as in
+/// one MATCH clause (#1233).
+///
+/// `sink` says what a complete match does. `First` stops the walk (EXISTS).
+/// `Count` adds one and goes on, returning `false` so no caller stops early
+/// (`COUNT { }`, #1235). `Collect` evaluates a projection and goes on (a
+/// pattern comprehension, #1243).
+fn exists_start_paths(
+    paths: &[crate::query::ast::PathPattern],
+    record: &Record,
+    visited_edges: &[crate::graph::EdgeId],
+    filter: Option<&Expression>,
+    sink: &MatchSink<'_>,
+    store: &GraphStore,
+) -> ExecutionResult<bool> {
+    let Some((path, rest)) = paths.split_first() else {
+        let matched = match filter {
+            Some(f) => matches!(
+                eval_expression(f, record, store)?,
+                Value::Property(PropertyValue::Boolean(true))
+            ),
+            None => true,
+        };
+        if !matched {
+            return Ok(false);
+        }
+        return match sink {
+            MatchSink::First => Ok(true),
+            MatchSink::Count(c) => {
+                c.set(c.get() + 1);
+                Ok(false)
             }
-
-            let mut bindings = record.clone();
-            if let Some(var) = path.start.variable.as_deref() {
-                bindings.bind(var.to_string(), Value::NodeRef(start_id));
+            MatchSink::Collect { projection, out } => {
+                let value = eval_expression(projection, record, store)?;
+                out.borrow_mut().push(value);
+                Ok(false)
             }
-
-            if exists_match_segment(path, 0, start_id, &bindings, &[], where_clause, store)? {
-                return Ok(Value::Property(PropertyValue::Boolean(true)));
-            }
+        };
+    };
+    // Candidate start nodes: pinned when the start variable is already bound
+    // (by the outer query or an earlier pattern), otherwise every node
+    // carrying the required label.
+    let start_candidates: Vec<NodeId> = match path.start.variable.as_deref().and_then(|v| record.get(v)) {
+        Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
+        // Bound to something that is not a node: this pattern, and so the
+        // whole match, cannot hold.
+        Some(_) => return Ok(false),
+        None => match path.start.labels.first() {
+            Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
+            None => store.all_nodes().iter().map(|n| n.id).collect(),
+        },
+    };
+    for start_id in start_candidates {
+        if !exists_node_matches(store, start_id, &path.start) {
+            continue;
+        }
+        let mut bindings = record.clone();
+        if let Some(var) = path.start.variable.as_deref() {
+            bindings.bind(var.to_string(), Value::NodeRef(start_id));
+        }
+        let path_start = (start_id, visited_edges.len());
+        if exists_match_segment(path, 0, start_id, path_start, &bindings, visited_edges, filter, rest, sink, store)? {
+            return Ok(true);
         }
     }
-    Ok(Value::Property(PropertyValue::Boolean(false)))
+    Ok(false)
 }
 
 /// Check a node against a pattern's labels and inline property constraints.
@@ -1345,23 +1460,30 @@ fn exists_for_each_neighbor(
 
 /// Match `path.segments[seg_idx..]` starting from `current`. Once every segment
 /// is consumed, the inner WHERE is evaluated with all subquery variables bound.
+/// `rest` is the EXISTS's patterns after this one; the match continues into
+/// them once this path is complete (#1244).
+#[allow(clippy::too_many_arguments)]
 fn exists_match_segment(
     path: &crate::query::ast::PathPattern,
     seg_idx: usize,
     current: NodeId,
+    path_start: (NodeId, usize),
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
-    where_clause: Option<&crate::query::ast::WhereClause>,
+    filter: Option<&Expression>,
+    rest: &[crate::query::ast::PathPattern],
+    sink: &MatchSink<'_>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     if seg_idx == path.segments.len() {
-        return Ok(match where_clause {
-            Some(wc) => matches!(
-                eval_expression(&wc.predicate, bindings, store)?,
-                Value::Property(PropertyValue::Boolean(true))
-            ),
-            None => true,
-        });
+        // `p = (a)-...->(b)`: the path is complete, so bind it before the next
+        // pattern, the WHERE or a projection reads it (#1243).
+        if let Some(pv) = path.path_variable.as_deref() {
+            let mut with_path = bindings.clone();
+            with_path.bind(pv.to_string(), walked_path(store, path_start, visited_edges));
+            return exists_start_paths(rest, &with_path, visited_edges, filter, sink, store);
+        }
+        return exists_start_paths(rest, bindings, visited_edges, filter, sink, store);
     }
 
     let segment = &path.segments[seg_idx];
@@ -1374,7 +1496,7 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, store,
+        path, seg_idx, current, path_start, 0, min_hops, max_hops, bindings, visited_edges, filter, rest, sink, store,
     )
 }
 
@@ -1385,12 +1507,15 @@ fn exists_expand_hops(
     path: &crate::query::ast::PathPattern,
     seg_idx: usize,
     current: NodeId,
+    path_start: (NodeId, usize),
     depth: usize,
     min_hops: usize,
     max_hops: usize,
     bindings: &Record,
     visited_edges: &[crate::graph::EdgeId],
-    where_clause: Option<&crate::query::ast::WhereClause>,
+    filter: Option<&Expression>,
+    rest: &[crate::query::ast::PathPattern],
+    sink: &MatchSink<'_>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let segment = &path.segments[seg_idx];
@@ -1410,7 +1535,7 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, &next, visited_edges, where_clause, store,
+                path, seg_idx + 1, current, path_start, &next, visited_edges, filter, rest, sink, store,
             )? {
                 return Ok(true);
             }
@@ -1470,16 +1595,37 @@ fn exists_expand_hops(
                 path,
                 seg_idx,
                 neighbor,
+                path_start,
                 depth + 1,
                 min_hops,
                 max_hops,
                 &next,
                 &next_visited,
-                where_clause,
+                filter,
+                rest,
+                sink,
                 store,
             )
         },
     )
+}
+
+/// The path a pattern walked: its start node, then each relationship in the
+/// order it was taken and the node it led to. The walk appends as it goes, so
+/// `visited_edges[from..]` are exactly this path's relationships (#1243).
+fn walked_path(store: &GraphStore, path_start: (NodeId, usize), visited_edges: &[crate::graph::EdgeId]) -> Value {
+    let (start, from) = path_start;
+    let edges: Vec<crate::graph::EdgeId> = visited_edges[from..].to_vec();
+    let mut nodes = Vec::with_capacity(edges.len() + 1);
+    let mut at = start;
+    nodes.push(at);
+    for &eid in &edges {
+        if let Some((source, target)) = store.get_edge_endpoints(eid) {
+            at = if source == at { target } else { source };
+        }
+        nodes.push(at);
+    }
+    Value::Path { nodes, edges }
 }
 
 /// Evaluate list comprehension: [x IN list WHERE cond | expr]
@@ -1692,7 +1838,16 @@ fn eval_reduce(
     Ok(acc)
 }
 
-/// Evaluate pattern comprehension: `[(a)-[:REL]->(b) | expr]`
+/// Evaluate a pattern comprehension: `[(a)-[:REL]->(b) WHERE cond | expr]`.
+///
+/// The pattern is matched by the walker EXISTS and COUNT use, and the
+/// projection is collected once per complete match (#1243). The comprehension
+/// used to have a walker of its own that expanded one hop per segment from the
+/// start node:
+/// - a multi-hop pattern lost every later variable ("Variable not found");
+/// - `*`, `*1..3` and `*3..3` were all one hop;
+/// - a target the row had already bound was rebound;
+/// - a named path held one relationship.
 fn eval_pattern_comprehension(
     pattern: &Pattern,
     filter: Option<&Expression>,
@@ -1701,103 +1856,10 @@ fn eval_pattern_comprehension(
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
     // `Vec<Value>`, not `Vec<PropertyValue>`: `[p = (n)-->() | p]` projects
-    // *paths*, and a `PropertyValue` cannot hold one (#662). An all-scalar
-    // comprehension is still returned as a `PropertyValue::Array` at the end,
-    // so nothing that consumed the old shape changes.
-    let mut results: Vec<Value> = Vec::new();
-
-    for path in &pattern.paths {
-        let start_var = path.start.variable.as_deref();
-        let start_labels = &path.start.labels;
-
-        // Get candidate start nodes
-        let start_node_ids: Vec<NodeId> = if let Some(var) = start_var {
-            if let Some(val) = record.get(var) {
-                match val {
-                    Value::NodeRef(id) | Value::Node(id, _) => vec![*id],
-                    _ => vec![],
-                }
-            } else if let Some(first_label) = start_labels.first() {
-                store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-            } else {
-                store.all_nodes().iter().map(|n| n.id).collect()
-            }
-        } else if let Some(first_label) = start_labels.first() {
-            store.get_nodes_by_label(first_label).iter().map(|n| n.id).collect()
-        } else {
-            store.all_nodes().iter().map(|n| n.id).collect()
-        };
-
-        for node_id in &start_node_ids {
-            let node = match store.get_node(*node_id) {
-                Some(n) => n,
-                None => continue,
-            };
-            let has_all_labels = start_labels.iter().all(|l| node.labels.contains(l));
-            if !has_all_labels { continue; }
-
-            if path.segments.is_empty() {
-                let mut temp_record = record.clone();
-                if let Some(var) = start_var {
-                    temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
-                }
-                if let Some(f) = filter {
-                    let cond = eval_expression(f, &temp_record, store)?;
-                    if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
-                }
-                results.push(eval_expression(projection, &temp_record, store)?);
-            } else {
-                // One-hop traversal for pattern comprehension
-                for segment in &path.segments {
-                    let edge_types: Vec<&str> = segment.edge.types.iter().map(|t| t.as_str()).collect();
-                    let edges = match segment.edge.direction {
-                        Direction::Outgoing => store.get_outgoing_edges(*node_id),
-                        Direction::Incoming => store.get_incoming_edges(*node_id),
-                        Direction::Both => {
-                            let mut all = store.get_outgoing_edges(*node_id);
-                            all.extend(store.get_incoming_edges(*node_id));
-                            all
-                        }
-                    };
-                    for edge in &edges {
-                        if !edge_types.is_empty() && !edge_types.contains(&edge.edge_type.as_str()) {
-                            continue;
-                        }
-                        let target_id = if edge.source == *node_id { edge.target } else { edge.source };
-                        if !segment.node.labels.is_empty() {
-                            if let Some(target) = store.get_node(target_id) {
-                                let matches = segment.node.labels.iter().all(|l| target.labels.contains(l));
-                                if !matches { continue; }
-                            } else { continue; }
-                        }
-                        let mut temp_record = record.clone_with_capacity(2);
-                        if let Some(var) = start_var {
-                            temp_record.bind(var.to_string(), Value::NodeRef(*node_id));
-                        }
-                        if let Some(ref var) = segment.node.variable {
-                            temp_record.bind(var.clone(), Value::NodeRef(target_id));
-                        }
-                        if let Some(ref var) = segment.edge.variable {
-                            temp_record.bind(var.clone(), Value::EdgeRef(edge.id, edge.source, edge.target, edge.edge_type.clone()));
-                        }
-                        // `[p = (a)-->(b) | p]` — the named path, bound for the
-                        // projection to read.
-                        if let Some(ref pv) = path.path_variable {
-                            temp_record.bind(
-                                pv.clone(),
-                                Value::Path { nodes: vec![*node_id, target_id], edges: vec![edge.id] },
-                            );
-                        }
-                        if let Some(f) = filter {
-                            let cond = eval_expression(f, &temp_record, store)?;
-                            if !matches!(cond, Value::Property(PropertyValue::Boolean(true))) { continue; }
-                        }
-                        results.push(eval_expression(projection, &temp_record, store)?);
-                    }
-                }
-            }
-        }
-    }
+    // *paths*, and a `PropertyValue` cannot hold one (#662).
+    let out = std::cell::RefCell::new(Vec::new());
+    exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Collect { projection, out: &out }, store)?;
+    let results = out.into_inner();
 
     // Kept as a `PropertyValue::Array` when every element is a scalar, which
     // is what it always was; only a comprehension projecting entities needs
@@ -1846,6 +1908,11 @@ fn value_node_id(v: &Value) -> Option<NodeId> {
 /// `p.score = 7` matches a float 7.0 -- `IN` disagreed with `=` about whether
 /// an integer and a float can be equal.
 fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyValue> {
+    // `x IN null` is null, as any comparison with null is (TCK Null3 [4]).
+    // Null is not a list, so it raised "IN requires a list on the right".
+    if matches!(right, PropertyValue::Null) {
+        return Some(PropertyValue::Null);
+    }
     let items = right.as_list_items()?;
     let numeric = |p: &PropertyValue| -> Option<f64> {
         match p {
@@ -2504,7 +2571,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
-    "pagerank", "pagerank2", "percentilecont", "percentiledisc", "pi", "prank",
+    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "prank",
     "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
     "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
     "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
@@ -2732,13 +2799,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "substring" => {
             if args.len() < 2 { return Err(ExecutionError::bad_argument("substring() requires at least 2 arguments".to_string())); }
             let s = extract_string(&args[0])?;
-            let start = extract_int(&args[1])? as usize;
+            // A negative start or length is refused, as Neo4j does. Cast to
+            // usize it wrapped: `substring('abc', -1)` answered "" (#1241).
+            let start = extract_int(&args[1])?;
+            if start < 0 {
+                return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative start index: {start}")));
+            }
+            let start = start as usize;
             let chars: Vec<char> = s.chars().collect();
             if start >= chars.len() {
                 return Ok(Value::Property(PropertyValue::String(String::new())));
             }
             let result = if args.len() >= 3 {
-                let len = extract_int(&args[2])? as usize;
+                let len = extract_int(&args[2])?;
+                if len < 0 {
+                    return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative length: {len}")));
+                }
+                let len = len as usize;
                 chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
             } else {
                 chars[start..].iter().collect()
@@ -2747,12 +2824,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "left" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("left() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
         }
         "right" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("right() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
             Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
@@ -2779,7 +2864,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let s = match val {
                 Value::Property(PropertyValue::String(s)) => s.clone(),
                 Value::Property(PropertyValue::Integer(i)) => i.to_string(),
-                Value::Property(PropertyValue::Float(f)) => f.to_string(),
+                Value::Property(PropertyValue::Float(f)) => java_double_string(*f),
                 Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
                 Value::Property(PropertyValue::DateTime(millis)) => {
                     use chrono::TimeZone;
@@ -2966,6 +3051,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         // Type/meta functions
         "coalesce" => {
+            // Neo4j refuses `coalesce()` outright; answering null hid the typo (#1241).
+            if args.is_empty() {
+                return Err(ExecutionError::bad_argument("coalesce() requires at least one argument".to_string()));
+            }
             for arg in args {
                 if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
                     return Ok(arg.clone());
@@ -4403,6 +4492,51 @@ fn shift_temporal(
         (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
     };
 
+    // A date-time in a **named** zone has no single offset, so the shift
+    // cannot be done on the instant alone (#824). Calendar parts -- months and
+    // days -- move the local date-time, and the offset is then re-resolved from
+    // the zone at the new local time; the clock parts are exact and move the
+    // instant. That is java.time's split, which Neo4j follows:
+    //
+    //   2017-10-29T00:00+02:00[Europe/Stockholm] + P1D  = 2017-10-30T00:00+01:00
+    //   2017-10-29T00:00+02:00[Europe/Stockholm] + PT24H = 2017-10-29T23:00+01:00
+    //
+    // Shifting the instant and keeping the old offset gave
+    // 2017-10-30T00:00+02:00 -- an offset Stockholm does not have that day, so
+    // the value read one instant by its zone name and another by its offset.
+    if let PropertyValue::ZonedDateTime { secs, nanos: sub, offset_seconds, zone: Some(name) } = v {
+        if let Ok(crate::query::executor::temporal::TzSpec::Named(tz)) =
+            crate::query::executor::temporal::parse_timezone_spec(name)
+        {
+            const NS: i128 = 1_000_000_000;
+            const DAY: i128 = 86_400 * NS;
+            let local = (*secs as i128 + *offset_seconds as i128) * NS + *sub as i128;
+            let calendar = if drop_date_part { 0 } else { days as i128 * DAY };
+            let new_local = local + month_shift_nanos + calendar;
+            let spec = crate::query::executor::temporal::TzSpec::Named(tz);
+            let off = crate::query::executor::temporal::resolve_offset(
+                &spec,
+                new_local.div_euclid(DAY) as i64,
+                new_local.rem_euclid(DAY) as i64,
+            )?;
+            let instant = new_local - off as i128 * NS + seconds as i128 * NS + nanos as i128;
+            let utc = chrono::DateTime::from_timestamp(
+                instant.div_euclid(NS) as i64,
+                instant.rem_euclid(NS) as u32,
+            )
+            .ok_or_else(|| ExecutionError::RuntimeError("date-time out of range".into()))?
+            .naive_utc();
+            use chrono::{Offset as _, TimeZone as _};
+            let offset_now = tz.offset_from_utc_datetime(&utc).fix().local_minus_utc();
+            return Ok(PropertyValue::ZonedDateTime {
+                secs: instant.div_euclid(NS) as i64,
+                nanos: instant.rem_euclid(NS) as u32,
+                offset_seconds: offset_now,
+                zone: Some(name.clone()),
+            });
+        }
+    }
+
     let total = temporal_epoch_nanos(v)
         .ok_or_else(|| ExecutionError::TypeError("not a temporal value".to_string()))?
         + month_shift_nanos
@@ -4501,6 +4635,9 @@ fn temporal_difference_calendar(
     let (Some(da), Some(db)) = (da, db) else {
         return temporal_difference(a, b);
     };
+    if let Some(d) = named_zone_calendar_difference(a, b)? {
+        return Ok(d);
+    }
 
     // Within one month the calendar answer *is* the elapsed one, and the plain
     // form gives it in the shape the TCK wants: `PT6H`, not `P0M0DT6H`. Going
@@ -4611,6 +4748,94 @@ fn temporal_difference_calendar(
         seconds: nanos / 1_000_000_000,
         nanos: (nanos % 1_000_000_000) as i32,
     })
+}
+
+/// `duration.between` across an offset change in a named zone (#825).
+///
+/// java.time's rule, which Neo4j follows: months and days are counted on the
+/// local date-times, and the remainder is measured on the instant after
+/// adding them to the start with the offset re-resolved there. Counting days
+/// as 86,400 s of elapsed time made Stockholm's 25-hour 2017-10-29 `P1DT1H`,
+/// and `start + P1DT1H` is an hour past the end.
+///
+/// `None` -- the existing path -- unless one named zone is involved and its
+/// offset differs between the two ends. Where the offsets agree, local and
+/// elapsed time agree and so do the two answers; two fixed offsets stay
+/// elapsed time, as they do in Neo4j.
+fn named_zone_calendar_difference(
+    a: &PropertyValue,
+    b: &PropertyValue,
+) -> Result<Option<PropertyValue>, ExecutionError> {
+    use crate::query::executor::temporal::{resolve_offset, TzSpec};
+    use chrono::{Offset as _, TimeZone as _};
+    const NS: i128 = 1_000_000_000;
+    const DAY: i128 = 86_400 * NS;
+
+    let tz = match (zone_of(a), zone_of(b)) {
+        (Some(TzSpec::Named(x)), Some(TzSpec::Named(y))) if x == y => x,
+        (Some(TzSpec::Named(x)), None) | (None, Some(TzSpec::Named(x))) => x,
+        _ => return Ok(None),
+    };
+    let Some((na, nb)) = zone_aligned_instants(a, b) else {
+        return Ok(None);
+    };
+    let offset_at = |instant: i128| -> Option<i128> {
+        let secs = i64::try_from(instant.div_euclid(NS)).ok()?;
+        let utc = chrono::DateTime::from_timestamp(secs, 0)?.naive_utc();
+        Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc() as i128)
+    };
+    let (Some(oa), Some(ob)) = (offset_at(na), offset_at(nb)) else {
+        return Ok(None);
+    };
+    if oa == ob {
+        return Ok(None);
+    }
+
+    // The calendar count runs on the two ends as local date-times.
+    let (local_a, local_b) = (na + oa * NS, nb + ob * NS);
+    let as_local = |l: i128| -> Option<PropertyValue> {
+        Some(PropertyValue::LocalDateTime {
+            secs: i64::try_from(l.div_euclid(NS)).ok()?,
+            nanos: l.rem_euclid(NS) as u32,
+        })
+    };
+    let (Some(la), Some(lb)) = (as_local(local_a), as_local(local_b)) else {
+        return Ok(None);
+    };
+    let PropertyValue::Duration { months, days, seconds, nanos } =
+        temporal_difference_calendar(&la, &lb)?
+    else {
+        return Ok(None);
+    };
+
+    // start + months + days on the local calendar, then its offset.
+    let out_of_range = || ExecutionError::RuntimeError("date out of range".into());
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+    let start_date = epoch
+        .checked_add_signed(chrono::Duration::days(local_b.div_euclid(DAY) as i64))
+        .ok_or_else(out_of_range)?;
+    let mid_date = shift_months_clamped(start_date, months)?
+        .checked_add_signed(chrono::Duration::days(days))
+        .ok_or_else(out_of_range)?;
+    let mid_day = mid_date.signed_duration_since(epoch).num_days();
+    let mid_time = local_b.rem_euclid(DAY);
+    let mid_offset = match resolve_offset(&TzSpec::Named(tz), mid_day, mid_time as i64) {
+        Ok(o) => o as i128,
+        // A local time in a spring-forward gap does not exist. java.time moves
+        // it later by the gap, which is the offset from *before* the gap; the
+        // local time read with the later offset is an instant before it.
+        Err(_) => match offset_at(mid_day as i128 * DAY + mid_time - oa.max(ob) * NS) {
+            Some(o) => o,
+            None => return Ok(None),
+        },
+    };
+    let rem = seconds as i128 * NS + nanos as i128 - (oa - mid_offset) * NS;
+    Ok(Some(PropertyValue::Duration {
+        months,
+        days,
+        seconds: (rem / NS) as i64,
+        nanos: (rem % NS) as i32,
+    }))
 }
 
 /// Move a date by whole months, clamping the day into the target month —
@@ -5144,6 +5369,18 @@ pub trait PhysicalOperator: Send {
         false
     }
 
+    /// A soft form of `try_push_limit`: the consumer above will *probably*
+    /// stop after about `n` rows, but cannot promise it (#593).
+    ///
+    /// `DISTINCT ... LIMIT n` is the case. `Distinct` may drop any number of
+    /// duplicates, so it cannot tell a sort below that only `n` rows matter,
+    /// but it will usually stop soon after `n`. An operator may use this to do
+    /// less work up front, and must still produce every row if asked. Returns
+    /// whether some operator took the hint. Pass-through operators forward it.
+    fn hint_early_stop(&mut self, _n: usize) -> bool {
+        false
+    }
+
     /// Get the next batch of records (Vectorized Execution)
     /// Defaults to accumulating records from next()
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -5157,7 +5394,7 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -5173,7 +5410,7 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -5254,6 +5491,43 @@ pub struct OperatorDescription {
 }
 
 impl OperatorDescription {
+    /// A stable structural digest of the operator tree (TRUST-06).
+    ///
+    /// Covers operator names, their details and the child order -- what EXPLAIN
+    /// prints -- and nothing else: timings, costs and cardinality estimates are
+    /// not part of `describe`. The one data-dependent detail, a materialised
+    /// operator's "N rows", is normalised, so equal plans hash equally as the
+    /// data grows.
+    ///
+    /// FNV-1a, written out rather than `DefaultHasher`, whose algorithm the
+    /// standard library does not promise to keep across releases.
+    pub fn structural_hash(&self) -> u64 {
+        fn mix(mut h: u64, bytes: &[u8]) -> u64 {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        }
+        fn walk(d: &OperatorDescription, mut h: u64) -> u64 {
+            h = mix(h, d.name.as_bytes());
+            h = mix(h, &[0x1f]);
+            let details = d.details.trim();
+            let normalised = match details.strip_suffix(" rows") {
+                Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => "<n> rows",
+                _ => details,
+            };
+            h = mix(h, normalised.as_bytes());
+            h = mix(h, &[0x1e]);
+            h = mix(h, &(d.children.len() as u64).to_le_bytes());
+            for child in &d.children {
+                h = walk(child, h);
+            }
+            mix(h, &[0x1d])
+        }
+        walk(self, 0xcbf2_9ce4_8422_2325)
+    }
+
     /// Format the operator tree as a string
     pub fn format(&self, indent: usize) -> String {
         let mut result = String::new();
@@ -5567,7 +5841,8 @@ impl PhysicalOperator for NodeScanOperator {
 
         Ok(Some(RecordBatch {
             records,
-            columns: vec![self.variable.clone()]
+            columns: vec![self.variable.clone()],
+            plan_hash: None,
         }))
     }
 
@@ -5788,7 +6063,7 @@ impl PhysicalOperator for EdgeTypeCountOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -5993,7 +6268,10 @@ impl FilterOperator {
                     }
                     UnaryOp::Minus => {
                         match val {
-                            Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(-i))),
+                            Value::Property(PropertyValue::Integer(i)) => i
+                .checked_neg()
+                .map(|n| Value::Property(PropertyValue::Integer(n)))
+                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
                             Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
                             Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                             _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
@@ -6015,8 +6293,8 @@ impl FilterOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -6139,6 +6417,7 @@ impl PhysicalOperator for FilterOperator {
             Ok(Some(RecordBatch {
                 records: filtered_records,
                 columns: Vec::new(), // Filter doesn't change columns
+                plan_hash: None,
             }))
         }
     }
@@ -7022,6 +7301,7 @@ impl PhysicalOperator for ExpandOperator {
             Ok(Some(RecordBatch {
                 records: expanded_records,
                 columns: Vec::new(), // Columns determined by output variables
+                plan_hash: None,
             }))
         }
     }
@@ -7137,6 +7417,15 @@ pub struct VarLengthExpandOperator {
     /// friend" but "is *this one node* reachable from each friend", and those
     /// have very different costs.
     pinned_target: Option<NodeId>,
+    /// The node this row already binds the target variable to, if it does
+    /// (#1237). Set per input record by `expand_from_inner`.
+    ///
+    /// A pattern that names its target twice -- `(x)-[*]->(x)`, or a target an
+    /// earlier clause bound -- asks for walks that *end* there. The walk used
+    /// to rebind the variable to wherever each path stopped, so the second
+    /// `(x)` constrained nothing: `MATCH (x:N)-[:T*]->(x)` counted every `:T`
+    /// path of a graph with no `:T` cycle.
+    bound_end: Option<NodeId>,
     /// Nodes from which `pinned_target` is reachable within the hop bounds,
     /// computed once on first use.
     ///
@@ -7238,6 +7527,7 @@ impl VarLengthExpandOperator {
             selector: crate::query::ast::PathSelector::default(),
             type_ids: None,
             pinned_target: None,
+            bound_end: None,
             target_reach: None,
             enumerate_trails: false,
             target_props: Vec::new(),
@@ -7617,8 +7907,17 @@ impl VarLengthExpandOperator {
     ///
     /// Only valid when the destination really is that one node; the operator
     /// then answers "can this source reach it" rather than enumerating.
+    ///
+    /// Ignored when the operator enumerates trails. A pinned target answers
+    /// "can this source reach it" -- one row per source -- and that is sound
+    /// only when the query cannot count the paths. With trails enumerated,
+    /// `count(q)` over two paths to the pinned node answered 1 instead of 2.
+    /// Every setter that turns enumeration on also drops a pin, so the two are
+    /// never both set whatever order the planner calls them in.
     pub fn with_pinned_target(mut self, target: NodeId) -> Self {
-        self.pinned_target = Some(target);
+        if !self.enumerate_trails {
+            self.pinned_target = Some(target);
+        }
         self
     }
 
@@ -7633,6 +7932,7 @@ impl VarLengthExpandOperator {
         self.selector = selector;
         if selector != crate::query::ast::PathSelector::All {
             self.enumerate_trails = true;
+            self.pinned_target = None;
         }
         self
     }
@@ -7648,6 +7948,7 @@ impl VarLengthExpandOperator {
         self.restrictor = restrictor;
         if restrictor != crate::query::ast::PathRestrictor::Trail {
             self.enumerate_trails = true;
+            self.pinned_target = None;
         }
         self
     }
@@ -7664,6 +7965,7 @@ impl VarLengthExpandOperator {
 
     pub fn with_trail_enumeration(mut self) -> Self {
         self.enumerate_trails = true;
+        self.pinned_target = None;
         self
     }
 
@@ -8029,6 +8331,7 @@ impl VarLengthExpandOperator {
     }
 
     fn expand_from_inner(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        self.bound_end = None;
         // `MATCH (first)-[rs*]->(second)` where `rs` is *already bound* to a
         // list of relationships is not a search at all. openCypher reads it as
         // "the walk is exactly `rs`", so there is one candidate path and the
@@ -8050,6 +8353,15 @@ impl VarLengthExpandOperator {
         let source_id = source_val.node_id().ok_or_else(|| {
             ExecutionError::TypeError(format!("{} is not a node", self.source_var))
         })?;
+
+        // The target variable already bound on this row -- the pattern's own
+        // start in `(x)-[*]->(x)`, or an earlier clause's -- is where every
+        // match must end (#1237). `emit_ok` enforces it.
+        self.bound_end = record.get(&self.target_var).and_then(|v| v.node_id());
+        // Back to the start: the BFS marks the source visited and can never
+        // reach it again, so a cycle is only found by enumerating trails, which
+        // repeat nodes and not relationships.
+        let closes_on_source = self.bound_end == Some(source_id);
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
@@ -8145,14 +8457,14 @@ impl VarLengthExpandOperator {
         // here; `A(1,n)` is what `expand_trails` already computes, since its emit
         // test is `depth >= min_hops` and its first depth is 1. So the two halves
         // cannot diverge again: there is only one traversal.
-        if self.enumerate_trails && self.min_hops == 0 {
+        if (self.enumerate_trails || closes_on_source) && self.min_hops == 0 {
             if self.emit_ok(source_id, store) {
                 let empty = std::collections::HashMap::new();
                 self.buffer(record, source_id, &empty, source_id, store);
             }
             return self.expand_trails(record, source_id, store);
         }
-        if self.min_hops >= 2 || (self.enumerate_trails && self.min_hops >= 1) {
+        if self.min_hops >= 2 || ((self.enumerate_trails || closes_on_source) && self.min_hops >= 1) {
             return self.expand_trails(record, source_id, store);
         }
 
@@ -8210,6 +8522,12 @@ impl VarLengthExpandOperator {
 
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
+        // A target the row already binds: only that node ends a match (#1237).
+        if let Some(bound) = self.bound_end {
+            if node != bound {
+                return false;
+            }
+        }
         // Cheapest discriminator first: a plan-time set settles it without
         // touching the node at all.
         if let Some(ids) = &self.target_ids {
@@ -8439,17 +8757,183 @@ impl PhysicalOperator for VarLengthExpandOperator {
     }
 }
 
+/// The outer row a correlated `CALL { WITH ... }` subquery runs against
+/// (#1236). `CorrelatedCallOperator` puts each outer row in the cell; this
+/// yields it once per reset, so the body's plan starts from that row with the
+/// imported variables bound.
+pub struct SeedOperator {
+    cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    done: bool,
+}
+
+impl SeedOperator {
+    pub fn new(cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>) -> Self {
+        Self { cell, done: false }
+    }
+}
+
+impl PhysicalOperator for SeedOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+        let row = self
+            .cell
+            .lock()
+            .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))?
+            .clone();
+        Ok(row)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Seed".to_string(),
+            details: "the outer row of a CALL { WITH ... }".to_string(),
+            children: vec![],
+        }
+    }
+}
+
+/// `MATCH ... CALL { WITH a <body> } RETURN ...` (#1236). For each outer row,
+/// the body runs against that row and each row it returns is emitted joined to
+/// the outer one. A body that returns nothing drops the outer row, as Cypher's
+/// CALL does; a body that aggregates returns one row per outer row, so
+/// `RETURN count(q) AS c` answers 0 rather than dropping the row.
+pub struct CorrelatedCallOperator {
+    outer: OperatorBox,
+    body: OperatorBox,
+    seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    current: Option<Record>,
+}
+
+impl CorrelatedCallOperator {
+    pub fn new(
+        outer: OperatorBox,
+        body: OperatorBox,
+        seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    ) -> Self {
+        Self { outer, body, seed, current: None }
+    }
+}
+
+impl PhysicalOperator for CorrelatedCallOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(outer_row) = &self.current {
+                if let Some(inner) = self.body.next(store)? {
+                    let mut row = outer_row.clone();
+                    row.merge(inner);
+                    return Ok(Some(row));
+                }
+                self.current = None;
+            }
+            let Some(outer_row) = self.outer.next(store)? else {
+                return Ok(None);
+            };
+            *self
+                .seed
+                .lock()
+                .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))? =
+                Some(outer_row.clone());
+            self.body.reset();
+            self.current = Some(outer_row);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.body.reset();
+        self.current = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CorrelatedCall".to_string(),
+            details: "the subquery runs once per outer row".to_string(),
+            children: vec![self.outer.describe(), self.body.describe()],
+        }
+    }
+}
+
+/// `WHERE EXISTS { MATCH ... WITH ... RETURN ... }` (#1211). Each outer row is
+/// kept once when the subquery, run against that row, returns at least one
+/// row, or when it returns none if `negated`. A semi-join: the outer row is
+/// never repeated and nothing from the body is added to it. The body is pulled
+/// for one row only, since existence is all that is asked.
+pub struct SemiApplyOperator {
+    outer: OperatorBox,
+    body: OperatorBox,
+    seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    negated: bool,
+}
+
+impl SemiApplyOperator {
+    pub fn new(
+        outer: OperatorBox,
+        body: OperatorBox,
+        seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+        negated: bool,
+    ) -> Self {
+        Self { outer, body, seed, negated }
+    }
+}
+
+impl PhysicalOperator for SemiApplyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        while let Some(row) = self.outer.next(store)? {
+            *self
+                .seed
+                .lock()
+                .map_err(|_| ExecutionError::RuntimeError("an EXISTS { } seed was poisoned".to_string()))? =
+                Some(row.clone());
+            self.body.reset();
+            let found = self.body.next(store)?.is_some();
+            if found != self.negated {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.body.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: if self.negated { "AntiSemiApply" } else { "SemiApply" }.to_string(),
+            details: "the EXISTS { } subquery runs once per outer row".to_string(),
+            children: vec![self.outer.describe(), self.body.describe()],
+        }
+    }
+}
+
 /// Project operator: RETURN n.name, n.age
 pub struct ProjectOperator {
     /// Input operator
     input: OperatorBox,
-    /// Expressions to project
-    projections: Vec<(Expression, String)>, // (expr, alias)
+    /// Expressions to project, with their output names.
+    ///
+    /// The names are `Arc<str>` because `Record::bind` takes
+    /// `impl Into<Arc<str>>`: binding a `String` alias copied it and then built
+    /// an `Arc<str>` from the copy, two allocator calls per column per row
+    /// before the value was looked at (#612, as #564 was for Expand).
+    projections: Vec<(Expression, std::sync::Arc<str>)>,
 }
 
 impl ProjectOperator {
     /// Create a new project operator
     pub fn new(input: OperatorBox, projections: Vec<(Expression, String)>) -> Self {
+        let projections = projections
+            .into_iter()
+            .map(|(expr, alias)| (expr, std::sync::Arc::from(alias)))
+            .collect();
         Self { input, projections }
     }
 
@@ -8520,8 +9004,8 @@ impl ProjectOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -8557,7 +9041,7 @@ impl PhysicalOperator for ProjectOperator {
 
             for (expr, alias) in &self.projections {
                 let value = self.evaluate_expression(expr, &record, store)?;
-                new_record.bind(alias.clone(), value);
+                new_record.bind(std::sync::Arc::clone(alias), value);
             }
 
             Ok(Some(new_record))
@@ -8571,16 +9055,20 @@ impl PhysicalOperator for ProjectOperator {
         self.input.try_push_limit(n)
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n)
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if let Some(batch) = self.input.next_batch(store, batch_size)? {
             let mut projected_records = Vec::with_capacity(batch.records.len());
-            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.clone()).collect();
+            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.to_string()).collect();
 
             for record in batch.records {
                 let mut new_record = Record::new();
                 for (expr, alias) in &self.projections {
                     let value = self.evaluate_expression(expr, &record, store)?;
-                    new_record.bind(alias.clone(), value);
+                    new_record.bind(std::sync::Arc::clone(alias), value);
                 }
                 projected_records.push(new_record);
             }
@@ -8588,6 +9076,7 @@ impl PhysicalOperator for ProjectOperator {
             Ok(Some(RecordBatch {
                 records: projected_records,
                 columns,
+                plan_hash: None,
             }))
         } else {
             Ok(None)
@@ -8599,7 +9088,7 @@ impl PhysicalOperator for ProjectOperator {
             let mut new_record = Record::new();
             for (expr, alias) in &self.projections {
                 let value = self.evaluate_expression(expr, &record, store)?;
-                new_record.bind(alias.clone(), value);
+                new_record.bind(std::sync::Arc::clone(alias), value);
             }
             Ok(Some(new_record))
         } else {
@@ -8614,7 +9103,7 @@ impl PhysicalOperator for ProjectOperator {
     fn describe(&self) -> OperatorDescription {
         let cols: Vec<String> = self.projections.iter().map(|(e, a)| {
             let expr_str = format_expression(e);
-            if expr_str == *a { a.clone() } else { format!("{} AS {}", expr_str, a) }
+            if expr_str == **a { a.to_string() } else { format!("{} AS {}", expr_str, a) }
         }).collect();
         OperatorDescription {
             name: "Project".to_string(),
@@ -9106,20 +9595,29 @@ pub struct AggregateOperator {
     input: OperatorBox,
     group_by: Vec<(Expression, String)>, // (expr, alias)
     aggregates: Vec<AggregateFunction>,
+    /// The output names of `group_by` and `aggregates`, shared. Binding the
+    /// `String` aliases cost two allocator calls per output column per group:
+    /// a copy, then an `Arc<str>` built from it (#612, as #564 for Expand).
+    group_names: Vec<std::sync::Arc<str>>,
+    agg_names: Vec<std::sync::Arc<str>>,
     results: std::vec::IntoIter<Record>,
     executed: bool,
 }
 
 impl AggregateOperator {
     pub fn new(
-        input: OperatorBox, 
-        group_by: Vec<(Expression, String)>, 
+        input: OperatorBox,
+        group_by: Vec<(Expression, String)>,
         aggregates: Vec<AggregateFunction>
     ) -> Self {
+        let group_names = group_by.iter().map(|(_, a)| std::sync::Arc::from(a.as_str())).collect();
+        let agg_names = aggregates.iter().map(|a| std::sync::Arc::from(a.alias.as_str())).collect();
         Self {
             input,
             group_by,
             aggregates,
+            group_names,
+            agg_names,
             results: Vec::new().into_iter(),
             executed: false,
         }
@@ -9169,8 +9667,8 @@ impl AggregateOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -9251,7 +9749,7 @@ impl PhysicalOperator for AggregateOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![] }))
+            Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None }))
         }
     }
 
@@ -9272,7 +9770,7 @@ impl PhysicalOperator for AggregateOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -9489,9 +9987,10 @@ impl AggregateOperator {
         // alone is enough to evaluate them.
         let mut merged: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::with_capacity_and_hasher(groups.len(), Default::default());
+        let var_name: std::sync::Arc<str> = std::sync::Arc::from(var);
         for (key, states) in groups {
             let mut probe = Record::new();
-            probe.bind(var.to_string(), key.probe_value(store));
+            probe.bind(std::sync::Arc::clone(&var_name), key.probe_value(store));
             let mut tuple = Vec::with_capacity(self.group_by.len());
             for (expr, _) in &self.group_by {
                 tuple.push(Self::evaluate_expression(expr, &probe, store)?);
@@ -9511,11 +10010,11 @@ impl AggregateOperator {
         let mut output_records = Vec::with_capacity(merged.len());
         for (tuple, states) in merged {
             let mut record = Record::new();
-            for (i, (_, alias)) in self.group_by.iter().enumerate() {
-                record.bind(alias.clone(), tuple[i].clone());
+            for (i, name) in self.group_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), tuple[i].clone());
             }
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -9596,11 +10095,11 @@ impl AggregateOperator {
         let mut output_records = Vec::new();
         for (key, states) in groups {
             let mut record = Record::new();
-            for (i, (_, alias)) in self.group_by.iter().enumerate() {
-                record.bind(alias.clone(), key[i].clone());
+            for (i, name) in self.group_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), key[i].clone());
             }
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -9651,13 +10150,13 @@ impl AggregateOperator {
             }
         }
 
-        let group_alias = &self.group_by[0].1;
+        let group_name = &self.group_names[0];
         let mut output_records = Vec::new();
         for (key, states) in groups {
             let mut record = Record::new();
-            record.bind(group_alias.clone(), key);
-            for (i, agg) in self.aggregates.iter().enumerate() {
-                record.bind(agg.alias.clone(), states[i].result());
+            record.bind(std::sync::Arc::clone(group_name), key);
+            for (i, name) in self.agg_names.iter().enumerate() {
+                record.bind(std::sync::Arc::clone(name), states[i].result());
             }
             output_records.push(record);
         }
@@ -9705,8 +10204,8 @@ impl AggregateOperator {
         }
 
         let mut record = Record::new();
-        for (i, agg) in self.aggregates.iter().enumerate() {
-            record.bind(agg.alias.clone(), states[i].result());
+        for (i, name) in self.agg_names.iter().enumerate() {
+            record.bind(std::sync::Arc::clone(name), states[i].result());
         }
         self.results = vec![record].into_iter();
         self.executed = true;
@@ -10338,6 +10837,10 @@ impl PhysicalOperator for LimitOperator {
         self.input.try_push_limit(effective)
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(self.limit.min(n))
+    }
+
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if self.count >= self.limit {
             return Ok(None);
@@ -10399,6 +10902,13 @@ impl<'s> SortKey<'s> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Key comparisons made by `SortOperator`, for tests that pin how much of
+    /// its input a bounded or early-stopping sort actually orders.
+    static SORT_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub struct SortOperator {
     input: OperatorBox,
     sort_items: Vec<(Expression, bool)>, // (expr, ascending)
@@ -10413,6 +10923,13 @@ pub struct SortOperator {
     /// be read, so the rest are discarded as they arrive instead of being
     /// sorted and then thrown away (#518).
     limit_hint: Option<usize>,
+    /// A soft bound from `hint_early_stop`: the consumer will probably stop
+    /// after about this many rows but may not (a `Distinct` above, #593). Only
+    /// a head of the rows is ordered up front; see `execute_all`.
+    soft_hint: Option<usize>,
+    /// `records[..sorted_upto]` are in final order. The rest are in input
+    /// order until `sort_tail` runs, which happens only if a read gets there.
+    sorted_upto: usize,
 }
 
 impl SortOperator {
@@ -10424,43 +10941,26 @@ impl SortOperator {
             current: 0,
             executed: false,
             limit_hint: None,
+            soft_hint: None,
+            sorted_upto: 0,
         }
     }
 
-    /// The sort key for one record: each `ORDER BY` expression evaluated once.
+    /// The sort key for one record: each `ORDER BY` expression evaluated once
+    /// (#518), each `x.prop` key through a cursor that located its column once
+    /// (#557).
     ///
-    /// This is the whole of the fix in #518. The comparator used to evaluate
-    /// both sides' expressions on **every comparison**, so a sort of n rows
-    /// performed ~2·n·log₂(n) evaluations rather than n. On LDBC IC9 that was
-    /// 389,461 rows -> ~14.5 million property resolutions where 389,461 would
-    /// do, and `Sort` was 68.6% of the query.
-    fn key_of(&self, record: &Record, store: &GraphStore) -> Vec<Value> {
-        self.sort_items
-            .iter()
-            .map(|(expr, _)| {
-                // Errors are folded to Null, which is what the comparator did
-                // before and what ORDER BY over a missing property means.
-                //
-                // The key is a `Value`, not a `PropertyValue`: going through
-                // `as_property()` turned every node, relationship and path
-                // into `Null` and sorted them all together at the end (#917).
-                Self::evaluate_expression(expr, record, store).unwrap_or(Value::Null)
-            })
-            .collect()
-    }
-
-    /// `key_of`, but reading each `x.prop` key through a cursor that located
-    /// its column once (#557).
-    ///
-    /// Only plain property expressions take the cursor; anything else -- an
-    /// arithmetic expression, a function call -- falls back to `key_of`'s
-    /// walker, and produces the same value either way.
+    /// An evaluation error is returned, not folded to `Null`. Folding made every
+    /// key compare equal, so a failing key sorted by nothing and the rows came
+    /// back in input order -- right count, right contents, wrong answer, no
+    /// error (#987). A *missing* property is not an error: it evaluates to
+    /// null, which is what `ORDER BY` over an absent value means.
     fn key_of_cached<'s>(
         readers: &mut [PropertyCursor],
         sort_items: &[(Expression, bool)],
         record: &Record,
         store: &'s GraphStore,
-    ) -> SortKey<'s> {
+    ) -> ExecutionResult<SortKey<'s>> {
         let n = sort_items.len();
         let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
         let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
@@ -10476,7 +10976,7 @@ impl SortOperator {
                         None => KeyPart::Value(Value::Property(c.read(record, store))),
                     }
                 }
-                other => KeyPart::Value(Self::evaluate_expression(other, record, store).unwrap_or(Value::Null)),
+                other => KeyPart::Value(Self::evaluate_expression(other, record, store)?),
             };
             if n <= 2 {
                 inline[i] = value;
@@ -10484,11 +10984,11 @@ impl SortOperator {
                 heap.push(value);
             }
         }
-        if n <= 2 {
+        Ok(if n <= 2 {
             SortKey::Inline(inline, n)
         } else {
             SortKey::Heap(heap)
-        }
+        })
     }
 
     /// Two key parts, in Cypher's order: `cypher_order_value` on values, and on
@@ -10523,6 +11023,8 @@ impl SortOperator {
 
     /// Compare two precomputed keys under the per-column sort directions.
     fn cmp_keys(a: &[KeyPart<'_>], b: &[KeyPart<'_>], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+        #[cfg(test)]
+        SORT_COMPARISONS.with(|c| c.set(c.get() + 1));
         for (i, (_, ascending)) in items.iter().enumerate() {
             let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
                 continue;
@@ -10608,8 +11110,8 @@ impl SortOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -10656,9 +11158,19 @@ impl PhysicalOperator for SortOperator {
         true
     }
 
+    /// Taken as a reason to order only a head of the rows up front (see
+    /// `execute_all`). Every row is still produced, in the same order.
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.soft_hint = Some(self.soft_hint.map_or(n, |s| s.min(n)));
+        true
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+        }
+        if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
+            self.sort_tail(store)?;
         }
 
         if self.current >= self.records.len() {
@@ -10691,6 +11203,9 @@ impl PhysicalOperator for SortOperator {
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
         }
+        if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
+            self.sort_tail(store)?;
+        }
 
         if self.current >= self.records.len() {
             return Ok(None);
@@ -10713,20 +11228,25 @@ impl PhysicalOperator for SortOperator {
             return Ok(None);
         }
 
+        if self.sorted_upto < self.records.len() && self.current + batch_size > self.sorted_upto {
+            self.sort_tail(store)?;
+        }
         let end = (self.current + batch_size).min(self.records.len());
         let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
         self.current = end;
 
-        Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+        Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
     }
 
     fn reset(&mut self) {
         self.input.reset();
         self.records.clear();
         self.current = 0;
+        self.sorted_upto = 0;
         self.executed = false;
-        // `limit_hint` is deliberately kept: it is a property of the plan the
-        // planner built, not state from a previous execution.
+        // `limit_hint` and `soft_hint` are deliberately kept: they are
+        // properties of the plan the planner built, not state from a previous
+        // execution.
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -10769,11 +11289,58 @@ impl SortOperator {
             })
             .collect();
 
+        // Without a LIMIT reaching this operator, every row is sorted. The rows
+        // and their keys stay where they are and only 4-byte row indices are
+        // sorted, compared through the keys; the index breaks ties, so the
+        // order is stable and deterministic. Sorting (key, record) pairs moved
+        // each pair at every merge step, and once the key was held inline
+        // (#750) a pair was ~130 bytes: LDBC IC9 fully sorts ~467k rows (its
+        // LIMIT sits above a DISTINCT), and its sort went 131 -> 200 ms.
+        if bound.is_none() {
+            let mut keys: Vec<SortKey<'_>> = Vec::new();
+            let mut rows: Vec<Record> = Vec::new();
+            while let Some(batch) = self.input.next_batch(store, batch_size)? {
+                keys.reserve(batch.records.len());
+                rows.reserve(batch.records.len());
+                for record in batch.records {
+                    keys.push(Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?);
+                    rows.push(record);
+                }
+            }
+            let sort_items = &self.sort_items;
+            let cmp = |a: &u32, b: &u32| {
+                Self::cmp_keys(keys[*a as usize].as_slice(), keys[*b as usize].as_slice(), sort_items)
+                    .then(a.cmp(b))
+            };
+            let mut order: Vec<u32> = (0..keys.len() as u32).collect();
+            // With an early-stopping consumer above -- `DISTINCT ... ORDER BY ...
+            // LIMIT k`, whose limit cannot pass the Distinct (#522) -- order only
+            // a head: the `head` smallest rows, in exactly the (key, index) order
+            // the full sort gives, found by an O(n) partition. The rest stay in
+            // input order, and `sort_tail` orders them only if a read gets that
+            // far (#593). LDBC IC9 at SF1 sorted 467,427 rows to return 20.
+            let head = self
+                .soft_hint
+                .map(|k| k.saturating_mul(4).max(1024))
+                .filter(|&h| h < order.len());
+            if let Some(h) = head {
+                order.select_nth_unstable_by(h - 1, cmp);
+                order[..h].sort_unstable_by(cmp);
+                order[h..].sort_unstable();
+            } else {
+                order.sort_unstable_by(cmp);
+            }
+            self.records = order.iter().map(|&i| std::mem::take(&mut rows[i as usize])).collect();
+            self.sorted_upto = head.unwrap_or(self.records.len());
+            self.executed = true;
+            return Ok(());
+        }
+
         let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
             for record in batch.records {
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store);
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
                 keyed.push((key, record));
             }
             if let (Some(k), Some(threshold)) = (bound, trim_at) {
@@ -10790,12 +11357,145 @@ impl SortOperator {
         keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
 
         self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.sorted_upto = self.records.len();
         self.executed = true;
+        Ok(())
+    }
+
+    /// One cursor per property-valued sort key, in key order.
+    fn cursors(sort_items: &[(Expression, bool)]) -> Vec<PropertyCursor> {
+        sort_items
+            .iter()
+            .filter_map(|(expr, _)| match expr {
+                Expression::Property { variable, property } => {
+                    Some(PropertyCursor::new(variable.as_str(), property.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Order the rows past `sorted_upto`, which an early-stopping sort left in
+    /// input order because nothing was expected to read them.
+    ///
+    /// The tail is in ascending input order, so a stable sort by key alone
+    /// breaks ties by input index -- the same total order the full sort uses.
+    /// The output is therefore row for row what it would have been had every
+    /// row been sorted up front.
+    fn sort_tail(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let start = self.sorted_upto;
+        let mut readers = Self::cursors(&self.sort_items);
+        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::with_capacity(self.records.len() - start);
+        for slot in self.records[start..].iter_mut() {
+            let record = std::mem::take(slot);
+            let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
+            keyed.push((key, record));
+        }
+        let sort_items = &self.sort_items;
+        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        for (slot, (_, record)) in self.records[start..].iter_mut().zip(keyed) {
+            *slot = record;
+        }
+        self.sorted_upto = self.records.len();
         Ok(())
     }
 }
 
 /// Index scan operator: MATCH (n:Person) WHERE n.id = 1
+/// A batch lookup: for each input row, evaluate `key`, look it up in the
+/// `label.property` index, and emit the row once per node found with
+/// `variable` bound (#1219).
+///
+/// `UNWIND $rows AS r MATCH (n:N) WHERE n.id = r.id` otherwise joins every
+/// row against a scan of the whole label and filters: on 200,000 nodes, 1,000
+/// rows took 63 s where 1,000 single index lookups took 10 ms. A null key
+/// matches nothing, as `n.id = null` does. Values are matched as the index
+/// stores them, exactly as the literal `IndexScanOperator` matches them.
+pub struct CorrelatedIndexLookupOperator {
+    input: OperatorBox,
+    variable: String,
+    label: Label,
+    property: String,
+    key: Expression,
+    pending: Option<(Record, Vec<NodeId>, usize)>,
+}
+
+impl CorrelatedIndexLookupOperator {
+    pub fn new(input: OperatorBox, variable: String, label: Label, property: String, key: Expression) -> Self {
+        Self { input, variable, label, property, key, pending: None }
+    }
+
+    /// The next output row from the pending input row, if it has one left.
+    fn drain_pending(&mut self, store: &GraphStore) -> Option<Record> {
+        let (row, ids, pos) = self.pending.as_mut()?;
+        while *pos < ids.len() {
+            let id = ids[*pos];
+            *pos += 1;
+            if store.has_node(id) {
+                let mut out = row.clone();
+                out.bind(self.variable.clone(), Value::NodeRef(id));
+                return Some(out);
+            }
+        }
+        self.pending = None;
+        None
+    }
+
+    fn probe(&self, row: &Record, store: &GraphStore) -> ExecutionResult<Vec<NodeId>> {
+        Ok(match eval_expression(&self.key, row, store)? {
+            Value::Property(PropertyValue::Null) | Value::Null => Vec::new(),
+            Value::Property(v) => match store.property_index.get_index(&self.label, &self.property) {
+                Some(index) => index.read().unwrap().get(&v),
+                None => Vec::new(),
+            },
+            // A node, relationship or list is never equal to a stored
+            // property value.
+            _ => Vec::new(),
+        })
+    }
+}
+
+impl PhysicalOperator for CorrelatedIndexLookupOperator {
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(out) = self.drain_pending(store) {
+                return Ok(Some(out));
+            }
+            let Some(row) = self.input.next(store)? else { return Ok(None) };
+            let ids = self.probe(&row, store)?;
+            self.pending = Some((row, ids, 0));
+        }
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(out) = self.drain_pending(store) {
+                return Ok(Some(out));
+            }
+            let Some(row) = self.input.next_mut(store, tenant_id)? else { return Ok(None) };
+            let ids = self.probe(&row, store)?;
+            self.pending = Some((row, ids, 0));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.pending = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CorrelatedIndexLookup".to_string(),
+            details: format!("{}:{:?}.{} = <per row>", self.variable, self.label, self.property),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
 pub struct IndexScanOperator {
     variable: String,
     label: Label,
@@ -10894,7 +11594,7 @@ impl PhysicalOperator for IndexScanOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] }))
+            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None }))
         }
     }
 
@@ -11118,7 +11818,7 @@ impl PhysicalOperator for CartesianProductOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -11313,7 +12013,7 @@ impl PhysicalOperator for JoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -11546,7 +12246,7 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -11636,21 +12336,25 @@ impl PhysicalOperator for CreateNodeOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
+            // The nodes this CREATE has made so far, by variable. A later element may
+            // read an earlier one -- `CREATE (a {id: 0}), (:B {ref: a.id})` -- and
+            // evaluating against an empty row made that an error (TCK With2 [1],
+            // WithSkipLimit1 [1], WithSkipLimit2 [2]).
+            let mut scope = Record::new();
             for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
                 // The whole label set at once, which for `CREATE ({...})` is
                 // empty. Passing a "primary" label meant an unlabelled node was
                 // created with `Label("")` (#625).
                 let node_id = store.create_node_with_labels(labels.iter().cloned());
 
-                // A CREATE with no input row has nothing bound, so a non-literal value can
-                // only be a constant (`{n: 1 + 2}`). Anything referring to a variable is an
-                // error rather than a silent null -- quietly storing nothing for a property
-                // is the failure this change exists to remove.
+                // With no input row, only the nodes this CREATE has made so far are
+                // bound. Anything else a value refers to is an error rather than a
+                // silent null -- quietly storing nothing for a property is the failure
+                // this check exists to remove.
                 let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                 if let Some(exprs) = property_exprs {
-                    let empty = Record::new();
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &empty, store).ok().as_ref().and_then(storable_property) {
+                        match eval_expression(expr, &scope, store).ok().as_ref().and_then(storable_property) {
                             Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
@@ -11674,6 +12378,9 @@ impl PhysicalOperator for CreateNodeOperator {
                     }
                 }
 
+                if let Some(v) = variable {
+                    scope.bind(v.clone(), Value::NodeRef(node_id));
+                }
                 self.created_nodes.push((node_id, variable.clone()));
             }
             self.executed = true;
@@ -12112,6 +12819,21 @@ impl PhysicalOperator for DistinctOperator {
             }
         }
         Ok(None)
+    }
+
+    /// A limit above cannot become a limit below: `Distinct` may drop any
+    /// number of duplicates, so `n` rows in is not `n` rows out, and refusing
+    /// is what keeps #522's semantics. It does make early stopping likely, and
+    /// says so to the operator below. That lets the sort under `DISTINCT ...
+    /// ORDER BY ... LIMIT k` order a head of its rows instead of all of them
+    /// (#593).
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n);
+        false
+    }
+
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n)
     }
 
     fn reset(&mut self) {
@@ -12675,10 +13397,15 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 // never set (#831).
                 let mut evaluated: Vec<(String, PropertyValue)> = Vec::new();
                 if let Some(exprs) = exprs {
-                    let empty = Record::new();
+                    // The nodes this CREATE made are bound, so `-[:R {w: a.id}]->`
+                    // reads `a` as a later node pattern does.
+                    let mut scope = Record::new();
+                    for (var, id) in &self.var_to_node_id {
+                        scope.bind(var.clone(), Value::NodeRef(*id));
+                    }
                     for (key, expr) in exprs {
                         if let Some(pv) =
-                            storable_property(&eval_expression(expr, &empty, store)?)
+                            storable_property(&eval_expression(expr, &scope, store)?)
                         {
                             evaluated.push((key.clone(), pv));
                         }
@@ -14848,6 +15575,108 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
+    ///
+    /// Principal component analysis over numeric node properties: one row per
+    /// node, `projection` its coordinates on the first `nComponents` components
+    /// (default 2). The algorithm lived in the algorithms crate and the SDK, and
+    /// Cypher refused it as an unknown algorithm (#1022).
+    ///
+    /// Features are read through `node_property` -- the column first -- so a
+    /// graph restored from a snapshot, whose nodes carry no row copy, reads its
+    /// real values. An integer or a float is its value; anything else, or an
+    /// absent property, is 0.0, as in the SDK. Rows are in node-id order.
+    fn execute_pca(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let empty = Record::new();
+        let arg = |i: usize| -> ExecutionResult<Option<Value>> {
+            match self.args.get(i) {
+                Some(e) => eval_expression(e, &empty, store).map(Some),
+                None => Ok(None),
+            }
+        };
+        let label = match arg(0)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => None,
+            Some(Value::Property(PropertyValue::String(s))) => Some(s),
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: the label must be a string or null, got {other:?}"
+                )))
+            }
+        };
+        let name_of = |v: Value| -> ExecutionResult<String> {
+            match v {
+                Value::Property(PropertyValue::String(s)) => Ok(s),
+                other => Err(ExecutionError::TypeError(format!(
+                    "algo.pca: property names must be strings, got {other:?}"
+                ))),
+            }
+        };
+        let properties: Vec<String> = match arg(1)? {
+            Some(Value::List(items)) => items.into_iter().map(name_of).collect::<ExecutionResult<_>>()?,
+            Some(Value::Property(PropertyValue::Array(items))) => items
+                .into_iter()
+                .map(|p| name_of(Value::Property(p)))
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(ExecutionError::RuntimeError(
+                    "algo.pca requires a list of property names: CALL algo.pca('Label', ['a', 'b'], 2)"
+                        .to_string(),
+                ))
+            }
+        };
+        if properties.is_empty() {
+            return Err(ExecutionError::RuntimeError(
+                "algo.pca needs at least one property".to_string(),
+            ));
+        }
+        let mut config = crate::algo::PcaConfig::default();
+        match arg(2)? {
+            None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => {}
+            Some(Value::Property(PropertyValue::Integer(k))) if k >= 1 => config.n_components = k as usize,
+            Some(other) => {
+                return Err(ExecutionError::TypeError(format!(
+                    "algo.pca: nComponents must be a positive integer, got {other:?}"
+                )))
+            }
+        }
+
+        let mut ids: Vec<NodeId> = match &label {
+            Some(l) => store.get_nodes_by_label(&Label::new(l.as_str())).into_iter().map(|n| n.id).collect(),
+            None => store.all_nodes().into_iter().map(|n| n.id).collect(),
+        };
+        ids.sort_unstable_by_key(|id| id.as_u64());
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Vec<f64>> = ids
+            .iter()
+            .map(|&id| {
+                properties
+                    .iter()
+                    .map(|p| match store.node_property(id, p) {
+                        Some(PropertyValue::Integer(v)) => v as f64,
+                        Some(PropertyValue::Float(v)) => v,
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let result = crate::algo::pca(&data, config);
+        let projections = result.transform(&data);
+        for (id, projection) in ids.iter().zip(projections) {
+            if let Some(node) = store.get_node(*id) {
+                let mut record = Record::new();
+                record.bind("node".to_string(), Value::Node(*id, Box::new(node.clone())));
+                record.bind(
+                    "projection".to_string(),
+                    Value::List(projection.into_iter().map(|x| Value::Property(PropertyValue::Float(x))).collect()),
+                );
+                self.results.push(record);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -15191,6 +16020,10 @@ impl AlgorithmOperator {
                 | "trianglecount"
                 | "cdlp"
                 | "lcc"
+                // Principal component analysis over numeric node properties
+                // (#1022): in the algorithms crate and the SDK, and refused
+                // here as unknown.
+                | "pca"
                 | "or.solve"
                 // The four causal/temporal primitives (ALGO-15). Reachability
                 // in a temporal graph is not transitive -- an edge that fired
@@ -15293,6 +16126,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 "temporalreachability" => self.execute_temporal_reachability(store, false)?,
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
@@ -15380,6 +16214,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "trianglecount" => self.execute_triangle_count(store)?,
                 "cdlp" => self.execute_cdlp(store)?,
                 "lcc" => self.execute_lcc(store)?,
+                "pca" => self.execute_pca(store)?,
                 // The four temporal primitives read the graph and do not write
                 // it, so they run here exactly as they do on the read path.
                 // Adding them to `next` alone left every one of them
@@ -15496,6 +16331,10 @@ impl PhysicalOperator for SkipOperator {
         self.input.try_push_limit(n.saturating_add(self.skip))
     }
 
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.input.hint_early_stop(n.saturating_add(self.skip))
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while self.skipped < self.skip {
             if self.input.next(store)?.is_some() {
@@ -15552,7 +16391,7 @@ impl PhysicalOperator for SkipOperator {
             if records.is_empty() {
                 continue;
             }
-            return Ok(Some(RecordBatch { records, columns: batch.columns }));
+            return Ok(Some(RecordBatch { records, columns: batch.columns, plan_hash: None }));
         }
     }
 
@@ -16201,7 +17040,7 @@ impl PhysicalOperator for UnwindOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -16555,6 +17394,37 @@ impl MergeOperator {
         }
     }
 
+    /// Candidate nodes from the property index: when one of `labels` is indexed
+    /// on one of `props`, the ids the index holds for that value; `None` when
+    /// no index applies, and the caller scans as before.
+    ///
+    /// Candidates still pass `node_matches`, whose equality is the index's own
+    /// (`PropertyValue`'s), so the result is the scan's without the scan. A
+    /// batch upsert -- `UNWIND $rows AS r MERGE (n:N {id: r.id})` -- scanned
+    /// the whole label for every row: 27.5 ms per row on 200,000 nodes.
+    fn index_candidates(
+        store: &GraphStore,
+        labels: &[Label],
+        props: Option<&HashMap<String, PropertyValue>>,
+    ) -> Option<Vec<NodeId>> {
+        let props = props?;
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        for label in labels {
+            for key in &keys {
+                let value = &props[*key];
+                if matches!(value, PropertyValue::Null) {
+                    continue;
+                }
+                if let Some(index) = store.property_index.get_index(label, key) {
+                    return Some(index.read().unwrap().get(value));
+                }
+            }
+        }
+        None
+    }
+
+
     /// MERGE over a pattern that contains relationships: find the whole pattern or create
     /// the whole pattern.
     ///
@@ -16658,6 +17528,17 @@ impl MergeOperator {
                 continue;
             }
             let mut ids = Vec::new();
+            if let Some(hits) = Self::index_candidates(store, &np.labels, node_props[i].as_ref()) {
+                for id in hits {
+                    if let Some(node) = store.get_node(id) {
+                        if Self::node_matches(store, node, &np.labels, node_props[i].as_ref()) {
+                            ids.push(node.id);
+                        }
+                    }
+                }
+                candidates.push(ids);
+                continue;
+            }
             match np.labels.first() {
                 Some(first_label) => {
                     for node in store.get_nodes_by_label(first_label) {
@@ -17004,9 +17885,12 @@ impl PhysicalOperator for MergeOperator {
             // node.
             Some(id) => vec![id],
             None => {
-                let candidates: Vec<&crate::graph::Node> = match labels.first() {
-                    Some(first_label) => store.get_nodes_by_label(first_label),
-                    None => store.all_nodes(),
+                let candidates: Vec<&crate::graph::Node> = match Self::index_candidates(store, labels, props) {
+                    Some(hits) => hits.into_iter().filter_map(|id| store.get_node(id)).collect(),
+                    None => match labels.first() {
+                        Some(first_label) => store.get_nodes_by_label(first_label),
+                        None => store.all_nodes(),
+                    },
                 };
                 candidates
                     .into_iter()
@@ -17096,7 +17980,7 @@ impl PhysicalOperator for MergeOperator {
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17104,13 +17988,22 @@ impl PhysicalOperator for MergeOperator {
     }
 }
 
-/// FOREACH operator: FOREACH (x IN list | SET x.prop = val)
+/// FOREACH operator: `FOREACH (x IN list | <updating clauses>)`.
+///
+/// For each input row, every element of the list runs the body once, and the
+/// input row passes through unchanged: FOREACH binds nothing outside itself.
+///
+/// The body is planned per element from the clauses as written, by the same
+/// planner helpers the top-level SET, REMOVE, DELETE, CREATE and MERGE use
+/// (`QueryPlanner::plan_foreach_body`). It used to carry SET items and CREATE
+/// patterns of its own: the parser dropped DELETE and REMOVE, this operator
+/// dropped `SET n:L` and `SET n = {…}`, and a list of nodes was not iterated.
+/// Each of those reported success and wrote nothing (#465).
 pub struct ForeachOperator {
     input: OperatorBox,
     variable: String,
     list_expr: Expression,
-    set_items: Vec<(String, String, Expression)>, // (variable, property, value_expr)
-    create_patterns: Vec<Pattern>,
+    body: Vec<crate::query::ast::ForeachBody>,
 }
 
 impl ForeachOperator {
@@ -17118,10 +18011,9 @@ impl ForeachOperator {
         input: OperatorBox,
         variable: String,
         list_expr: Expression,
-        set_items: Vec<(String, String, Expression)>,
-        create_patterns: Vec<Pattern>,
+        body: Vec<crate::query::ast::ForeachBody>,
     ) -> Self {
-        Self { input, variable, list_expr, set_items, create_patterns }
+        Self { input, variable, list_expr, body }
     }
 }
 
@@ -17137,93 +18029,33 @@ impl PhysicalOperator for ForeachOperator {
     }
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
-        if let Some(record) = self.input.next_mut(store, tenant_id)? {
-            // Evaluate the list expression
-            let list_val = eval_expression(&self.list_expr, &record, store)?;
-            let items = match list_val {
-                Value::Property(PropertyValue::Array(arr)) => arr,
-                _ => return Ok(Some(record)),
-            };
-
-            // Iterate over list items
-            for item in &items {
-                let mut inner_record = record.clone();
-                inner_record.bind(self.variable.clone(), Value::Property(item.clone()));
-
-                // Execute SET operations
-                for (var, prop, expr) in &self.set_items {
-                    let val = eval_expression(expr, &inner_record, store)?;
-                    let prop_val = match val {
-                        Value::Property(p) => p,
-                        Value::Null => PropertyValue::Null,
-                        _ => continue,
-                    };
-
-                    if let Some(node_val) = inner_record.get(var) {
-                        match node_val {
-                            Value::NodeRef(id) | Value::Node(id, _) => {
-                                let _ = store.set_node_property(tenant_id, *id, prop.to_string(), prop_val.clone());
-                            }
-                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                                let _ = store.set_edge_property(*id, prop.to_string(), prop_val.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Execute CREATE operations
-                for pattern in &self.create_patterns {
-                    for path in &pattern.paths {
-                        // A relationship pattern would need the surrounding
-                        // variables joined up; creating just the start node
-                        // would silently produce an orphan instead of an edge.
-                        if !path.segments.is_empty() {
-                            return Err(ExecutionError::RuntimeError(
-                                "CREATE of a relationship pattern inside FOREACH is not supported"
-                                    .to_string(),
-                            ));
-                        }
-
-                        let node_id =
-                            store.create_node_with_labels(path.start.labels.iter().cloned());
-                        if let Some(props) = &path.start.properties {
-                            for (k, v) in props {
-                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), v.clone());
-                            }
-                        }
-                        // Property values that are expressions rather than
-                        // literals -- crucially including the loop variable
-                        // itself. These live in `property_exprs`, and not
-                        // evaluating them meant `CREATE (:T {i: i})` created
-                        // the node and silently dropped `i` (#467): the right
-                        // number of nodes, none of the data.
-                        if let Some(prop_exprs) = &path.start.property_exprs {
-                            for (k, expr) in prop_exprs {
-                                let val = eval_expression(expr, &inner_record, store)?;
-                                let prop_val = match val {
-                                    Value::Null => PropertyValue::Null,
-                                    other => match storable_property(&other) {
-                                        Some(p) => p,
-                                        None => {
-                                            return Err(ExecutionError::TypeError(format!(
-                                                "FOREACH CREATE: property `{k}` evaluated to {other:?}, \
-which cannot be stored as a property value"
-                                            )))
-                                        }
-                                    },
-                                };
-                                let _ = store.set_node_property(tenant_id, node_id, k.to_string(), prop_val);
-                            }
-                        }
-                    }
-                }
+        let Some(record) = self.input.next_mut(store, tenant_id)? else {
+            return Ok(None);
+        };
+        let items: Vec<Value> = match eval_expression(&self.list_expr, &record, store)? {
+            Value::List(items) => items,
+            Value::Property(PropertyValue::Array(arr)) => arr.into_iter().map(Value::Property).collect(),
+            // A null list is an empty one, as it is for UNWIND.
+            Value::Null | Value::Property(PropertyValue::Null) => Vec::new(),
+            other => {
+                return Err(ExecutionError::TypeError(format!(
+                    "FOREACH expects a list, got {other:?}"
+                )))
             }
-
-            Ok(Some(record))
-        } else {
-            Ok(None)
+        };
+        for item in items {
+            let mut inner = record.clone();
+            inner.bind(self.variable.clone(), item);
+            let bound: std::collections::HashSet<String> =
+                inner.bindings().iter().map(|(name, _)| name.to_string()).collect();
+            let mut body = crate::query::executor::planner::QueryPlanner::plan_foreach_body(
+                Box::new(MaterializedOperator::new(vec![inner])),
+                &self.body,
+                &bound,
+            );
+            while body.next_mut(store, tenant_id)?.is_some() {}
         }
+        Ok(Some(record))
     }
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
@@ -17234,7 +18066,7 @@ which cannot be stored as a property value"
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17699,7 +18531,7 @@ impl PhysicalOperator for ShortestPathOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![] })) }
+        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
     }
 
     fn reset(&mut self) {
@@ -17815,7 +18647,11 @@ impl WithBarrierOperator {
     ///
     /// The projected alias still wins, because `carry_sort_scope` only copies
     /// a name the projection did not already bind.
-    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> Value {
+    ///
+    /// An evaluation error is returned, as in `SortOperator::key_of_cached`:
+    /// folded to `Null`, a failing key sorted by nothing and a failing WHERE
+    /// dropped every row, both silently (#987).
+    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         let mut names = HashSet::new();
         collect_expression_names(expr, &mut names);
         let mut widened: Option<Record> = None;
@@ -17826,7 +18662,7 @@ impl WithBarrierOperator {
             }
         }
         let target = widened.as_ref().unwrap_or(record);
-        Self::evaluate_expression(expr, target, store).unwrap_or(Value::Null)
+        Self::evaluate_expression(expr, target, store)
     }
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
@@ -17872,8 +18708,8 @@ impl WithBarrierOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -17919,6 +18755,17 @@ impl WithBarrierOperator {
                         states[i].update(&val);
                     }
                 }
+            }
+            // No grouping keys means one group -- the whole input -- even when
+            // the input is empty: `WITH count(*) AS c` over nothing is one row
+            // with c = 0, as it is for RETURN. The group was only ever created
+            // from a row, so over no rows WITH answered no row at all
+            // (TCK With6 [5], WithOrderBy4 [16]).
+            if groups.is_empty() && self.group_by.is_empty() {
+                groups.insert(
+                    Vec::new(),
+                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect(),
+                );
             }
 
             let mut records = Vec::new();
@@ -17986,14 +18833,18 @@ impl WithBarrierOperator {
 
         // Apply WHERE filter (if present in WITH ... WHERE ...)
         if let Some(ref predicate) = self.where_predicate {
-            output_records.retain(|record| {
-                // Through the same widening as the sort: a WITH's WHERE sees
-                // the projected aliases *and* the scope in front of them.
-                matches!(
-                    Self::eval_sort_key(predicate, record, store),
-                    Value::Property(PropertyValue::Boolean(true))
-                )
-            });
+            // Through the same widening as the sort: a WITH's WHERE sees the
+            // projected aliases *and* the scope in front of them. Evaluated
+            // before filtering so an error can stop the query.
+            let keep = output_records
+                .iter()
+                .map(|record| {
+                    Self::eval_sort_key(predicate, record, store)
+                        .map(|v| matches!(v, Value::Property(PropertyValue::Boolean(true))))
+                })
+                .collect::<ExecutionResult<Vec<bool>>>()?;
+            let mut keep = keep.into_iter();
+            output_records.retain(|_| keep.next().unwrap_or(false));
         }
 
         // Apply DISTINCT
@@ -18009,25 +18860,38 @@ impl WithBarrierOperator {
         // Apply ORDER BY
         if !self.sort_items.is_empty() {
             let sort_items = &self.sort_items;
-            output_records.sort_by(|a, b| {
-                for (expr, ascending) in sort_items {
+            // Keys first, once per row: a sort comparator cannot return an
+            // error, and it evaluated every key ~2·log₂(n) times besides (#518).
+            let keys = output_records
+                .iter()
+                .map(|r| {
+                    sort_items
+                        .iter()
+                        .map(|(expr, _)| Self::eval_sort_key(expr, r, store))
+                        .collect::<ExecutionResult<Vec<Value>>>()
+                })
+                .collect::<ExecutionResult<Vec<Vec<Value>>>>()?;
+            let mut keyed: Vec<(Vec<Value>, Record)> =
+                keys.into_iter().zip(output_records.drain(..)).collect();
+            keyed.sort_by(|(ka, _), (kb, _)| {
+                for (i, (_, ascending)) in sort_items.iter().enumerate() {
                     // The projected name wins; the carried pre-projection
                     // binding answers for anything the projection dropped.
-                    let val_a = Self::eval_sort_key(expr, a, store);
-                    let val_b = Self::eval_sort_key(expr, b, store);
+                    let (val_a, val_b) = (&ka[i], &kb[i]);
                     // Cypher's orderability, not the property index's — see
                     // `graph::property::cypher_order`. A WITH ... ORDER BY
                     // sorts here rather than in `SortOperator`, so wiring only
                     // that one left every `WITH` sort on the old order — the
                     // same trap for the entity ranks (#917), which is why both
                     // sites now call the `Value`-level comparison.
-                    let ord = crate::query::executor::record::cypher_order_value(&val_a, &val_b);
+                    let ord = crate::query::executor::record::cypher_order_value(val_a, val_b);
                     if ord != std::cmp::Ordering::Equal {
                         return if *ascending { ord } else { ord.reverse() };
                     }
                 }
                 std::cmp::Ordering::Equal
             });
+            output_records = keyed.into_iter().map(|(_, r)| r).collect();
         }
 
         // The carried pre-projection bindings are the sort's business only.
@@ -18113,7 +18977,7 @@ impl PhysicalOperator for WithBarrierOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new() }))
+            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
         }
     }
 
@@ -18242,6 +19106,7 @@ impl PhysicalOperator for ExpandIntoOperator {
             Ok(Some(RecordBatch {
                 records,
                 columns: Vec::new(),
+                plan_hash: None,
             }))
         }
     }
@@ -18327,6 +19192,7 @@ impl PhysicalOperator for NodeByIdOperator {
             Ok(Some(RecordBatch {
                 records,
                 columns: vec![self.variable.clone()],
+                plan_hash: None,
             }))
         }
     }
@@ -18430,6 +19296,105 @@ mod tests {
         let predicate = Expression::Literal(PropertyValue::Boolean(true)); // always-true
         let mut filter = FilterOperator::new(Box::new(scan), predicate);
         assert!(!filter.try_push_limit(5), "Filter should block push");
+    }
+
+    /// `Limit -> Distinct -> Sort`: the plan of `RETURN DISTINCT ... ORDER BY
+    /// ... LIMIT k`, which is LDBC IC9's shape. `Distinct` has to stay above
+    /// `Sort` (#522), so the hard limit never reaches the sort, and the sort
+    /// ordered every row to hand out k (467,427 of them for 20 on IC9 at SF1).
+    fn distinct_limit_plan(values: &[i64], k: usize) -> LimitOperator {
+        let sort = SortOperator::new(
+            Box::new(MaterializedOperator::new(x_rows(values))),
+            vec![(Expression::Variable("x".to_string()), false)],
+        );
+        let mut limit = LimitOperator::new(Box::new(DistinctOperator::new(Box::new(sort))), k);
+        limit.try_push_limit(k);
+        limit
+    }
+
+    fn x_rows(values: &[i64]) -> Vec<Record> {
+        values
+            .iter()
+            .map(|&v| {
+                let mut r = Record::new();
+                r.bind("x".to_string(), Value::Property(PropertyValue::Integer(v)));
+                r
+            })
+            .collect()
+    }
+
+    fn drain_x(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<i64> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            match r.get("x") {
+                Some(Value::Property(PropertyValue::Integer(i))) => out.push(*i),
+                other => panic!("unexpected x: {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// The reference answer: `Distinct -> Sort` with nothing above it, so the
+    /// sort orders every row, then the first k.
+    fn full_sort_then_k(values: &[i64], k: usize) -> Vec<i64> {
+        let sort = SortOperator::new(
+            Box::new(MaterializedOperator::new(x_rows(values))),
+            vec![(Expression::Variable("x".to_string()), false)],
+        );
+        let mut all = drain_x(&mut DistinctOperator::new(Box::new(sort)), &GraphStore::new());
+        all.truncate(k);
+        all
+    }
+
+    #[test]
+    fn distinct_limit_orders_only_the_head_of_the_sort() {
+        const N: usize = 20_000;
+        let values: Vec<i64> = (0..N).map(|i| ((i * 7919) % N) as i64).collect();
+        let mut plan = distinct_limit_plan(&values, 10);
+        SORT_COMPARISONS.with(|c| c.set(0));
+        let got = drain_x(&mut plan, &GraphStore::new());
+        let comparisons = SORT_COMPARISONS.with(|c| c.get());
+        eprintln!("{comparisons} key comparisons to return 10 of {N} rows through DISTINCT");
+        assert_eq!(got, (0..10).map(|i| (N - 1 - i) as i64).collect::<Vec<_>>());
+        // Ordering everything is ~N·log2(N) ≈ 286k comparisons; the head is O(N).
+        assert!(
+            comparisons < 5 * N as u64,
+            "{comparisons} comparisons to return 10 of {N} rows"
+        );
+    }
+
+    #[test]
+    fn distinct_limit_past_the_sorted_head_matches_a_full_sort() {
+        // 3,000 copies of the largest value: Distinct drops all but one, so the
+        // consumer reads past whatever head the sort ordered first, and the
+        // rest must come out exactly as a full sort orders it.
+        let mut values: Vec<i64> = vec![5_000; 3_000];
+        values.extend((0..5_000).rev());
+        values.extend((0..2_000).map(|i| (i * 37 % 5_000) as i64));
+        for k in [1usize, 10, 100, 4_000] {
+            let mut plan = distinct_limit_plan(&values, k);
+            assert_eq!(drain_x(&mut plan, &GraphStore::new()), full_sort_then_k(&values, k), "k = {k}");
+        }
+    }
+
+    #[test]
+    fn distinct_limit_matches_a_full_sort_on_random_inputs() {
+        let mut seed: u64 = 0x5eed;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as i64
+        };
+        for (n, range) in [(1usize, 5i64), (50, 10), (2_000, 100), (10_000, 50_000)] {
+            let values: Vec<i64> = (0..n).map(|_| next() % range).collect();
+            for k in [1usize, 3, 20, 1_500] {
+                let mut plan = distinct_limit_plan(&values, k);
+                assert_eq!(
+                    drain_x(&mut plan, &GraphStore::new()),
+                    full_sort_then_k(&values, k),
+                    "n = {n}, range = {range}, k = {k}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -20769,7 +21734,7 @@ mod tests {
                     None => break,
                 }
             }
-            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new() })) }
+            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None })) }
         }
 
         fn reset(&mut self) {

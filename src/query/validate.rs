@@ -55,6 +55,9 @@ pub enum ValidationError {
     SizeOfNonCollection(&'static str),
     /// A bare pattern used where a value is expected (#880).
     PatternInProjection(&'static str),
+    /// A full `EXISTS { ... }` body outside the first WHERE's top-level
+    /// conditions (#1211).
+    ExistsSubqueryPosition,
     /// `DELETE` applied to something that is not an entity (#887).
     InvalidDeleteTarget(String),
     /// An ORDER BY naming something the projection did not keep.
@@ -134,6 +137,7 @@ impl ValidationError {
             Self::MixedUnionAndUnionAll { .. } => c::CLAUSE_CONFLICT,
             Self::UnaliasedWithItem { .. } => c::CLAUSE_CONFLICT,
             Self::PatternInProjection { .. } => c::CLAUSE_CONFLICT,
+            Self::ExistsSubqueryPosition => c::CLAUSE_CONFLICT,
             Self::PatternInSetValue { .. } => c::CLAUSE_CONFLICT,
             Self::InvalidPredicatePattern { .. } => c::CLAUSE_CONFLICT,
             Self::RelationshipUniquenessViolation { .. } => c::CLAUSE_CONFLICT,
@@ -270,6 +274,12 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "size() takes a list or a string, not {what}; \
                  use length() for a path"
+            ),
+            Self::ExistsSubqueryPosition => write!(
+                f,
+                "an EXISTS {{ }} subquery with a full body (WITH, aggregation, more than \
+                 one clause) is supported only as a top-level condition of the first \
+                 WHERE; a pattern-only EXISTS {{ (a)-->(b) }} works anywhere"
             ),
             Self::PatternInProjection(where_) => write!(
                 f,
@@ -533,7 +543,7 @@ fn vars_outside_aggregates(expr: &Expression, out: &mut Vec<String>) {
 }
 
 /// Apply `f` to the immediate sub-expressions of `expr`.
-fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
+pub(crate) fn walk_children(expr: &Expression, f: &mut impl FnMut(&Expression)) {
     match expr {
         Expression::Binary { left, right, .. } => {
             f(left);
@@ -1174,6 +1184,62 @@ fn child_expressions(e: &Expression) -> Vec<&Expression> {
 ///
 /// Both AST shapes, because a query parsed into one leaves the other empty --
 /// the split that has now cost six separate fixes.
+/// A full `EXISTS { MATCH ... WITH ... RETURN ... }` (#1211) is planned as a
+/// semi-join on the first WHERE, so it is accepted only as one of that WHERE's
+/// top-level conditions, optionally under NOT. Anywhere else it would be
+/// evaluated in place, and in-place evaluation walks the pattern alone and
+/// ignores the rest of the body. That is a wrong answer, so it is refused.
+fn validate_exists_body_positions(query: &Query) -> Result<(), ValidationError> {
+    fn is_full_exists(e: &Expression) -> bool {
+        matches!(e, Expression::ExistsSubquery { body: Some(_), count: false, .. })
+    }
+    fn conjuncts<'a>(e: &'a Expression, out: &mut Vec<&'a Expression>) {
+        match e {
+            Expression::Binary { left, op: crate::query::ast::BinaryOp::And, right } => {
+                conjuncts(left, out);
+                conjuncts(right, out);
+            }
+            Expression::Unary { op: crate::query::ast::UnaryOp::Not, expr } if is_full_exists(expr) => {
+                out.push(expr)
+            }
+            other if is_full_exists(other) => out.push(other),
+            _ => {}
+        }
+    }
+    fn walk(e: &Expression, allowed: &[&Expression]) -> Result<(), ValidationError> {
+        if is_full_exists(e) && !allowed.iter().any(|a| std::ptr::eq(*a, e)) {
+            return Err(ValidationError::ExistsSubqueryPosition);
+        }
+        for child in child_expressions(e) {
+            walk(child, allowed)?;
+        }
+        Ok(())
+    }
+
+    let mut allowed: Vec<&Expression> = Vec::new();
+    if let Some(w) = &query.where_clause {
+        conjuncts(&w.predicate, &mut allowed);
+    }
+    let mut roots = all_expressions(query);
+    if let Some(w) = &query.post_with_where_clause {
+        roots.push(&w.predicate);
+    }
+    for (_, _, _, wh) in &query.extra_with_stages {
+        if let Some(w) = wh {
+            roots.push(&w.predicate);
+        }
+    }
+    if let Some(ob) = &query.order_by {
+        for item in &ob.items {
+            roots.push(&item.expression);
+        }
+    }
+    for root in roots {
+        walk(root, &allowed)?;
+    }
+    Ok(())
+}
+
 fn all_expressions(query: &Query) -> Vec<&Expression> {
     use crate::query::ast::Clause;
     let mut out: Vec<&Expression> = Vec::new();
@@ -1762,6 +1828,22 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
         }
     }
 
+    /// A FOREACH binds its loop variable and whatever its body's CREATE and
+    /// MERGE patterns name, nested bodies included.
+    fn note_foreach(f: &crate::query::ast::ForeachClause, bound: &mut HashSet<String>) {
+        use crate::query::ast::ForeachBody;
+        bound.insert(f.variable.clone());
+        for clause in &f.body {
+            match clause {
+                ForeachBody::Create(c) => pattern_and_path_variables(&c.pattern, bound),
+                ForeachBody::Merge(m) => pattern_and_path_variables(&m.pattern, bound),
+                ForeachBody::Set(sc) => note_set(sc, bound),
+                ForeachBody::Foreach(inner) => note_foreach(inner, bound),
+                ForeachBody::Remove(_) | ForeachBody::Delete(_) => {}
+            }
+        }
+    }
+
     fn note_clause_binders(query: &Query, bound: &mut HashSet<String>) {
         for mc in &query.match_clauses {
             pattern_and_path_variables(&mc.pattern, bound);
@@ -1786,13 +1868,7 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
             binders(&l.source, bound);
         }
         if let Some(f) = &query.foreach_clause {
-            bound.insert(f.variable.clone());
-            for c in &f.create_clauses {
-                pattern_and_path_variables(&c.pattern, bound);
-            }
-            for sc in &f.set_clauses {
-                note_set(sc, bound);
-            }
+            note_foreach(f, bound);
         }
         if let Some(call) = &query.call_clause {
             for y in &call.yield_items {
@@ -1812,15 +1888,7 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
                     bound.insert(l.variable.clone());
                     binders(&l.source, bound);
                 }
-                Clause::Foreach(f) => {
-                    bound.insert(f.variable.clone());
-                    for cc in &f.create_clauses {
-                        pattern_and_path_variables(&cc.pattern, bound);
-                    }
-                    for sc in &f.set_clauses {
-                        note_set(sc, bound);
-                    }
-                }
+                Clause::Foreach(f) => note_foreach(f, bound),
                 Clause::Call(call) => {
                     for y in &call.yield_items {
                         bound.insert(y.alias.clone().unwrap_or_else(|| y.name.clone()));
@@ -1836,6 +1904,22 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
     }
 
     note_clause_binders(query, &mut bound);
+
+    // A correlated `CALL { WITH ... }` (#1236) exports the columns its body's
+    // RETURN names to the outer query, as the leading form below does.
+    if let Some(cc) = &query.correlated_call {
+        note_clause_binders(&cc.body, &mut bound);
+        for items in cc.body.return_clause.iter().map(|r| &r.items) {
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+    }
 
     // A `CALL { … }` subquery exports the columns its RETURN names, and binds
     // everything it binds internally. Recursing rather than duplicating the
@@ -2716,6 +2800,7 @@ fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationErr
 }
 
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_exists_body_positions(query)?;
     validate_unbounded_walk_is_refused(query)?;
     validate_variables_are_bound(query)?;
 
@@ -2953,6 +3038,9 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     {
         fn holds_pattern(e: &Expression) -> bool {
             match e {
+                // A `COUNT { }` is a value -- an integer -- and may be stored
+                // (`SET n.deg = COUNT { (n)--() }`); only a pattern is refused.
+                Expression::ExistsSubquery { count: true, .. } => false,
                 Expression::ExistsSubquery { .. } | Expression::PatternComprehension { .. } => true,
                 Expression::Binary { left, right, .. } => holds_pattern(left) || holds_pattern(right),
                 Expression::Unary { expr, .. } => holds_pattern(expr),

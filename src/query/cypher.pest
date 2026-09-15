@@ -78,6 +78,10 @@ match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
 
 // CALL subquery: CALL { MATCH ... RETURN ... }
 call_subquery = { ^"CALL" ~ "{" ~ statement ~ "}" }
+// `MATCH ... CALL { WITH a, b <statement> }` (#1236): a subquery run once per
+// row, with `a` and `b` imported from it. `WITH *` imports everything in scope.
+correlated_call = { ^"CALL" ~ "{" ~ ^"WITH" ~ call_imports ~ statement ~ "}" }
+call_imports = { "*" | variable ~ ("," ~ variable)* }
 
 // CALL clause
 call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
@@ -99,12 +103,12 @@ on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ (correlated_call | call_clause)? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A FOREACH with no preceding MATCH/UNWIND. It drives itself off a single
 // empty row, the same way a bare RETURN does, so no pattern is required.
 foreach_stmt = { foreach_clause }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
-foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause | merge_inline | foreach_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // LOAD CSV (LANG-09). A reading clause: it produces one row per record, the way
 // UNWIND produces one row per list element, and everything downstream of it is
@@ -315,6 +319,7 @@ primary = {
     predicate_function |
     pattern_comprehension |
     list_comprehension |
+    count_subquery |
     count_star |
     function_call |
     nested_property_access |
@@ -322,6 +327,7 @@ primary = {
     parameter |
     value |
     list_expr |
+    map_projection |
     map_expr |
     variable |
     pattern_predicate |
@@ -334,6 +340,9 @@ pattern_predicate = { node ~ (edge_pattern ~ node)+ }
 
 // COUNT(*) — special rule since * is not a valid expression
 count_star = { ^"COUNT" ~ "(" ~ distinct? ~ "*" ~ ")" }
+// `COUNT { pattern WHERE ... }` (#1235): how many matches. Braces, not
+// parentheses, so it cannot be mistaken for `count(*)` or `count(x)`.
+count_subquery = { ^"COUNT" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ "}" }
 
 // Query parameter: $name
 parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
@@ -369,7 +378,13 @@ pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~
 // subquery produces at least one row, so what those rows contain cannot change
 // the answer. The parser already ignored every inner rule but `pattern` and
 // `where_clause`, which is why allowing RETURN needed no evaluator change.
-exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}" }
+//
+// A body with more than that -- `WITH`, aggregation, a second MATCH -- is a
+// full subquery, run once per outer row (#1211). The simple form is tried
+// first and keeps its fast path. The `"}"` inside each alternative is what
+// lets a simple body that stops short (at `WITH`, say) fall through to the
+// full one.
+exists_subquery = { ^"EXISTS" ~ "{" ~ ((^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}") | (statement ~ "}")) }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is
@@ -470,6 +485,13 @@ map_entry = { (string | property_key) ~ ":" ~ value }
 list_expr = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
 map_expr = { "{" ~ (map_expr_entry ~ ("," ~ map_expr_entry)*)? ~ "}" }
 map_expr_entry = { (string | property_key) ~ ":" ~ expression }
+// Map projection, `p {.name, .*, key: expr, other}` (#1239). Ahead of
+// `variable` in `primary`, and behind `exists_subquery`, so `EXISTS {` stays a
+// subquery.
+map_projection = { variable ~ "{" ~ (map_projection_item ~ ("," ~ map_projection_item)*)? ~ "}" }
+map_projection_item = { map_projection_all | map_projection_property | map_expr_entry | variable }
+map_projection_all = { "." ~ "*" }
+map_projection_property = { "." ~ property_key }
 
 // Variable names
 variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

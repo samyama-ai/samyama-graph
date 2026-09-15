@@ -23,6 +23,10 @@ on:
         type: choice
         options: [testpypi, pypi, none]
         default: testpypi
+      ref:
+        description: "Tag to build (empty: the ref this runs on). Lets a fixed workflow build a release whose own workflow cannot."
+        type: string
+        default: ""
 
 env:
   PYTHON_SDK_DIR: sdk/python
@@ -30,29 +34,35 @@ env:
 jobs:
   wheels:
     name: wheel (${{ matrix.platform }})
+    # kg-snapshots-v* data releases are Releases too, and each one failed here.
+    # Only a v* tag is an engine release. `publish` needs this job, so it is
+    # skipped with it.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
+          # manylinux_2_28 (AlmaLinux 8) rather than `auto` (manylinux2014,
+          # CentOS 7), whose clang is too old for bindgen. See before-script-linux.
           - platform: linux-x86_64
             runner: ubuntu-latest
             target: x86_64
-            manylinux: auto
-          # The one most likely to need attention: this cross-compiles RocksDB's
-          # C++ through the manylinux cross image. If it proves unworkable,
-          # dropping this entry costs aarch64 Linux users the wheel, not the
-          # package — they fall back to the sdist, which is buildable (see the
-          # sdist job).
+            manylinux: "2_28"
+          # Built natively on an arm runner. Cross-compiling through the
+          # manylinux cross image failed twice (2026-09-07 and v1.8.0): bindgen
+          # found no aarch64 sysroot headers, `bits/libc-header-start.h`.
           - platform: linux-aarch64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             target: aarch64
-            manylinux: auto
+            manylinux: "2_28"
           # manylinux is meaningless off Linux, but every entry sets it so the
           # action never receives an empty string for an input it expects unset.
+          # macos-13 is no longer a GitHub-hosted label; a job asking for it
+          # waits for a runner that never comes. macos-15-intel is x86_64.
           - platform: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64
             manylinux: "off"
           - platform: macos-aarch64
@@ -66,6 +76,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -73,12 +85,22 @@ jobs:
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        # maturin's default floor for x86_64 macOS is 10.12. RocksDB's
+        # clock_cache.cc uses aligned new/delete, "only available on macOS
+        # 10.13 or newer" (80 clang errors for v1.8.0). arm64 starts at 11.0
+        # and is unaffected. Ignored off macOS.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
         with:
           working-directory: ${{ env.PYTHON_SDK_DIR }}
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
           sccache: "true"
+          # librocksdb-sys generates its bindings with bindgen, which needs
+          # libclang, and the manylinux images ship none: v1.8.0's x86_64 wheel
+          # failed on "Unable to find libclang". Runs only in the Linux container.
+          before-script-linux: dnf install -y clang
 
       - uses: actions/upload-artifact@v4
         with:
@@ -88,10 +110,13 @@ jobs:
 
   sdist:
     name: sdist
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       # maturin walks up to the repository root and vendors the whole cargo
       # workspace into the sdist — the crates/ sources included — so it is
@@ -114,7 +139,13 @@ jobs:
   publish:
     name: Publish to ${{ github.event_name == 'release' && 'PyPI' || inputs.target }}
     needs: [wheels, sdist]
-    if: github.event_name == 'release' || inputs.target != 'none'
+    # A dispatch to the real PyPI must build a tag: the one it runs on, as
+    # tag-release.yml's does (#1249), or the one named by `ref`. From a branch
+    # it would upload whatever that branch holds.
+    if: >-
+      github.event_name == 'release'
+      || (inputs.target == 'testpypi')
+      || (inputs.target == 'pypi' && (github.ref_type == 'tag' || startsWith(inputs.ref, 'v')))
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

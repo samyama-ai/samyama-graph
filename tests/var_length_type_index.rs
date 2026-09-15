@@ -162,10 +162,13 @@ fn the_pinned_target_search_answers_the_same_from_the_index() {
     // The target's equality is in `WHERE`, not inline: on a single-segment
     // pattern an inline `(q:P {id: 7})` is applied as a filter after the walk
     // and never pins, while the same equality in `WHERE` does.
+    //
+    // `RETURN DISTINCT`, not `count(q)`: a pin is only sound when the query
+    // cannot count paths, and a counted target is no longer pinned (#1202).
     let shapes = [
-        "MATCH (p:P)-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 7 RETURN count(q)",
-        "MATCH (p:P)-[:KNOWS*1..2]->(q:P) WHERE p.id = {A} AND q.id = 8 RETURN count(q)",
-        "MATCH (p:P)<-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 0 RETURN count(q)",
+        "MATCH (p:P)-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 7 RETURN DISTINCT q.id AS q",
+        "MATCH (p:P)-[:KNOWS*1..2]->(q:P) WHERE p.id = {A} AND q.id = 8 RETURN DISTINCT q.id AS q",
+        "MATCH (p:P)<-[:KNOWS*1..3]-(q:P) WHERE p.id = {A} AND q.id = 0 RETURN DISTINCT q.id AS q",
     ];
     // The planner pins a target only through a property index that resolves
     // it to exactly one node.
@@ -190,7 +193,7 @@ fn the_pinned_target_search_answers_the_same_from_the_index() {
         // threshold and would leave that store with an index of its own.
         let expected: Vec<Vec<String>> = ANCHORS.iter().map(|&a| rows(&walked, &at(shape, a))).collect();
         assert_eq!(walked.type_adjacency_cached(), 0, "`{shape}` built an index on the walk-only store");
-        assert!(expected.iter().any(|r| r.iter().any(|row| !row.contains("Integer(0)"))), "`{shape}` reached the target from no anchor");
+        assert!(expected.iter().any(|r| !r.is_empty()), "`{shape}` reached the target from no anchor");
         for (i, &a) in ANCHORS.iter().enumerate() {
             assert_eq!(rows(&indexed, &at(shape, a)), expected[i], "`{}`", at(shape, a));
         }

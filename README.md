@@ -31,12 +31,12 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 **Step 1 — Prerequisites**
 
 - ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No AWS account or credentials needed — the image is publicly available
+- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.8.0` for a reproducible setup)
 
 **Step 2 — Pull the Docker image**
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull ghcr.io/samyama-ai/samyama-graph:latest
 ```
 
 **Step 3 — Docker Compose setup**
@@ -65,7 +65,7 @@ notepad docker-compose.yml
 version: "3.9"
 services:
   samyama-graph:
-    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    image: ghcr.io/samyama-ai/samyama-graph:latest
     container_name: samyama-graph
     restart: unless-stopped
     ports:
@@ -356,7 +356,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 ## The 30-Second Tour
 
-**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,760 of 3,763, at 96.6% coverage of the 3,897-scenario corpus, measured 2026-08-30), and **none of the three remaining failures is a wrong answer** — all three raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
+**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,845 of 3,847, at 98.7% coverage of the 3,897-scenario corpus, measured 2026-09-15), and **neither of the two remaining failures is a wrong answer** — both raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
 
 ```cypher
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)

@@ -238,10 +238,10 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                 query.order_by = Some(parse_order_by_clause(c)?);
                             }
                             Rule::skip_clause => {
-                                query.skip = parse_row_count(c)?;
+                                (query.skip, query.deferred_skip) = parse_row_count(c)?;
                             }
                             Rule::limit_clause => {
-                                query.limit = parse_row_count(c)?;
+                                (query.limit, query.deferred_limit) = parse_row_count(c)?;
                             }
                             // Anything this builder cannot lower has to be an
                             // error. Falling through silently was the worse
@@ -353,7 +353,32 @@ fn parse_count_literal(text: &str) -> ParseResult<usize> {
 /// Four parse sites did this inline, each testing for `Rule::integer` and
 /// silently ignoring anything else. One implementation now, because "silently
 /// ignoring anything else" is how a LIMIT goes missing.
-fn parse_row_count(pair: pest::iterators::Pair<Rule>) -> ParseResult<Option<usize>> {
+/// SKIP/LIMIT: a count fixed at parse time, or -- when it holds a
+/// `$parameter`, which does not exist until execution -- the expression
+/// itself, resolved when parameters are bound. Evaluating `$s` here made
+/// `SKIP $s` a parse error.
+fn parse_row_count(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<(Option<usize>, Option<Expression>)> {
+    if let Some(e) = pair.clone().into_inner().find(|p| p.as_rule() == Rule::expression) {
+        let expr = parse_expression(e)?;
+        if contains_parameter(&expr) {
+            return Ok((None, Some(expr)));
+        }
+    }
+    parse_row_count_fixed(pair).map(|n| (n, None))
+}
+
+fn contains_parameter(e: &Expression) -> bool {
+    if matches!(e, Expression::Parameter(_)) {
+        return true;
+    }
+    let mut found = false;
+    crate::query::validate::walk_children(e, &mut |c| found = found || contains_parameter(c));
+    found
+}
+
+fn parse_row_count_fixed(pair: pest::iterators::Pair<Rule>) -> ParseResult<Option<usize>> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             // Through `parse_count_literal`, so `LIMIT -1` keeps saying what is
@@ -565,10 +590,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            query.skip = parse_row_count(child)?;
+                            (query.skip, query.deferred_skip) = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            query.limit = parse_row_count(child)?;
+                            (query.limit, query.deferred_limit) = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -584,10 +609,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                             query.order_by = Some(parse_order_by_clause(child)?);
                         }
                         Rule::skip_clause => {
-                            query.skip = parse_row_count(child)?;
+                            (query.skip, query.deferred_skip) = parse_row_count(child)?;
                         }
                         Rule::limit_clause => {
-                            query.limit = parse_row_count(child)?;
+                            (query.limit, query.deferred_limit) = parse_row_count(child)?;
                         }
                         _ => {}
                     }
@@ -874,10 +899,10 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1035,9 +1060,27 @@ fn parse_yield_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<YieldItem>
     Ok(YieldItem { name, alias })
 }
 
+/// The AND-conjuncts of a predicate, in order.
+fn and_conjuncts(e: &Expression, out: &mut Vec<Expression>) {
+    match e {
+        Expression::Binary { left, op: BinaryOp::And, right } => {
+            and_conjuncts(left, out);
+            and_conjuncts(right, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
 fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+    // The pattern of the OPTIONAL MATCH the next clause follows, if it is one:
+    // its WHERE belongs to it (#1231).
+    let mut after_optional: Option<Pattern> = None;
     for inner in pair.into_inner() {
-        match inner.as_rule() {
+        let rule = inner.as_rule();
+        if rule != Rule::where_clause && rule != Rule::optional_match_clause {
+            after_optional = None;
+        }
+        match rule {
             Rule::match_clause => {
                 for mc_inner in inner.into_inner() {
                     if mc_inner.as_rule() == Rule::pattern {
@@ -1057,6 +1100,7 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                         });
                     }
                 }
+                after_optional = query.match_clauses.last().map(|m| m.pattern.clone());
             }
             Rule::where_clause => {
                 // Cypher permits a `WHERE` after each `MATCH`. The planner
@@ -1067,6 +1111,13 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 // predicate. Dropping the first WHERE was behind OM27's
                 // timeout + wrong-semantics on the v1.0 mega benchmark.
                 let parsed = parse_where_clause(inner)?;
+                if let Some(pattern) = after_optional.take() {
+                    let mut conjuncts = Vec::new();
+                    and_conjuncts(&parsed.predicate, &mut conjuncts);
+                    for c in conjuncts {
+                        query.optional_where.push((pattern.clone(), c));
+                    }
+                }
                 let target = if query.with_split_index.is_some() {
                     &mut query.post_with_where_clause
                 } else {
@@ -1124,6 +1175,27 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::call_clause => {
                 query.call_clause = Some(parse_call_clause(inner)?);
             }
+            // `CALL { WITH a, b <statement> }` after MATCH (#1236).
+            Rule::correlated_call => {
+                let mut imports: Option<Vec<String>> = None;
+                let mut body = Query::new();
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::call_imports => {
+                            let vars: Vec<String> = part
+                                .into_inner()
+                                .filter(|v| v.as_rule() == Rule::variable)
+                                .map(|v| v.as_str().to_string())
+                                .collect();
+                            // `WITH *` has no variables: it imports everything.
+                            imports = if vars.is_empty() { None } else { Some(vars) };
+                        }
+                        Rule::statement => parse_statement(part, &mut body)?,
+                        _ => {}
+                    }
+                }
+                query.correlated_call = Some(CorrelatedCall { imports, body: Box::new(body) });
+            }
             Rule::create_clause => {
                 for create_inner in inner.into_inner() {
                     if create_inner.as_rule() == Rule::pattern {
@@ -1176,10 +1248,10 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1215,10 +1287,10 @@ fn parse_create_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) 
                 query.order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                query.skip = parse_row_count(inner)?;
+                (query.skip, query.deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                query.limit = parse_row_count(inner)?;
+                (query.limit, query.deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
@@ -1238,6 +1310,8 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
     let mut order_by = None;
     let mut skip = None;
     let mut limit = None;
+    let mut deferred_skip = None;
+    let mut deferred_limit = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1252,16 +1326,16 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
                 order_by = Some(parse_order_by_clause(inner)?);
             }
             Rule::skip_clause => {
-                skip = parse_row_count(inner)?;
+                (skip, deferred_skip) = parse_row_count(inner)?;
             }
             Rule::limit_clause => {
-                limit = parse_row_count(inner)?;
+                (limit, deferred_limit) = parse_row_count(inner)?;
             }
             _ => {}
         }
     }
 
-    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit })
+    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit, deferred_skip, deferred_limit })
 }
 
 fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteClause> {
@@ -2541,6 +2615,27 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             Rule::exists_subquery => {
                 return parse_exists_subquery(inner);
             }
+            // `COUNT { ... }` (#1235): the EXISTS node, counting. Parsed inline
+            // rather than in a helper, as every `ParseResult` fn adds a clippy
+            // `result_large_err`.
+            Rule::count_subquery => {
+                let mut pattern = None;
+                let mut where_clause = None;
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::pattern => pattern = Some(parse_pattern(part)?),
+                        Rule::where_clause => where_clause = Some(Box::new(parse_where_clause(part)?)),
+                        _ => {}
+                    }
+                }
+                return Ok(Expression::ExistsSubquery {
+                    pattern: pattern.ok_or_else(|| ParseError::SemanticError("COUNT missing pattern".to_string()))?,
+                    where_clause,
+                    bare_pattern: false,
+                    count: true,
+                    body: None,
+                });
+            }
             Rule::pattern_predicate => {
                 // `WHERE (:Acc)-[:SUPPORTS]->(o)` means "such a path exists", which is
                 // exactly `EXISTS { MATCH ... }` -- so it desugars to the same node and
@@ -2549,6 +2644,8 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     pattern: Pattern { paths: vec![parse_path(inner)?] },
                     where_clause: None,
                     bare_pattern: true,
+                    count: false,
+                    body: None,
                 });
             }
             Rule::reduce_expression => {
@@ -2608,6 +2705,72 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     }
                 }
                 return Ok(Expression::ListExpr(items));
+            }
+            Rule::map_projection => {
+                // Map projection, `v {.name, key: expr, other, .*}` (#1239), as the map it
+                // builds: `CASE WHEN v IS NULL THEN null ELSE {name: v.name, key: expr,
+                // other: other} END`. A null `v` projects to null, not to a map of nulls,
+                // which is what an OPTIONAL MATCH that found nothing needs. `.*` alone is
+                // `properties(v)`; `.*` next to other items would need a map union and is
+                // refused rather than answered with half the keys.
+                let mut parts = inner.into_inner();
+                let var = parts
+                    .next()
+                    .map(|v| v.as_str().to_string())
+                    .ok_or_else(|| ParseError::SemanticError("map projection missing its variable".to_string()))?;
+                let mut entries: Vec<(String, Expression)> = Vec::new();
+                let mut all_properties = false;
+                for item in parts {
+                    let Some(part) = item.into_inner().next() else { continue };
+                    match part.as_rule() {
+                        Rule::map_projection_all => all_properties = true,
+                        Rule::map_projection_property => {
+                            let key = part.into_inner().next().map(|k| unescape_name(k.as_str())).unwrap_or_default();
+                            entries.push((key.clone(), Expression::Property { variable: var.clone(), property: key }));
+                        }
+                        Rule::map_expr_entry => {
+                            let mut key = String::new();
+                            let mut value = None;
+                            for p in part.into_inner() {
+                                match p.as_rule() {
+                                    Rule::property_key => key = unescape_name(p.as_str()),
+                                    Rule::string => key = unescape_string_literal(p.as_str())?,
+                                    Rule::expression => value = Some(parse_expression(p)?),
+                                    _ => {}
+                                }
+                            }
+                            if let Some(v) = value {
+                                entries.push((key, v));
+                            }
+                        }
+                        Rule::variable => {
+                            let name = part.as_str().to_string();
+                            entries.push((name.clone(), Expression::Variable(name)));
+                        }
+                        _ => {}
+                    }
+                }
+                let body = match (all_properties, entries.is_empty()) {
+                    (true, true) => Expression::Function {
+                        name: "properties".to_string(),
+                        args: vec![Expression::Variable(var.clone())],
+                        distinct: false,
+                    },
+                    (true, false) => {
+                        return Err(ParseError::UnsupportedFeature(
+                            "a map projection with `.*` and other items is not supported yet; use `.*` alone or list the keys".to_string(),
+                        ))
+                    }
+                    (false, _) => Expression::MapExpr(entries),
+                };
+                return Ok(Expression::Case {
+                    operand: None,
+                    when_clauses: vec![(
+                        Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(Expression::Variable(var)) },
+                        Expression::Literal(PropertyValue::Null),
+                    )],
+                    else_result: Some(Box::new(body)),
+                });
             }
             Rule::map_expr => {
                 let mut entries = Vec::new();
@@ -2687,11 +2850,24 @@ fn parse_case_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
 fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     let mut pattern = None;
     let mut where_clause = None;
+    let mut body: Option<Box<Query>> = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::pattern => pattern = Some(parse_pattern(inner)?),
             Rule::where_clause => where_clause = Some(parse_where_clause(inner)?),
+            // A full subquery (#1211): planned as a semi-join, not walked.
+            Rule::statement => {
+                let mut q = Query::new();
+                parse_statement(inner, &mut q)?;
+                pattern = q.match_clauses.first().map(|m| m.pattern.clone());
+                if pattern.is_none() {
+                    return Err(ParseError::SemanticError(
+                        "an EXISTS { } subquery needs a MATCH".to_string(),
+                    ));
+                }
+                body = Some(Box::new(q));
+            }
             _ => {}
         }
     }
@@ -2702,6 +2878,8 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
         // `EXISTS { ... }` may introduce variables; a bare pattern predicate
         // may not (#798).
         bare_pattern: false,
+        count: false,
+        body,
     })
 }
 
@@ -2850,33 +3028,46 @@ fn parse_reduce_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Exp
 }
 
 fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ForeachClause> {
+    use crate::query::ast::ForeachBody;
     let mut variable = None;
     let mut expression = None;
-    let mut set_clauses = Vec::new();
-    let mut create_clauses = Vec::new();
+    // In the order written: a later clause sees what an earlier one did.
+    let mut body = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => variable = Some(inner.as_str().to_string()),
             Rule::in_op => {} // skip
             Rule::expression => expression = Some(parse_expression(inner)?),
-            Rule::set_clause => set_clauses.push(parse_set_clause(inner)?),
+            Rule::set_clause => body.push(ForeachBody::Set(parse_set_clause(inner)?)),
+            Rule::remove_clause => body.push(ForeachBody::Remove(parse_remove_clause(inner)?)),
+            Rule::delete_clause => body.push(ForeachBody::Delete(parse_delete_clause(inner)?)),
             Rule::create_clause => {
                 for ci in inner.into_inner() {
                     if ci.as_rule() == Rule::pattern {
-                        create_clauses.push(CreateClause { pattern: parse_pattern(ci)? });
+                        body.push(ForeachBody::Create(CreateClause { pattern: parse_pattern(ci)? }));
                     }
                 }
             }
-            _ => {}
+            Rule::merge_inline => body.push(ForeachBody::Merge(parse_merge_clause(inner)?)),
+            Rule::foreach_clause => {
+                body.push(ForeachBody::Foreach(Box::new(parse_foreach_clause(inner)?)))
+            }
+            // Every rule the grammar admits in a body is handled above. A
+            // catch-all that ignored the rest is how DELETE and REMOVE were
+            // parsed and then dropped (#465).
+            other => {
+                return Err(ParseError::SemanticError(format!(
+                    "FOREACH: unexpected {other:?} in the body"
+                )))
+            }
         }
     }
 
     Ok(ForeachClause {
         variable: variable.ok_or_else(|| ParseError::SemanticError("FOREACH missing variable".to_string()))?,
         expression: expression.ok_or_else(|| ParseError::SemanticError("FOREACH missing expression".to_string()))?,
-        set_clauses,
-        create_clauses,
+        body,
     })
 }
 
@@ -2915,6 +3106,26 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
                 args.push(parse_expression(inner)?);
             }
             _ => {}
+        }
+    }
+
+    // `exists((n)-->())` is the pattern predicate, not "is the argument null"
+    // (#1255). The argument has already desugared to the EXISTS node, which
+    // evaluates to true or false. Wrapping it in the null-tolerant `exists`
+    // function asked whether that boolean was null, and `false` is not, so the
+    // call was true on every row.
+    //
+    // It becomes `EXISTS { (n)-->() }`, not the bare pattern it was parsed as:
+    // an explicit existence test may be projected by WITH or RETURN, which a
+    // bare pattern may not. Neo4j 2026.04 gives A, B for `WITH n, exists((n)-->(:D))
+    // AS e WHERE e` on #1255's graph.
+    if name.eq_ignore_ascii_case("exists")
+        && !distinct
+        && args.len() == 1
+        && matches!(args[0], Expression::ExistsSubquery { bare_pattern: true, .. })
+    {
+        if let Expression::ExistsSubquery { pattern, where_clause, count, body, .. } = args.remove(0) {
+            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count, body });
         }
     }
 
@@ -3312,7 +3523,7 @@ mod tests {
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "tag");
-        assert!(!fc.set_clauses.is_empty());
+        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Set(_)]));
     }
 
     #[test]
@@ -3324,7 +3535,7 @@ mod tests {
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "x");
-        assert!(!fc.create_clauses.is_empty());
+        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Create(_)]));
     }
 
     #[test]
