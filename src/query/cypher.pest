@@ -322,6 +322,7 @@ primary = {
     parameter |
     value |
     list_expr |
+    map_projection |
     map_expr |
     variable |
     pattern_predicate |
@@ -470,6 +471,13 @@ map_entry = { (string | property_key) ~ ":" ~ value }
 list_expr = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
 map_expr = { "{" ~ (map_expr_entry ~ ("," ~ map_expr_entry)*)? ~ "}" }
 map_expr_entry = { (string | property_key) ~ ":" ~ expression }
+// Map projection, `p {.name, .*, key: expr, other}` (#1239). Ahead of
+// `variable` in `primary`, and behind `exists_subquery`, so `EXISTS {` stays a
+// subquery.
+map_projection = { variable ~ "{" ~ (map_projection_item ~ ("," ~ map_projection_item)*)? ~ "}" }
+map_projection_item = { map_projection_all | map_projection_property | map_expr_entry | variable }
+map_projection_all = { "." ~ "*" }
+map_projection_property = { "." ~ property_key }
 
 // Variable names
 variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
