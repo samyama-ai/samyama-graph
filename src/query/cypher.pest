@@ -378,7 +378,13 @@ pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~
 // subquery produces at least one row, so what those rows contain cannot change
 // the answer. The parser already ignored every inner rule but `pattern` and
 // `where_clause`, which is why allowing RETURN needed no evaluator change.
-exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}" }
+//
+// A body with more than that -- `WITH`, aggregation, a second MATCH -- is a
+// full subquery, run once per outer row (#1211). The simple form is tried
+// first and keeps its fast path. The `"}"` inside each alternative is what
+// lets a simple body that stops short (at `WITH`, say) fall through to the
+// full one.
+exists_subquery = { ^"EXISTS" ~ "{" ~ ((^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}") | (statement ~ "}")) }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is

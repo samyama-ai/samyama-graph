@@ -2633,6 +2633,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     where_clause,
                     bare_pattern: false,
                     count: true,
+                    body: None,
                 });
             }
             Rule::pattern_predicate => {
@@ -2644,6 +2645,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     where_clause: None,
                     bare_pattern: true,
                     count: false,
+                    body: None,
                 });
             }
             Rule::reduce_expression => {
@@ -2848,11 +2850,24 @@ fn parse_case_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
 fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
     let mut pattern = None;
     let mut where_clause = None;
+    let mut body: Option<Box<Query>> = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::pattern => pattern = Some(parse_pattern(inner)?),
             Rule::where_clause => where_clause = Some(parse_where_clause(inner)?),
+            // A full subquery (#1211): planned as a semi-join, not walked.
+            Rule::statement => {
+                let mut q = Query::new();
+                parse_statement(inner, &mut q)?;
+                pattern = q.match_clauses.first().map(|m| m.pattern.clone());
+                if pattern.is_none() {
+                    return Err(ParseError::SemanticError(
+                        "an EXISTS { } subquery needs a MATCH".to_string(),
+                    ));
+                }
+                body = Some(Box::new(q));
+            }
             _ => {}
         }
     }
@@ -2864,6 +2879,7 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
         // may not (#798).
         bare_pattern: false,
         count: false,
+        body,
     })
 }
 
@@ -3108,8 +3124,8 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
         && args.len() == 1
         && matches!(args[0], Expression::ExistsSubquery { bare_pattern: true, .. })
     {
-        if let Expression::ExistsSubquery { pattern, where_clause, count, .. } = args.remove(0) {
-            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count });
+        if let Expression::ExistsSubquery { pattern, where_clause, count, body, .. } = args.remove(0) {
+            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count, body });
         }
     }
 

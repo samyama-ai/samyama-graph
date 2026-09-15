@@ -8860,6 +8860,60 @@ impl PhysicalOperator for CorrelatedCallOperator {
     }
 }
 
+/// `WHERE EXISTS { MATCH ... WITH ... RETURN ... }` (#1211). Each outer row is
+/// kept once when the subquery, run against that row, returns at least one
+/// row, or when it returns none if `negated`. A semi-join: the outer row is
+/// never repeated and nothing from the body is added to it. The body is pulled
+/// for one row only, since existence is all that is asked.
+pub struct SemiApplyOperator {
+    outer: OperatorBox,
+    body: OperatorBox,
+    seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    negated: bool,
+}
+
+impl SemiApplyOperator {
+    pub fn new(
+        outer: OperatorBox,
+        body: OperatorBox,
+        seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+        negated: bool,
+    ) -> Self {
+        Self { outer, body, seed, negated }
+    }
+}
+
+impl PhysicalOperator for SemiApplyOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        while let Some(row) = self.outer.next(store)? {
+            *self
+                .seed
+                .lock()
+                .map_err(|_| ExecutionError::RuntimeError("an EXISTS { } seed was poisoned".to_string()))? =
+                Some(row.clone());
+            self.body.reset();
+            let found = self.body.next(store)?.is_some();
+            if found != self.negated {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.body.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: if self.negated { "AntiSemiApply" } else { "SemiApply" }.to_string(),
+            details: "the EXISTS { } subquery runs once per outer row".to_string(),
+            children: vec![self.outer.describe(), self.body.describe()],
+        }
+    }
+}
+
 /// Project operator: RETURN n.name, n.age
 pub struct ProjectOperator {
     /// Input operator

@@ -679,6 +679,12 @@ pub enum Expression {
         /// `COUNT { ... }` (#1235): the number of matches, not whether one
         /// exists. Same pattern, same walk, an integer instead of a boolean.
         count: bool,
+        /// The whole subquery, when the body holds more than a pattern, a WHERE
+        /// and a RETURN: `EXISTS { MATCH ... WITH ... RETURN ... }` (#1211).
+        /// It runs once per outer row as a semi-join, so the planner takes it
+        /// out of the WHERE and plans it; it is never evaluated in place.
+        /// `pattern` is then the body's first MATCH pattern.
+        body: Option<Box<Query>>,
     },
     /// List comprehension: [x IN list WHERE cond | expr]
     ListComprehension {
