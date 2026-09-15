@@ -3124,8 +3124,8 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
         && args.len() == 1
         && matches!(args[0], Expression::ExistsSubquery { bare_pattern: true, .. })
     {
-        if let Expression::ExistsSubquery { pattern, where_clause, count, .. } = args.remove(0) {
-            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count });
+        if let Expression::ExistsSubquery { pattern, where_clause, count, body, .. } = args.remove(0) {
+            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count, body });
         }
     }
 
