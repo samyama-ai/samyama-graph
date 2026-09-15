@@ -2955,6 +2955,9 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     {
         fn holds_pattern(e: &Expression) -> bool {
             match e {
+                // A `COUNT { }` is a value -- an integer -- and may be stored
+                // (`SET n.deg = COUNT { (n)--() }`); only a pattern is refused.
+                Expression::ExistsSubquery { count: true, .. } => false,
                 Expression::ExistsSubquery { .. } | Expression::PatternComprehension { .. } => true,
                 Expression::Binary { left, right, .. } => holds_pattern(left) || holds_pattern(right),
                 Expression::Unary { expr, .. } => holds_pattern(expr),

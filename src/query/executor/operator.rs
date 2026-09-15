@@ -1064,8 +1064,8 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
             let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause, .. } => {
-            eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+        Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+            eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
             eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -1142,10 +1142,18 @@ fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
+    count: bool,
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, store)?;
+    // `COUNT { ... }` (#1235): the same walk, counting every match instead of
+    // stopping at the first.
+    if count {
+        let matches = std::cell::Cell::new(0i64);
+        exists_start_paths(&pattern.paths, record, &[], where_clause, Some(&matches), store)?;
+        return Ok(Value::Property(PropertyValue::Integer(matches.get())));
+    }
+    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, None, store)?;
     Ok(Value::Property(PropertyValue::Boolean(found)))
 }
 
@@ -1160,21 +1168,30 @@ fn eval_exists_subquery(
 /// its variables ("Variable not found"). Relationships already walked carry
 /// into the next pattern: a relationship appears once in the subquery, as in
 /// one MATCH clause (#1233).
+///
+/// With `counter`, every complete match adds one and the walk goes on (`false`
+/// is returned so no caller stops early); `COUNT { }` reads the total (#1235).
 fn exists_start_paths(
     paths: &[crate::query::ast::PathPattern],
     record: &Record,
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let Some((path, rest)) = paths.split_first() else {
-        return Ok(match where_clause {
+        let matched = match where_clause {
             Some(wc) => matches!(
                 eval_expression(&wc.predicate, record, store)?,
                 Value::Property(PropertyValue::Boolean(true))
             ),
             None => true,
-        });
+        };
+        if let (true, Some(c)) = (matched, counter) {
+            c.set(c.get() + 1);
+            return Ok(false);
+        }
+        return Ok(matched);
     };
     // Candidate start nodes: pinned when the start variable is already bound
     // (by the outer query or an earlier pattern), otherwise every node
@@ -1197,7 +1214,7 @@ fn exists_start_paths(
         if let Some(var) = path.start.variable.as_deref() {
             bindings.bind(var.to_string(), Value::NodeRef(start_id));
         }
-        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, store)? {
+        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, counter, store)? {
             return Ok(true);
         }
     }
@@ -1393,10 +1410,11 @@ fn exists_match_segment(
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
     rest: &[crate::query::ast::PathPattern],
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     if seg_idx == path.segments.len() {
-        return exists_start_paths(rest, bindings, visited_edges, where_clause, store);
+        return exists_start_paths(rest, bindings, visited_edges, where_clause, counter, store);
     }
 
     let segment = &path.segments[seg_idx];
@@ -1409,7 +1427,7 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, store,
+        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, counter, store,
     )
 }
 
@@ -1427,6 +1445,7 @@ fn exists_expand_hops(
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
     rest: &[crate::query::ast::PathPattern],
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let segment = &path.segments[seg_idx];
@@ -1446,7 +1465,7 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, store,
+                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, counter, store,
             )? {
                 return Ok(true);
             }
@@ -1513,6 +1532,7 @@ fn exists_expand_hops(
                 &next_visited,
                 where_clause,
                 rest,
+                counter,
                 store,
             )
         },
@@ -6234,8 +6254,8 @@ impl FilterOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -8779,8 +8799,8 @@ impl ProjectOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -9429,8 +9449,8 @@ impl AggregateOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -10849,8 +10869,8 @@ impl SortOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -18353,8 +18373,8 @@ impl WithBarrierOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
