@@ -683,6 +683,42 @@ pub struct EdgeVersionEntry {
     pub properties: Option<PropertyMap>,
 }
 
+/// One write to a node that a read at an earlier version must undo (#1200).
+///
+/// History is kept as what each write replaced, per key, not as a copy of the
+/// whole node per version: changing one property of a 20-property node records
+/// one value, not 20.
+#[derive(Debug, Clone)]
+enum NodeUndo {
+    /// Before version `at`, property `key` held `old` (`None`: it was absent).
+    Property { at: u64, key: String, old: Option<PropertyValue> },
+    /// Before version `at`, the node did (`had`) or did not carry `label`.
+    Label { at: u64, label: Label, had: bool },
+}
+
+impl NodeUndo {
+    fn at(&self) -> u64 {
+        match self {
+            NodeUndo::Property { at, .. } | NodeUndo::Label { at, .. } => *at,
+        }
+    }
+}
+
+/// What a node looked like before its recent writes (#1200).
+///
+/// Held only for a node created or written after version 1, so a store whose
+/// version never advances -- any store not using transactions -- holds none.
+#[derive(Debug, Clone, Default)]
+struct NodeHistory {
+    /// The version the node was created at, when that is after version 1.
+    born: Option<u64>,
+    /// Oldest first, so `at` never decreases along the list.
+    undo: Vec<NodeUndo>,
+    /// The newest `at` garbage collection dropped: the version a read reports
+    /// when every write it could name is gone.
+    pruned_to: u64,
+}
+
 /// Where a loaded graph's bytes are, by structure (`GraphStore::memory_report`).
 ///
 /// Every field is heap bytes at **capacity**, since slack is resident. The point of
@@ -833,6 +869,11 @@ pub struct GraphStore {
     /// Maps NodeId/EdgeId → version at which it was last committed.
     node_last_commit: HashMap<NodeId, u64>,
     edge_last_commit: HashMap<EdgeId, u64>,
+
+    /// Node history as an undo log beside the columns (#1200). Sparse: a node
+    /// has an entry only once a write at a later version replaced something an
+    /// earlier version can still read, or it was created after version 1.
+    node_history: HashMap<NodeId, NodeHistory>,
 
     /// Free node IDs for reuse
     free_node_ids: Vec<u64>,
@@ -990,6 +1031,7 @@ impl GraphStore {
             next_txn_id: 1,
             active_transactions: HashMap::new(),
             node_last_commit: HashMap::new(),
+            node_history: HashMap::new(),
             edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
@@ -1463,13 +1505,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
+        self.note_node_birth(node_id);
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         for label in &labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
             self.catalog.on_label_added(label);
         }
@@ -1555,6 +1598,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         let mut node = Node::new_with_properties(node_id, labels.clone(), properties);
         node.version = self.current_version;
+        self.note_node_birth(node_id);
 
         // Add to label indices
         // `label_index` changes here, so the derived bitsets are stale (#730).
@@ -1562,7 +1606,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in &labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
             // Update catalog label count
             self.catalog.on_label_added(label);
@@ -1613,21 +1657,57 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         node_id
     }
 
-    /// Get a node by ID at a specific version (MVCC)
-    pub fn get_node_at_version(&self, id: NodeId, version: u64) -> Option<&Node> {
-        let idx = id.as_u64() as usize;
-        let versions = self.nodes.get(idx)?;
-        
-        // Find the latest version <= requested version
-        // Versions are sorted by creation time
-        versions.iter()
+    /// A node as it was at `version` (MVCC), or `None` if it did not exist yet.
+    ///
+    /// Owned, not borrowed: an earlier state is not stored anywhere to borrow.
+    /// The arena holds only the current node, and its history is the list of
+    /// writes to undo (`node_history`), one entry per key per version that
+    /// overwrote it, not a full copy of the node per version (#1200). A read at
+    /// or after the node's last write undoes nothing.
+    pub fn get_node_at_version(&self, id: NodeId, version: u64) -> Option<Node> {
+        let last_write = self.get_node(id)?.version;
+        let history = self.node_history.get(&id);
+        let born = history.and_then(|h| h.born).unwrap_or(1);
+        if version < born {
+            return None;
+        }
+        let mut node = self.node_materialized(id)?;
+        let Some(history) = history.filter(|_| version < last_write) else {
+            return Some(node);
+        };
+        for entry in history.undo.iter().rev().take_while(|e| e.at() > version) {
+            match entry {
+                NodeUndo::Property { key, old: Some(old), .. } => {
+                    node.properties.insert(key.clone(), old.clone());
+                }
+                NodeUndo::Property { key, old: None, .. } => {
+                    node.properties.remove(key);
+                }
+                NodeUndo::Label { label, had: true, .. } => {
+                    node.labels.insert(label.clone());
+                }
+                NodeUndo::Label { label, had: false, .. } => {
+                    node.labels.remove(label);
+                }
+            }
+        }
+        // The version of the state read: its newest write at or before `version`.
+        node.version = history
+            .undo
+            .iter()
             .rev()
-            .find(|n| n.version <= version)
+            .map(NodeUndo::at)
+            .find(|&at| at <= version)
+            .unwrap_or(0)
+            .max(history.pruned_to)
+            .max(born);
+        Some(node)
     }
 
-    /// Get a node by ID (uses current version)
+    /// The current node. The arena holds only the current state; an earlier
+    /// one is rebuilt by `get_node_at_version`.
     pub fn get_node(&self, id: NodeId) -> Option<&Node> {
-        self.get_node_at_version(id, self.current_version)
+        self.nodes.get(id.as_u64() as usize)?.last()
     }
 
     /// Get a mutable node by ID (always latest version)
@@ -1687,12 +1767,13 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let label = label.into();
         let mut node = Node::new_stub(node_id, label.clone());
         node.version = self.current_version;
+        self.note_node_birth(node_id);
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         self.label_index
             .entry(label.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(node_id);
 
         self.catalog.on_label_added(&label);
@@ -1838,6 +1919,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
+        // What this write replaces, kept while an earlier version can still read
+        // it (#1200). Before the column write, since the old value is read there.
+        let last_write = self
+            .get_node(node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?
+            .version;
+        if self.undo_needed(node_id, last_write, |e| {
+            matches!(e, NodeUndo::Property { key, .. } if *key == key_str)
+        }) {
+            let old = self.node_property(node_id, &key_str);
+            let at = self.current_version;
+            self.push_node_undo(node_id, NodeUndo::Property { at, key: key_str.clone(), old });
+        }
+
         // Update columnar storage (always latest)
         self.node_columns.set_property(idx, &key_str, val.clone());
         self.update_hierarchies_for_property(node_id, &key_str, &val);
@@ -1847,22 +1942,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // fine as two shared borrows but not while this one is live.
         let old_val = {
             let current_version = self.current_version;
-            let versions = self.nodes.get_mut(idx).ok_or(GraphError::NodeNotFound(node_id))?;
-            let latest_node = versions.last().ok_or(GraphError::NodeNotFound(node_id))?;
-
-            if latest_node.version < current_version {
-                // COW: Create new version
-                let mut new_node = latest_node.clone();
-                new_node.version = current_version;
-                new_node.updated_at = chrono::Utc::now().timestamp_millis();
-                let old = new_node.set_property(key_str.clone(), val.clone());
-                versions.push(new_node);
-                old
-            } else {
-                // Update in place (same transaction/version)
-                let node = versions.last_mut().unwrap();
-                node.set_property(key_str.clone(), val.clone())
-            }
+            let node = self
+                .nodes
+                .get_mut(idx)
+                .and_then(|v| v.last_mut())
+                .ok_or(GraphError::NodeNotFound(node_id))?;
+            // In place. The history of this write is the undo entry above, not
+            // a copy of the whole node pushed as a new version (#1200).
+            node.version = current_version;
+            node.set_property(key_str.clone(), val.clone())
         };
 
         // Record the new value so subsequent writes can see it. Without this the
@@ -1955,6 +2043,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         
         // Add to free list for reuse (In true MVCC, we only reuse after compaction/vacuum)
         self.free_node_ids.push(id.as_u64());
+        // The history goes with the node. The id is reused, and the next node
+        // to take it must not answer for this one's earlier states. A death
+        // version is not recorded yet, so a snapshot loses a node deleted after
+        // it (#1200).
+        self.node_history.remove(&id);
 
         // For this prototype, we'll keep the removal logic but wrap it in MVCC metadata if needed.
         // Actually, let's keep it simple: removal from the latest version effectively deletes it.
@@ -2034,6 +2127,20 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.invalidate_statistics_cache();
         let idx = node_id.as_u64() as usize;
 
+        let (had, last_write) = self
+            .get_node(node_id)
+            .map(|n| (n.labels.contains(label), n.version))
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+        if had
+            && self.undo_needed(node_id, last_write, |e| {
+                matches!(e, NodeUndo::Label { label: l, .. } if l == label)
+            })
+        {
+            let at = self.current_version;
+            self.push_node_undo(node_id, NodeUndo::Label { at, label: label.clone(), had: true });
+        }
+        let current_version = self.current_version;
+
         let node = self
             .nodes
             .get_mut(idx)
@@ -2043,6 +2150,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if !removed {
             return Ok(false);
         }
+        node.version = current_version;
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
@@ -2076,13 +2184,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // borrowed mutably does not compile (#730).
         self.invalidate_label_bits();
 
+        let prior = self.get_node(node_id).map(|n| (n.labels.contains(&label), n.version));
+        let had = prior.is_some_and(|(had, _)| had);
+        if let Some((false, last_write)) = prior {
+            if self.undo_needed(node_id, last_write, |e| {
+                matches!(e, NodeUndo::Label { label: l, .. } if *l == label)
+            }) {
+                let at = self.current_version;
+                self.push_node_undo(node_id, NodeUndo::Label { at, label: label.clone(), had: false });
+            }
+        }
+        let current_version = self.current_version;
+
         let node = self.nodes.get_mut(idx).and_then(|v| v.last_mut()).ok_or(GraphError::NodeNotFound(node_id))?;
         node.add_label(label.clone());
+        if !had {
+            node.version = current_version;
+        }
 
         // Update the label index so queries can find this node by the new label
         self.label_index
             .entry(label.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(node_id);
 
         // Update catalog label count
@@ -2218,7 +2341,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             None => {
                 self.edge_type_index
                     .entry(edge_type.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(edge_id);
             }
         }
@@ -2327,7 +2450,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             None => {
                 self.edge_type_index
                     .entry(edge_type.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(edge_id);
             }
         }
@@ -3129,9 +3252,25 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// leaves the value readable, which is what `REMOVE n.prop` was doing
     /// (#594). Anything that removes a property has to go through here.
     pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) {
+        // A removal is a write, and history keeps what it removed (#1200).
+        if let Some(last_write) = self.get_node(node_id).map(|n| n.version) {
+            if self.undo_needed(node_id, last_write, |e| {
+                matches!(e, NodeUndo::Property { key: k, .. } if k.as_str() == key)
+            }) {
+                if let Some(old) = self.node_property(node_id, key) {
+                    let at = self.current_version;
+                    self.push_node_undo(
+                        node_id,
+                        NodeUndo::Property { at, key: key.to_string(), old: Some(old) },
+                    );
+                }
+            }
+        }
         self.node_columns.remove_property(node_id.as_u64() as usize, key);
+        let current_version = self.current_version;
         if let Some(node) = self.get_node_mut(node_id) {
             node.remove_property(key);
+            node.version = current_version;
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
         self.invalidate_statistics_cache();
@@ -3708,7 +3847,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             let edge_type = self.edge_type_table[type_id as usize].clone();
             self.edge_type_index
                 .entry(edge_type)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(EdgeId::new(idx as u64));
         }
         self.invalidate_statistics_cache();
@@ -4251,6 +4390,42 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     // MVCC Transaction API
     // ============================================================
 
+    /// Whether a write at the current version must record what it replaces.
+    ///
+    /// Only if a read at an earlier version could see the old state: not when
+    /// the node was created at this version, and only for the first write to a
+    /// key or label at this version -- a second one replaces a value no earlier
+    /// version saw. So a store whose version never advances, which is any store
+    /// not using transactions, records nothing (#1200).
+    fn undo_needed(&self, id: NodeId, last_write: u64, same: impl Fn(&NodeUndo) -> bool) -> bool {
+        let v = self.current_version;
+        let history = self.node_history.get(&id);
+        if history.and_then(|h| h.born).unwrap_or(1) >= v {
+            return false;
+        }
+        if last_write < v {
+            return true;
+        }
+        !history.is_some_and(|h| {
+            h.undo.iter().rev().take_while(|e| e.at() == v).any(same)
+        })
+    }
+
+    fn push_node_undo(&mut self, id: NodeId, entry: NodeUndo) {
+        self.node_history.entry(id).or_default().undo.push(entry);
+    }
+
+    /// A node created now did not exist at any earlier version. Also drops
+    /// whatever history a reused id still carried.
+    fn note_node_birth(&mut self, id: NodeId) {
+        if self.current_version > 1 {
+            let born = Some(self.current_version);
+            self.node_history.insert(id, NodeHistory { born, ..NodeHistory::default() });
+        } else if !self.node_history.is_empty() {
+            self.node_history.remove(&id);
+        }
+    }
+
     /// Begin a new transaction with the specified isolation level.
     /// Returns the transaction ID.
     pub fn begin_transaction(&mut self, isolation: IsolationLevel) -> TxnId {
@@ -4272,7 +4447,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get a node visible to the given transaction, respecting its isolation level.
     /// - ReadCommitted: returns the latest committed version.
     /// - SnapshotIsolation: returns the version at txn start.
-    pub fn get_node_for_txn(&self, txn_id: TxnId, node_id: NodeId) -> Option<&Node> {
+    pub fn get_node_for_txn(&self, txn_id: TxnId, node_id: NodeId) -> Option<Node> {
         let txn = self.active_transactions.get(&txn_id)?;
         let read_version = match txn.isolation {
             IsolationLevel::ReadCommitted => self.current_version,
@@ -4396,21 +4571,21 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let mut nodes_pruned = 0usize;
         let mut edges_pruned = 0usize;
 
-        // GC node versions: keep only the latest version <= min_version + all versions > min_version
-        for versions in &mut self.nodes {
-            if versions.len() <= 1 {
-                continue;
+        // Node history. An entry at version `at` is undone only by a read before
+        // `at`, and no reader is left below `min_version`, so every entry at or
+        // below it goes; so does a birth at or below it (#1200).
+        for history in self.node_history.values_mut() {
+            let drop = history.undo.partition_point(|e| e.at() <= min_version);
+            if drop > 0 {
+                history.pruned_to = history.pruned_to.max(history.undo[drop - 1].at());
+                history.undo.drain(..drop);
+                nodes_pruned += drop;
             }
-            // Find the latest version that's <= min_version (the "base" we must keep)
-            let keep_idx = versions.iter().rposition(|n| n.version <= min_version);
-            if let Some(idx) = keep_idx {
-                if idx > 0 {
-                    // Remove all versions before idx (they're superseded by the base)
-                    nodes_pruned += idx;
-                    versions.drain(..idx);
-                }
+            if history.born.is_some_and(|b| b <= min_version) {
+                history.born = None;
             }
         }
+        self.node_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
         // GC edge version log: remove entries with version < min_version, keep the latest one
         let mut empty_logs = Vec::new();
@@ -4469,6 +4644,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_endpoints.clear();
         self.edge_properties.clear();
         self.edge_version_log.clear();
+        self.node_history.clear();
         self.outgoing.clear();
         self.incoming.clear();
         self.frozen_outgoing.clear();
@@ -4708,7 +4884,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in &node.labels {
             self.label_index
                 .entry(label.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(node_id);
         }
 
@@ -4781,7 +4957,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Update edge type index
         self.edge_type_index
             .entry(self.edge_type_table[type_id as usize].clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(edge_id);
 
         // Update next_edge_id to be higher than any recovered edge
@@ -4899,6 +5075,8 @@ mod tests {
             ("mark_edge_version", "records the version an edge property write happened at; reads at that version use the live properties either way"),
             ("seal_edge_version", "copies an edge's live properties into its version-log entry, which then holds the same values it read as before"),
             ("note_edge_created", "marks a new edge's creation version; reads before it see the live properties with or without the entry"),
+            ("push_node_undo", "records what a write replaced for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
+            ("note_node_birth", "records a new node's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("journal", "appends to the journal, which no query reads"),
             ("shrink_to_fit", "returns unused capacity; every element and every id is unchanged"),
             ("intern_edge_type", "adds a type name to the table; no edge exists at that type until the caller creates one, and that path bumps"),
@@ -7221,13 +7399,16 @@ mod tests {
         store.current_version = 3;
         store.set_node_property("default", nid, "name", "v3").unwrap();
 
-        // Should have 3 versions
-        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 3);
+        // Two overwrites are two undo entries; the node is stored once (#1200).
+        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 1);
+        assert_eq!(store.node_history[&nid].undo.len(), 2);
 
-        // GC versions < 2: keeps v2 base + v3
+        // GC below 2: the entry undoing v2 goes; the one undoing v3 stays.
         let (nodes_pruned, _) = store.gc_versions(2);
-        assert_eq!(nodes_pruned, 1); // v1 pruned
-        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 2);
+        assert_eq!(nodes_pruned, 1);
+        assert_eq!(store.node_history[&nid].undo.len(), 1);
+        let at2 = store.get_node_at_version(nid, 2).unwrap();
+        assert_eq!(at2.get_property("name").unwrap().as_string(), Some("v2"));
 
         // Latest still works
         let latest = store.get_node(nid).unwrap();
@@ -7297,13 +7478,13 @@ mod tests {
         store.current_version = 3;
         store.set_node_property("default", nid, "v", "c").unwrap();
 
-        // 3 node versions
-        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 3);
+        // Two overwrites, two undo entries (#1200).
+        assert_eq!(store.node_history[&nid].undo.len(), 2);
 
         // No active txns → watermark = current_version = 3
         let (pruned, _) = store.gc_auto();
-        assert_eq!(pruned, 2); // v1 and v2 base pruned, only v3 remains
-        assert_eq!(store.nodes[nid.as_u64() as usize].len(), 1);
+        assert_eq!(pruned, 2); // both entries go; no reader is left below v3
+        assert!(!store.node_history.contains_key(&nid));
     }
 
     #[test]
@@ -7334,5 +7515,129 @@ mod tests {
         store.gc_versions(5);
         assert_eq!(store.active_transactions.len(), 1);
         assert!(store.active_transactions.contains_key(&txn2));
+    }
+
+    // ============================================================
+    // Node history as an undo log (#1200 step 2)
+    // ============================================================
+
+    fn prop_at(store: &GraphStore, n: NodeId, version: u64, key: &str) -> Option<PropertyValue> {
+        store.get_node_at_version(n, version).and_then(|node| node.get_property(key).cloned())
+    }
+
+    #[test]
+    fn test_history_is_one_entry_per_changed_key_not_a_node_copy() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        for i in 0..20i64 {
+            store.set_node_property("default", n, format!("p{i}"), i).unwrap();
+        }
+        store.current_version = 2;
+        store.set_node_property("default", n, "p3", 99i64).unwrap();
+
+        assert_eq!(store.nodes[n.as_u64() as usize].len(), 1, "the write copied the node");
+        assert_eq!(store.node_history[&n].undo.len(), 1, "one changed key, one entry");
+        assert_eq!(prop_at(&store, n, 1, "p3"), Some(PropertyValue::Integer(3)));
+        assert_eq!(prop_at(&store, n, 1, "p4"), Some(PropertyValue::Integer(4)));
+        assert_eq!(prop_at(&store, n, 2, "p3"), Some(PropertyValue::Integer(99)));
+    }
+
+    #[test]
+    fn test_a_store_whose_version_never_advances_keeps_no_history() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        for i in 0..100i64 {
+            store.set_node_property("default", n, "x", i).unwrap();
+        }
+        store.remove_node_property(n, "x");
+        store.add_label_to_node("default", n, "M").unwrap();
+        store.remove_label_from_node(n, &Label::new("N")).unwrap();
+        assert!(store.node_history.is_empty(), "history without a version to read it at");
+    }
+
+    #[test]
+    fn test_two_writes_to_one_key_in_one_version_are_one_entry() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "x", 1i64).unwrap();
+        store.current_version = 2;
+        store.set_node_property("default", n, "x", 2i64).unwrap();
+        store.set_node_property("default", n, "x", 3i64).unwrap();
+
+        assert_eq!(store.node_history[&n].undo.len(), 1);
+        assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)));
+        assert_eq!(prop_at(&store, n, 2, "x"), Some(PropertyValue::Integer(3)));
+    }
+
+    #[test]
+    fn test_keys_added_and_removed_later_are_undone_before_it() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "x", 1i64).unwrap();
+        store.current_version = 2;
+        store.set_node_property("default", n, "y", 5i64).unwrap();
+        // Null removes (#952), and a removal is a write to undo.
+        store.set_node_property("default", n, "x", PropertyValue::Null).unwrap();
+
+        assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)), "removal not undone");
+        assert_eq!(prop_at(&store, n, 1, "y"), None, "a key added at v2 is visible at v1");
+        assert_eq!(prop_at(&store, n, 2, "x"), None);
+        assert_eq!(prop_at(&store, n, 2, "y"), Some(PropertyValue::Integer(5)));
+    }
+
+    #[test]
+    fn test_label_changes_are_undone_for_an_earlier_version() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("A");
+        store.current_version = 2;
+        store.add_label_to_node("default", n, "B").unwrap();
+        store.remove_label_from_node(n, &Label::new("A")).unwrap();
+
+        let at1 = store.get_node_at_version(n, 1).unwrap();
+        assert!(at1.labels.contains(&Label::new("A")) && !at1.labels.contains(&Label::new("B")));
+        let at2 = store.get_node_at_version(n, 2).unwrap();
+        assert!(at2.labels.contains(&Label::new("B")) && !at2.labels.contains(&Label::new("A")));
+        assert_eq!(store.get_node(n).unwrap().version, 2);
+    }
+
+    #[test]
+    fn test_a_node_created_after_a_version_is_absent_at_it() {
+        let mut store = GraphStore::new();
+        store.current_version = 2;
+        let n = store.create_node("N");
+        assert!(store.get_node_at_version(n, 1).is_none(), "a node was visible before it existed");
+        assert!(store.get_node_at_version(n, 2).is_some());
+
+        // No reader is left below v2 once nothing is open, so the birth goes too.
+        store.gc_auto();
+        assert!(store.node_history.is_empty());
+    }
+
+    #[test]
+    fn test_a_reused_id_does_not_inherit_the_deleted_nodes_history() {
+        let mut store = GraphStore::new();
+        let old = store.create_node("Old");
+        store.set_node_property("default", old, "x", 1i64).unwrap();
+        store.current_version = 2;
+        store.set_node_property("default", old, "x", 2i64).unwrap();
+        store.delete_node("default", old).unwrap();
+
+        let fresh = store.create_node("Fresh");
+        assert_eq!(fresh, old, "the test needs the id reused");
+        assert!(store.get_node_at_version(fresh, 1).is_none(), "the new node existed before it was created");
+        assert_eq!(prop_at(&store, fresh, 2, "x"), None, "the new node carries the old one's value");
+    }
+
+    #[test]
+    fn test_history_keeps_a_value_held_only_in_the_column() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        // A restored graph holds scalars in the column with an empty row.
+        store.node_columns.set_property(n.as_u64() as usize, "x", PropertyValue::Integer(1));
+        store.current_version = 2;
+        store.set_node_property("default", n, "x", 2i64).unwrap();
+
+        assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)));
+        assert_eq!(prop_at(&store, n, 2, "x"), Some(PropertyValue::Integer(2)));
     }
 }
