@@ -85,6 +85,12 @@ jobs:
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        # maturin's default floor for x86_64 macOS is 10.12. RocksDB's
+        # clock_cache.cc uses aligned new/delete, "only available on macOS
+        # 10.13 or newer" (80 clang errors for v1.8.0). arm64 starts at 11.0
+        # and is unaffected. Ignored off macOS.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
         with:
           working-directory: ${{ env.PYTHON_SDK_DIR }}
           target: ${{ matrix.target }}
