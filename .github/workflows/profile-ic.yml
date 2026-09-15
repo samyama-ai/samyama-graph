@@ -1,21 +1,30 @@
 name: Profile IC3/IC5/IC9 (throwaway)
 
 # Throwaway branch `profile-ic`, never merged. The AWS account is blocked, so
-# SF1 experiments for #612 run on a GitHub runner. Run 1 (34950228916) was the
-# per-operator profile and perf of IC3/IC5/IC9. This run times IC5 against
-# rewrites of it (examples/ic5_variants.rs) to test where its time goes.
-# Runner timings are noisy; the ratios between variants on one runner are the point.
+# SF1 experiments for #612 run on a GitHub runner.
+#   run 34950228916  per-operator profile and perf of IC3/IC5/IC9
+#   run 34952633724  IC5 against rewrites of itself (group-by-node was slower)
+#   this run         IC5 A/B, main 060ca71 against branch arc-aliases (shared
+#                    output names in Project/Aggregate), same runner,
+#                    interleaved rounds.
 
 on:
   push:
     branches: [profile-ic]
 
 jobs:
-  ic5-variants:
+  ic5-ab:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
+        with: { path: prof }
+      - uses: actions/checkout@v4
+        with: { ref: 060ca71d28ca2eebd9517a1cb6dfe62195c22d43, path: base }
+      - uses: actions/checkout@v4
+        with: { ref: arc-aliases, path: arc }
 
       - name: Tools
         run: |
@@ -25,8 +34,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build the example
-        run: cargo build --release --example ic5_variants 2>&1 | tail -3
+      - name: Build the example against both trees (one target dir, deps once)
+        run: |
+          mkdir -p bin
+          for t in base arc; do
+            cp prof/examples/ic5_variants.rs "$t/examples/"
+            (cd "$t" && git log --oneline -1 && cargo build --release --example ic5_variants 2>&1 | tail -1)
+            cp "$CARGO_TARGET_DIR/release/examples/ic5_variants" "bin/ic5_variants-$t"
+          done
+          ls -la bin
 
       - name: LDBC SF1
         run: |
@@ -34,13 +50,19 @@ jobs:
           curl -sSf --retry 5 -o sf1.tar.zst https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst
           tar --use-compress-program=unzstd -xf sf1.tar.zst && rm -f sf1.tar.zst
 
-      - name: IC5 variants
+      - name: A/B, three interleaved rounds
         run: |
           mkdir -p out
-          ./target/release/examples/ic5_variants --data-dir ~/ldbc/social_network-sf1-CsvBasic-LongDateFormatter 2>&1 | tee out/ic5-variants.log
+          for round in 1 2 3; do
+            for t in base arc; do
+              echo "=== round $round $t"
+              "bin/ic5_variants-$t" --data-dir ~/ldbc/social_network-sf1-CsvBasic-LongDateFormatter 2>/dev/null \
+                | grep -E '^(F|V)[0-9]|equal|multiset'
+            done
+          done | tee out/ic5-ab.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ic5-variants-sf1
+          name: ic5-ab-sf1
           path: out/
