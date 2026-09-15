@@ -30,6 +30,10 @@ env:
 jobs:
   wheels:
     name: wheel (${{ matrix.platform }})
+    # kg-snapshots-v* data releases are Releases too, and each one failed here.
+    # Only a v* tag is an engine release. `publish` needs this job, so it is
+    # skipped with it.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -51,8 +55,10 @@ jobs:
             manylinux: auto
           # manylinux is meaningless off Linux, but every entry sets it so the
           # action never receives an empty string for an input it expects unset.
+          # macos-13 is no longer a GitHub-hosted label; a job asking for it
+          # waits for a runner that never comes. macos-15-intel is x86_64.
           - platform: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64
             manylinux: "off"
           - platform: macos-aarch64
@@ -88,6 +94,7 @@ jobs:
 
   sdist:
     name: sdist
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -114,7 +121,12 @@ jobs:
   publish:
     name: Publish to ${{ github.event_name == 'release' && 'PyPI' || inputs.target }}
     needs: [wheels, sdist]
-    if: github.event_name == 'release' || inputs.target != 'none'
+    # A dispatch to the real PyPI must run on a tag, as tag-release.yml's does
+    # (#1249). From a branch it would upload whatever that branch holds.
+    if: >-
+      github.event_name == 'release'
+      || (inputs.target == 'testpypi')
+      || (inputs.target == 'pypi' && github.ref_type == 'tag')
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

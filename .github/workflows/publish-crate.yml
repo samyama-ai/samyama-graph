@@ -40,6 +40,9 @@ env:
 jobs:
   publish:
     name: Publish crates
+    # Knowledge-graph data releases (kg-snapshots-v*) are Releases too, and
+    # every one of them failed this workflow. Only a v* tag is an engine release.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -70,6 +73,12 @@ jobs:
       # than trusted to stay in step.
       - name: Verify tag matches every manifest version
         shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
 
@@ -104,14 +113,25 @@ jobs:
             fi
           done
 
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-            if [ "${TAG#v}" != "$WS_VERSION" ]; then
-              echo "::error::release tag $TAG does not match version $WS_VERSION"
-              exit 1
-            fi
-            echo "tag $TAG matches all manifests"
+          # The tag being released: the Release's own, or the tag a dispatch runs
+          # on (tag-release.yml dispatches this workflow, #1249). A real upload
+          # must come from a tag, so a dispatch from a branch can only dry-run.
+          if [ "$EVENT" = "release" ]; then
+            TAG=$RELEASE_TAG
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG=$REF_NAME
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "dry run on branch $REF_NAME: no tag to check"
+            exit 0
+          else
+            echo "::error::a real publish must run on a v* tag, not the branch $REF_NAME"
+            exit 1
           fi
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::tag $TAG does not match version $WS_VERSION"
+            exit 1
+          fi
+          echo "tag $TAG matches all manifests"
 
       # Exchanges this job's GitHub OIDC identity for a 30-minute crates.io
       # token, scoped to the crates whose trusted-publisher settings name this
