@@ -377,6 +377,33 @@ fn int_out_of_range(l: i64, op: &str, r: i64) -> ExecutionError {
     ExecutionError::RuntimeError(format!("numeric value out of range: {l} {op} {r}"))
 }
 
+/// A float as Neo4j writes it, which is Java's `Double.toString` (#1241):
+/// `1.0` keeps its `.0`, magnitudes from 10^-3 up to 10^7 are plain decimal,
+/// and anything else is `d.dddE<n>` (`1.0E20`, `1.0E-4`). The digits are the
+/// shortest that round-trip, as in both Rust and current Java. `toString()` and
+/// `'a' + 1.5` both write floats through here.
+pub(crate) fn java_double_string(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+    }
+    let a = f.abs();
+    if (1e-3..1e7).contains(&a) {
+        let s = f.to_string();
+        if s.contains('.') { s } else { format!("{s}.0") }
+    } else {
+        let s = format!("{f:e}");
+        let (mantissa, exp) = s.split_once('e').expect("`{:e}` always has an exponent");
+        let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
+        format!("{mantissa}E{exp}")
+    }
+}
+
 fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
     // Identity comparison for the three entity kinds (Cypher: n1 = n2, r1 = r2,
     // p1 = p2).
@@ -611,6 +638,12 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
             (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
             (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            // A string and a number concatenate, the number written as Neo4j
+            // writes it: `'a' + 1` is "a1", `'a' + 1.0` is "a1.0" (#1241).
+            (PropertyValue::String(l), PropertyValue::Integer(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::Integer(l), PropertyValue::String(r)) => PropertyValue::String(format!("{l}{r}")),
+            (PropertyValue::String(l), PropertyValue::Float(r)) => PropertyValue::String(format!("{l}{}", java_double_string(*r))),
+            (PropertyValue::Float(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{r}", java_double_string(*l))),
             // List concatenation, and appending or prepending a scalar. Cypher
             // defines all three for `+`; none of them worked (#578).
             (PropertyValue::Array(l), PropertyValue::Array(r)) => {
@@ -1064,8 +1097,8 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
             let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause, .. } => {
-            eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+        Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+            eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
         }
         Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
             eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -1142,10 +1175,18 @@ fn require_a_hierarchy(store: &GraphStore, func: &str) -> ExecutionResult<()> {
 fn eval_exists_subquery(
     pattern: &crate::query::ast::Pattern,
     where_clause: Option<&crate::query::ast::WhereClause>,
+    count: bool,
     record: &Record,
     store: &GraphStore,
 ) -> ExecutionResult<Value> {
-    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, store)?;
+    // `COUNT { ... }` (#1235): the same walk, counting every match instead of
+    // stopping at the first.
+    if count {
+        let matches = std::cell::Cell::new(0i64);
+        exists_start_paths(&pattern.paths, record, &[], where_clause, Some(&matches), store)?;
+        return Ok(Value::Property(PropertyValue::Integer(matches.get())));
+    }
+    let found = exists_start_paths(&pattern.paths, record, &[], where_clause, None, store)?;
     Ok(Value::Property(PropertyValue::Boolean(found)))
 }
 
@@ -1160,21 +1201,30 @@ fn eval_exists_subquery(
 /// its variables ("Variable not found"). Relationships already walked carry
 /// into the next pattern: a relationship appears once in the subquery, as in
 /// one MATCH clause (#1233).
+///
+/// With `counter`, every complete match adds one and the walk goes on (`false`
+/// is returned so no caller stops early); `COUNT { }` reads the total (#1235).
 fn exists_start_paths(
     paths: &[crate::query::ast::PathPattern],
     record: &Record,
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let Some((path, rest)) = paths.split_first() else {
-        return Ok(match where_clause {
+        let matched = match where_clause {
             Some(wc) => matches!(
                 eval_expression(&wc.predicate, record, store)?,
                 Value::Property(PropertyValue::Boolean(true))
             ),
             None => true,
-        });
+        };
+        if let (true, Some(c)) = (matched, counter) {
+            c.set(c.get() + 1);
+            return Ok(false);
+        }
+        return Ok(matched);
     };
     // Candidate start nodes: pinned when the start variable is already bound
     // (by the outer query or an earlier pattern), otherwise every node
@@ -1197,7 +1247,7 @@ fn exists_start_paths(
         if let Some(var) = path.start.variable.as_deref() {
             bindings.bind(var.to_string(), Value::NodeRef(start_id));
         }
-        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, store)? {
+        if exists_match_segment(path, 0, start_id, &bindings, visited_edges, where_clause, rest, counter, store)? {
             return Ok(true);
         }
     }
@@ -1393,10 +1443,11 @@ fn exists_match_segment(
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
     rest: &[crate::query::ast::PathPattern],
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     if seg_idx == path.segments.len() {
-        return exists_start_paths(rest, bindings, visited_edges, where_clause, store);
+        return exists_start_paths(rest, bindings, visited_edges, where_clause, counter, store);
     }
 
     let segment = &path.segments[seg_idx];
@@ -1409,7 +1460,7 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, store,
+        path, seg_idx, current, 0, min_hops, max_hops, bindings, visited_edges, where_clause, rest, counter, store,
     )
 }
 
@@ -1427,6 +1478,7 @@ fn exists_expand_hops(
     visited_edges: &[crate::graph::EdgeId],
     where_clause: Option<&crate::query::ast::WhereClause>,
     rest: &[crate::query::ast::PathPattern],
+    counter: Option<&std::cell::Cell<i64>>,
     store: &GraphStore,
 ) -> ExecutionResult<bool> {
     let segment = &path.segments[seg_idx];
@@ -1446,7 +1498,7 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, store,
+                path, seg_idx + 1, current, &next, visited_edges, where_clause, rest, counter, store,
             )? {
                 return Ok(true);
             }
@@ -1513,6 +1565,7 @@ fn exists_expand_hops(
                 &next_visited,
                 where_clause,
                 rest,
+                counter,
                 store,
             )
         },
@@ -2774,13 +2827,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "substring" => {
             if args.len() < 2 { return Err(ExecutionError::bad_argument("substring() requires at least 2 arguments".to_string())); }
             let s = extract_string(&args[0])?;
-            let start = extract_int(&args[1])? as usize;
+            // A negative start or length is refused, as Neo4j does. Cast to
+            // usize it wrapped: `substring('abc', -1)` answered "" (#1241).
+            let start = extract_int(&args[1])?;
+            if start < 0 {
+                return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative start index: {start}")));
+            }
+            let start = start as usize;
             let chars: Vec<char> = s.chars().collect();
             if start >= chars.len() {
                 return Ok(Value::Property(PropertyValue::String(String::new())));
             }
             let result = if args.len() >= 3 {
-                let len = extract_int(&args[2])? as usize;
+                let len = extract_int(&args[2])?;
+                if len < 0 {
+                    return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative length: {len}")));
+                }
+                let len = len as usize;
                 chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
             } else {
                 chars[start..].iter().collect()
@@ -2789,12 +2852,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "left" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("left() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
         }
         "right" => {
             let s = extract_string(&args[0])?;
-            let n = extract_int(&args[1])? as usize;
+            let n = extract_int(&args[1])?;
+            if n < 0 {
+                return Err(ExecutionError::bad_argument(format!("right() cannot handle a negative length: {n}")));
+            }
+            let n = n as usize;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
             Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
@@ -2821,7 +2892,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let s = match val {
                 Value::Property(PropertyValue::String(s)) => s.clone(),
                 Value::Property(PropertyValue::Integer(i)) => i.to_string(),
-                Value::Property(PropertyValue::Float(f)) => f.to_string(),
+                Value::Property(PropertyValue::Float(f)) => java_double_string(*f),
                 Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
                 Value::Property(PropertyValue::DateTime(millis)) => {
                     use chrono::TimeZone;
@@ -3008,6 +3079,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         // Type/meta functions
         "coalesce" => {
+            // Neo4j refuses `coalesce()` outright; answering null hid the typo (#1241).
+            if args.is_empty() {
+                return Err(ExecutionError::bad_argument("coalesce() requires at least one argument".to_string()));
+            }
             for arg in args {
                 if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
                     return Ok(arg.clone());
@@ -6234,8 +6309,8 @@ impl FilterOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -8698,6 +8773,109 @@ impl PhysicalOperator for VarLengthExpandOperator {
     }
 }
 
+/// The outer row a correlated `CALL { WITH ... }` subquery runs against
+/// (#1236). `CorrelatedCallOperator` puts each outer row in the cell; this
+/// yields it once per reset, so the body's plan starts from that row with the
+/// imported variables bound.
+pub struct SeedOperator {
+    cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    done: bool,
+}
+
+impl SeedOperator {
+    pub fn new(cell: std::sync::Arc<std::sync::Mutex<Option<Record>>>) -> Self {
+        Self { cell, done: false }
+    }
+}
+
+impl PhysicalOperator for SeedOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+        let row = self
+            .cell
+            .lock()
+            .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))?
+            .clone();
+        Ok(row)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "Seed".to_string(),
+            details: "the outer row of a CALL { WITH ... }".to_string(),
+            children: vec![],
+        }
+    }
+}
+
+/// `MATCH ... CALL { WITH a <body> } RETURN ...` (#1236). For each outer row,
+/// the body runs against that row and each row it returns is emitted joined to
+/// the outer one. A body that returns nothing drops the outer row, as Cypher's
+/// CALL does; a body that aggregates returns one row per outer row, so
+/// `RETURN count(q) AS c` answers 0 rather than dropping the row.
+pub struct CorrelatedCallOperator {
+    outer: OperatorBox,
+    body: OperatorBox,
+    seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    current: Option<Record>,
+}
+
+impl CorrelatedCallOperator {
+    pub fn new(
+        outer: OperatorBox,
+        body: OperatorBox,
+        seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
+    ) -> Self {
+        Self { outer, body, seed, current: None }
+    }
+}
+
+impl PhysicalOperator for CorrelatedCallOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if let Some(outer_row) = &self.current {
+                if let Some(inner) = self.body.next(store)? {
+                    let mut row = outer_row.clone();
+                    row.merge(inner);
+                    return Ok(Some(row));
+                }
+                self.current = None;
+            }
+            let Some(outer_row) = self.outer.next(store)? else {
+                return Ok(None);
+            };
+            *self
+                .seed
+                .lock()
+                .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))? =
+                Some(outer_row.clone());
+            self.body.reset();
+            self.current = Some(outer_row);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.body.reset();
+        self.current = None;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CorrelatedCall".to_string(),
+            details: "the subquery runs once per outer row".to_string(),
+            children: vec![self.outer.describe(), self.body.describe()],
+        }
+    }
+}
+
 /// Project operator: RETURN n.name, n.age
 pub struct ProjectOperator {
     /// Input operator
@@ -8779,8 +8957,8 @@ impl ProjectOperator {
                 let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -9429,8 +9607,8 @@ impl AggregateOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -10849,8 +11027,8 @@ impl SortOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
@@ -18353,8 +18531,8 @@ impl WithBarrierOperator {
                 let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), record, store)
+            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
+                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
             }
             Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)

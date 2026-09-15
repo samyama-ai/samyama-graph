@@ -44,6 +44,15 @@
 use crate::graph::{EdgeType, Label, PropertyValue};
 use std::collections::HashMap;
 
+/// A correlated `CALL { WITH ... }` subquery (#1236).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrelatedCall {
+    /// The variables the leading `WITH` imports; `None` for `WITH *`.
+    pub imports: Option<Vec<String>>,
+    /// The subquery after that `WITH`.
+    pub body: Box<Query>,
+}
+
 /// The root AST node representing a complete Cypher query.
 ///
 /// Every parsed Cypher statement produces exactly one `Query`. Its fields are grouped
@@ -91,6 +100,9 @@ pub struct Query {
     pub call_clause: Option<CallClause>,
     /// CALL subquery (optional)
     pub call_subquery: Option<Box<Query>>,
+    /// `MATCH ... CALL { WITH a, b <body> }` (#1236): `body` runs once per
+    /// outer row, with the imported variables bound from that row.
+    pub correlated_call: Option<CorrelatedCall>,
     /// DELETE clause (optional)
     pub delete_clause: Option<DeleteClause>,
     /// SET clauses
@@ -664,6 +676,9 @@ pub enum Expression {
         /// tell them apart, and applying it to both rejects every
         /// `EXISTS { MATCH (n)-->(m) ... }` — which is what happened (#798).
         bare_pattern: bool,
+        /// `COUNT { ... }` (#1235): the number of matches, not whether one
+        /// exists. Same pattern, same walk, an integer instead of a boolean.
+        count: bool,
     },
     /// List comprehension: [x IN list WHERE cond | expr]
     ListComprehension {
@@ -1093,6 +1108,7 @@ impl Query {
             deferred_limit: None,
             call_clause: None,
             call_subquery: None,
+            correlated_call: None,
             delete_clause: None,
             set_clauses: Vec::new(),
             remove_clauses: Vec::new(),

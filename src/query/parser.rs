@@ -1175,6 +1175,27 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::call_clause => {
                 query.call_clause = Some(parse_call_clause(inner)?);
             }
+            // `CALL { WITH a, b <statement> }` after MATCH (#1236).
+            Rule::correlated_call => {
+                let mut imports: Option<Vec<String>> = None;
+                let mut body = Query::new();
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::call_imports => {
+                            let vars: Vec<String> = part
+                                .into_inner()
+                                .filter(|v| v.as_rule() == Rule::variable)
+                                .map(|v| v.as_str().to_string())
+                                .collect();
+                            // `WITH *` has no variables: it imports everything.
+                            imports = if vars.is_empty() { None } else { Some(vars) };
+                        }
+                        Rule::statement => parse_statement(part, &mut body)?,
+                        _ => {}
+                    }
+                }
+                query.correlated_call = Some(CorrelatedCall { imports, body: Box::new(body) });
+            }
             Rule::create_clause => {
                 for create_inner in inner.into_inner() {
                     if create_inner.as_rule() == Rule::pattern {
@@ -2594,6 +2615,26 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             Rule::exists_subquery => {
                 return parse_exists_subquery(inner);
             }
+            // `COUNT { ... }` (#1235): the EXISTS node, counting. Parsed inline
+            // rather than in a helper, as every `ParseResult` fn adds a clippy
+            // `result_large_err`.
+            Rule::count_subquery => {
+                let mut pattern = None;
+                let mut where_clause = None;
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::pattern => pattern = Some(parse_pattern(part)?),
+                        Rule::where_clause => where_clause = Some(Box::new(parse_where_clause(part)?)),
+                        _ => {}
+                    }
+                }
+                return Ok(Expression::ExistsSubquery {
+                    pattern: pattern.ok_or_else(|| ParseError::SemanticError("COUNT missing pattern".to_string()))?,
+                    where_clause,
+                    bare_pattern: false,
+                    count: true,
+                });
+            }
             Rule::pattern_predicate => {
                 // `WHERE (:Acc)-[:SUPPORTS]->(o)` means "such a path exists", which is
                 // exactly `EXISTS { MATCH ... }` -- so it desugars to the same node and
@@ -2602,6 +2643,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                     pattern: Pattern { paths: vec![parse_path(inner)?] },
                     where_clause: None,
                     bare_pattern: true,
+                    count: false,
                 });
             }
             Rule::reduce_expression => {
@@ -2821,6 +2863,7 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
         // `EXISTS { ... }` may introduce variables; a bare pattern predicate
         // may not (#798).
         bare_pattern: false,
+        count: false,
     })
 }
 

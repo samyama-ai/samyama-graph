@@ -1839,6 +1839,22 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
 
     note_clause_binders(query, &mut bound);
 
+    // A correlated `CALL { WITH ... }` (#1236) exports the columns its body's
+    // RETURN names to the outer query, as the leading form below does.
+    if let Some(cc) = &query.correlated_call {
+        note_clause_binders(&cc.body, &mut bound);
+        for items in cc.body.return_clause.iter().map(|r| &r.items) {
+            for item in items {
+                if let Some(a) = &item.alias {
+                    bound.insert(a.clone());
+                } else if let Expression::Variable(v) = &item.expression {
+                    bound.insert(v.clone());
+                }
+                binders(&item.expression, &mut bound);
+            }
+        }
+    }
+
     // A `CALL { … }` subquery exports the columns its RETURN names, and binds
     // everything it binds internally. Recursing rather than duplicating the
     // walk: a subquery is a `Query`.
@@ -2955,6 +2971,9 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
     {
         fn holds_pattern(e: &Expression) -> bool {
             match e {
+                // A `COUNT { }` is a value -- an integer -- and may be stored
+                // (`SET n.deg = COUNT { (n)--() }`); only a pattern is refused.
+                Expression::ExistsSubquery { count: true, .. } => false,
                 Expression::ExistsSubquery { .. } | Expression::PatternComprehension { .. } => true,
                 Expression::Binary { left, right, .. } => holds_pattern(left) || holds_pattern(right),
                 Expression::Unary { expr, .. } => holds_pattern(expr),
