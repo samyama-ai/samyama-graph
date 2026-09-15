@@ -30,7 +30,7 @@ fn test_mvcc_snapshot_isolation() {
     
     // T5: Read latest (implicit)
     let node_latest = store.get_node(n1).unwrap();
-    assert_eq!(node_latest.get_property("balance").unwrap().as_integer(), Some(200));
+    assert_eq!(store.node_property(node_latest.id, "balance").unwrap().as_integer(), Some(200));
 }
 
 #[test]

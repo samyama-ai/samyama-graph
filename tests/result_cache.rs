@@ -112,7 +112,7 @@ fn a_property_write_that_changes_no_count_still_invalidates() {
     let before = render(&warm);
 
     let target = store.get_nodes_by_label(&Label::new("Person"))
-        .iter().find(|n| n.properties.get("id") == Some(&PropertyValue::Integer(0)))
+        .iter().find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(0)))
         .map(|n| n.id)
         .expect("seeded Person with id 0");
     store.set_node_property("default", target, "name", PropertyValue::String("renamed".into()))
@@ -158,7 +158,7 @@ fn a_columnar_property_write_invalidates_too() {
     let before = render(&warm);
 
     let target = store.get_nodes_by_label(&Label::new("Person"))
-        .iter().find(|n| n.properties.get("id") == Some(&PropertyValue::Integer(3)))
+        .iter().find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(3)))
         .map(|n| n.id)
         .expect("seeded Person with id 3");
     store.set_column_property(target, "name", PropertyValue::String("columnar".into()));
