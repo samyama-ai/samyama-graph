@@ -62,6 +62,10 @@ fn the_other_spellings_agree_with_it() {
     }
 }
 
+/// Not a Neo4j comparison. Neo4j 2026.04 rejects `exists(n.prop)` ("no longer
+/// supported, use IS NOT NULL"). openCypher 9 defines it as `n.prop IS NOT NULL`,
+/// and this engine keeps that meaning. The test guards that the pattern fix
+/// leaves the property form alone.
 #[test]
 fn exists_on_a_property_is_still_is_not_null() {
     let s = graph();
