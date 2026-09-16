@@ -25,6 +25,10 @@ use std::time::{Duration, Instant};
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
@@ -586,6 +590,7 @@ async fn main() -> Result<(), Error> {
         // should report a skip, so "run every benchmark" is not permanently red.
         if explicit_data_dir {
             eprintln!("ERROR: Data directory not found: {}", data_dir.display());
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
             std::process::exit(1);
         }
         eprintln!("SKIP: LDBC SF1 dataset not present at {}", data_dir.display());

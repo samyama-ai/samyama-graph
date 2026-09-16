@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
@@ -740,6 +744,7 @@ async fn main() -> Result<(), Error> {
         .collect();
     if !unknown.is_empty() {
         eprintln!("unknown option(s): {}", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
         eprintln!("known options: {}", KNOWN[..10].join(" "));
         eprintln!("\nRefusing to run: an ignored flag produces a number measured under\nsettings nobody chose, and the output cannot tell you that happened.");
         std::process::exit(64);

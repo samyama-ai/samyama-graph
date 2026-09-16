@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
@@ -558,6 +562,7 @@ async fn main() -> Result<(), Error> {
     // Load dataset
     // ========================================================================
     eprintln!("LDBC FinBench Benchmark — Samyama v0.5.8");
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     eprintln!();
 
     let client = EmbeddedClient::new();
