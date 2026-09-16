@@ -86,7 +86,7 @@ fn a_snapshot_does_not_see_a_later_commit() {
 /// **Phantom by creation.** A snapshot does not see an entity created after it
 /// started. Today creation is not versioned.
 #[test]
-#[ignore = "#1200 step 2: creation and deletion carry a birth and death version"]
+#[ignore = "#1200 steps 2 and 4: step 2 records the birth version, but create_node inside a transaction still runs at the snapshot's own version until step 4 commits at a new one"]
 fn a_snapshot_does_not_see_a_node_created_after_it() {
     let (mut store, _) = one();
     let snapshot = store.begin_transaction(IsolationLevel::SnapshotIsolation);

@@ -16,13 +16,13 @@
 //!
 //! ## MVCC (Multi-Version Concurrency Control)
 //!
-//! Each node carries a `version: u64` field that is incremented on mutation.
-//! In the storage layer ([`GraphStore`](super::store::GraphStore)), nodes are
-//! stored in a `Vec<Vec<Node>>` arena where the inner `Vec` holds successive
-//! versions of the same node. This enables **snapshot isolation**: a reader
-//! operating at version V sees only node versions <= V, and is never blocked by
-//! a concurrent writer creating version V+1. MVCC is the same concurrency
-//! strategy used by PostgreSQL, Oracle, and most modern databases.
+//! Each node carries a `version: u64`: the version of its last write. The
+//! storage layer ([`GraphStore`](super::store::GraphStore)) keeps only the
+//! current node. Its history is an undo log beside the columns: for each write
+//! at a later version, the value (or label) it replaced. A read at version V
+//! takes the current node and undoes the entries newer than V, so changing one
+//! property of a 20-property node records one value, not a copy of the node
+//! (samyama-graph#1200).
 //!
 //! ## Identity semantics
 //!
