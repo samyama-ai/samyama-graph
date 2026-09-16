@@ -318,11 +318,18 @@ impl<T: Clone + Default> ColumnData<T> {
         if !dense_is_smaller(span, len, std::mem::size_of::<T>()) {
             return;
         }
+        // Move the values out of the map; do not clone them. Cloning and then
+        // dropping the map freed every original, one small free per entry, all
+        // at once and scattered among the copies. On glibc, promoting a string
+        // column during an SF1 Comment load took the free-chunk count from 6 to
+        // 1,775,224, and queries paid for that list for the life of the process
+        // (#1269).
+        let taken = std::mem::replace(m, FxHashMap::default());
         let mut values = vec![T::default(); span];
         let mut present = vec![0u64; span.div_ceil(64)];
-        for (&idx, value) in m.iter() {
+        for (idx, value) in taken {
             let slot = idx - min;
-            values[slot] = value.clone();
+            values[slot] = value;
             set_bit(&mut present, slot);
         }
         *self = ColumnData::Dense { base: min, values, present, count: len };
