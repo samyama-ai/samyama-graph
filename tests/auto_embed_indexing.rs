@@ -189,8 +189,7 @@ async fn an_auto_embedded_vector_survives_a_rebuild() {
     {
         let guard = store.read().await;
         let stored = guard
-            .get_node(id)
-            .and_then(|n| n.get_property("embedding").cloned());
+            .node_property(id, "embedding");
         assert!(
             stored.is_some_and(|v| v.to_vector().is_some_and(|v| v.len() == MOCK_DIM)),
             "the embedding should be stored on the node, not only in the index"

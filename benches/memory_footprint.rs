@@ -166,6 +166,56 @@ struct Phase {
 /// both of which a customer pays for. Both are reported, with their ratio, because a
 /// large gap between them is itself the finding — it says the cost is in the
 /// allocator rather than in the data structures.
+/// `RETURN n` latency on the loaded graph (#1188), with `--return-n`.
+///
+/// Dropping the node row copy means a returned node's property map is built
+/// from the columns rather than cloned from the row, so the cost it moves is
+/// here. Timed as execute **plus** materialising each returned node, which is
+/// what a client that receives `n` makes the server do; the executor alone
+/// hands back ids. `RETURN n.firstName` is the control: it never builds a map.
+fn time_return_n(store: &GraphStore) {
+    use samyama::query::executor::{QueryExecutor, Value};
+    use samyama::query::parser::parse_query;
+    let cases = [
+        ("RETURN n, 1,000 Person", "MATCH (n:Person) RETURN n LIMIT 1000"),
+        ("RETURN n, 10,000 Post", "MATCH (n:Post) RETURN n LIMIT 10000"),
+        ("RETURN n.firstName (control)", "MATCH (n:Person) RETURN n.firstName LIMIT 1000"),
+    ];
+    let once = |query: &samyama::query::ast::Query| -> usize {
+        let batch = QueryExecutor::new(store).execute(query).expect("query");
+        let mut props = 0usize;
+        for record in &batch.records {
+            match record.get("n") {
+                Some(Value::NodeRef(id)) => {
+                    props += store.node_materialized(*id).map_or(0, |n| n.properties.len())
+                }
+                Some(Value::Node(_, n)) => props += n.properties.len(),
+                _ => {}
+            }
+        }
+        std::hint::black_box(props);
+        batch.records.len()
+    };
+    println!("\nRETURN n latency, execute + materialise (ms, 50 runs after 3 warm-ups)");
+    println!("{:<30} {:>8} {:>8} {:>8}", "query", "p50", "p95", "rows");
+    for (name, cypher) in cases {
+        let query = parse_query(cypher).expect(cypher);
+        let mut rows = 0;
+        for _ in 0..3 {
+            rows = once(&query);
+        }
+        let mut ms: Vec<f64> = (0..50)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                once(&query);
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("{:<30} {:>8.2} {:>8.2} {:>8}", name, (ms[24] + ms[25]) / 2.0, ms[47], rows);
+    }
+}
+
 fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     let base_heap = live_heap();
     let base_rss = rss();
@@ -253,6 +303,10 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     }
     if heap > 0 && rss_delta > 0 {
         println!("{:<28} {:>16.2}", "RSS / heap", rss_delta as f64 / heap as f64);
+    }
+    // After the footprint is read, so the timing's allocations are not in it.
+    if std::env::args().any(|a| a == "--return-n") {
+        time_return_n(&store);
     }
 
     // What is *in* a node, since that is where the footprint sits.

@@ -669,18 +669,48 @@ pub struct Transaction {
     pub node_write_set: HashSet<NodeId>,
     /// Set of edge IDs written (created or modified) by this transaction.
     pub edge_write_set: HashSet<EdgeId>,
+    /// Node property writes buffered until commit (#1200 step 4); `None`
+    /// removes the key. No other reader sees them. The transaction itself
+    /// reads them over its snapshot, and commit applies them at a new version.
+    pub node_writes: HashMap<NodeId, HashMap<String, Option<PropertyValue>>>,
+    /// Nodes this transaction created, with their labels. The id is reserved
+    /// when the node is created; the node enters the store at commit.
+    pub created_nodes: Vec<(NodeId, Vec<Label>)>,
 }
 
-/// MVCC version entry for edges. Stores a snapshot of edge properties at a specific version.
-/// Endpoints and type are immutable — only properties are versioned.
-///
-/// `properties` is `None` while nothing has changed the edge since `version`:
-/// the live properties are then this entry's properties. It takes its copy
-/// when the first change at a later version arrives (#602).
+/// One write to a relationship that a read at an earlier version must undo
+/// (#1200 step 5). The shape of `NodeUndo`: what a write replaced, per key, so
+/// changing one property records one value rather than a copy of the map.
+/// Endpoints and type are immutable; only properties are versioned.
 #[derive(Debug, Clone)]
-pub struct EdgeVersionEntry {
-    pub version: u64,
-    pub properties: Option<PropertyMap>,
+enum EdgeUndo {
+    /// Before version `at`, property `key` held `old` (`None`: it was absent).
+    Property { at: u64, key: String, old: Option<PropertyValue> },
+    /// Before version `at`, the whole map was `old`. Only
+    /// `get_edge_properties_mut` records this: it hands the map out without
+    /// saying which key will change, so the one copy it costs is the price of
+    /// that escape hatch.
+    Map { at: u64, old: PropertyMap },
+}
+
+impl EdgeUndo {
+    fn at(&self) -> u64 {
+        match self {
+            EdgeUndo::Property { at, .. } | EdgeUndo::Map { at, .. } => *at,
+        }
+    }
+}
+
+/// What a relationship looked like before its recent writes (#1200 step 5).
+/// Held only for one created or written after version 1.
+#[derive(Debug, Clone, Default)]
+struct EdgeHistory {
+    /// The version the relationship was created at, when that is after 1.
+    born: Option<u64>,
+    /// Oldest first, so `at` never decreases along the list.
+    undo: Vec<EdgeUndo>,
+    /// The newest `at` garbage collection dropped.
+    pruned_to: u64,
 }
 
 /// One write to a node that a read at an earlier version must undo (#1200).
@@ -842,7 +872,7 @@ pub struct GraphStore {
     edge_properties: HashMap<EdgeId, PropertyMap>,
 
     /// MVCC version log for edges. Sparse — only edges that have been updated get entries.
-    edge_version_log: HashMap<EdgeId, Vec<EdgeVersionEntry>>,
+    edge_history: HashMap<EdgeId, EdgeHistory>,
 
     /// Outgoing edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     outgoing: Vec<Vec<(NodeId, EdgeId)>>,
@@ -1022,7 +1052,7 @@ impl GraphStore {
             edge_type_ids: Vec::new(),
             edge_endpoints: Vec::with_capacity(4096),
             edge_properties: HashMap::new(),
-            edge_version_log: HashMap::new(),
+            edge_history: HashMap::new(),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
             frozen_outgoing: FrozenAdjacencyStore::new(),
@@ -1491,8 +1521,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// (n:Node)` matched nodes nobody labelled (#625). Callers that know the
     /// whole label set should use this.
     pub fn create_node_with_labels(&mut self, labels: impl IntoIterator<Item = Label>) -> NodeId {
-        let labels: Vec<Label> = labels.into_iter().collect();
-        self.invalidate_statistics_cache();
+        let node_id = self.allocate_node_id();
+        self.insert_node_with_labels(node_id, labels.into_iter().collect());
+        node_id
+    }
+
+    /// The id the next node takes: a freed one first, else a new one. Split
+    /// from insertion so a transaction can reserve an id when it creates a
+    /// node and insert the node at commit (#1200 step 4).
+    fn allocate_node_id(&mut self) -> NodeId {
         let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
             id
         } else {
@@ -1500,8 +1537,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.next_node_id += 1;
             id
         };
-        let node_id = NodeId::new(node_id_u64);
-        let idx = node_id_u64 as usize;
+        NodeId::new(node_id_u64)
+    }
+
+    /// Put a node with exactly these labels into the store under `node_id`,
+    /// which `allocate_node_id` handed out.
+    fn insert_node_with_labels(&mut self, node_id: NodeId, labels: Vec<Label>) {
+        self.invalidate_statistics_cache();
+        let idx = node_id.as_u64() as usize;
 
         let mut node = Node::with_labels(node_id, labels.iter().cloned());
         node.version = self.current_version;
@@ -1562,7 +1605,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
-        node_id
     }
 
     /// Create a node with multiple labels and properties
@@ -1588,15 +1630,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.node_columns.set_property(idx, key, value.clone());
         }
 
-        // Kept before the move so the index event below is built from the
-        // properties *as given* rather than read back off the node. Reading them
-        // back ties indexing to the row copy: with the row empty — which is what a
-        // snapshot-imported graph looks like, and what removing the duplication in
-        // #1123 would make every graph look like — the event carries nothing and
-        // the index silently never learns the values (#1132).
-        let indexed_properties = properties.clone();
+        // The index event below is built from the properties *as given*, never
+        // read back off the node (#1132): the row is left empty, because the
+        // column above is the only copy of every value (#1188).
+        let indexed_properties = properties;
 
-        let mut node = Node::new_with_properties(node_id, labels.clone(), properties);
+        let mut node = Node::new_with_properties(node_id, labels.clone(), PropertyMap::new());
         node.version = self.current_version;
         self.note_node_birth(node_id);
 
@@ -1919,17 +1958,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
-        // What this write replaces, kept while an earlier version can still read
-        // it (#1200). Before the column write, since the old value is read there.
+        // The value this write replaces, read before the column is overwritten.
+        // The column holds the current value and the row does not (#1188), so the
+        // index learns what to drop, and history what to keep, from here.
         let last_write = self
             .get_node(node_id)
             .ok_or(GraphError::NodeNotFound(node_id))?
             .version;
+        let old_val = self.node_property(node_id, &key_str);
         if self.undo_needed(node_id, last_write, |e| {
             matches!(e, NodeUndo::Property { key, .. } if *key == key_str)
         }) {
-            let old = self.node_property(node_id, &key_str);
             let at = self.current_version;
+            let old = old_val.clone();
             self.push_node_undo(node_id, NodeUndo::Property { at, key: key_str.clone(), old });
         }
 
@@ -1940,7 +1981,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Scoped so the mutable borrow of `self.nodes` ends here; the indexing
         // below needs `&self` and the node's labels at the same time, which is
         // fine as two shared borrows but not while this one is live.
-        let old_val = {
+        {
             let current_version = self.current_version;
             let node = self
                 .nodes
@@ -1950,8 +1991,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             // In place. The history of this write is the undo entry above, not
             // a copy of the whole node pushed as a new version (#1200).
             node.version = current_version;
-            node.set_property(key_str.clone(), val.clone())
-        };
+            node.updated_at = chrono::Utc::now().timestamp_millis();
+            // No row copy: the column is the only one (#1188). A value put in
+            // the row directly through `get_node_mut` is superseded by this
+            // write, so it goes rather than shadowing the column in the map.
+            node.remove_property(&key_str);
+        }
 
         // Record the new value so subsequent writes can see it. Without this the
         // constraint index only ever holds what the backfill put there at CREATE
@@ -1987,14 +2032,11 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
     /// Set a property on an edge, updating both columnar and row storage.
     ///
-    /// MVCC contract: the version log has an entry per version the edge was
-    /// written at. `get_edge_at_version(eid, V)` finds the entry with the
-    /// largest `version <= V`, which then represents the state as of that
-    /// version. Writes at the same `current_version` coalesce onto the last
-    /// entry instead of creating a new one (intra-transaction updates). An
-    /// entry holds its properties only once a later version has changed them;
-    /// until then the live properties are its properties (#602). An edge with
-    /// no log has been there, unchanged, since the first version.
+    /// MVCC contract: the first write to a key at a version later than the
+    /// edge's creation records the value it replaces (`edge_history`), and
+    /// `get_edge_at_version(eid, V)` undoes the entries newer than V. Later
+    /// writes to the same key at the same version replace a value no earlier
+    /// version saw, so they record nothing (#1200 step 5).
     pub fn set_edge_property(
         &mut self,
         edge_id: EdgeId,
@@ -2023,7 +2065,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // Column, row map, statistics cache and journal. This wrote the column
         // itself as well, and journalled the edge a second time.
         self.set_edge_property_sparse(edge_id, key_str, val);
-        self.mark_edge_version(edge_id);
         Ok(())
     }
 
@@ -2433,11 +2474,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
-        // The caller's map, moved. It was cloned whole into the row store and
-        // the original dropped with the unused `Edge` (#491).
-        if !properties.is_empty() {
-            self.edge_properties.insert(edge_id, properties);
-        }
+        // No row copy: the columns above hold every value (#545, #1200 step 5).
+        drop(properties);
 
         // Update edge type index. `get_mut` first so the common case -- a type
         // already seen, which after the first few edges is every case -- does
@@ -2500,40 +2538,38 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         };
         let edge_type = self.get_edge_type(id)?;
 
-        // Resolve properties at the requested version using the version log.
-        // The version log stores snapshots of properties BEFORE mutations.
-        // If a version log entry exists with version <= requested version,
-        // and the requested version < current, use the historical snapshot.
-        let (edge_version, properties) = if let Some(versions) = self.edge_version_log.get(&id) {
-            if let Some(entry) = versions.iter().rev().find(|v| v.version <= version) {
-                // Check if there's a later version that supersedes this snapshot
-                let next_version = versions.iter()
-                    .find(|v| v.version > version)
-                    .map(|v| v.version);
-                if next_version.is_some() || version < self.current_version {
-                    // Historical read — use the snapshot properties. An entry
-                    // without one has not been changed since its version, so
-                    // the live properties are its properties.
-                    let properties = match &entry.properties {
-                        Some(snapshot) => snapshot.clone(),
-                        None => self.edge_properties.get(&id).cloned().unwrap_or_default(),
-                    };
-                    (entry.version, properties)
-                } else {
-                    // Current read — use latest properties
-                    (entry.version, self.edge_properties.get(&id).cloned().unwrap_or_default())
+        // The live properties, with every recorded write newer than `version`
+        // undone, newest first (#1200 step 5). A read at the current version
+        // undoes nothing.
+        let history = self.edge_history.get(&id);
+        let born = history.and_then(|h| h.born).unwrap_or(Self::FIRST_VERSION);
+        if version < born {
+            return None; // the edge did not exist at this version
+        }
+        let mut properties = self.edge_properties_merged(id);
+        let mut edge_version = born;
+        if let Some(history) = history {
+            for entry in history.undo.iter().rev().take_while(|e| e.at() > version) {
+                match entry {
+                    EdgeUndo::Property { key, old: Some(old), .. } => {
+                        properties.insert(key.clone(), old.clone());
+                    }
+                    EdgeUndo::Property { key, old: None, .. } => {
+                        properties.remove(key);
+                    }
+                    EdgeUndo::Map { old, .. } => properties = old.clone(),
                 }
-            } else {
-                // No version entry <= requested — edge didn't exist yet or default
-                (1, self.edge_properties.get(&id).cloned().unwrap_or_default())
             }
-        } else {
-            // No version history — use current properties (edge was never updated)
-            (1, self.edge_properties.get(&id).cloned().unwrap_or_default())
-        };
-
-        if edge_version > version {
-            return None; // edge didn't exist at this version
+            // The version of the state read: its newest write at or before `version`.
+            edge_version = history
+                .undo
+                .iter()
+                .rev()
+                .map(EdgeUndo::at)
+                .find(|&at| at <= version)
+                .unwrap_or(0)
+                .max(history.pruned_to)
+                .max(born);
         }
 
         Some(Edge {
@@ -2565,78 +2601,65 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if idx >= self.edge_endpoints.len() { return None; }
         let (src, tgt) = self.edge_endpoints[idx];
         if src.as_u64() == 0 && tgt.as_u64() == 0 { return None; }
-        self.seal_edge_version(id);
-        Some(self.edge_properties.entry(id).or_insert_with(PropertyMap::new))
+        self.log_edge_map(id);
+        Some(self.edge_properties.entry(id).or_default())
     }
 
-    /// Note that `edge_id` was written at the current version, for
-    /// `get_edge_at_version`.
-    ///
-    /// The entry carries no properties. While its version is the current one
-    /// nothing reads them: a read at the current version uses the live
-    /// properties, and a historical read picks an older entry. It gets its copy
-    /// from `seal_edge_version` when the first change at a later version
-    /// arrives, before that change is made. Cloning the whole map here on
-    /// every write cost 728 B/edge for three properties (#602).
-    ///
-    /// At the first version there is nothing older to tell apart, so no entry
-    /// is made: an edge with no log reads as unchanged since the first version,
-    /// which is what an entry at the first version would say. Nothing outside
-    /// the transaction API advances `current_version`, so a store that does not
-    /// use it keeps no edge version log at all.
-    fn mark_edge_version(&mut self, edge_id: EdgeId) {
-        let current = self.current_version;
-        if current == Self::FIRST_VERSION {
+    /// Whether a write to `edge_id` at the current version must record what it
+    /// replaces: only when an earlier version can still read the old state, so
+    /// never for an edge created at this version, and never for a key already
+    /// recorded at it (a `Map` entry records every key). A store whose version
+    /// never advances records nothing (#1200 step 5).
+    fn edge_undo_needed(&self, edge_id: EdgeId, key: Option<&str>) -> bool {
+        let v = self.current_version;
+        let history = self.edge_history.get(&edge_id);
+        if history.and_then(|h| h.born).unwrap_or(Self::FIRST_VERSION) >= v {
+            return false;
+        }
+        if !self.has_edge(edge_id) {
+            return false;
+        }
+        !history.is_some_and(|h| {
+            h.undo.iter().rev().take_while(|e| e.at() == v).any(|e| match (e, key) {
+                (EdgeUndo::Map { .. }, _) => true,
+                (EdgeUndo::Property { key: k, .. }, Some(key)) => k == key,
+                (EdgeUndo::Property { .. }, None) => false,
+            })
+        })
+    }
+
+    /// Record the value a write to `key` is about to replace (#1200 step 5).
+    /// Every setter calls this before it writes.
+    fn log_edge_write(&mut self, edge_id: EdgeId, key: &str) {
+        if !self.edge_undo_needed(edge_id, Some(key)) {
             return;
         }
-        let log = self.edge_version_log.entry(edge_id).or_insert_with(|| Vec::with_capacity(1));
-        if log.last().is_none_or(|last| last.version != current) {
-            log.push(EdgeVersionEntry { version: current, properties: None });
-        }
+        let at = self.current_version;
+        let old = self.edge_property(edge_id, key);
+        let entry = EdgeUndo::Property { at, key: key.to_string(), old };
+        self.edge_history.entry(edge_id).or_default().undo.push(entry);
     }
 
-    /// An edge created after the first version gets an entry at its creation
-    /// version, so `seal_edge_version` does not take it for one that has been
-    /// there since the first. Reads before that version see the live
-    /// properties, as they did before the log was lazy.
+    /// Record the whole map before `get_edge_properties_mut` hands it out,
+    /// since it does not say which key will change.
+    fn log_edge_map(&mut self, edge_id: EdgeId) {
+        if !self.edge_undo_needed(edge_id, None) {
+            return;
+        }
+        let at = self.current_version;
+        let old = self.edge_properties_merged(edge_id);
+        self.edge_history.entry(edge_id).or_default().undo.push(EdgeUndo::Map { at, old });
+    }
+
+    /// An edge created after the first version did not exist at earlier ones.
+    /// Also drops whatever history a reused id still carried.
     fn note_edge_created(&mut self, edge_id: EdgeId) {
         let current = self.current_version;
         if current != Self::FIRST_VERSION {
-            self.edge_version_log
-                .insert(edge_id, vec![EdgeVersionEntry { version: current, properties: None }]);
-        }
-    }
-
-    /// Give the newest version-log entry of `edge_id` its own copy of the
-    /// properties, if a later version has begun since it was written. Every
-    /// path that changes an edge's properties calls this first; until one
-    /// does, the live properties are that entry's properties.
-    fn seal_edge_version(&mut self, edge_id: EdgeId) {
-        let current = self.current_version;
-        if current == Self::FIRST_VERSION {
-            return; // no older version to keep
-        }
-        let live = &self.edge_properties;
-        match self.edge_version_log.get_mut(&edge_id) {
-            Some(log) => {
-                if let Some(last) = log.last_mut() {
-                    if last.properties.is_none() && last.version < current {
-                        last.properties = Some(live.get(&edge_id).cloned().unwrap_or_default());
-                    }
-                }
-            }
-            None => {
-                if !self.has_edge(edge_id) {
-                    return;
-                }
-                // There since the first version and unchanged until now.
-                let mut log = Vec::with_capacity(2);
-                log.push(EdgeVersionEntry {
-                    version: Self::FIRST_VERSION,
-                    properties: Some(self.edge_properties.get(&edge_id).cloned().unwrap_or_default()),
-                });
-                self.edge_version_log.insert(edge_id, log);
-            }
+            let born = Some(current);
+            self.edge_history.insert(edge_id, EdgeHistory { born, ..EdgeHistory::default() });
+        } else if !self.edge_history.is_empty() {
+            self.edge_history.remove(&edge_id);
         }
     }
 
@@ -2679,16 +2702,17 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             return;
         }
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
-        self.seal_edge_version(edge_id);
-        // The column as well as the row map. This is the setter CREATE, MERGE
-        // and SET use, and it wrote the row map only, so every relationship
-        // property a query created missed the column that reads try first and
-        // fell back to two hash probes into a per-edge map scattered across the
-        // heap. On a 2M-edge `WHERE r.p ... ORDER BY r.p` scan that fallback was
-        // 63% of the query; peak RSS for the column copy was +0.9%.
-        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value.clone());
-        let props = self.edge_properties.entry(edge_id).or_insert_with(PropertyMap::new);
-        props.insert(key, value);
+        self.log_edge_write(edge_id, &key);
+        // The column only. This is the setter CREATE, MERGE and SET use. It
+        // once wrote the row map only, so reads fell back to a per-edge map
+        // scattered across the heap (63% of a 2M-edge `WHERE r.p ... ORDER BY
+        // r.p` scan); then it wrote both, which stored every value twice. The
+        // column is now the only copy (#545, #1200 step 5). A value put in the
+        // row through `get_edge_properties_mut` is superseded, so it goes.
+        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value);
+        if let Some(props) = self.edge_properties.get_mut(&edge_id) {
+            props.remove(&key);
+        }
     }
 
     /// Several properties of one relationship at once, into both stores.
@@ -2704,7 +2728,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         I: IntoIterator<Item = (K, PropertyValue)>,
     {
         let idx = edge_id.as_u64() as usize;
-        self.seal_edge_version(edge_id);
         let mut wrote = false;
         for (key, value) in props {
             let key = key.into();
@@ -2712,11 +2735,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 self.remove_edge_property(edge_id, &key);
                 continue;
             }
-            self.edge_columns.set_property(idx, &key, value.clone());
-            self.edge_properties
-                .entry(edge_id)
-                .or_insert_with(PropertyMap::new)
-                .insert(key, value);
+            self.log_edge_write(edge_id, &key);
+            // The column only, as in the single setter (#545).
+            self.edge_columns.set_property(idx, &key, value);
+            if let Some(row) = self.edge_properties.get_mut(&edge_id) {
+                row.remove(&key);
+            }
             wrote = true;
         }
         if wrote {
@@ -2780,7 +2804,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // the next relationship to take the id read the deleted one's values --
         // for a property it never had, and over one it was created with.
         self.edge_columns.clear_row(idx);
-        self.edge_version_log.remove(&id);
+        // The id is reused; its next edge must not answer for this one's past.
+        self.edge_history.remove(&id);
 
         // Update catalog triple stats
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
@@ -3279,8 +3304,12 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Remove one property of an edge from both stores. See
     /// `remove_node_property`.
     pub fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) {
+        // One key's history, not the whole map `get_edge_properties_mut` would
+        // record for a caller that does not say which key it changes (#1200).
+        self.bump_epoch();
+        self.log_edge_write(edge_id, key);
         self.edge_columns.remove_property(edge_id.as_u64() as usize, key);
-        if let Some(props) = self.get_edge_properties_mut(edge_id) {
+        if let Some(props) = self.edge_properties.get_mut(&edge_id) {
             props.remove(key);
         }
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
@@ -4439,6 +4468,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             commit_version: None,
             node_write_set: HashSet::new(),
             edge_write_set: HashSet::new(),
+            node_writes: HashMap::new(),
+            created_nodes: Vec::new(),
         };
         self.active_transactions.insert(txn_id, txn);
         txn_id
@@ -4447,13 +4478,37 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// Get a node visible to the given transaction, respecting its isolation level.
     /// - ReadCommitted: returns the latest committed version.
     /// - SnapshotIsolation: returns the version at txn start.
+    ///
+    /// Over that, the transaction's own buffered writes and the nodes it
+    /// created: a transaction reads its own writes, and nobody else does until
+    /// it commits (#1200 step 4).
     pub fn get_node_for_txn(&self, txn_id: TxnId, node_id: NodeId) -> Option<Node> {
         let txn = self.active_transactions.get(&txn_id)?;
         let read_version = match txn.isolation {
             IsolationLevel::ReadCommitted => self.current_version,
             IsolationLevel::SnapshotIsolation => txn.start_version,
         };
-        self.get_node_at_version(node_id, read_version)
+        let mut node = match txn.created_nodes.iter().find(|(id, _)| *id == node_id) {
+            Some((_, labels)) => {
+                let mut fresh = Node::with_labels(node_id, labels.iter().cloned());
+                fresh.version = read_version;
+                fresh
+            }
+            None => self.get_node_at_version(node_id, read_version)?,
+        };
+        if let Some(writes) = txn.node_writes.get(&node_id) {
+            for (key, value) in writes {
+                match value {
+                    Some(v) => {
+                        node.properties.insert(key.clone(), v.clone());
+                    }
+                    None => {
+                        node.properties.remove(key);
+                    }
+                }
+            }
+        }
+        Some(node)
     }
 
     /// Get an edge visible to the given transaction, respecting its isolation level.
@@ -4478,6 +4533,119 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         if let Some(txn) = self.active_transactions.get_mut(&txn_id) {
             txn.edge_write_set.insert(edge_id);
         }
+    }
+
+    /// The transaction, if it exists and is still open.
+    fn active_txn(&self, txn_id: TxnId) -> GraphResult<&Transaction> {
+        let txn = self
+            .active_transactions
+            .get(&txn_id)
+            .ok_or(GraphError::TransactionNotFound(txn_id))?;
+        if txn.status != TxnStatus::Active {
+            return Err(GraphError::TransactionNotActive(txn_id));
+        }
+        Ok(txn)
+    }
+
+    /// Set a node property inside a transaction; `Null` removes it, as on the
+    /// store (#952).
+    ///
+    /// Buffered, not written: no other reader sees it until the commit, which
+    /// applies it at a new version, and an abort drops it (#1200 step 4). The
+    /// transaction reads it back through `get_node_for_txn`.
+    pub fn txn_set_node_property(
+        &mut self,
+        txn_id: TxnId,
+        node_id: NodeId,
+        key: impl Into<String>,
+        value: impl Into<PropertyValue>,
+    ) -> GraphResult<()> {
+        let key = key.into();
+        let value = value.into();
+        if !property_is_storable(&value) {
+            return Err(GraphError::ConstraintViolation(format!(
+                "InvalidPropertyType: `{key}` cannot hold a map inside a list. \
+                 A property is a scalar or a list of scalars."
+            )));
+        }
+        let txn = self.active_txn(txn_id)?;
+        let created_here = txn.created_nodes.iter().any(|(id, _)| *id == node_id);
+        if !created_here && self.get_node(node_id).is_none() {
+            return Err(GraphError::NodeNotFound(node_id));
+        }
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
+        let value = (!matches!(value, PropertyValue::Null)).then_some(value);
+        txn.node_writes.entry(node_id).or_default().insert(key, value);
+        txn.node_write_set.insert(node_id);
+        Ok(())
+    }
+
+    /// Create a node inside a transaction. The id is reserved now and is what
+    /// the node has after commit; until then only this transaction sees the
+    /// node, and a snapshot taken before the commit never does (#1200 step 4).
+    pub fn txn_create_node(
+        &mut self,
+        txn_id: TxnId,
+        labels: impl IntoIterator<Item = Label>,
+    ) -> GraphResult<NodeId> {
+        self.active_txn(txn_id)?;
+        let node_id = self.allocate_node_id();
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
+        txn.created_nodes.push((node_id, labels.into_iter().collect()));
+        txn.node_write_set.insert(node_id);
+        Ok(node_id)
+    }
+
+    /// Apply a committing transaction's buffer at the current version.
+    ///
+    /// All or nothing. On the first error what was applied is put back and the
+    /// created nodes are removed, so a failed commit leaves the current state
+    /// as it was. Transactions carry no tenant, so index events go to
+    /// `"default"`, as writes made through the store's tests do.
+    fn apply_txn_writes(
+        &mut self,
+        created: Vec<(NodeId, Vec<Label>)>,
+        writes: HashMap<NodeId, HashMap<String, Option<PropertyValue>>>,
+    ) -> GraphResult<()> {
+        let mut inserted: Vec<NodeId> = Vec::new();
+        for (id, labels) in created {
+            self.insert_node_with_labels(id, labels);
+            inserted.push(id);
+        }
+        let mut replaced: Vec<(NodeId, String, Option<PropertyValue>)> = Vec::new();
+        let mut result = Ok(());
+        'apply: for (id, props) in writes {
+            for (key, value) in props {
+                let old = self.node_property(id, &key);
+                let step = match value {
+                    Some(v) => self.set_node_property("default", id, key.clone(), v),
+                    None if self.get_node(id).is_none() => Err(GraphError::NodeNotFound(id)),
+                    None => {
+                        self.remove_node_property(id, &key);
+                        Ok(())
+                    }
+                };
+                if let Err(e) = step {
+                    result = Err(e);
+                    break 'apply;
+                }
+                replaced.push((id, key, old));
+            }
+        }
+        if result.is_err() {
+            for (id, key, old) in replaced.into_iter().rev() {
+                match old {
+                    Some(v) => {
+                        let _ = self.set_node_property("default", id, key, v);
+                    }
+                    None => self.remove_node_property(id, &key),
+                }
+            }
+            for id in inserted.into_iter().rev() {
+                let _ = self.delete_node("default", id);
+            }
+        }
+        result
     }
 
     /// Commit a transaction. Returns Err if a write conflict is detected (first-writer-wins).
@@ -4519,9 +4687,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             }
         }
 
-        // No conflicts — commit. Bump global version.
+        // No conflicts. The buffer is applied at a new version, so a snapshot
+        // taken before it reads the replaced values through the undo log, and
+        // a node created here is born at it (#1200 step 4).
         self.current_version += 1;
         let commit_version = self.current_version;
+
+        let (created, writes) = match self.active_transactions.get_mut(&txn_id) {
+            Some(t) => (std::mem::take(&mut t.created_nodes), std::mem::take(&mut t.node_writes)),
+            None => (Vec::new(), HashMap::new()),
+        };
+        if let Err(e) = self.apply_txn_writes(created, writes) {
+            if let Some(t) = self.active_transactions.get_mut(&txn_id) {
+                t.status = TxnStatus::Aborted;
+            }
+            return Err(e);
+        }
 
         // Update last-commit tracking for all written entities
         for &nid in &txn.node_write_set {
@@ -4540,9 +4721,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Ok(commit_version)
     }
 
-    /// Abort a transaction, discarding its writes.
-    /// Note: actual rollback of in-place mutations requires version-aware cleanup.
-    /// For now, marks the transaction as aborted so future reads skip its writes.
+    /// Abort a transaction: ROLLBACK. Its writes were only ever buffered, so
+    /// dropping the buffer undoes them, and the ids reserved for nodes it
+    /// created go back to the free list (#1200 step 4).
     pub fn abort_transaction(&mut self, txn_id: TxnId) -> GraphResult<()> {
         let txn = self.active_transactions.get_mut(&txn_id)
             .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?;
@@ -4552,6 +4733,9 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
 
         txn.status = TxnStatus::Aborted;
+        txn.node_writes.clear();
+        let reserved = std::mem::take(&mut txn.created_nodes);
+        self.free_node_ids.extend(reserved.into_iter().map(|(id, _)| id.as_u64()));
         Ok(())
     }
 
@@ -4587,26 +4771,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
         self.node_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
-        // GC edge version log: remove entries with version < min_version, keep the latest one
-        let mut empty_logs = Vec::new();
-        for (&edge_id, log) in &mut self.edge_version_log {
-            if log.len() <= 1 {
-                continue;
+        // Relationship history, by the same rule (#1200 step 5).
+        for history in self.edge_history.values_mut() {
+            let drop = history.undo.partition_point(|e| e.at() <= min_version);
+            if drop > 0 {
+                history.pruned_to = history.pruned_to.max(history.undo[drop - 1].at());
+                history.undo.drain(..drop);
+                edges_pruned += drop;
             }
-            let keep_idx = log.iter().rposition(|e| e.version <= min_version);
-            if let Some(idx) = keep_idx {
-                if idx > 0 {
-                    edges_pruned += idx;
-                    log.drain(..idx);
-                }
-            }
-            if log.is_empty() {
-                empty_logs.push(edge_id);
+            if history.born.is_some_and(|b| b <= min_version) {
+                history.born = None;
             }
         }
-        for eid in empty_logs {
-            self.edge_version_log.remove(&eid);
-        }
+        self.edge_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
         // Clean up completed/aborted transactions older than min_version
         self.active_transactions.retain(|_, txn| {
@@ -4643,7 +4820,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_type_ids.clear();
         self.edge_endpoints.clear();
         self.edge_properties.clear();
-        self.edge_version_log.clear();
+        self.edge_history.clear();
         self.node_history.clear();
         self.outgoing.clear();
         self.incoming.clear();
@@ -4793,19 +4970,18 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// while `RETURN n` returned an empty property bag for every node (#1125) — one
     /// of the pair was moved to the columnar store and the other was not.
     ///
-    /// The merge runs only when the columns hold a key the row does not, so a graph
-    /// built by `CREATE` — where `set_node_property` writes both — pays a key scan
-    /// and no rebuild.
+    /// Store writes keep no row copy (#1188), so every column value is filled
+    /// in, and a column value wins over a row value for the same key, as in
+    /// `node_properties_merged`. Row-only keys, written through `get_node_mut`,
+    /// are kept.
     pub fn node_materialized(&self, id: NodeId) -> Option<Node> {
         let mut node = self.get_node(id)?.clone();
         let idx = id.as_u64() as usize;
-        if self
-            .node_columns
-            .get_property_keys(idx)
-            .iter()
-            .any(|k| !node.properties.contains_key(k))
-        {
-            node.properties = self.node_properties_full(id);
+        for key in self.node_columns.get_property_keys(idx) {
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                node.properties.insert(key, value);
+            }
         }
         Some(node)
     }
@@ -4828,6 +5004,22 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     /// MERGE and the bulk loaders write edge properties to the row map only, so
     /// the column read in front of that fallback misses and the clone ran on
     /// every read: three per row on a `WHERE r.p ... ORDER BY r.p` scan.
+    /// Every property of a relationship: the row map, which only
+    /// `get_edge_properties_mut` still writes, overlaid by the column, which
+    /// holds every value a store write made (#545, #1200 step 5). The column
+    /// wins on a clash, as in `node_properties_merged`.
+    pub fn edge_properties_merged(&self, id: EdgeId) -> PropertyMap {
+        let mut out = self.edge_properties.get(&id).cloned().unwrap_or_default();
+        let idx = id.as_u64() as usize;
+        for key in self.edge_columns.get_property_keys(idx) {
+            let value = self.edge_columns.get_property(idx, &key);
+            if !value.is_null() {
+                out.insert(key, value);
+            }
+        }
+        out
+    }
+
     pub fn edge_property(&self, id: EdgeId, key: &str) -> Option<PropertyValue> {
         let v = self.edge_columns.get_property(id.as_u64() as usize, key);
         if !v.is_null() {
@@ -4854,10 +5046,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 out.insert(k.clone(), v.clone());
             }
         }
+        // The column wins on a clash: it holds the current value, and a row value
+        // for the same key is one a store write has since superseded (#1188).
         let idx = id.as_u64() as usize;
         for key in self.node_columns.get_property_keys(idx) {
-            out.entry(key.clone())
-                .or_insert_with(|| self.node_columns.get_property(idx, &key));
+            let value = self.node_columns.get_property(idx, &key);
+            if !value.is_null() {
+                out.insert(key, value);
+            }
         }
         out
     }
@@ -5072,9 +5268,9 @@ mod tests {
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
-            ("mark_edge_version", "records the version an edge property write happened at; reads at that version use the live properties either way"),
-            ("seal_edge_version", "copies an edge's live properties into its version-log entry, which then holds the same values it read as before"),
-            ("note_edge_created", "marks a new edge's creation version; reads before it see the live properties with or without the entry"),
+            ("log_edge_write", "records what an edge write replaces for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
+            ("log_edge_map", "records an edge's whole map for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
+            ("note_edge_created", "records a new edge's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("push_node_undo", "records what a write replaced for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("note_node_birth", "records a new node's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("journal", "appends to the journal, which no query reads"),
@@ -5083,7 +5279,10 @@ mod tests {
             ("begin_transaction", "opens a transaction record; nothing is visible until commit_transaction, which bumps"),
             ("txn_write_node", "records an id in the write set for conflict detection; the write itself bumps"),
             ("txn_write_edge", "records an id in the write set for conflict detection; the write itself bumps"),
-            ("abort_transaction", "flips the transaction status; it rolls nothing back, so no committed row changes"),
+            ("abort_transaction", "drops the transaction's buffered writes and reserved ids; nothing was applied, so no committed row changes (#1200)"),
+            ("allocate_node_id", "hands out an id; no node exists at it until insert_node_with_labels, which bumps"),
+            ("txn_set_node_property", "buffers a write inside the transaction; no other reader sees it until commit_transaction, which bumps (#1200)"),
+            ("txn_create_node", "reserves an id inside the transaction; the node enters the store at commit_transaction, which bumps (#1200)"),
         ];
 
         let src = std::fs::read_to_string(concat!(
@@ -5274,8 +5473,8 @@ mod tests {
 
         let node = store.get_node(node_id).unwrap();
         assert_eq!(node.label_count(), 2);
-        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
-        assert_eq!(node.get_property("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -5597,7 +5796,7 @@ mod tests {
         store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
-            node.get_property("age"),
+            store.node_property(node.id, "age").as_ref(),
             Some(&PropertyValue::Integer(30))
         );
 
@@ -5605,7 +5804,7 @@ mod tests {
         store.set_node_property("default", id, "age", PropertyValue::Integer(31)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
-            node.get_property("age"),
+            store.node_property(node.id, "age").as_ref(),
             Some(&PropertyValue::Integer(31))
         );
 
@@ -5944,12 +6143,13 @@ mod tests {
         let mut props = PropertyMap::new();
         props.insert("weight".into(), PropertyValue::Float(0.5));
         let e2 = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
-        let sparse = store.get_edge_properties(e2).unwrap();
-        assert_eq!(sparse.get("weight"), Some(&PropertyValue::Float(0.5)));
+        // The column holds it; the row keeps no copy (#545, #1200 step 5).
+        assert_eq!(store.edge_property(e2, "weight"), Some(PropertyValue::Float(0.5)));
+        assert!(store.get_edge_properties(e2).is_none_or(|p| p.is_empty()));
     }
 
     #[test]
-    fn set_edge_properties_sparse_writes_both_stores_and_null_removes() {
+    fn set_edge_properties_sparse_writes_the_column_and_null_removes() {
         let mut store = GraphStore::new();
         let a = store.create_node("A");
         let b = store.create_node("B");
@@ -5960,9 +6160,10 @@ mod tests {
         );
         let idx = eid.as_u64() as usize;
         assert_eq!(store.edge_columns.get_property(idx, "w"), PropertyValue::Float(2.5));
-        assert_eq!(
-            store.get_edge_properties(eid).and_then(|p| p.get("k").cloned()),
-            Some(PropertyValue::Integer(7))
+        assert_eq!(store.edge_property(eid, "k"), Some(PropertyValue::Integer(7)));
+        assert!(
+            store.get_edge_properties(eid).is_none_or(|p| p.is_empty()),
+            "the row keeps a second copy (#545)"
         );
         store.set_edge_properties_sparse(eid, [("w", PropertyValue::Null)]);
         assert!(store.edge_columns.get_property(idx, "w").is_null());
@@ -5996,8 +6197,8 @@ mod tests {
 
         // Add property via sparse map
         store.set_edge_property_sparse(eid, "key", PropertyValue::String("val".into()));
-        let props = store.get_edge_properties(eid).unwrap();
-        assert_eq!(props.get("key"), Some(&PropertyValue::String("val".into())));
+        assert_eq!(store.edge_property(eid, "key"), Some(PropertyValue::String("val".into())));
+        assert!(store.get_edge_properties(eid).is_none_or(|p| p.is_empty()), "the row keeps a second copy");
     }
 
     #[test]
@@ -6047,13 +6248,13 @@ mod tests {
         // Same version update — in-place
         store.set_node_property("default", id, "name", PropertyValue::String("Bob".to_string())).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(node.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
 
         // Add another property
         store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(node.get_property("age"), Some(&PropertyValue::Integer(30)));
-        assert_eq!(node.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(30)));
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
     }
 
     // ========== Coverage Enhancement Tests ==========
@@ -6414,7 +6615,7 @@ mod tests {
 
         // Latest version should be Bob
         let latest = store.get_node(id).unwrap();
-        assert_eq!(latest.get_property("name"), Some(&PropertyValue::String("Bob".to_string())));
+        assert_eq!(store.node_property(latest.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
         assert_eq!(latest.version, 2);
 
         // Version 1 should still be Alice
@@ -7262,7 +7463,7 @@ mod tests {
 
         // Current version sees "Bob"
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("Bob"));
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
@@ -7354,12 +7555,9 @@ mod tests {
         // Start snapshot txn
         let txn = store.begin_transaction(IsolationLevel::SnapshotIsolation);
 
-        // Modify edge after txn starts
+        // Modify edge after txn starts. The write records what it replaces
+        // (#1200 step 5), so the test no longer builds a log entry by hand.
         store.current_version = 2;
-        let current_props = store.edge_properties.get(&eid).cloned().unwrap_or_default();
-        store.edge_version_log.entry(eid).or_insert_with(Vec::new).push(
-            EdgeVersionEntry { version: 1, properties: Some(current_props) }
-        );
         store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(9.9));
 
         // Snapshot sees version-1 properties
@@ -7412,7 +7610,7 @@ mod tests {
 
         // Latest still works
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(latest.get_property("name").unwrap().as_string(), Some("v3"));
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("v3"));
     }
 
     #[test]
@@ -7422,29 +7620,20 @@ mod tests {
         let b = store.create_node("B");
         let eid = store.create_edge(a, b, "REL").unwrap();
         store.set_edge_property_sparse(eid, "w", PropertyValue::Float(1.0));
-
-        // Create version log entries
-        store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 1, properties: Some(PropertyMap::new()) }
-        );
         store.current_version = 2;
-        let mut props2 = PropertyMap::new();
-        props2.insert("w".to_string(), PropertyValue::Float(2.0));
-        store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 2, properties: Some(props2) }
-        );
+        store.set_edge_property_sparse(eid, "w", PropertyValue::Float(2.0));
         store.current_version = 3;
-        let mut props3 = PropertyMap::new();
-        props3.insert("w".to_string(), PropertyValue::Float(3.0));
-        store.edge_version_log.entry(eid).or_default().push(
-            EdgeVersionEntry { version: 3, properties: Some(props3) }
-        );
+        store.set_edge_property_sparse(eid, "w", PropertyValue::Float(3.0));
 
-        assert_eq!(store.edge_version_log[&eid].len(), 3);
+        // Two overwrites, two undo entries (#1200 step 5).
+        assert_eq!(store.edge_history[&eid].undo.len(), 2);
 
+        // GC below 2: the entry undoing v2 goes; the one undoing v3 stays.
         let (_, edges_pruned) = store.gc_versions(2);
-        assert_eq!(edges_pruned, 1); // version 1 pruned
-        assert_eq!(store.edge_version_log[&eid].len(), 2);
+        assert_eq!(edges_pruned, 1);
+        assert_eq!(store.edge_history[&eid].undo.len(), 1);
+        let at2 = store.get_edge_at_version(eid, 2).unwrap();
+        assert_eq!(at2.properties.get("w"), Some(&PropertyValue::Float(2.0)));
     }
 
     #[test]
@@ -7639,5 +7828,78 @@ mod tests {
 
         assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)));
         assert_eq!(prop_at(&store, n, 2, "x"), Some(PropertyValue::Integer(2)));
+    }
+
+    // ============================================================
+    // Relationship history as an undo log (#1200 step 5)
+    // ============================================================
+
+    fn edge_prop_at(store: &GraphStore, e: EdgeId, version: u64, key: &str) -> Option<PropertyValue> {
+        store.get_edge_at_version(e, version).and_then(|edge| edge.properties.get(key).cloned())
+    }
+
+    fn one_edge_store() -> (GraphStore, EdgeId) {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let e = store.create_edge(a, b, "R").unwrap();
+        (store, e)
+    }
+
+    #[test]
+    fn test_edge_history_is_one_entry_per_changed_key_not_a_map_copy() {
+        let (mut store, e) = one_edge_store();
+        for i in 0..10i64 {
+            store.set_edge_property(e, format!("p{i}"), i).unwrap();
+        }
+        store.current_version = 2;
+        store.set_edge_property(e, "p3", 99i64).unwrap();
+
+        assert_eq!(store.edge_history[&e].undo.len(), 1, "one changed key, one entry");
+        assert!(
+            matches!(store.edge_history[&e].undo[0], EdgeUndo::Property { .. }),
+            "a property write copied the whole map"
+        );
+        assert_eq!(edge_prop_at(&store, e, 1, "p3"), Some(PropertyValue::Integer(3)));
+        assert_eq!(edge_prop_at(&store, e, 1, "p4"), Some(PropertyValue::Integer(4)));
+        assert_eq!(edge_prop_at(&store, e, 2, "p3"), Some(PropertyValue::Integer(99)));
+    }
+
+    #[test]
+    fn test_an_edge_store_whose_version_never_advances_keeps_no_history() {
+        let (mut store, e) = one_edge_store();
+        for i in 0..100i64 {
+            store.set_edge_property(e, "w", i).unwrap();
+        }
+        store.remove_edge_property(e, "w");
+        store.get_edge_properties_mut(e).unwrap().insert("z".to_string(), PropertyValue::Integer(1));
+        assert!(store.edge_history.is_empty(), "history without a version to read it at");
+    }
+
+    #[test]
+    fn test_a_key_added_through_the_mutable_map_is_absent_before_it() {
+        let (mut store, e) = one_edge_store();
+        store.set_edge_property(e, "w", 1i64).unwrap();
+        store.current_version = 2;
+        store.get_edge_properties_mut(e).unwrap().insert("z".to_string(), PropertyValue::Integer(7));
+
+        assert_eq!(edge_prop_at(&store, e, 1, "z"), None, "a key added at v2 is visible at v1");
+        assert_eq!(edge_prop_at(&store, e, 1, "w"), Some(PropertyValue::Integer(1)));
+        assert_eq!(edge_prop_at(&store, e, 2, "z"), Some(PropertyValue::Integer(7)));
+    }
+
+    #[test]
+    fn test_a_reused_edge_id_does_not_inherit_the_deleted_edges_history() {
+        let (mut store, old) = one_edge_store();
+        let (a, b) = store.get_edge_endpoints(old).unwrap();
+        store.set_edge_property(old, "w", 1i64).unwrap();
+        store.current_version = 2;
+        store.set_edge_property(old, "w", 2i64).unwrap();
+        store.delete_edge(old).unwrap();
+
+        let fresh = store.create_edge(a, b, "R").unwrap();
+        assert_eq!(fresh, old, "the test needs the id reused");
+        assert!(store.get_edge_at_version(fresh, 1).is_none(), "the new edge existed before it was created");
+        assert_eq!(edge_prop_at(&store, fresh, 2, "w"), None, "the new edge carries the old one's value");
     }
 }

@@ -57,7 +57,7 @@ fn test_optimization_solver_integration() {
     // Check if properties were actually updated in the store
     let nodes = store.get_nodes_by_label(&samyama::graph::Label::new("Resource"));
     for node in nodes {
-        let allocation = node.get_property("allocation").unwrap().as_float().unwrap();
+        let allocation = store.node_property(node.id, "allocation").unwrap().as_float().unwrap();
         assert!(allocation >= 4.99, "Allocation should be >= 5.0, got {}", allocation);
         // It might not be exactly 5.0 due to stochastic nature, but should be close.
     }

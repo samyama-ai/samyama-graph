@@ -62,7 +62,7 @@ fn a_set_with_an_aggregate_return_actually_sets() {
     run(&mut store, "MATCH (a:A) SET a.num = 9 RETURN count(*) AS n");
     let all = store.all_nodes();
     assert!(
-        all.iter().all(|n| n.properties.get("num") == Some(&PropertyValue::Integer(9))),
+        all.iter().all(|n| store.node_property(n.id, "num") == Some(PropertyValue::Integer(9))),
         "SET was discarded by the shortcut",
     );
 }

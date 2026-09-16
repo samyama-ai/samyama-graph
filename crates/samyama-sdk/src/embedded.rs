@@ -203,8 +203,19 @@ fn value_to_json(
                 .collect(),
         ),
         Value::Node(id, node) => {
+            // The store's merged view, column first (#1188): the row a node
+            // value was cloned from holds no property a store write made. The
+            // value's own map is the fallback for a node no longer in the store,
+            // such as one returned by a DELETE.
             let mut properties = serde_json::Map::new();
-            for (k, v) in &node.properties {
+            let merged;
+            let source = if store.get_node(*id).is_some() {
+                merged = store.node_properties_merged(*id);
+                &merged
+            } else {
+                &node.properties
+            };
+            for (k, v) in source {
                 properties.insert(k.clone(), v.to_json());
             }
             let id_str = id.as_u64().to_string();
@@ -226,7 +237,9 @@ fn value_to_json(
         }
         Value::NodeRef(id) => {
             let id_str = id.as_u64().to_string();
-            let (labels, properties, node_json) = if let Some(node) = store.get_node(*id) {
+            // Materialised, not the row: store writes leave the row empty and
+            // hold every value in the column (#1188).
+            let (labels, properties, node_json) = if let Some(node) = store.node_materialized(*id) {
                 let mut props = serde_json::Map::new();
                 for (k, v) in &node.properties {
                     props.insert(k.clone(), v.to_json());
