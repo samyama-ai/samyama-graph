@@ -323,6 +323,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         }
     }
 
