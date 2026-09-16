@@ -101,6 +101,90 @@ impl CommandHandler {
         }
     }
 
+    /// GRAPH.BEGIN, on a connection that already holds the writer's lock
+    /// (#1200 step 6b). Replies with the version the transaction writes at.
+    pub fn begin_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        match store.begin_session_transaction() {
+            Ok(version) => {
+                if self.persistence.is_some() {
+                    store.enable_write_log();
+                }
+                RespValue::Integer(version as i64)
+            }
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.COMMIT: keep the transaction's writes and persist them now,
+    /// all at once, rather than statement by statement.
+    pub fn commit_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        match store.commit_session_transaction() {
+            Ok(version) => {
+                if let Some(pm) = &self.persistence {
+                    let mutations = store.take_write_log();
+                    if let Err(e) = pm.apply_mutations("default", store, &mutations) {
+                        warn!("Failed to persist a committed transaction: {}", e);
+                    }
+                }
+                RespValue::Integer(version as i64)
+            }
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.ROLLBACK: undo the transaction. What it logged for persistence
+    /// is dropped, since none of it reached disk.
+    pub fn rollback_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        let outcome = store.rollback_session_transaction();
+        let _ = store.take_write_log();
+        match outcome {
+            Ok(()) => RespValue::SimpleString("OK".to_string()),
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.QUERY or GRAPH.RO_QUERY inside an open transaction, against the
+    /// lock the connection holds. Nothing is persisted until COMMIT.
+    pub fn query_in_transaction(
+        &self,
+        args: &[RespValue],
+        store: &mut GraphStore,
+        read_only: bool,
+    ) -> RespValue {
+        if args.len() < 3 {
+            return RespValue::Error("ERR wrong number of arguments for a query".to_string());
+        }
+        let graph_name = match args[1].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        if graph_name != "default" {
+            return RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
+                graph_name
+            ));
+        }
+        let query_str = match args[2].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null query".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
+        if read_only && is_write {
+            return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
+        }
+        let result = if is_write {
+            self.query_engine.execute_mut(&query_str, store, &graph_name)
+        } else {
+            self.query_engine.execute(&query_str, store)
+        };
+        match result {
+            Ok(batch) => self.format_query_result(batch),
+            Err(e) => RespValue::Error(format!("ERR {}", e)),
+        }
+    }
+
     /// Handle GRAPH.QUERY command
     /// Format: GRAPH.QUERY graph_name "MATCH (n) RETURN n"
     async fn handle_graph_query(

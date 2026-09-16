@@ -26,6 +26,10 @@ pub struct QueryRequest {
     /// must be able to opt out of a warm cache without restarting the server.
     #[serde(default)]
     pub cache: Option<bool>,
+    /// Run the statement inside this open transaction (`POST /api/tx/begin`)
+    /// instead of on its own (#1200 step 6b).
+    #[serde(default)]
+    pub tx: Option<String>,
 }
 
 /// Whether the result cache is on for a request that did not say.
@@ -325,6 +329,10 @@ pub async fn query_handler(
             .into_response();
     }
 
+    if let Some(tx) = payload.tx.as_deref() {
+        return query_in_transaction(&state, tx, &payload).await;
+    }
+
     // Asked of the parser, not of the query text. Two string matchers used to
     // answer this, one per transport, and they disagreed: this one only looked
     // past the first keyword when the statement began with `MATCH`, so
@@ -378,6 +386,48 @@ pub async fn query_handler(
         (result, props)
     };
 
+    render_query_result(result, &full_props, served_from_cache, snapshot_version)
+}
+
+/// A statement inside an open HTTP transaction, run against the writer's lock
+/// the transaction holds (#1200 step 6b). Its writes are persisted at COMMIT,
+/// not here, and a ROLLBACK undoes them.
+async fn query_in_transaction(
+    state: &AppState,
+    tx: &str,
+    payload: &QueryRequest,
+) -> axum::response::Response {
+    let mut sessions = state.transactions.lock().await;
+    let Some(txn) = sessions.get_mut(tx) else {
+        return crate::http::transactions::not_open(tx);
+    };
+    if std::time::Instant::now() > txn.deadline {
+        if let Some(expired) = sessions.remove(tx) {
+            crate::http::transactions::roll_back(expired);
+        }
+        return crate::http::transactions::not_open(tx);
+    }
+    let store: &mut crate::graph::GraphStore = &mut txn.guard;
+    let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
+    let result = if is_write {
+        state.engine.execute_mut(&payload.query, store, &payload.graph)
+    } else {
+        state.engine.execute(&payload.query, store)
+    };
+    let props = result
+        .as_ref()
+        .map(|b| merged_node_properties(b, store))
+        .unwrap_or_default();
+    let version = store.current_version;
+    render_query_result(result, &props, false, version)
+}
+
+fn render_query_result(
+    result: Result<crate::query::RecordBatch, Box<dyn std::error::Error>>,
+    full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
+    served_from_cache: bool,
+    snapshot_version: u64,
+) -> axum::response::Response {
     match result {
         Ok(batch) => {
             let mut nodes = HashMap::new();
@@ -1315,6 +1365,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
@@ -1374,6 +1425,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
         let app = Router::new()
             .route("/api/schema", get(schema_handler))
@@ -1414,6 +1466,7 @@ mod tests {
                 embed_pipeline: None,
                 embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 persistence: None,
+                transactions: Default::default(),
             };
             let app = Router::new()
                 .route("/api/query", axum::routing::post(query_handler))
@@ -1501,6 +1554,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
         let engine = state.engine.clone();
         let app = Router::new()
@@ -1561,6 +1615,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", axum::routing::post(query_handler))
@@ -2191,6 +2246,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: Some(std::sync::Arc::clone(&pm)),
+            transactions: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
@@ -2244,6 +2300,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: Some(std::sync::Arc::clone(&pm)),
+            transactions: Default::default(),
         };
         (state, pm, dir)
     }

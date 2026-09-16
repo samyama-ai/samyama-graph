@@ -4527,6 +4527,19 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         Ok(version)
     }
 
+    /// How long a session transaction may stay open before it is rolled back
+    /// (#1200 step 6b). It holds the writer's lock, so every other reader and
+    /// writer waits on it: an abandoned one would stop the server. Set with
+    /// `SAMYAMA_TX_TIMEOUT_SECS`; 30 seconds by default.
+    pub fn session_transaction_timeout() -> std::time::Duration {
+        std::env::var("SAMYAMA_TX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&secs| secs > 0)
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(30))
+    }
+
     /// The version an open session transaction records its writes at.
     pub fn session_transaction_version(&self) -> Option<u64> {
         self.session_txn.as_ref().map(|txn| txn.version)
@@ -7835,7 +7848,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_edge_version_log() {
+    fn test_gc_edge_history() {
         let mut store = GraphStore::new();
         let a = store.create_node("A");
         let b = store.create_node("B");

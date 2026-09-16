@@ -91,6 +91,8 @@ pub struct AppState {
     /// Persistence for writes made over HTTP (#1094, #1106). Without it a write
     /// lives only in memory, and every one of them returns success.
     pub persistence: Option<Arc<crate::persistence::PersistenceManager>>,
+    /// Open HTTP transactions, each holding the writer's lock (#1200 step 6b).
+    pub transactions: super::transactions::TxnSessions,
 }
 
 impl AppState {
@@ -209,6 +211,7 @@ impl HttpServer {
             embed_pipeline: self.embed_pipeline.clone(),
             embed_cache: Arc::clone(&embed_cache),
             persistence: self.persistence.clone(),
+            transactions: Default::default(),
         };
 
         let optimize_state = Arc::new(super::optimize::OptimizeState::default());
@@ -217,6 +220,9 @@ impl HttpServer {
             .route("/", get(static_handler))
             .route("/api/query", post(query_handler))
             .route("/api/query/export", post(export_handler))
+            .route("/api/tx/begin", post(super::transactions::begin_handler))
+            .route("/api/tx/:id/commit", post(super::transactions::commit_handler))
+            .route("/api/tx/:id/rollback", post(super::transactions::rollback_handler))
             .route("/api/import/parquet", post(import_parquet_handler))
             .route("/api/enrich/policy", post(set_enrich_policy_handler))
             .route("/api/enrich", post(enrich_handler))
@@ -291,6 +297,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         let cloned = state.clone();
@@ -310,6 +317,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         let cloned = state.clone();
@@ -335,6 +343,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         let c1 = state.clone();
@@ -358,6 +367,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         // Write through the state
@@ -397,6 +407,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         let _app: Router = Router::new()
@@ -417,6 +428,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            transactions: Default::default(),
         };
 
         let app = Router::new()

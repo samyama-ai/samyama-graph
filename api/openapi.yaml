@@ -58,6 +58,111 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/tx/begin:
+    post:
+      operationId: beginTransaction
+      summary: Begin a transaction
+      description: |
+        Opens a transaction and returns its id. Send statements to `/api/query`
+        with `"tx": <id>`, then commit or roll back.
+
+        The transaction holds the graph's write lock until it ends: no other
+        request can read or write while it is open. It is rolled back
+        automatically after `timeout_seconds` (`SAMYAMA_TX_TIMEOUT_SECS`,
+        default 30). Isolation is serializable in effect, since nothing runs
+        concurrently with an open transaction.
+      responses:
+        '200':
+          description: Transaction opened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx:
+                    type: string
+                  version:
+                    type: integer
+                  timeout_seconds:
+                    type: integer
+        '409':
+          description: A transaction could not be opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tx/{id}/commit:
+    post:
+      operationId: commitTransaction
+      summary: Commit a transaction
+      description: Keeps every write the transaction made, persists them, and releases the lock.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Committed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx:
+                    type: string
+                  committed:
+                    type: boolean
+                  version:
+                    type: integer
+        '404':
+          description: No such open transaction (already ended, or timed out and rolled back)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The transaction timed out and was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tx/{id}/rollback:
+    post:
+      operationId: rollbackTransaction
+      summary: Roll back a transaction
+      description: |
+        Undoes everything the transaction did -- property and label writes,
+        created nodes and relationships, and deletions, which are restored with
+        their properties and relationships -- and releases the lock.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rolled back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx:
+                    type: string
+                  rolled_back:
+                    type: boolean
+        '404':
+          description: No such open transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/schema:
     get:
       operationId: getSchema
@@ -730,6 +835,13 @@ components:
             changed since the answer was computed. Omitted means the server
             default, which is off unless SAMYAMA_RESULT_CACHE=1. Send false to
             bypass a warm cache for a latency measurement.
+        tx:
+          type: string
+          description: >-
+            Run the statement inside this open transaction, from
+            `POST /api/tx/begin`. Its writes are visible only inside the
+            transaction until `POST /api/tx/{id}/commit`, and
+            `POST /api/tx/{id}/rollback` undoes them.
 
     QueryResponse:
       type: object
