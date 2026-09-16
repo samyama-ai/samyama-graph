@@ -139,12 +139,21 @@ reqwest = { version = "0.13.1", features = ["json"] }
 samyama-gpu = { path = "crates/samyama-gpu", version = "1.8.0", optional = true }
 
 [features]
-default = []
+# mimalloc is the server's and the benchmarks' global allocator (ADR-038). A
+# library never installs one: samyama-sdk depends on this crate without default
+# features, so embedded users keep their host's allocator.
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 # Enable in-engine GPU acceleration. Off by default so users who do not want the
 # large wgpu/cudarc dep tree never compile it. See docs/ADR/ADR-025.
 gpu = ["dep:samyama-gpu", "samyama-graph-algorithms/gpu"]
 # NVIDIA CUDA fast path (implies gpu). Requires a CUDA toolkit at build time.
 cuda = ["gpu", "samyama-gpu/cuda"]
+
+[dependencies.mimalloc]
+version = "0.1"
+optional = true
+default-features = false
 
 [dev-dependencies]
 tempfile = "3.8"

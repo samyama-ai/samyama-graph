@@ -1,3 +1,7 @@
+// The shipped allocator (ADR-038): mimalloc unless built with --no-default-features.
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
 use samyama::http::HttpServer;
 use samyama::persistence::{AutoEmbedConfig, LLMProvider};

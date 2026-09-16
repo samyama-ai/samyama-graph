@@ -115,6 +115,7 @@
 #![allow(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod allocator;
 pub mod graph;
 pub mod query;
 pub mod protocol;

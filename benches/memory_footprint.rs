@@ -27,7 +27,7 @@ use samyama::graph::GraphStore;
 // loader would measure a second graph, and the point is to measure the one the
 // benchmark builds.
 mod ldbc_common;
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------- allocator
@@ -57,11 +57,11 @@ unsafe impl GlobalAlloc for Counting {
         ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         SIZE_HIST[bucket_of(layout.size())].fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
+        unsafe { samyama::allocator::SHIPPED.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         FREED.fetch_add(layout.size(), Ordering::Relaxed);
-        unsafe { System.dealloc(ptr, layout) }
+        unsafe { samyama::allocator::SHIPPED.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size >= layout.size() {
@@ -69,7 +69,7 @@ unsafe impl GlobalAlloc for Counting {
         } else {
             FREED.fetch_add(layout.size() - new_size, Ordering::Relaxed);
         }
-        unsafe { System.realloc(ptr, layout, new_size) }
+        unsafe { samyama::allocator::SHIPPED.realloc(ptr, layout, new_size) }
     }
 }
 
@@ -282,6 +282,7 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
 
     println!("PERF-10 — real dataset at {}", dir.display());
     println!("{}", "-".repeat(78));
+    println!("{:<28} {:>16}", "allocator", samyama::allocator::NAME);
     println!("{:<28} {:>16}", "nodes", nodes);
     println!("{:<28} {:>16}", "edges", edges);
     println!("{:<28} {:>16}", "load seconds", elapsed.as_secs());
