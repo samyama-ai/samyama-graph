@@ -54,6 +54,7 @@ Links to related ADRs
 | … | *ADRs 017–034 are on disk but not yet listed here* | — | — |
 | [035](./ADR-035-multi-hop-query-optimization.md) | Multi-Hop Query Optimization | Proposed | 2026-07-31 |
 | [036](./ADR-036-data-load-time-to-ready-optimization.md) | Data Load and Time-to-Ready Optimization | Proposed | 2026-07-31 |
+| [038](./ADR-038-memory-allocator.md) | Memory Allocator for the Server Binary | Accepted | 2026-09-17 |
 
 ## Decision Process
 
