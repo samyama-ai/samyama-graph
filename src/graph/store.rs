@@ -850,6 +850,23 @@ impl std::fmt::Display for IntegrityViolation {
     }
 }
 
+/// A transaction whose statements run directly against the store, under the
+/// writer's lock, for BEGIN/COMMIT/ROLLBACK over a connection (#1200 step 6).
+///
+/// Its writes are recorded at `version`, so the undo logs already hold what
+/// each one replaced and which entities were born. Deletions are the one thing
+/// the logs cannot reconstruct, so they are captured here in full.
+#[derive(Debug, Default)]
+struct SessionTxn {
+    /// The version its writes are recorded at.
+    version: u64,
+    /// Nodes it deleted: the node, and its properties, which live in the
+    /// columns rather than on the node since #1188.
+    deleted_nodes: Vec<(Node, PropertyMap)>,
+    /// Relationships it deleted, each with the properties `get_edge` gave it.
+    deleted_edges: Vec<Edge>,
+}
+
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
@@ -904,6 +921,10 @@ pub struct GraphStore {
     /// has an entry only once a write at a later version replaced something an
     /// earlier version can still read, or it was created after version 1.
     node_history: HashMap<NodeId, NodeHistory>,
+
+    /// The open session transaction, if one is (#1200 step 6). One at a time:
+    /// the caller holds the writer's lock for as long as it is open.
+    session_txn: Option<SessionTxn>,
 
     /// Free node IDs for reuse
     free_node_ids: Vec<u64>,
@@ -1062,6 +1083,7 @@ impl GraphStore {
             active_transactions: HashMap::new(),
             node_last_commit: HashMap::new(),
             node_history: HashMap::new(),
+            session_txn: None,
             edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
@@ -2078,6 +2100,24 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         let idx = id.as_u64() as usize;
         let latest_node = self.get_node(id).ok_or(GraphError::NodeNotFound(id))?.clone();
 
+        // A deletion is the one change the undo log cannot reconstruct, so an
+        // open session transaction keeps the whole node to put back (#1200
+        // step 6). Its relationships are captured by `delete_edge` below.
+        //
+        // As of the version before the transaction, not as it stands now: a
+        // statement that wrote the node and then deleted it would otherwise be
+        // restored with the value it wrote, since deleting drops the history
+        // that would have undone it. `None` means the transaction created this
+        // node, and rollback has nothing to put back.
+        if let Some(version) = self.session_transaction_version() {
+            if let Some(mut before) = self.get_node_at_version(id, version - 1) {
+                let properties = std::mem::take(&mut before.properties);
+                if let Some(txn) = &mut self.session_txn {
+                    txn.deleted_nodes.push((before, properties));
+                }
+            }
+        }
+
         // Create a tombstone version (we use a special property or metadata in a real system)
         // For now, we'll just not return it in get_node_at_version if we had a flag.
         // Let's add a `deleted` flag to Node/Edge for true MVCC.
@@ -2761,6 +2801,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
 
         // Reconstruct edge from DS-07c before deletion
         let edge = self.get_edge(id).ok_or(GraphError::EdgeNotFound(id))?;
+        // Kept whole while a session transaction is open, so ROLLBACK can put
+        // it back under the same id, as of the version before the transaction
+        // (#1200 step 6). `None` means the transaction created it.
+        if let Some(version) = self.session_transaction_version() {
+            if let Some(before) = self.get_edge_at_version(id, version - 1) {
+                if let Some(txn) = &mut self.session_txn {
+                    txn.deleted_edges.push(before);
+                }
+            }
+        }
         self.invalidate_hierarchies_for_edge_type(&edge.edge_type);
 
         // Collect catalog info
@@ -4455,6 +4505,174 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         }
     }
 
+    /// BEGIN: open the session transaction, and return the version its writes
+    /// are recorded at (#1200 step 6).
+    ///
+    /// Unlike `begin_transaction`, whose writes are buffered (step 4), a
+    /// session transaction's statements run directly against the store. The
+    /// caller holds the writer's lock for as long as it is open, so nobody can
+    /// read what it has written: that is what makes direct writes safe here,
+    /// and it is why a session transaction must not be left open.
+    ///
+    /// Its writes land at a new version, so the undo logs record what each one
+    /// replaced and which entities were born, and `rollback_session_transaction`
+    /// puts all of it back.
+    pub fn begin_session_transaction(&mut self) -> GraphResult<u64> {
+        if let Some(txn) = &self.session_txn {
+            return Err(GraphError::TransactionNotActive(txn.version));
+        }
+        self.current_version += 1;
+        let version = self.current_version;
+        self.session_txn = Some(SessionTxn { version, ..SessionTxn::default() });
+        Ok(version)
+    }
+
+    /// The version an open session transaction records its writes at.
+    pub fn session_transaction_version(&self) -> Option<u64> {
+        self.session_txn.as_ref().map(|txn| txn.version)
+    }
+
+    /// COMMIT: keep everything the transaction wrote and stop recording.
+    pub fn commit_session_transaction(&mut self) -> GraphResult<u64> {
+        let txn = self.session_txn.take().ok_or(GraphError::TransactionNotFound(0))?;
+        Ok(txn.version)
+    }
+
+    /// ROLLBACK: put the store back as it was when the transaction began.
+    ///
+    /// In order: what it deleted (nodes before the relationships that need
+    /// them), then every write recorded at its version, undone newest first
+    /// through the ordinary setters so the indexes and the catalog stay in
+    /// step, then whatever it created. The history it wrote goes with it, and
+    /// so does the version.
+    pub fn rollback_session_transaction(&mut self) -> GraphResult<()> {
+        let txn = self.session_txn.take().ok_or(GraphError::TransactionNotFound(0))?;
+        self.bump_epoch();
+        let version = txn.version;
+
+        for (node, properties) in txn.deleted_nodes {
+            let id = node.id;
+            let labels: Vec<Label> = node.labels.iter().cloned().collect();
+            self.insert_recovered_node(node);
+            let idx = id.as_u64() as usize;
+            for (key, value) in properties {
+                self.node_columns.set_property(idx, &key, value);
+            }
+            // `insert_recovered_node` restores the label index, not the catalog
+            // counts `delete_node` decremented.
+            for label in &labels {
+                self.catalog.on_label_added(label);
+            }
+            self.free_node_ids.retain(|&free| free != id.as_u64());
+        }
+        for mut edge in txn.deleted_edges {
+            let id = edge.id;
+            let (source, target) = (edge.source, edge.target);
+            let edge_type = edge.edge_type.clone();
+            // The properties go to the column, which is where a relationship's
+            // values live since #545; the recovery path would put them in the row.
+            let properties = std::mem::take(&mut edge.properties);
+            if self.insert_recovered_edge(edge).is_err() {
+                continue;
+            }
+            let idx = id.as_u64() as usize;
+            for (key, value) in properties {
+                self.edge_columns.set_property(idx, &key, value);
+            }
+            let src_labels: Vec<Label> =
+                self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            let tgt_labels: Vec<Label> =
+                self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
+            self.free_edge_ids.retain(|&free| free != id.as_u64());
+        }
+
+        // The entries are still in place while this runs, so the setters record
+        // no new history: each key already has an entry at this version.
+        let nodes: Vec<NodeId> = self.node_history.keys().copied().collect();
+        for id in nodes {
+            let entries: Vec<NodeUndo> = match self.node_history.get(&id) {
+                Some(history) => {
+                    history.undo.iter().rev().take_while(|e| e.at() == version).cloned().collect()
+                }
+                None => continue,
+            };
+            for entry in entries {
+                match entry {
+                    NodeUndo::Property { key, old: Some(value), .. } => {
+                        let _ = self.set_node_property("default", id, key, value);
+                    }
+                    NodeUndo::Property { key, old: None, .. } => self.remove_node_property(id, &key),
+                    NodeUndo::Label { label, had: true, .. } => {
+                        let _ = self.add_label_to_node("default", id, label);
+                    }
+                    NodeUndo::Label { label, had: false, .. } => {
+                        let _ = self.remove_label_from_node(id, &label);
+                    }
+                }
+            }
+        }
+        let edges: Vec<EdgeId> = self.edge_history.keys().copied().collect();
+        for id in edges {
+            let entries: Vec<EdgeUndo> = match self.edge_history.get(&id) {
+                Some(history) => {
+                    history.undo.iter().rev().take_while(|e| e.at() == version).cloned().collect()
+                }
+                None => continue,
+            };
+            for entry in entries {
+                match entry {
+                    EdgeUndo::Property { key, old: Some(value), .. } => {
+                        self.set_edge_property_sparse(id, key, value)
+                    }
+                    EdgeUndo::Property { key, old: None, .. } => self.remove_edge_property(id, &key),
+                    EdgeUndo::Map { old, .. } => {
+                        let now: Vec<String> = self.edge_properties_merged(id).into_keys().collect();
+                        for key in now {
+                            if !old.contains_key(&key) {
+                                self.remove_edge_property(id, &key);
+                            }
+                        }
+                        for (key, value) in old {
+                            self.set_edge_property_sparse(id, key, value);
+                        }
+                    }
+                }
+            }
+        }
+
+        let born_nodes: Vec<NodeId> = self
+            .node_history
+            .iter()
+            .filter(|(_, h)| h.born == Some(version))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in born_nodes {
+            let _ = self.delete_node("default", id);
+        }
+        let born_edges: Vec<EdgeId> = self
+            .edge_history
+            .iter()
+            .filter(|(_, h)| h.born == Some(version))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in born_edges {
+            let _ = self.delete_edge(id);
+        }
+
+        for history in self.node_history.values_mut() {
+            history.undo.retain(|e| e.at() != version);
+        }
+        self.node_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        for history in self.edge_history.values_mut() {
+            history.undo.retain(|e| e.at() != version);
+        }
+        self.edge_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+
+        self.current_version = version - 1;
+        Ok(())
+    }
+
     /// Begin a new transaction with the specified isolation level.
     /// Returns the transaction ID.
     pub fn begin_transaction(&mut self, isolation: IsolationLevel) -> TxnId {
@@ -4822,6 +5040,7 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.edge_properties.clear();
         self.edge_history.clear();
         self.node_history.clear();
+        self.session_txn = None;
         self.outgoing.clear();
         self.incoming.clear();
         self.frozen_outgoing.clear();
@@ -5283,6 +5502,8 @@ mod tests {
             ("allocate_node_id", "hands out an id; no node exists at it until insert_node_with_labels, which bumps"),
             ("txn_set_node_property", "buffers a write inside the transaction; no other reader sees it until commit_transaction, which bumps (#1200)"),
             ("txn_create_node", "reserves an id inside the transaction; the node enters the store at commit_transaction, which bumps (#1200)"),
+            ("begin_session_transaction", "opens the session transaction and advances the version; no row changes, and the statements that follow bump on their own paths (#1200 step 6)"),
+            ("commit_session_transaction", "drops the rollback journal, keeping every write already applied and already bumped; rollback_session_transaction, which does change rows, bumps (#1200 step 6)"),
         ];
 
         let src = std::fs::read_to_string(concat!(
@@ -7901,5 +8122,114 @@ mod tests {
         assert_eq!(fresh, old, "the test needs the id reused");
         assert!(store.get_edge_at_version(fresh, 1).is_none(), "the new edge existed before it was created");
         assert_eq!(edge_prop_at(&store, fresh, 2, "w"), None, "the new edge carries the old one's value");
+    }
+
+    // ============================================================
+    // Session transactions: BEGIN / COMMIT / ROLLBACK (#1200 step 6)
+    // ============================================================
+
+    #[test]
+    fn test_rollback_undoes_a_property_write() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "x", 1i64).unwrap();
+
+        store.begin_session_transaction().unwrap();
+        store.set_node_property("default", n, "x", 2i64).unwrap();
+        store.add_label_to_node("default", n, "M").unwrap();
+        assert_eq!(store.node_property(n, "x"), Some(PropertyValue::Integer(2)));
+
+        store.rollback_session_transaction().unwrap();
+        assert_eq!(store.node_property(n, "x"), Some(PropertyValue::Integer(1)), "the write survived a rollback");
+        assert!(!store.get_node(n).unwrap().labels.contains(&Label::new("M")), "the label survived a rollback");
+        assert_eq!(store.current_version, 1, "the version did not go back");
+    }
+
+    #[test]
+    fn test_rollback_removes_what_the_transaction_created() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+
+        store.begin_session_transaction().unwrap();
+        let fresh = store.create_node("B");
+        store.set_node_property("default", fresh, "x", 1i64).unwrap();
+        let e = store.create_edge(a, fresh, "R").unwrap();
+        store.set_edge_property(e, "w", 1i64).unwrap();
+
+        store.rollback_session_transaction().unwrap();
+        assert!(store.get_node(fresh).is_none(), "a created node survived a rollback");
+        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.edge_count(), 0, "a created relationship survived a rollback");
+        assert!(store.node_history.is_empty() && store.edge_history.is_empty(), "history outlived the rollback");
+    }
+
+    #[test]
+    fn test_rollback_restores_a_deleted_node_with_its_relationships() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("A");
+        let b = store.create_node("B");
+        let e = store.create_edge(a, b, "R").unwrap();
+        store.set_node_property("default", a, "x", 1i64).unwrap();
+        store.set_edge_property(e, "w", 2i64).unwrap();
+
+        store.begin_session_transaction().unwrap();
+        store.delete_node("default", a).unwrap();
+        assert!(store.get_node(a).is_none());
+
+        store.rollback_session_transaction().unwrap();
+        assert!(store.get_node(a).is_some(), "the deleted node was not restored");
+        assert_eq!(store.node_property(a, "x"), Some(PropertyValue::Integer(1)));
+        assert_eq!(store.get_nodes_by_label(&Label::new("A")).len(), 1, "the label index was not restored");
+        assert_eq!(store.edge_count(), 1, "the deleted relationship was not restored");
+        assert_eq!(store.edge_property(e, "w"), Some(PropertyValue::Integer(2)));
+    }
+
+    #[test]
+    fn test_rollback_restores_a_node_written_then_deleted_in_one_transaction() {
+        // Deleting drops the node's history, so a capture taken at deletion
+        // time would put back the value the same transaction had written.
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "x", 1i64).unwrap();
+
+        store.begin_session_transaction().unwrap();
+        store.set_node_property("default", n, "x", 2i64).unwrap();
+        store.delete_node("default", n).unwrap();
+
+        store.rollback_session_transaction().unwrap();
+        assert_eq!(
+            store.node_property(n, "x"),
+            Some(PropertyValue::Integer(1)),
+            "the node came back with the value the rolled-back transaction wrote"
+        );
+    }
+
+    #[test]
+    fn test_commit_keeps_the_writes_and_the_version() {
+        let mut store = GraphStore::new();
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "x", 1i64).unwrap();
+
+        let version = store.begin_session_transaction().unwrap();
+        assert_eq!(version, 2);
+        store.set_node_property("default", n, "x", 2i64).unwrap();
+        assert_eq!(store.commit_session_transaction().unwrap(), 2);
+
+        assert_eq!(store.node_property(n, "x"), Some(PropertyValue::Integer(2)));
+        assert_eq!(store.current_version, 2);
+        // The committed write is history now: a read before it still sees the old value.
+        assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)));
+        assert!(store.session_transaction_version().is_none());
+    }
+
+    #[test]
+    fn test_only_one_session_transaction_at_a_time() {
+        let mut store = GraphStore::new();
+        assert_eq!(store.begin_session_transaction().unwrap(), 2);
+        assert!(store.begin_session_transaction().is_err(), "a second transaction opened");
+        assert_eq!(store.session_transaction_version(), Some(2));
+        store.commit_session_transaction().unwrap();
+        assert!(store.commit_session_transaction().is_err(), "committing twice succeeded");
+        assert!(store.rollback_session_transaction().is_err(), "rolling back with none open succeeded");
     }
 }
