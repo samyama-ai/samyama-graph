@@ -540,6 +540,8 @@ async fn run_benchmark(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // First, so it prints on every path: a run that measured anything says under which allocator.
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     bench_setup::init();
     // Opening calibration, before anything else competes for the CPU. Closed
     // out at the end of the suite so a host that changed speed mid-run says so
@@ -590,7 +592,6 @@ async fn main() -> Result<(), Error> {
         // should report a skip, so "run every benchmark" is not permanently red.
         if explicit_data_dir {
             eprintln!("ERROR: Data directory not found: {}", data_dir.display());
-    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
             std::process::exit(1);
         }
         eprintln!("SKIP: LDBC SF1 dataset not present at {}", data_dir.display());

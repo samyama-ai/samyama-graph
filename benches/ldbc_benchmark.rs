@@ -715,6 +715,8 @@ async fn run_benchmark(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // First, so it prints on every path: a run that measured anything says under which allocator.
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     bench_setup::init();
     // Opening calibration, before anything else competes for the CPU. Closed
     // out at the end of the suite so a host that changed speed mid-run says so
@@ -744,7 +746,6 @@ async fn main() -> Result<(), Error> {
         .collect();
     if !unknown.is_empty() {
         eprintln!("unknown option(s): {}", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
         eprintln!("known options: {}", KNOWN[..10].join(" "));
         eprintln!("\nRefusing to run: an ignored flag produces a number measured under\nsettings nobody chose, and the output cannot tell you that happened.");
         std::process::exit(64);

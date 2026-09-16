@@ -534,6 +534,8 @@ async fn run_benchmark(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // First, so it prints on every path: a run that measured anything says under which allocator.
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     bench_setup::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -562,7 +564,6 @@ async fn main() -> Result<(), Error> {
     // Load dataset
     // ========================================================================
     eprintln!("LDBC FinBench Benchmark — Samyama v0.5.8");
-    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     eprintln!();
 
     let client = EmbeddedClient::new();

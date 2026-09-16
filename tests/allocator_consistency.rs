@@ -50,3 +50,26 @@ fn the_sdk_does_not_take_the_servers_allocator() {
     let line = sdk.lines().find(|l| l.trim_start().starts_with("samyama = ")).expect("samyama dependency");
     assert!(line.contains("default-features = false"), "samyama-sdk would bring mimalloc into every embedding: {line}");
 }
+
+#[test]
+fn every_gated_bench_says_which_allocator_it_ran_under() {
+    // First statement of main, so no early return (a skip, a missing data
+    // directory, an unknown option) can leave a run without it. The first version
+    // of this line sat inside an error branch in two of the three benches and
+    // never printed on a real run.
+    for bench in ["benches/ldbc_benchmark.rs", "benches/ldbc_bi_benchmark.rs", "benches/finbench_benchmark.rs"] {
+        let src = read(bench);
+        let main = src.find("fn main()").unwrap_or_else(|| panic!("{bench}: no main"));
+        let body = &src[main..];
+        let open = body.find('{').expect("main body");
+        let first_statement = body[open + 1..]
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .expect("a statement");
+        assert!(
+            first_statement.contains("samyama::allocator::NAME"),
+            "{bench}: main starts with `{first_statement}`, not the allocator line"
+        );
+    }
+}
