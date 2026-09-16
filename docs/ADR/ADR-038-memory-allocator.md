@@ -191,10 +191,10 @@ threshold, so mimalloc is chosen.
 **How:**
 1. **Dependency.** `mimalloc` (MIT) is an optional dependency of the `samyama` crate,
    with `default-features = false`, enabled by a **default** feature, `mimalloc`.
-2. **One definition.** A module in the library crate, `samyama::alloc`, names the shipped
+2. **One definition.** A module in the library crate, `samyama::allocator`, names the shipped
    allocator (`SHIPPED`) but does **not** install it. A library never sets
    `#[global_allocator]`.
-3. **Where it is installed.** `#[global_allocator] static GLOBAL = samyama::alloc::SHIPPED`
+3. **Where it is installed.** `#[global_allocator] static GLOBAL = samyama::allocator::SHIPPED`
    in:
    - `src/main.rs`, the server and the Docker image;
    - every bench binary that produces a published or gated number: `ldbc_benchmark`,
