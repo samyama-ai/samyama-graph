@@ -189,18 +189,27 @@ Under the rule above, mimalloc's SF10 RSS is 0.4% above jemalloc's, well inside 
 threshold, so mimalloc is chosen.
 
 **How:**
-1. **Dependency.** `mimalloc` (MIT) with `default-features = false`.
-2. **One definition.** A module in the library crate,
-   `samyama::alloc::ShippedAllocator`, names the allocator but does **not** install it.
-   A library never sets `#[global_allocator]`.
-3. **Where it is installed.** `#[global_allocator] static GLOBAL: ShippedAllocator` in:
+1. **Dependency.** `mimalloc` (MIT) is an optional dependency of the `samyama` crate,
+   with `default-features = false`, enabled by a **default** feature, `mimalloc`.
+2. **One definition.** A module in the library crate, `samyama::alloc`, names the shipped
+   allocator (`SHIPPED`) but does **not** install it. A library never sets
+   `#[global_allocator]`.
+3. **Where it is installed.** `#[global_allocator] static GLOBAL = samyama::alloc::SHIPPED`
+   in:
    - `src/main.rs`, the server and the Docker image;
-   - the CLI;
    - every bench binary that produces a published or gated number: `ldbc_benchmark`,
      `ldbc_bi_benchmark`, `finbench_benchmark`, and `memory_footprint`, whose counting
-     allocator wraps `ShippedAllocator` instead of `System`.
-4. **Opt-out.** A Cargo feature, `system-allocator`, installs `std::alloc::System`
-   instead, for anyone who has to build without mimalloc.
+     allocator wraps `SHIPPED` instead of `System`.
+
+   The CLI links the engine only through `samyama-sdk`'s `RemoteClient` and runs no
+   queries, so it is left alone.
+4. **Library consumers do not get it.** `samyama-sdk` depends on `samyama` with
+   `default-features = false`. The Python wheel and SDK users keep their host allocator
+   and never compile mimalloc.
+5. **Opt-out.** Build the server with `--no-default-features`, and `SHIPPED` is
+   `std::alloc::System`.
+6. **Guard.** A test checks that the server and each gated bench install `SHIPPED`, so
+   the benchmarks cannot drift from what ships.
 
 **Not adopted:** A, B and C, as above.
 
