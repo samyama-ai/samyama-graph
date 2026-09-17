@@ -80,7 +80,7 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 - Store transactions are not reachable over any protocol. Exposing them would give readers concurrency during a write transaction, at the price of write skew.
 - Conflicts are detected per entity, not per property. Two transactions setting different keys on one node conflict.
 - Old versions are not collected in production. Undo-log entries accumulate only while transactions write; a store with no transactions holds none (#1200 step 2).
-- **Durability of COMMIT is not guaranteed by its reply.** Over RESP and HTTP, if persistence fails at commit, the server logs a warning and still reports success. The same holds for a single write statement over RESP.
+- **Durability of COMMIT is not guaranteed by its reply.** Over RESP and HTTP, if persistence fails at commit, the server logs a warning and still reports success. The same holds for a single write statement over RESP and HTTP (#1274).
 
 ### 4. Durability — "committed data survives"
 
