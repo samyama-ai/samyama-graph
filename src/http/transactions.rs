@@ -102,16 +102,17 @@ pub async fn commit_handler(State(state): State<AppState>, Path(id): Path<String
         roll_back(txn);
         return error(StatusCode::CONFLICT, format!("transaction '{id}' timed out and was rolled back"));
     }
-    let version = match txn.guard.commit_session_transaction() {
-        Ok(v) => v,
-        Err(e) => return error(StatusCode::CONFLICT, e.to_string()),
+    // Persisted before the reply; refused and rolled back if it cannot be (#1274).
+    let version = match &state.persistence {
+        Some(pm) => match pm.commit_session_transaction("default", &mut txn.guard) {
+            Ok(v) => v,
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        },
+        None => match txn.guard.commit_session_transaction() {
+            Ok(v) => v,
+            Err(e) => return error(StatusCode::CONFLICT, e.to_string()),
+        },
     };
-    if let Some(pm) = &state.persistence {
-        let mutations = txn.guard.take_write_log();
-        if let Err(e) = pm.apply_mutations("default", &txn.guard, &mutations) {
-            tracing::warn!("failed to persist a committed transaction ({} mutations): {e}", mutations.len());
-        }
-    }
     Json(json!({ "tx": id, "committed": true, "version": version })).into_response()
 }
 
@@ -225,5 +226,33 @@ mod tests {
         let (status, _) =
             post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "a query ran in a finished transaction");
+    }
+
+    /// #1274: a commit that could not be persisted used to answer
+    /// `{"committed": true}`. It must be refused and rolled back.
+    #[tokio::test]
+    async fn a_commit_that_cannot_be_persisted_is_refused_and_rolled_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pm = Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
+        let quotas = crate::persistence::tenant::ResourceQuotas {
+            max_nodes: Some(0),
+            ..crate::persistence::tenant::ResourceQuotas::unlimited()
+        };
+        pm.tenants().update_quotas("default", quotas).unwrap();
+        let (_, mut state) = app();
+        state.persistence = Some(Arc::clone(&pm));
+        let app = Router::new()
+            .route("/api/query", post(query_handler))
+            .route("/api/tx/begin", post(begin_handler))
+            .route("/api/tx/:id/commit", post(commit_handler))
+            .with_state(state.clone());
+
+        let tx = begin(&app).await;
+        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
+        assert_ne!(status, StatusCode::OK, "a commit that was not persisted reported success: {body}");
+        let guard = state.store.read().await;
+        assert_eq!(guard.node_count(), 0, "the refused CREATE is still in memory");
+        assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
     }
 }
