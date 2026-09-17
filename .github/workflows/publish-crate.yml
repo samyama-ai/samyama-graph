@@ -197,6 +197,23 @@ jobs:
                   rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
               fi
 
+              # The dry run above only proves $CRATE compiles standalone — cargo
+              # resolves its dependencies from the registry for packaging, but
+              # this still runs from the workspace checkout with local path
+              # deps. A crate that passes CI inside the workspace can still be
+              # broken for anyone who actually depends on it; this is the
+              # closest check to that without unpacking the real .crate and
+              # testing it in isolation, and it is cheap enough to run on
+              # every crate before it ships. Runs in dry-run mode too, so a
+              # validate-only dispatch still catches a real test failure.
+              echo "--- test: $CRATE"
+              cargo test -p "$CRATE" 2>&1 | tee "$TMPLOG"
+              EXIT_CODE=${PIPESTATUS[0]}
+              if [ "$EXIT_CODE" -ne 0 ]; then
+                  echo "::error::tests failed for $CRATE (exit $EXIT_CODE) — refusing to publish"
+                  rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
+              fi
+
               if [ "$DRY_RUN" = "true" ]; then
                   echo "DRY_RUN set — validated, not uploading"
                   rm -f "$TMPLOG"; echo "::endgroup::"; return 0
