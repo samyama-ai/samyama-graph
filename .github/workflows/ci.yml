@@ -41,7 +41,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        # ARM64 because we publish for it: linux-aarch64 and macos-aarch64
+        # wheels, and a linux/arm64 image. Until this entry nothing ran on the
+        # architecture we ship to (#1044), and atomics ordering, FMA contraction
+        # in the numeric parity checks and C `char` signedness all differ there.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
