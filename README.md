@@ -5,7 +5,7 @@
     <strong>The graph database that queried 1 billion edges for $2.50</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.8.0-blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
@@ -124,10 +124,6 @@ curl -X POST http://localhost:8080/api/query \
   -H 'content-type: application/json' \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
-
-> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
-> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
-> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
 
 **Step 7 — Samyama Visualizer**
 
