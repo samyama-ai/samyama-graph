@@ -487,7 +487,11 @@ async fn run_benchmark(
     let mut timings = Vec::with_capacity(runs);
     let mut row_count = 0;
 
-    let actual_runs = if is_mutating { 1 } else { runs }; // mutations run once
+    // Creates run once: repeating one grows the graph it is timed on. The RW
+    // queries set a flag to the value it already holds after the warm-up, so
+    // every run does the same work, and one sample per run made RW-3 read 2.03x
+    // on a same-host A/B that 3 local runs of 11 did not show.
+    let actual_runs = if query.category == "write" { 1 } else { runs };
     for _ in 0..actual_runs {
         let start = Instant::now();
         let run_result = if is_mutating {
