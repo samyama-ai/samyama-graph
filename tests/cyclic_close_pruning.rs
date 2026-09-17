@@ -319,3 +319,32 @@ fn a_close_over_both_directions_consults_both_lists() {
     assert_eq!(count(&store, TRI), unpruned(&store), "a close over both lists lost matches");
     assert!(count(&store, TRI) > 0, "the fixture produced no triangles");
 }
+
+/// The closing hop is a lookup, and a lookup must return *every* matching edge.
+///
+/// With the far end pinned the expand cuts the sorted list to that target's run
+/// rather than reading the node's degree (#1082). Parallel edges make that run
+/// longer than one entry, and each of them completes a different triangle: two
+/// `a`-`c` edges double the triangle count, and a lookup that returned the first
+/// would quietly halve it.
+#[test]
+fn parallel_closing_edges_each_complete_the_pattern() {
+    let build = |closing_copies: usize| {
+        let mut store = GraphStore::new();
+        let ns: Vec<NodeId> = (0..600).map(|_| store.create_node("N")).collect();
+        let n = ns.len();
+        for i in 0..n {
+            store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+            for _ in 0..closing_copies {
+                store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+            }
+        }
+        store
+    };
+    let one = count(&build(1), TRI);
+    let two = count(&build(2), TRI);
+    assert!(one > 0, "the fixture produced no triangles");
+    // Each triangle uses exactly one chord edge, so doubling the chords doubles
+    // the triangles; the six orderings of each are counted in both.
+    assert_eq!(two, one * 2, "a parallel closing edge was not matched");
+}

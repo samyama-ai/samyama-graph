@@ -6480,6 +6480,24 @@ type TypeIndexPair = (
 );
 type TypeIndexSlot = Option<Option<TypeIndexPair>>;
 
+/// The run of entries for one target in a sorted `TypeAdjacency` list.
+///
+/// A closing hop is an existence test between two nodes that are both already
+/// known, and it should not cost the degree of either (#1071 made that true for
+/// the variable-length walk; this is the single-hop expand). The list is sorted
+/// by `(target, edge)`, so the entries for one target are a contiguous run and
+/// two binary searches find it. Parallel edges are why this returns the run
+/// rather than one entry: each of them is a separate match.
+fn pinned_run<'a>(
+    list: &'a [(NodeId, crate::graph::EdgeId)],
+    target: NodeId,
+) -> &'a [(NodeId, crate::graph::EdgeId)] {
+    let t = target.as_u64();
+    let start = list.partition_point(|&(n, _)| n.as_u64() < t);
+    let end = start + list[start..].partition_point(|&(n, _)| n.as_u64() == t);
+    &list[start..end]
+}
+
 /// Membership in a closing node's adjacency, walked with forward-only cursors.
 ///
 /// The cyclic-close prune asks, for every candidate the expand walks, whether
@@ -7078,6 +7096,17 @@ impl ExpandOperator {
         // `None` when there is no close to test, which is every non-cyclic
         // expand and any walk the type index declined.
         let mut co = (!co_lists.is_empty()).then(|| CoCursor::new(&co_lists));
+        // A pinned far end turns the walk into a lookup: the sorted list is cut
+        // to that target's run before it is read, so a closing hop costs two
+        // binary searches instead of the node's degree.
+        macro_rules! walk_list {
+            ($list:expr) => {
+                match pinned_target {
+                    Some(p) => pinned_run($list, p),
+                    None => $list,
+                }
+            };
+        }
         macro_rules! closes {
             ($target:expr) => {
                 match co.as_mut() {
@@ -7090,7 +7119,7 @@ impl ExpandOperator {
         match self.direction {
             Direction::Outgoing => {
                 if typed.is_some() {
-                    for &(target, eid) in out_of(&typed, node_id) {
+                    for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                         if closes!(target) && keeps(target, eid) {
                             collected.push((eid, node_id, target));
                         }
@@ -7105,7 +7134,7 @@ impl ExpandOperator {
             }
             Direction::Incoming => {
                 if typed.is_some() {
-                    for &(source, eid) in in_of(&typed, node_id) {
+                    for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
                         if closes!(source) && keeps(source, eid) {
                             collected.push((eid, source, node_id));
                         }
@@ -7119,7 +7148,7 @@ impl ExpandOperator {
                 }
             }
             Direction::Both if typed.is_some() => {
-                for &(target, eid) in out_of(&typed, node_id) {
+                for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                     if closes!(target) && keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
@@ -7128,7 +7157,7 @@ impl ExpandOperator {
                 if let Some(c) = co.as_mut() {
                     c.restart();
                 }
-                for &(source, eid) in in_of(&typed, node_id) {
+                for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
                     // Same self-loop rule as the walk below: an edge incident
                     // to its own node appears in both indexes and must be
                     // taken once (#640).
