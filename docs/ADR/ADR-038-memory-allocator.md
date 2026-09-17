@@ -244,14 +244,38 @@ threshold, so mimalloc is chosen.
 - **Competitor comparisons.** SCORECARD figures against competitors are re-measured
   rather than carried over.
 
-**Embedded users keep their host's allocator and the regression.** The Python wheel and
-the Rust SDK load the engine as a library, so they still run on glibc, and on glibc
-step 5b's BI slowdown stands: 1.5–1.7× on BI-9, BI-12 and BI-14. The fragmentation
-pattern is not yet explained. The load-path follow-up is tracked separately:
-- **Find the pattern.** Which allocations leave the ~800 K free chunks after load.
-- **Fix it in the load path.** Candidates are pre-sizing the column store and compacting
-  columns after bulk load.
-- **Workaround until then.** Embedded Linux users can `LD_PRELOAD` mimalloc or jemalloc.
+**Embedded users keep their host's allocator.** The Python wheel and the Rust SDK load the
+engine as a library, so they run on glibc.
+
+> **Update, 2026-09-17: the glibc regression is fixed for them too (#1269, #1271, `6da7424`).**
+>
+> **Cause.** Probing `mallinfo2` every 100,000 rows of the SF1 Comment node load found one
+> event, not gradual churn (run 35149366139). Between rows 1.8 M and 1.9 M the free-chunk
+> count went from 6 to 1,775,224, and the arena grew 167 MB. `ColumnData::maybe_promote`
+> cloned every value of a sparse column into the dense array and then dropped the map,
+> freeing every original at once.
+>
+> **Why step 5b exposed it.** Pre-5b builds had the same holes (952 K after the Comment
+> file, run 35146599426), but their per-relationship row maps refilled them. Step 5b
+> removed those maps.
+>
+> **Fix.** Promotion now moves the values instead of cloning them. A test counts
+> allocations during the promoting insert: 4,098 before the fix, fewer than 64 after.
+>
+> **Verified on glibc** (one runner, run 35152082412; main built with
+> `--no-default-features`, the fix, and pre-5b):
+>
+> | | main | fix | pre-5b |
+> |---|---:|---:|---:|
+> | free chunks after load | 797,348 | 199,344 | 219,070 |
+> | heap after load | 2,295 MB | 2,293 MB | 3,766 MB |
+> | BI-14 | 893 ms | 615 (0.69×) | 657 (0.74×) |
+> | BI-12 | 1,233 | 806 (0.65×) | 862 (0.70×) |
+> | BI-9 | 721 | 504 (0.70×) | 547 (0.76×) |
+>
+> **What still holds.** mimalloc remains the server's allocator: the SF1 comparison above
+> was measured before this fix and still stands. The `LD_PRELOAD` workaround is no longer
+> needed for this regression.
 
 **Not covered by the evidence:**
 - **Platforms.** 16 K and 64 K page arm64 kernels; the page-size hazard applies to
