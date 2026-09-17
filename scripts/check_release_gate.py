@@ -15,7 +15,7 @@ source-code change.
 not "it is fine" -- treating those as the same thing is the failure the whole
 harness is built to avoid, and a release is the last place to start.
 
-    python3 scripts/check_release_gate.py RELEASE-GATE.json [--max-age-days 3]
+    python3 scripts/check_release_gate.py RELEASE-GATE.json [--max-age-days 8]
         [--commit SHA] [--repo PATH]
 
 **A pass must be about the code being shipped.** Status and age alone let a
@@ -80,8 +80,8 @@ def provenance_error(engine: str | None, commit: str, repo: Path) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("verdict", type=Path)
-    ap.add_argument("--max-age-days", type=int, default=3,
-                    help="older than this and the nightly is not running")
+    ap.add_argument("--max-age-days", type=int, default=8,
+                    help="older than this and the weekly run is not running (owner, 2026-09-17)")
     ap.add_argument("--commit",
                     help="the commit being tagged; the verdict must have measured "
                          "it, or an ancestor with no engine change since")
@@ -111,7 +111,7 @@ def main() -> int:
     age = (datetime.now(timezone.utc) - measured).days
     if age > a.max_age_days:
         print(f"::error::the CH-REGRESS verdict is {age} days old "
-              f"(limit {a.max_age_days}) — the nightly has not run. "
+              f"(limit {a.max_age_days}) — the weekly run has not run. "
               f"A gate with gaps nobody notices is not a gate.")
         return 1
 
