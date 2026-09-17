@@ -102,6 +102,26 @@ jobs:
           # failed on "Unable to find libclang". Runs only in the Linux container.
           before-script-linux: dnf install -y clang
 
+      # Every platform here is a native runner (arm64 wheels build on an arm64
+      # runner, etc.) — manylinux wheels are built inside the AlmaLinux
+      # container but copied back out, and install cleanly on the host
+      # distro, which is the entire point of the manylinux tag. So this
+      # installs and imports the exact wheel that would otherwise go straight
+      # to PyPI unexamined: `maturin build` only proves the PyO3 extension
+      # compiles, not that the compiled bindings actually work once loaded —
+      # an ABI mismatch or a binding error only shows up by running it.
+      # `shell: bash` for glob/pip syntax that behaves the same on Windows as
+      # everywhere else — GitHub's windows-latest runner ships Git Bash for
+      # exactly this.
+      - name: Test the built wheel
+        shell: bash
+        working-directory: ${{ env.PYTHON_SDK_DIR }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl pytest
+          python -m pytest tests/ -v
+
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}

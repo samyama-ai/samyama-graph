@@ -97,6 +97,14 @@ jobs:
         working-directory: ${{ env.SDK_DIR }}
         run: npm run build
 
+      # tsc compiles tests/**/*.ts into dist/tests/ (see tsconfig.json's
+      # `include`), so `npm test` exercises the exact compiled output about to
+      # be published, not the TypeScript source. A build that type-checks can
+      # still be wrong at runtime; this is what actually proves it.
+      - name: Test
+        working-directory: ${{ env.SDK_DIR }}
+        run: npm test
+
       - name: Publish
         working-directory: ${{ env.SDK_DIR }}
         env:
