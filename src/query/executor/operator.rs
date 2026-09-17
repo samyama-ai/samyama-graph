@@ -6480,6 +6480,53 @@ type TypeIndexPair = (
 );
 type TypeIndexSlot = Option<Option<TypeIndexPair>>;
 
+/// Membership in a closing node's adjacency, walked with forward-only cursors.
+///
+/// The cyclic-close prune asks, for every candidate the expand walks, whether
+/// that candidate neighbours the node the pattern closes onto (#1082). Both
+/// sides are `TypeAdjacency` lists, sorted by `(target, edge)`, and the
+/// candidates arrive in that same order — so the question can be answered by
+/// advancing a cursor rather than by a binary search per candidate: O(m + n)
+/// over the pair instead of O(m log n).
+///
+/// The cursors only ever move forward, which is why [`Self::restart`] exists:
+/// an undirected walk reads the outgoing list and then the incoming one, and
+/// the second starts from the beginning again.
+///
+/// Duplicate targets are what parallel edges look like here, and the cursor
+/// stops *at* the first entry for a target rather than past it, so a repeated
+/// candidate is answered the same way twice.
+struct CoCursor<'a> {
+    lists: &'a [&'a [(NodeId, crate::graph::EdgeId)]],
+    pos: Vec<usize>,
+}
+
+impl<'a> CoCursor<'a> {
+    fn new(lists: &'a [&'a [(NodeId, crate::graph::EdgeId)]]) -> Self {
+        Self { lists, pos: vec![0; lists.len()] }
+    }
+
+    /// Begin a new sorted candidate list.
+    fn restart(&mut self) {
+        self.pos.iter_mut().for_each(|p| *p = 0);
+    }
+
+    /// Does `target` appear in any of the closing node's lists?
+    fn contains(&mut self, target: NodeId) -> bool {
+        let t = target.as_u64();
+        let mut found = false;
+        for (list, pos) in self.lists.iter().zip(self.pos.iter_mut()) {
+            while *pos < list.len() && list[*pos].0.as_u64() < t {
+                *pos += 1;
+            }
+            if *pos < list.len() && list[*pos].0.as_u64() == t {
+                found = true;
+            }
+        }
+        found
+    }
+}
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -7011,24 +7058,11 @@ impl ExpandOperator {
             if !label_ok {
                 return false;
             }
-            // The cyclic close, applied here instead of two operators later.
-            //
-            // `co_lists` is empty when the type index is not built yet -- the
-            // first `TYPE_INDEX_AFTER_ROWS` rows, or a type the store declined
-            // to index -- and then this test is simply skipped. That is the
-            // correct fallback rather than a hole: the closing hop downstream
-            // still rejects the row, so skipping costs rows, never answers.
-            if !co_lists.is_empty() {
-                // Binary search, which is what `TypeAdjacency`'s sort is for.
-                // A linear scan here would replace one walk of `N(b)` with a
-                // walk of `N(a)` per candidate and be strictly worse.
-                let shared = co_lists
-                    .iter()
-                    .any(|l| l.binary_search_by_key(&target.as_u64(), |&(t, _)| t.as_u64()).is_ok());
-                if !shared {
-                    return false;
-                }
-            }
+            // The cyclic close is answered by `CoCursor` at the walk below,
+            // not here: it reads the candidates in the order the sorted list
+            // produces them, which is what lets it advance a cursor instead of
+            // binary-searching per candidate (#1082). `keeps` is called from
+            // the unsorted walks too, where no cursor is possible.
             if target_props.is_empty() {
                 return true;
             }
@@ -7040,11 +7074,24 @@ impl ExpandOperator {
             }
         };
 
+        // One cursor per record, shared by both lists an undirected walk reads.
+        // `None` when there is no close to test, which is every non-cyclic
+        // expand and any walk the type index declined.
+        let mut co = (!co_lists.is_empty()).then(|| CoCursor::new(&co_lists));
+        macro_rules! closes {
+            ($target:expr) => {
+                match co.as_mut() {
+                    Some(c) => c.contains($target),
+                    None => true,
+                }
+            };
+        }
+
         match self.direction {
             Direction::Outgoing => {
                 if typed.is_some() {
                     for &(target, eid) in out_of(&typed, node_id) {
-                        if keeps(target, eid) {
+                        if closes!(target) && keeps(target, eid) {
                             collected.push((eid, node_id, target));
                         }
                     }
@@ -7059,7 +7106,7 @@ impl ExpandOperator {
             Direction::Incoming => {
                 if typed.is_some() {
                     for &(source, eid) in in_of(&typed, node_id) {
-                        if keeps(source, eid) {
+                        if closes!(source) && keeps(source, eid) {
                             collected.push((eid, source, node_id));
                         }
                     }
@@ -7073,9 +7120,13 @@ impl ExpandOperator {
             }
             Direction::Both if typed.is_some() => {
                 for &(target, eid) in out_of(&typed, node_id) {
-                    if keeps(target, eid) {
+                    if closes!(target) && keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
+                }
+                // A second sorted list, so the cursors start over.
+                if let Some(c) = co.as_mut() {
+                    c.restart();
                 }
                 for &(source, eid) in in_of(&typed, node_id) {
                     // Same self-loop rule as the walk below: an edge incident
@@ -7084,7 +7135,7 @@ impl ExpandOperator {
                     if source == node_id {
                         continue;
                     }
-                    if keeps(source, eid) {
+                    if closes!(source) && keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
                 }
