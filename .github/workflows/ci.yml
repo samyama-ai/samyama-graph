@@ -34,6 +34,19 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  supply-chain:
+    # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
+    # list, and crates from unknown sources fail the build. Exceptions live in
+    # deny.toml, each with the reason it cannot be fixed yet.
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
