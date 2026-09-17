@@ -78,6 +78,9 @@ jobs:
       # and the prose in src/lib.rs and CLAUDE.md that names a version. v1.8.0
       # was prepared without these and the release PR would have gone red on
       # its own consistency test -- the guard worked, the bump did not.
+      # README.md joined the list after v1.8.0 shipped with a README badge
+      # still reading 1.1.0: the first version number a visitor sees, and the
+      # one location nothing checked.
       - name: Bump the version locations that are not manifests
         run: |
           set -euo pipefail
@@ -85,11 +88,11 @@ jobs:
           PREV=$(git show HEAD:Cargo.toml 2>/dev/null | grep -m1 '^version = ' | cut -d'"' -f2 || true)
           [ -n "$PREV" ] || PREV=$(git show origin/main:Cargo.toml | grep -m1 '^version = ' | cut -d'"' -f2)
           echo "bumping prose and openapi from $PREV to $V"
-          for f in api/openapi.yaml src/lib.rs CLAUDE.md; do
+          for f in api/openapi.yaml src/lib.rs CLAUDE.md README.md; do
             [ -f "$f" ] && sed -i "s/${PREV//./\.}/$V/g" "$f"
           done
           # Verify rather than assume: a sed that matched nothing is silent.
-          if grep -rn "$PREV" api/openapi.yaml src/lib.rs CLAUDE.md 2>/dev/null; then
+          if grep -rn "$PREV" api/openapi.yaml src/lib.rs CLAUDE.md README.md 2>/dev/null; then
             echo "::error::a version location still names $PREV after the bump"
             exit 1
           fi

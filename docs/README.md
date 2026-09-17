@@ -1,6 +1,6 @@
 # Samyama Graph — Documentation Index
 
-**Last Updated:** 2026-05-19 · **Engine version:** v1.0.0 (shipped 2026-04-11)
+**Last Updated:** 2026-05-19 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
 
 ## Primary sources
 

@@ -125,10 +125,6 @@ curl -X POST http://localhost:8080/api/query \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
 
-> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
-> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
-> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
-
 **Step 7 — Samyama Visualizer**
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
