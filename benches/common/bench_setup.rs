@@ -72,6 +72,34 @@ pub struct HostState {
     pub cpu_mhz: Option<f64>,
 }
 
+/// Mean of the `cpu MHz` lines in `/proc/cpuinfo`, if it has any.
+pub fn cpuinfo_mhz() -> Option<f64> {
+    let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let readings: Vec<f64> = s
+        .lines()
+        .filter(|l| l.starts_with("cpu MHz"))
+        .filter_map(|l| l.split(':').nth(1)?.trim().parse().ok())
+        .collect();
+    (!readings.is_empty()).then(|| readings.iter().sum::<f64>() / readings.len() as f64)
+}
+
+/// Mean of every core's cpufreq `scaling_cur_freq`, in MHz, if the host exposes it.
+pub fn cpufreq_mhz() -> Option<f64> {
+    let readings: Vec<f64> = std::fs::read_dir("/sys/devices/system/cpu")
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter_map(|e| std::fs::read_to_string(e.path().join("cpufreq/scaling_cur_freq")).ok())
+        .filter_map(|khz| khz.trim().parse::<f64>().ok())
+        .map(|khz| khz / 1000.0)
+        .collect();
+    (!readings.is_empty()).then(|| readings.iter().sum::<f64>() / readings.len() as f64)
+}
+
 impl HostState {
     pub fn read() -> Self {
         let load_average = std::fs::read_to_string("/proc/loadavg")
@@ -88,14 +116,11 @@ impl HostState {
         //
         // Even averaged this is a weak signal next to `calibrate()`. It is
         // here because a host that has thermally capped shows it here first.
-        let cpu_mhz = std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|s| {
-            let readings: Vec<f64> = s
-                .lines()
-                .filter(|l| l.starts_with("cpu MHz"))
-                .filter_map(|l| l.split(':').nth(1)?.trim().parse().ok())
-                .collect();
-            (!readings.is_empty()).then(|| readings.iter().sum::<f64>() / readings.len() as f64)
-        });
+        //
+        // `/proc/cpuinfo` carries `cpu MHz` on x86 only. ARM64 kernels omit the
+        // line, so there the cpufreq driver's `scaling_cur_freq` (kHz) is read
+        // instead, and a host with neither reports unknown (#1044).
+        let cpu_mhz = cpuinfo_mhz().or_else(cpufreq_mhz);
 
         HostState { load_average, cpu_mhz }
     }

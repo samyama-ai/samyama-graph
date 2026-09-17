@@ -72,13 +72,20 @@ fn host_state_reports_what_it_can_and_says_so_when_it_cannot() {
     assert!(text.contains("load"), "{text}");
     assert!(text.contains("cpu"), "{text}");
 
-    // On Linux both should resolve. Elsewhere they must read as unknown
-    // rather than as a fabricated zero.
+    // On Linux the load average always resolves. The frequency resolves when
+    // the host publishes one: x86 in `/proc/cpuinfo`, ARM64 only through
+    // cpufreq, and a VM may expose neither (#1044). What it must never do is
+    // read a source that exists as unknown, or invent a figure without one.
     #[cfg(target_os = "linux")]
     {
         assert!(state.load_average.is_some(), "load average should be readable on Linux");
-        assert!(state.cpu_mhz.is_some(), "cpu MHz should be readable on Linux");
-        assert!(!text.contains("unknown"), "{text}");
+        let published = bench_setup::cpuinfo_mhz().is_some() || bench_setup::cpufreq_mhz().is_some();
+        assert_eq!(state.cpu_mhz.is_some(), published, "cpu MHz: {text}");
+        if !published {
+            assert!(text.contains("cpu unknown"), "{text}");
+        }
+        #[cfg(target_arch = "x86_64")]
+        assert!(state.cpu_mhz.is_some(), "x86 Linux publishes cpu MHz: {text}");
     }
     #[cfg(not(target_os = "linux"))]
     {
