@@ -115,19 +115,16 @@ impl CommandHandler {
         }
     }
 
-    /// GRAPH.COMMIT: keep the transaction's writes and persist them now,
-    /// all at once, rather than statement by statement.
+    /// GRAPH.COMMIT: persist the transaction's writes, all at once, then keep
+    /// them. If they cannot be persisted the transaction is rolled back and the
+    /// reply is an error (#1274).
     pub fn commit_transaction_on(&self, store: &mut GraphStore) -> RespValue {
-        match store.commit_session_transaction() {
-            Ok(version) => {
-                if let Some(pm) = &self.persistence {
-                    let mutations = store.take_write_log();
-                    if let Err(e) = pm.apply_mutations("default", store, &mutations) {
-                        warn!("Failed to persist a committed transaction: {}", e);
-                    }
-                }
-                RespValue::Integer(version as i64)
-            }
+        let outcome = match &self.persistence {
+            Some(pm) => pm.commit_session_transaction("default", store),
+            None => store.commit_session_transaction().map_err(|e| e.to_string()),
+        };
+        match outcome {
+            Ok(version) => RespValue::Integer(version as i64),
             Err(e) => RespValue::Error(format!("ERR {e}")),
         }
     }

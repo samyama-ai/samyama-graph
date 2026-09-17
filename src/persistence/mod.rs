@@ -239,6 +239,47 @@ impl PersistenceManager {
         Ok(())
     }
 
+    /// COMMIT the store's open session transaction, persisted first (#1274).
+    ///
+    /// The reply to COMMIT is a promise that the writes survive a restart, so
+    /// they are written to disk before the transaction is closed. If that fails
+    /// the transaction is rolled back instead, and whatever part of it already
+    /// reached the disk is overwritten with the rolled-back state. Returns the
+    /// commit version, or why the commit was refused.
+    pub fn commit_session_transaction(&self, tenant: &str, store: &mut GraphStore) -> Result<u64, String> {
+        use crate::graph::event::Mutation;
+        if store.session_transaction_version().is_none() {
+            return store.commit_session_transaction().map_err(|e| e.to_string());
+        }
+        let mutations = store.take_write_log();
+        let failure = match self.apply_mutations(tenant, store, &mutations) {
+            Ok(_) => return store.commit_session_transaction().map_err(|e| e.to_string()),
+            Err(e) => e,
+        };
+        if let Err(e) = store.rollback_session_transaction() {
+            return Err(format!("the transaction could not be persisted ({failure}) and its rollback failed: {e}"));
+        }
+        // Every entity the transaction or its rollback touched, as it now is.
+        // One the rollback removed is a delete, since `apply_mutations` skips an
+        // upsert of an absent entity and would leave it on disk.
+        let repair: Vec<Mutation> = mutations
+            .into_iter()
+            .chain(store.take_write_log())
+            .map(|m| match m {
+                Mutation::NodeUpserted(id) if store.get_node(id).is_none() => Mutation::NodeDeleted(id),
+                Mutation::EdgeUpserted(id) if store.get_edge(id).is_none() => Mutation::EdgeDeleted(id),
+                m => m,
+            })
+            .collect();
+        match self.apply_mutations(tenant, store, &repair) {
+            Ok(_) => Err(format!("the transaction could not be persisted and was rolled back: {failure}")),
+            Err(e) => Err(format!(
+                "the transaction could not be persisted ({failure}) and was rolled back in memory; \
+                 restoring the disk also failed ({e}), so it may hold part of the transaction until restart"
+            )),
+        }
+    }
+
     /// Persist a statement's changes, as recorded by [`GraphStore::take_write_log`] (#1094).
     ///
     /// This replaces reading durability off the *result* of a write query. That older
@@ -297,6 +338,11 @@ impl PersistenceManager {
                     if let Some(node) = store.node_materialized(crate::graph::NodeId::new(id)) {
                         let node = &node;
                         let existed = self.storage.get_node(tenant, id)?.is_some();
+                        // Before the write, not after: a refused node must not
+                        // reach the disk (#1274).
+                        if !existed {
+                            self.tenants.check_quota(tenant, "nodes")?;
+                        }
                         let properties = bincode::serialize(&node.properties)?;
                         self.wal.lock().unwrap().append(WalEntry::CreateNode {
                             tenant: tenant.to_string(),
@@ -306,7 +352,6 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_node(tenant, node)?;
                         if !existed {
-                            self.tenants.check_quota(tenant, "nodes")?;
                             self.tenants.increment_usage(tenant, "nodes", 1)?;
                         }
                         written += 1;
@@ -321,6 +366,9 @@ impl PersistenceManager {
                 (true, false) => {
                     if let Some(edge) = store.get_edge(crate::graph::EdgeId::new(id)) {
                         let existed = self.storage.get_edge(tenant, id)?.is_some();
+                        if !existed {
+                            self.tenants.check_quota(tenant, "edges")?;
+                        }
                         let properties = bincode::serialize(&edge.properties)?;
                         self.wal.lock().unwrap().append(WalEntry::CreateEdge {
                             tenant: tenant.to_string(),
@@ -332,7 +380,6 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_edge(tenant, &edge)?;
                         if !existed {
-                            self.tenants.check_quota(tenant, "edges")?;
                             self.tenants.increment_usage(tenant, "edges", 1)?;
                         }
                         written += 1;
