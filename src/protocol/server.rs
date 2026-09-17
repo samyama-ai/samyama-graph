@@ -499,6 +499,42 @@ mod tests {
         assert!(guard.session_transaction_version().is_none(), "the store still has a transaction open");
     }
 
+    /// #1274: a COMMIT that could not be persisted used to log a warning and
+    /// reply with the version, so the client was told a write was durable that a
+    /// restart would lose. It must be refused and rolled back, in memory and on
+    /// disk, where a write that got through before the failure is put back too.
+    #[tokio::test]
+    async fn a_commit_that_cannot_be_persisted_is_refused_and_rolled_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+        let mut txn = ConnTxn::default();
+
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn).await;
+        assert!(!is_error(&r), "{r:?}");
+        let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
+        // One node persisted; a quota of one refuses the next new node at commit.
+        let quotas = crate::persistence::tenant::ResourceQuotas { max_nodes: Some(1), ..crate::persistence::tenant::ResourceQuotas::unlimited() };
+        pm.tenants().update_quotas("default", quotas).unwrap();
+
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn).await;
+        assert!(!is_error(&r), "{r:?}");
+        let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await;
+        assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
+
+        let guard = store.read().await;
+        assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
+        assert_eq!(guard.node_count(), 1, "the refused CREATE is still in memory");
+        assert_eq!(guard.node_property(p, "x"), Some(crate::graph::PropertyValue::Integer(1)), "the refused SET is still in memory");
+        drop(guard);
+
+        let on_disk = pm.storage().get_node("default", p.as_u64()).unwrap().expect("P left the disk");
+        assert_eq!(on_disk.properties.get("x"), Some(&crate::graph::PropertyValue::Integer(1)), "the refused SET reached the disk");
+        assert!(pm.storage().get_node("default", p.as_u64() + 1).unwrap().is_none(), "the refused CREATE reached the disk");
+    }
+
     #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();
