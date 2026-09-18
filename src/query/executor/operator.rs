@@ -14136,7 +14136,52 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
     }
 
+
+    /// Refuse a config key the algorithm does not read.
+    ///
+    /// Every algorithm's config parser asks the map for the keys it knows and
+    /// ignores the rest, so `algo.pageRank({writeProperty: 'pr'})` is accepted,
+    /// streams, writes nothing, and reports success -- and so is
+    /// `{iteratons: 100}`, which runs at the default and says nothing
+    /// (samyama-graph#1316). A request the engine discards should not look like
+    /// a request it honoured.
+    ///
+    /// The allowed list is the keys the function actually reads. `writeProperty`
+    /// and `mutate` are not among them anywhere, which is ALGO-06 being unbuilt
+    /// -- and unbuilt is a thing a caller can be told.
+    fn reject_unknown_config_keys(
+        args: &[Expression],
+        call: &str,
+        allowed: &[&str],
+    ) -> ExecutionResult<()> {
+        for arg in args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                let mut unknown: Vec<&String> =
+                    m.keys().filter(|k| !allowed.contains(&k.as_str())).collect();
+                unknown.sort();
+                if let Some(first) = unknown.first() {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{call}: unknown config key `{first}`{}. This algorithm reads: {}. \
+                         Keys it does not read were previously accepted and ignored, so a \
+                         request like `writeProperty` looked like it worked; write-back \
+                         modes are not implemented (ALGO-06).",
+                        if unknown.len() > 1 {
+                            format!(" (and {} more: {})", unknown.len() - 1,
+                                    unknown[1..].iter().map(|k| k.as_str())
+                                        .collect::<Vec<_>>().join(", "))
+                        } else {
+                            String::new()
+                        },
+                        allowed.join(", "),
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "iterations"])?;
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
@@ -14242,6 +14287,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     fn execute_wcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label", "startTime", "timeProperty"])?;
         // Arguments: (label?, edge_type?)
         let mut label = None;
         let mut edge_type = None;
@@ -14531,6 +14577,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         store: &GraphStore,
         which: Centrality,
     ) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -14612,6 +14659,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         store: &GraphStore,
         which: crate::algo::LinkScore,
     ) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "limit"])?;
         let (mut label, mut edge_type, mut limit) = (None, None, 100usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -14792,6 +14840,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// smaller number indistinguishable from a real one, and a caller sizing a
     /// traversal budget from it would under-provision.
     fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["undirected"])?;
         let view = self.structural_view(store);
         // Undirected by default, as every one of these is a statement about
         // graph shape rather than about flow.
@@ -14986,6 +15035,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// forty look identical through `shortestPath`, and in a resilience review
     /// they are not.
     fn execute_path_enum(&mut self, store: &GraphStore, kind: PathKind) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "heuristicProperty", "k", "label", "limit", "weightProperty"])?;
         let (mut label, mut edge_type, mut weight, mut heuristic) = (None, None, None, None);
         let mut k = 3usize;
         let mut limit = 1000usize;
@@ -15073,6 +15123,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// reproduce is not a result: someone who sees something surprising in a
     /// walk has to be able to get the same walk back.
     fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["seed", "steps"])?;
         let (mut steps, mut seed) = (10usize, 42u64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -15100,6 +15151,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "iterations"])?;
         let (mut damping, mut iters) = (0.85f64, 20usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -15120,6 +15172,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.katz({alpha, beta, iterations, tolerance})`.
     fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "iterations", "tolerance"])?;
         let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -15156,6 +15209,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// procedures would run the same fixed point twice and invite a caller to
     /// compare hubs from one run with authorities from another.
     fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "hits", &["iterations", "tolerance"])?;
         let (mut iters, mut tol) = (500usize, 1e-8f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -15515,6 +15569,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.nodeSimilarity({topK, cutoff})`.
     fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff"])?;
         let k = self.usize_arg("topK", 10);
         let mut cutoff = 0.0f64;
         for arg in &self.args {
@@ -15593,6 +15648,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     fn execute_cdlp(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "cdlp", &["maxIterations"])?;
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
