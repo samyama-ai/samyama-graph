@@ -26,7 +26,7 @@ use samyama_graph_algorithms::{
     rich_club_coefficient, square_clustering, transitivity,
     constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
-    eigenvector_centrality, harmonic_centrality,
+    eigenvector_centrality, harmonic_centrality, pca, PcaConfig,
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::article_rank,
@@ -534,6 +534,30 @@ fn main() {
         put("reciprocity",
             serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
 
+        // PCA, against a matrix this file also exports (benchmarks#199).
+        //
+        // `pca` became callable from Cypher and arrived in ALGO-02's
+        // denominator with nothing to compare it to. The tempting conclusion is
+        // that it cannot have a reference, because a component's **sign** is
+        // arbitrary and ours fixes none. That is true of the components and not
+        // of the variance: `explained_variance_ratio` is a property of the data,
+        // identical in any basis, and it is the number a user reads.
+        //
+        // The matrix is exported rather than derived on both sides. A parity
+        // check whose two halves each build "the same" input is partly checking
+        // two input builders, and when it disagrees you cannot tell which moved
+        // -- the same reason the graphs themselves are exported.
+        let features: Vec<Vec<f64>> = (0..r.n).map(|i| vec![
+            view.out_degree(i) as f64,
+            view.in_degree(i) as f64,
+            view.weights(i).map(|w| w.iter().sum::<f64>()).unwrap_or(0.0),
+            view.successors(i).iter().map(|&t| t as f64).sum::<f64>() / (r.n as f64),
+        ]).collect();
+        let p = pca(&features, PcaConfig { n_components: 3, ..Default::default() });
+        put("pca_matrix", serde_json::to_value(&features).unwrap());
+        put("pca_explained_variance_ratio",
+            serde_json::to_value(&p.explained_variance_ratio).unwrap());
+
         let mut entry = serde_json::json!({
             "name": r.name,
             "directed": r.directed,
@@ -669,13 +693,27 @@ fn main() {
                 // right; the pairing was the bug, and a check that pairs by position
                 // across two orderings is one transposition away from a false
                 // failure at any time.
-                let pairs: Vec<(f64, f64)> = store
+                //
+                // Read through `store.node_property`, not `node.get_property`.
+                // The Cypher write path stores properties columnar and
+                // `Node::get_property` reads the node's own inline map, so it
+                // answers `None` for a property that is there (#1313). Both
+                // reads here returned NaN, JSON wrote `null`, and the
+                // comparator raised on it -- so this check had silently stopped
+                // running, and the harness was reading an old report.
+                let ids: Vec<_> = store
                     .get_nodes_by_label(&samyama::graph::Label::new("Item"))
                     .iter()
-                    .map(|n| {
+                    .map(|n| n.id)
+                    .collect();
+                let pairs: Vec<(f64, f64)> = ids
+                    .iter()
+                    .map(|id| {
                         (
-                            n.get_property("cost").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
-                            n.get_property("qty").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
+                            store.node_property(*id, "cost").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
+                            store.node_property(*id, "qty").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
                         )
                     })
                     .collect();
