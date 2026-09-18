@@ -426,8 +426,40 @@ fn main() {
         // modularity is defined on here.
         let louvain_partition = louvain(&single, 10);
 
+        // `allPairsShortestPath` and `nodeSimilarity` (ALGO-02). Both were out
+        // of the parity denominator, excused as having no deterministic
+        // reference. Neither reason was that: `allPairsShortestPath` was
+        // "already checked as `hop_distance` over every pair" and
+        // `nodeSimilarity` was "the underlying Jaccard is already checked
+        // pairwise". Both attribute the coverage to a check on **different
+        // code** -- `hop_distance` runs `all_shortest_paths` and the Jaccard
+        // check runs the link-prediction scorer, while these two call
+        // `all_pairs_hops` and `node_similarity`. An algorithm excused because
+        // something else is checked is an algorithm nobody checks.
+        let all_pairs_hops_out: HashMap<String, usize> =
+            samyama_graph_algorithms::all_pairs_hops(&view)
+                .into_iter()
+                .map(|((a, b), d)| (format!("{a}-{b}"), d))
+                .collect();
+        // Exported with the parameters, so the reference runs the same query.
+        // `topK` and `cutoff` decide which pairs come back at all; a reference
+        // guessing them would compare two different questions.
+        const NODE_SIM_TOPK: usize = 10;
+        const NODE_SIM_CUTOFF: f64 = 0.0;
+        let node_similarity_out: Vec<serde_json::Value> =
+            samyama_graph_algorithms::node_similarity(&single, NODE_SIM_TOPK, NODE_SIM_CUTOFF)
+                .into_iter()
+                .map(|(a, b, s)| serde_json::json!([a, b, s]))
+                .collect();
+
         let mut h2 = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
+        put("all_pairs_hops", serde_json::json!(all_pairs_hops_out));
+        put("node_similarity", serde_json::json!({
+            "top_k": NODE_SIM_TOPK,
+            "cutoff": NODE_SIM_CUTOFF,
+            "pairs": node_similarity_out,
+        }));
         // ArticleRank (ALGO-02). Deterministic for a given damping and iteration
         // count, so it has exactly one right answer and belongs in the parity
         // denominator — "no library ships it" is not the same as "no reference can
