@@ -16,7 +16,7 @@
 //! # Shared machinery
 //!
 //! Closeness and betweenness both need single-source shortest paths from every
-//! node; [`bfs_sssp`] is that one traversal, and betweenness additionally uses
+//! node; `bfs_sssp` is that one traversal, and betweenness additionally uses
 //! the shortest-path *counts* and predecessor lists it already computes.
 //! Writing a second BFS for the second algorithm is how two algorithms come to
 //! disagree about whether an unreachable node is at distance infinity or zero.
@@ -36,6 +36,12 @@
 //! so betweenness comes back wrong while degree and closeness look fine. The
 //! flag is named for the *traversal* rather than for the graph for exactly
 //! that reason.
+//!
+//! **Two functions here ignore it.** `degree_centrality` always sums out-degree
+//! and in-degree, and `core_number` always peels on that same combined degree;
+//! both take the parameter and discard it (`let _ = bidirectional;`). Passing
+//! either value changes nothing, so a caller tuning the flag to fix a degree
+//! result is tuning something that is not read.
 
 use std::collections::VecDeque;
 
@@ -50,6 +56,13 @@ pub type Scores = Vec<f64>;
 /// number of shortest paths from the source, and each node's predecessors on
 /// those paths. `order` is the BFS discovery order, which betweenness walks
 /// backwards.
+///
+/// **Only `bfs_sssp` fills all four.** `bfs_sssp_reversed` fills `dist` and
+/// `order` and leaves `sigma` all zero — including `sigma[source]` — and
+/// `preds` empty, because its callers (closeness and harmonic) read distances
+/// only. A future caller that believed this doc and divided by `sigma` would
+/// divide by zero, which is why the difference is written here rather than
+/// left to be discovered.
 struct Sssp {
     dist: Vec<i64>,
     sigma: Vec<f64>,

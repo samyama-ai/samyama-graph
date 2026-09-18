@@ -28,6 +28,9 @@ fn weight_at(view: &GraphView, slot: usize) -> f64 {
 /// `limit` caps the enumeration: the count of shortest paths is exponential in
 /// the worst case, and a graph that hits that would otherwise hang rather than
 /// answer.
+///
+/// Each returned path is `dedup`ed, so a consecutive repeat of the same node id
+/// is collapsed before it reaches the caller.
 pub fn all_shortest_paths(
     view: &GraphView,
     source: usize,
@@ -88,10 +91,16 @@ pub fn all_shortest_paths(
 ///
 /// `heuristic[v]` is an estimate of the cost from `v` to the target. It must
 /// be **admissible** — never an overestimate — or the result is not the
-/// shortest path, merely a path. Passing all zeros makes this exactly
-/// Dijkstra, which is the honest default when a caller has no estimate:
+/// shortest path, merely a path. Passing all zeros makes this Dijkstra in
+/// substance, which is the honest default when a caller has no estimate:
 /// A* without a heuristic *is* Dijkstra, and pretending otherwise would be
 /// selling a name rather than an algorithm.
+///
+/// Two differences from `pathfinding::dijkstra` remain even with a zero heuristic, and
+/// "exactly Dijkstra" overstated it: the priority key here is quantised to
+/// `1e-6` and clamped at zero, so costs within that tie artificially and a
+/// negative weight orders wrongly — and unlike `dijkstra` there is no
+/// negative-weight guard at all (samyama-graph#1303).
 pub fn a_star(
     view: &GraphView,
     source: usize,
