@@ -76,15 +76,44 @@ pub enum RespValue {
     Null,
 }
 
+/// Make a payload safe for RESP's two line types.
+///
+/// `+` and `-` are terminated by CRLF and may not contain CR or LF anywhere
+/// else. Our parse errors are multi-line -- `pest` draws a caret under the
+/// offending token -- and they were being written into a simple error verbatim.
+/// The framing survived a client that scans for CRLF, because only bare LF
+/// appeared inside, and broke a client that scans for LF: it read the first
+/// line as the error and then returned `  |` as the *reply to the next
+/// command*, staying one fragment out of step for the rest of the session.
+///
+/// Escaping rather than truncating, because the part being cut was the span --
+/// the line and column and the caret -- which is the half of the error worth
+/// having. A RESP client now gets it on one line, as `\n` and `\r` two-character
+/// escapes, and stays in sync.
+fn escape_line(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains(['\r', '\n']) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 impl RespValue {
     /// Encode RESP value to bytes
     pub fn encode(&self, buf: &mut Vec<u8>) -> io::Result<()> {
         match self {
             RespValue::SimpleString(s) => {
-                write!(buf, "+{}\r\n", s)?;
+                write!(buf, "+{}\r\n", escape_line(s))?;
             }
             RespValue::Error(e) => {
-                write!(buf, "-{}\r\n", e)?;
+                write!(buf, "-{}\r\n", escape_line(e))?;
             }
             RespValue::Integer(i) => {
                 write!(buf, ":{}\r\n", i)?;
