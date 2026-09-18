@@ -10,6 +10,9 @@
 # Compares full failure manifests as sets. A scenario that passes at 1 thread
 # and fails at 32 changes the manifest, and any difference fails the build.
 #
+# Writes `summary.json` into the out-dir so the harness can report LANG-14 from the
+# same run CI gates on, rather than asserting it a second way and hoping the two agree.
+#
 #   usage: check_thread_determinism.sh <path to tck/features> [out-dir]
 set -euo pipefail
 
@@ -38,7 +41,22 @@ for t in "${THREAD_COUNTS[@]:1}"; do
   fi
 done
 
+entries=$(wc -l < "$OUT/manifest-$base.txt" | tr -d ' ')
+counts=""
+for t in "${THREAD_COUNTS[@]}"; do
+  counts="$counts${counts:+,}{\"threads\":$t,\"manifest_entries\":$(wc -l < "$OUT/manifest-$t.txt" | tr -d ' ')}"
+done
+cat > "$OUT/summary.json" <<JSON
+{
+  "thread_counts": [$(IFS=,; echo "${THREAD_COUNTS[*]}")],
+  "identical": $([ "$status" -eq 0 ] && echo true || echo false),
+  "manifest_entries": $entries,
+  "runs": [$counts]
+}
+JSON
+
 if [ "$status" -eq 0 ]; then
-  echo "OK: identical failure manifests at ${THREAD_COUNTS[*]} threads ($(wc -l < "$OUT/manifest-$base.txt") entries)"
+  echo "OK: identical failure manifests at ${THREAD_COUNTS[*]} threads ($entries entries)"
 fi
+echo "summary: $OUT/summary.json"
 exit "$status"
