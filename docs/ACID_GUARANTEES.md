@@ -1,6 +1,6 @@
 # Samyama ACID Guarantees
 
-**Last Updated:** 2026-09-17 (§3 Isolation re-verified; §1, §2 and §4 date from 2026-05-19 and were not re-checked)
+**Last Updated:** 2026-09-18 (§1, §2 and §4 re-checked against the code and corrected — see #1309; §3 Isolation re-verified 2026-09-17)
 
 Samyama provides ACID guarantees for both single-statement Cypher and multi-statement transactions. The MVCC transaction layer landed in v1.0.0 (ADR-020); the storage path is RocksDB + Samyama's logical WAL (ADR-023).
 
@@ -9,9 +9,9 @@ Samyama provides ACID guarantees for both single-statement Cypher and multi-stat
 | Property | Status | Mechanism |
 |----------|:------:|-----------|
 | **Atomicity** | ✅ | RocksDB `WriteBatch` + WAL — see ADR-023 |
-| **Consistency** | ✅ | Schema-flexible with internal-identifier integrity; distributed = Raft quorum |
+| **Consistency** | ✅ | Schema-flexible with internal-identifier integrity. Single node only — the distributed claim is withdrawn, see §2 |
 | **Isolation** | ✅ | Session transactions (RESP, HTTP) hold the writer lock: serializable in effect. The Rust store API offers snapshot isolation with first-committer-wins. Anomaly table in §3 |
-| **Durability** | ✅ | RocksDB persistence + Samyama logical WAL + Raft replication in HA |
+| **Durability** | ⚠️ | Written, not **synced**: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. See §4 |
 
 ---
 
@@ -27,14 +27,14 @@ Any Cypher mutation (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, and combined 
 - Indexes (`IndexManager`, ADR-029): label, property, unique, composite
 - Label count and edge-type count caches
 
-Persistence path: writes append to the **Samyama logical WAL** (ADR-023) before in-memory state is mutated. RocksDB's internal WAL is separate; the two are not collapsed. Recovery replays from the logical WAL.
+Persistence path: the in-memory state is mutated first, and the **Samyama logical WAL** (ADR-023) is appended after, from a write log the statement collected (`src/protocol/command.rs:238-256` → `src/persistence/mod.rs:340`). That is write-*behind*, not write-ahead — this section claimed the opposite until 2026-09-18. A crash in the window between the two loses the write entirely, because there is nothing in the log to replay. RocksDB's internal WAL is separate; the two are not collapsed.
 
-There are no dangling edges, no orphan index entries, and no half-applied multi-label changes after a crash.
+Within the in-memory structures the all-or-nothing claim holds: no dangling edges, no orphan index entries, no half-applied multi-label changes. **A single statement is not atomic if it fails partway.** The engine has no statement rollback (LANG-07), so a `CREATE` that fails on its tenth row keeps the nine before it, in memory and on disk. Multi-statement transactions do roll back, through the undo log (§3).
 
 ### 2. Consistency — "valid state transitions"
 
 - **Schema-flexible**, but internal invariants are enforced: a `NodeId` referenced from an edge must exist, label-interning IDs (ADR-028) are stable across reads, and the columnar property store maintains its column-aligned indexes.
-- **Distributed**: Raft quorum (`openraft`) is the agreement protocol. A write is acknowledged only after a majority of nodes have logged it; this gives linearizability at the cluster level.
+- **Distributed: not implemented.** This section claimed Raft quorum before acknowledgement until 2026-09-18. `RaftNode::write` applies to the **local** state machine and increments a counter (`src/raft/node.rs:104-119`); there is no log append, no peer contact and no quorum, and the file says so itself at line 47. `openraft` supplies a `Config` type and nothing more. No protocol write path reaches it — `ClusterManager` is used for tenant routing and proxying only. Treat the cluster as a single node for every guarantee on this page.
 
 ### 3. Isolation — verified 2026-09-17 against v1.8.0+ main (`73e6733`)
 
@@ -80,19 +80,25 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 - Store transactions are not reachable over any protocol. Exposing them would give readers concurrency during a write transaction, at the price of write skew.
 - Conflicts are detected per entity, not per property. Two transactions setting different keys on one node conflict.
 - Old versions are not collected in production. Undo-log entries accumulate only while transactions write; a store with no transactions holds none (#1200 step 2).
-- **Durability of COMMIT is not guaranteed by its reply.** Over RESP and HTTP, if persistence fails at commit, the server logs a warning and still reports success. The same holds for a single write statement over RESP and HTTP (#1274).
+- **A COMMIT that cannot be persisted is refused** (#1275). The reply is an error, the in-memory state is rolled back from the undo log and what reached disk is repaired — pinned by `a_commit_that_cannot_be_persisted_is_refused_and_rolled_back` in `src/protocol/server.rs:507` and `src/http/transactions.rs:234`. This bullet said the opposite until 2026-09-18; it was written against `73e6733`, one commit before the fix landed.
+- **A single write statement outside a transaction still warns and succeeds** if persistence fails (`src/protocol/command.rs:255`, `src/http/server.rs:129`). That half of #1274 is open.
 
 ### 4. Durability — "committed data survives"
 
-- **Disk persistence**: writes go through the Samyama logical WAL (ADR-023) before being applied. The current WAL "checksum" is XOR-of-bytes; the CRC32C upgrade and segment-rotation work are still open (see ADR-023 "Partially Shipped" status).
+- **Nothing is fsynced.** A write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache. `WalWriter::sync_mode` defaults to false (`src/persistence/wal.rs:187`) and its setter has no callers anywhere in the repository, so it is false for the life of the process; even when true the call is `file.flush()` (`wal.rs:232`), which is not a durability barrier. `sync_all`/`sync_data` appear in `src/` only in the snapshot writer. RocksDB is opened without `WriteOptions::set_sync`, so its writes are unsynced too.
+  - **What survives:** the Samyama process being killed. The data is in the page cache and the kernel writes it out.
+  - **What may not:** power loss, a kernel panic, a hard host reset, or a container host failure. A write acknowledged seconds earlier can be gone.
+  - Choosing a durability level is #1309.
+- **Write order**: the log is appended after the memory mutation, not before (§1).
+- The current WAL "checksum" is XOR-of-bytes; the CRC32C upgrade and segment-rotation work are still open (see ADR-023 "Partially Shipped" status).
 - **Snapshots**: portable `.sgsnap` format (ADR-022) — gzip-framed, importable via `import_tenant_with_dedup` (ADR-019) for cross-KG entity dedup at load time.
-- **Distributed durability**: Raft replication ensures data is on a quorum before acknowledgement. Leader failure post-ACK does not lose the write.
+- **Distributed durability: none.** See §2 — the replication this claimed does not run.
 
 ## Performance Trade-offs
 
 | Trade-off | Why |
 |---|---|
-| Write latency higher than eventual-consistency systems | WAL fsync + (in HA) Raft replication before ACK |
+| Write latency higher than a pure in-memory store | A WAL append and a RocksDB write per mutation. **Not** fsync, and not replication — neither happens (§4), so this trade-off is smaller than this table claimed until 2026-09-18 |
 | An open session transaction blocks all other clients | It holds the writer lock; bounded by `SAMYAMA_TX_TIMEOUT_SECS` |
 | Snapshot import is bulk-only | `.sgsnap` import bypasses the WAL for speed; in-flight transactions see the imported tenant only after commit |
 
@@ -103,8 +109,8 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 | **Storage** | RocksDB + columnar property store | In-memory | Native disk |
 | **Atomicity** | Multi-statement (MVCC txn) | Operation-level | Multi-statement |
 | **Isolation** | Serializable-in-effect sessions (RESP/HTTP); SI in the Rust API | None (single-threaded) | Read Committed |
-| **Clustering** | Raft (CP) | Master-replica | Raft / Causal Clustering (CP / CA) |
-| **Durability** | Logical WAL + RocksDB + Raft | AOF / RDB | Transaction log |
+| **Clustering** | none in effect (Raft is a stub, §2) | Master-replica | Raft / Causal Clustering (CP / CA) |
+| **Durability** | Logical WAL + RocksDB, **unsynced** (§4) | AOF / RDB (`appendfsync` configurable) | Transaction log, fsync per commit by default |
 
 ## References
 
