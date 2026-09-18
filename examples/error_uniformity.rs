@@ -11,12 +11,13 @@
 //! nothing else.
 //!
 //! **Normalisation is the trap.** Each surface has a wrapper: RESP prefixes
-//! `ERR `, HTTP wraps the text in a JSON `error` field and may add its own
-//! preamble. Strip too much and every surface agrees by construction, which is
-//! how this measurement would report a perfect score while a caller still could
-//! not write one error handler. So only the transport envelope is removed —
-//! the RESP `ERR ` token and the JSON field — and what is compared after that
-//! is the text the engine produced.
+//! `ERR ` and escapes CR and LF because its line types cannot carry them
+//! (#1322); HTTP wraps the text in a JSON `error` field. Strip too much and
+//! every surface agrees by construction, which is how this measurement would
+//! report a perfect score while a caller still could not write one error
+//! handler. So only the transport envelope is removed — the RESP `ERR ` token
+//! and its two escapes, and the JSON field — and what is compared after that is
+//! the text the engine produced.
 //!
 //! Three properties, kept apart because they fail apart:
 //!
@@ -89,11 +90,22 @@ fn extract_code(msg: &str) -> Option<String> {
 /// what the engine said.
 fn strip_envelope(surface: &str, msg: &str) -> String {
     let m = msg.trim();
-    let m = match surface {
-        "resp" => m.strip_prefix("ERR ").unwrap_or(m),
-        _ => m,
-    };
-    m.trim().to_string()
+    match surface {
+        // `ERR ` is RESP's error marker. The `\n` and `\r` escapes are the
+        // encoder's own (#1322): RESP line types may not carry CR or LF, so
+        // `escape_line` puts them in as two characters. Reversing exactly that
+        // recovers the bytes the engine produced and adds no agreement -- it is
+        // the transport being undone, not the messages being made to match. Any
+        // rule beyond these two would be.
+        "resp" => m
+            .strip_prefix("ERR ")
+            .unwrap_or(m)
+            .replace("\\r", "\r")
+            .replace("\\n", "\n")
+            .trim()
+            .to_string(),
+        _ => m.trim().to_string(),
+    }
 }
 
 fn embedded(store: &GraphStore, q: &str) -> String {
