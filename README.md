@@ -349,7 +349,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 |------|-----|
 | **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge; that run cost about $2.50 at the spot price of the day, which is a fact about one run and not a price list |
 | **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
-| **Parallel everything** | Rayon-parallel PageRank, LCC, CDLP and triangle counting; parallel scan, filter, compaction |
+| **Four algorithms scale with cores** | PageRank, LCC, CDLP and triangle counting are Rayon-parallel, as are scan, filter and compaction. Measured at 16 cores: 3 of 7 frontier algorithms reach ≥0.6 efficiency, and `wcc`, `betweenness` and `closeness` are sequential at 0.06 — one thread on sixteen (`CH-ALGO-PARALLEL`, ALGO-09) |
 | **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 12/12 against the LDBC reference answers |
 | **200 resident bytes per edge** | Measured on LDBC SNB SF10 (176M edges) by `CH-MEM-01`, against a 256 B/edge target |
 | **Transactions with a published isolation table** | `BEGIN` / `COMMIT` / `ROLLBACK` over RESP and HTTP; every anomaly mapped to the test that pins it in [`docs/ACID_GUARANTEES.md`](docs/ACID_GUARANTEES.md) |
