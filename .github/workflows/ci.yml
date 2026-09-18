@@ -47,6 +47,25 @@ jobs:
         with:
           command: check
 
+      # The release generates an SBOM. Generating one here too means a broken SBOM
+      # step is found on a pull request instead of during a release, which is the
+      # failure mode of anything that only runs on a tag.
+      - name: SBOM generates
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: SBOM is not empty
+        run: |
+          set -euo pipefail
+          packages=$(python3 -c "import json;print(len(json.load(open('sbom.spdx.json')).get('packages',[])))")
+          echo "SBOM lists $packages packages"
+          # A well-formed file listing nothing is the shape of failure worth catching:
+          # the step would be green and the artifact useless.
+          [ "$packages" -ge 50 ]
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
