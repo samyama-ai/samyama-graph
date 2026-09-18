@@ -187,7 +187,27 @@ impl Node {
         old
     }
 
-    /// Get a property value
+    /// Get a property value **from this node's own map**.
+    ///
+    /// This is not the whole store. The Cypher write path keeps properties in
+    /// the columnar store (ADR-021), and a `Node` holds no reference to it, so
+    /// this answers `None` for a property that a query would return:
+    ///
+    /// ```text
+    /// CREATE (:Item {cost: 7.0})     through Cypher
+    ///   node.get_property("cost")         => None
+    ///   store.node_property(id, "cost")   => Some(Float(7.0))
+    ///
+    /// set_property("cost", 7.0)      through this API
+    ///   node.get_property("cost")         => Some(Float(7.0))
+    ///   store.node_property(id, "cost")   => Some(Float(7.0))
+    /// ```
+    ///
+    /// So **prefer [`GraphStore::node_property`]**, which reads both, unless you
+    /// specifically want the inline map. Reading through here cost the parity
+    /// exporter its `or.solve` check: both properties came back `None`, the
+    /// export wrote `NaN`, and the comparator died on it without anyone
+    /// noticing for weeks (#1313).
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
     }
