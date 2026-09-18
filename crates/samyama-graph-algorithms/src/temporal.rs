@@ -30,10 +30,13 @@
 //! # Timestamps
 //!
 //! Edge times are supplied alongside the [`GraphView`] rather than inside it,
-//! aligned with `out_targets`. [`TemporalEdges::new`] **checks that
-//! alignment** instead of trusting it: a times array off by one silently
-//! answers a different question on every edge, and the answer still looks like
-//! a plausible set of nodes and times.
+//! aligned with `out_targets`. [`TemporalEdges::new`] checks the **length** of
+//! the times array against `out_targets`, which catches an array built from the
+//! wrong graph and **does not catch a misalignment**: a times array rotated or
+//! shifted by one has the same length, passes, and silently answers a different
+//! question on every edge — and the answer still looks like a plausible set of
+//! nodes and times. That is the failure this note used to claim was prevented
+//! (samyama-graph#1304).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -73,10 +76,16 @@ impl std::error::Error for TemporalError {}
 impl TemporalEdges {
     /// Wrap a times array, checking it against the view.
     ///
-    /// The length check is the whole point of the type. An array off by one
-    /// pairs every edge with its neighbour's timestamp, which changes every
-    /// answer and produces no symptom -- the result is still a well-formed set
-    /// of nodes with plausible times.
+    /// The check is on **length only**, and it is worth being precise about what
+    /// that does and does not buy. It catches a times array built from a
+    /// different graph. It does not catch an array of the right length whose
+    /// entries are rotated or shifted: that pairs every edge with another
+    /// edge's timestamp, changes every answer, and produces no symptom -- the
+    /// result is still a well-formed set of nodes with plausible times.
+    ///
+    /// Collecting the times in the same pass that builds the CSR is the only
+    /// construction that rules that out; this constructor exists for callers
+    /// that cannot (samyama-graph#1304).
     pub fn new(view: &GraphView, times: Vec<i64>) -> Result<Self, TemporalError> {
         if times.len() != view.out_targets.len() {
             return Err(TemporalError::Misaligned {
