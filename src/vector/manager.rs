@@ -18,6 +18,14 @@ pub struct IndexKey {
 #[derive(Debug)]
 pub struct VectorIndexManager {
     indices: RwLock<HashMap<IndexKey, Arc<RwLock<VectorIndex>>>>,
+    /// Index name -> the (label, property) it indexes.
+    ///
+    /// `CREATE VECTOR INDEX vidx FOR (n:N) ON (n.embedding)` names the index, and until
+    /// #1041 that name was parsed and dropped: the query addressed the index by label and
+    /// property instead, so the name a user was required to supply was never usable. It is
+    /// how Neo4j's form of `db.index.vector.queryNodes` addresses an index, so it has to
+    /// survive creation.
+    names: RwLock<HashMap<String, IndexKey>>,
 }
 
 impl VectorIndexManager {
@@ -25,7 +33,40 @@ impl VectorIndexManager {
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            names: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Create a new index, remembering the name it was given.
+    pub fn create_index_named(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+    ) -> VectorResult<()> {
+        self.create_index(label, property_key, dimensions, metric)?;
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            self.names.write().unwrap().insert(
+                name.to_string(),
+                IndexKey { label: label.to_string(), property_key: property_key.to_string() },
+            );
+        }
+        Ok(())
+    }
+
+    /// The (label, property) an index name refers to.
+    pub fn resolve_name(&self, name: &str) -> Option<(String, String)> {
+        self.names.read().unwrap().get(name)
+            .map(|k| (k.label.clone(), k.property_key.clone()))
+    }
+
+    /// Every index name known, for an error message that can be acted on.
+    pub fn index_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.names.read().unwrap().keys().cloned().collect();
+        v.sort();
+        v
     }
 
     /// Create a new index

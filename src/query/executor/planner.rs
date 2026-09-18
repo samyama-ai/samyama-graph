@@ -1323,7 +1323,7 @@ impl QueryPlanner {
                     clause.property_key.clone(),
                     clause.dimensions,
                     clause.similarity.clone(),
-                )),
+                ).with_name(clause.index_name.clone())),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
@@ -2558,7 +2558,7 @@ impl QueryPlanner {
 
         // 2. Handle CALL if present
         if let Some(call_clause) = &query.call_clause {
-            let call_op = self.plan_call(call_clause)?;
+            let call_op = self.plan_call(call_clause, store)?;
             if let Some(existing_op) = operator {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
@@ -3277,41 +3277,75 @@ impl QueryPlanner {
         })
     }
 
-    fn plan_call(&self, call_clause: &CallClause) -> ExecutionResult<OperatorBox> {
+    fn plan_call(&self, call_clause: &CallClause, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
-            // CALL db.index.vector.queryNodes(label, property, vector, k) YIELD node, score
-            if call_clause.arguments.len() < 4 {
+            // Two spellings of the same call, because the name is Neo4j's (#1041):
+            //
+            //   ours   (label, property, queryVector, k)
+            //   Neo4j  (indexName, k, queryVector)
+            //
+            // A client written against Neo4j — or an LLM generating Cypher from Neo4j's
+            // documentation, which is most of them — writes the second. Taking a name with
+            // an established meaning and giving it a different one is the defect; accepting
+            // both is the fix that does not break the queries already written against ours.
+            let args = &call_clause.arguments;
+            let neo4j_form = args.len() == 3
+                && matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
+                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))));
+
+            if args.len() < 3 || (args.len() == 3 && !neo4j_form) {
                 return Err(ExecutionError::PlanningError(
-                    "db.index.vector.queryNodes requires 4 arguments: (label, property, query_vector, k)".to_string()
+                    "db.index.vector.queryNodes takes either (label, property, queryVector, k) \
+                     or Neo4j's (indexName, k, queryVector)".to_string()
                 ));
             }
 
-            let label = match &call_clause.arguments[0] {
-                Expression::Literal(PropertyValue::String(s)) => s.clone(),
-                _ => return Err(ExecutionError::PlanningError("First argument (label) must be a string literal".to_string())),
-            };
-
-            let property = match &call_clause.arguments[1] {
-                Expression::Literal(PropertyValue::String(s)) => s.clone(),
-                _ => return Err(ExecutionError::PlanningError("Second argument (property) must be a string literal".to_string())),
+            let (label, property, vector_arg, k_arg) = if neo4j_form {
+                let name = match &args[0] {
+                    Expression::Literal(PropertyValue::String(s)) => s.clone(),
+                    _ => unreachable!("checked above"),
+                };
+                let (label, property) = store.resolve_vector_index(&name).ok_or_else(|| {
+                    let known = store.vector_index_names();
+                    ExecutionError::PlanningError(format!(
+                        "no vector index named '{name}'. {}",
+                        if known.is_empty() {
+                            "No vector index has been created with a name; \
+                             CREATE VECTOR INDEX <name> FOR ... names one.".to_string()
+                        } else {
+                            format!("Known index names: {}", known.join(", "))
+                        }
+                    ))
+                })?;
+                (label, property, &args[2], &args[1])
+            } else {
+                let label = match &args[0] {
+                    Expression::Literal(PropertyValue::String(s)) => s.clone(),
+                    _ => return Err(ExecutionError::PlanningError("First argument (label) must be a string literal".to_string())),
+                };
+                let property = match &args[1] {
+                    Expression::Literal(PropertyValue::String(s)) => s.clone(),
+                    _ => return Err(ExecutionError::PlanningError("Second argument (property) must be a string literal".to_string())),
+                };
+                (label, property, &args[2], &args[3])
             };
 
             // Any numeric list literal, not only one that parsed as a
             // `Vector`. List literals stay lists now (#628), so requiring the
             // `Vector` variant here would reject every query vector written
             // with a decimal point -- which is all of them.
-            let query_vector = match &call_clause.arguments[2] {
+            let query_vector = match vector_arg {
                 Expression::Literal(pv) => pv.to_vector().ok_or_else(|| {
                     ExecutionError::PlanningError(
-                        "Third argument (vector) must be a list of numbers".to_string(),
+                        "the query vector must be a list of numbers".to_string(),
                     )
                 })?,
-                _ => return Err(ExecutionError::PlanningError("Third argument (vector) must be a vector literal".to_string())),
+                _ => return Err(ExecutionError::PlanningError("the query vector must be a vector literal".to_string())),
             };
 
-            let k = match &call_clause.arguments[3] {
+            let k = match k_arg {
                 Expression::Literal(PropertyValue::Integer(i)) => *i as usize,
-                _ => return Err(ExecutionError::PlanningError("Fourth argument (k) must be an integer literal".to_string())),
+                _ => return Err(ExecutionError::PlanningError("k must be an integer literal".to_string())),
             };
 
             let mut node_var = "node".to_string();
