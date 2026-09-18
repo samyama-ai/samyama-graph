@@ -3379,7 +3379,24 @@ impl QueryPlanner {
             Ok(Box::new(ShowPropertyKeysOperator::new()))
         } else if call_clause.procedure_name == "db.schema.visualization" {
             Ok(Box::new(SchemaVisualizationOperator::new()))
+        } else if let Some((mode, bare)) =
+            AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
+        {
+            // The procedure exists here and the *mode* does not. GDS `write`
+            // and `mutate` persist a property and `stats` returns a summary;
+            // every algorithm here streams a row per node. Running the stream
+            // under a write name would do a different thing under a name the
+            // user already trusts, so it is refused -- but refused with the
+            // reason, because "Unknown procedure" sends the reader looking for
+            // an algorithm that is in fact right there (INT-04).
+            Err(ExecutionError::unknown_procedure(format!(
+                "`{}` is not supported: this engine streams results, and GDS's \
+                 `{}` mode writes them. Call `gds.{}.stream` or `algo.{}` and \
+                 write the result yourself with SET.",
+                call_clause.procedure_name, mode, bare, bare
+            )))
         } else if call_clause.procedure_name.starts_with("algo.")
+            || call_clause.procedure_name.starts_with("gds.")
             || AlgorithmOperator::is_algorithm(&call_clause.procedure_name)
         {
             // Namespace optional and case-insensitive: `pagerank`, `algo.pagerank`,
@@ -3387,9 +3404,10 @@ impl QueryPlanner {
             // `algo.` prefix alone meant `CALL pagerank()` never reached the operator and
             // came back as "Unknown procedure" (#198).
             //
-            // The prefix check is kept alongside so an unrecognised `algo.*` name still
-            // reaches the operator and gets the specific "Unknown algorithm" error rather
-            // than the generic "Unknown procedure".
+            // The prefix check is kept alongside so an unrecognised `algo.*` or
+            // `gds.*` name still reaches the operator and gets the specific
+            // "Unknown algorithm" error rather than the generic "Unknown
+            // procedure".
             Ok(Box::new(
                 AlgorithmOperator::new(
                     call_clause.procedure_name.clone(),
