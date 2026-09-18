@@ -693,13 +693,27 @@ fn main() {
                 // right; the pairing was the bug, and a check that pairs by position
                 // across two orderings is one transposition away from a false
                 // failure at any time.
-                let pairs: Vec<(f64, f64)> = store
+                //
+                // Read through `store.node_property`, not `node.get_property`.
+                // The Cypher write path stores properties columnar and
+                // `Node::get_property` reads the node's own inline map, so it
+                // answers `None` for a property that is there (#1313). Both
+                // reads here returned NaN, JSON wrote `null`, and the
+                // comparator raised on it -- so this check had silently stopped
+                // running, and the harness was reading an old report.
+                let ids: Vec<_> = store
                     .get_nodes_by_label(&samyama::graph::Label::new("Item"))
                     .iter()
-                    .map(|n| {
+                    .map(|n| n.id)
+                    .collect();
+                let pairs: Vec<(f64, f64)> = ids
+                    .iter()
+                    .map(|id| {
                         (
-                            n.get_property("cost").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
-                            n.get_property("qty").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
+                            store.node_property(*id, "cost").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
+                            store.node_property(*id, "qty").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
                         )
                     })
                     .collect();
