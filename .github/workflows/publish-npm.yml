@@ -24,6 +24,10 @@ on:
         description: "Build and validate the package, upload nothing"
         type: boolean
         default: true
+      ref:
+        description: "Tag to build (empty: the ref this runs on). Lets a fixed workflow build a release whose own workflow cannot."
+        type: string
+        default: ""
 
 env:
   SDK_DIR: sdk/typescript
@@ -43,6 +47,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       # Trusted Publishing needs npm CLI >= 11.5.1. The version bundled with a
       # given setup-node Node release lags behind npm's own releases, so it is
@@ -64,7 +70,10 @@ jobs:
       # explicitly against the release tag for the same reason as the crates
       # and PyPI guards: npm also refuses to re-publish an existing version.
       # A dispatch runs on a tag when tag-release.yml sends it (#1249), and is
-      # checked the same way. A real upload from a branch is refused.
+      # checked the same way. A real upload from a branch is refused unless
+      # `ref` names a tag directly — that is what lets a workflow fixed after
+      # a tag was cut (e.g. #231's test step, missing from v1.8.0's own copy)
+      # still build and check out that exact tag's source.
       - name: Verify package version matches the release tag
         working-directory: ${{ env.SDK_DIR }}
         env:
@@ -72,6 +81,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          DISPATCH_REF: ${{ inputs.ref }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
@@ -80,6 +90,8 @@ jobs:
             TAG=$RELEASE_TAG
           elif [ "$REF_TYPE" = "tag" ]; then
             TAG=$REF_NAME
+          elif [[ "$DISPATCH_REF" == v* ]]; then
+            TAG=$DISPATCH_REF
           elif [ "$DRY_RUN" = "true" ]; then
             echo "dry run on branch $REF_NAME: no tag to check"
             exit 0
