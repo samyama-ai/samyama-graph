@@ -133,3 +133,17 @@ fn our_own_spellings_are_unchanged() {
         assert_eq!(AlgorithmOperator::canonical_name(name), "pagerank", "{name}");
     }
 }
+
+#[test]
+fn a_gds_name_and_an_aliased_yield_work_together() {
+    // These two changes met at the same call site. #1318 added
+    // `.with_aliases(...)` to the `AlgorithmOperator::new` here, and the GDS
+    // routing changed the branch that reaches it; the merge conflicted, and
+    // resolving it by taking either side alone would have silently reverted
+    // the other. Each has its own passing test, which is exactly the state in
+    // which two correct fixes compose wrong.
+    //
+    // So: a GDS spelling *and* an aliased yield, in one query.
+    run("CALL gds.pageRank.stream() YIELD score AS rank RETURN rank ORDER BY rank DESC LIMIT 1")
+        .expect("a gds name with an aliased yield");
+}
