@@ -146,9 +146,10 @@ implementation; this document is where the rest are at least visible.
 
 The strongest of them, in the order that would surprise a user most:
 
-1. **MST returns one component.** On a disconnected graph the result is the
-   minimum spanning tree of whichever component holds internal index 0, and
-   nothing says so in the result.
+1. **MST returns a forest, not a tree.** A disconnected graph has no spanning
+   tree, so `algo.mst` spans every component and yields `components` beside
+   `total_weight`. The edge rows look the same either way; that number is what
+   tells them apart.
 2. **Weighted path, A\* and Yen's refuse negative edges.** The algorithms skip
    them, which answers over a different graph, so the Cypher calls refuse and
    name `bellmanFord`. A library caller reaching past Cypher still gets the
