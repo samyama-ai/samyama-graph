@@ -18,6 +18,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing of the pushed image (REL-14 / TRUST-08). No key to
+      # store, rotate or leak: the identity is this workflow, and the signature is
+      # verifiable with `gh attestation verify`.
+      id-token: write
+      attestations: write
 
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -50,6 +55,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -59,6 +65,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # What a user pulls is the image, so that is what has to carry provenance —
+      # attesting a file in the repository would sign something nobody downloads.
+      - name: Attest the image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/samyama-ai/samyama-graph
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # An SBOM of the image, beside the image, in the registry.
+      - name: SBOM for the image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/samyama-ai/samyama-graph@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-image.spdx.json
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ghcr.io/samyama-ai/samyama-graph
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-image.spdx.json
+          push-to-registry: true
 
   smoke-test:
     needs: build-and-push
