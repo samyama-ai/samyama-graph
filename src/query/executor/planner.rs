@@ -3408,10 +3408,14 @@ impl QueryPlanner {
             // `gds.*` name still reaches the operator and gets the specific
             // "Unknown algorithm" error rather than the generic "Unknown
             // procedure".
-            Ok(Box::new(AlgorithmOperator::new(
-                call_clause.procedure_name.clone(),
-                call_clause.arguments.clone(),
-            )))
+            Ok(Box::new(
+                AlgorithmOperator::new(
+                    call_clause.procedure_name.clone(),
+                    call_clause.arguments.clone(),
+                )
+                // Without this the aliases were parsed and dropped (#1318).
+                .with_aliases(&call_clause.yield_items),
+            ))
         } else {
             // Its own code: the procedure surface is fine and this name is not
             // on it, which is a different recovery from "the planner could not

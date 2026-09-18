@@ -14089,6 +14089,14 @@ pub struct AlgorithmOperator {
     current: usize,
     /// Whether algorithm has run
     executed: bool,
+    /// `YIELD col AS alias` renames, source column -> alias.
+    ///
+    /// The operator binds the column names each algorithm produces (`node`,
+    /// `score`, `community`, ...). Without these the aliases parsed fine and
+    /// bound nothing, so `YIELD node AS a ... RETURN a` failed VariableNotBound
+    /// while `... RETURN count(*)` succeeded -- the form looked supported right
+    /// up to the point of using it (samyama-graph#1318).
+    aliases: Vec<(String, String)>,
 }
 
 impl AlgorithmOperator {
@@ -14127,12 +14135,36 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     pub fn new(name: String, args: Vec<crate::query::ast::Expression>) -> Self {
-        Self {
-            name,
-            args,
-            results: Vec::new(),
-            current: 0,
-            executed: false,
+        Self { name, args, results: Vec::new(), current: 0, executed: false,
+               aliases: Vec::new() }
+    }
+
+    /// Record the `YIELD` aliases so the produced records carry them.
+    pub fn with_aliases(mut self, items: &[crate::query::ast::YieldItem]) -> Self {
+        self.aliases = items
+            .iter()
+            .filter_map(|i| i.alias.clone().map(|a| (i.name.clone(), a)))
+            .collect();
+        self
+    }
+
+    /// Rename the bound columns to their aliases, once, after the algorithm has
+    /// produced its records.
+    ///
+    /// Applied here rather than in each of the sixty-odd `execute_*` functions:
+    /// they all bind their own column names and every one of them would have to
+    /// remember. A rename at the single point they converge on cannot be
+    /// forgotten by the next algorithm added.
+    fn apply_yield_aliases(&mut self) {
+        if self.aliases.is_empty() {
+            return;
+        }
+        for record in &mut self.results {
+            for (from, to) in &self.aliases {
+                if let Some(value) = record.get(from).cloned() {
+                    record.bind(to.clone(), value);
+                }
+            }
         }
     }
 
@@ -16467,6 +16499,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
+            self.apply_yield_aliases();
             self.executed = true;
         }
 
@@ -16559,6 +16592,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "reciprocity" => self.execute_reciprocity(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
+            self.apply_yield_aliases();
             self.executed = true;
         }
 
