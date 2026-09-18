@@ -14217,7 +14217,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let view = crate::algo::build_view(store, None, None, weight_prop.as_deref());
         
         // Run Algorithm
-        let result = if weight_prop.is_some() {
+        let result = if let Some(prop) = weight_prop.as_deref() {
+            Self::refuse_negative_weights(&view, "shortestPath", prop)?;
             crate::algo::dijkstra(&view, source_id, target_id)
         } else {
             crate::algo::bfs(&view, source_id, target_id)
@@ -14956,6 +14957,28 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// Dijkstra and A* are correct only on non-negative weights, and the crate's
+    /// implementations *skip* a negative edge rather than refusing it. That answers
+    /// with a shortest path over a different graph -- the one without those edges --
+    /// and nothing in the result says so (#1303). `algo.bellmanFord` handles
+    /// negative weights and detects a negative cycle, so a refusal here has
+    /// somewhere to send the caller.
+    fn refuse_negative_weights(
+        view: &samyama_graph_algorithms::GraphView,
+        call: &str,
+        weight_property: &str,
+    ) -> ExecutionResult<()> {
+        match view.first_negative_weight() {
+            Some(w) => Err(ExecutionError::RuntimeError(format!(
+                "{call}: edge property `{weight_property}` holds a negative weight ({w}), \
+                 which this algorithm cannot use -- it would skip the edge and return a \
+                 path through a different graph. Use algo.bellmanFord, which handles \
+                 negative weights and reports a negative cycle."
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// `algo.allShortestPaths(src, dst)`, `algo.aStar(...)`, `algo.yens(src, dst, k)`.
     ///
     /// One row per path, with its position and cost, because the *set* of
@@ -14994,6 +15017,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             })
         };
         let (s, t) = (idx(ids[0])?, idx(ids[1])?);
+        if let Some(prop) = weight.as_deref() {
+            // `allShortestPaths` counts hops and is unaffected; the other two
+            // sum weights, so a negative one changes what they return.
+            if !matches!(kind, PathKind::All) {
+                Self::refuse_negative_weights(&view, &self.name, prop)?;
+            }
+        }
         // A third positional integer is `k`, so `algo.yens(a, b, 5)` reads the
         // way a user writes it rather than forcing a config map.
         if ids.len() >= 3 { k = (ids[2] as usize).max(1); }
@@ -15790,7 +15820,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // Build view with weights
         let view = crate::algo::build_view(store, None, None, Some(&weight_prop));
-        
+        Self::refuse_negative_weights(&view, "weightedPath", &weight_prop)?;
+
         if let Some(result) = crate::algo::dijkstra(&view, source_id, target_id) {
              let mut record = Record::new();
              record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
@@ -15985,19 +16016,35 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             None
         };
 
+        // The source and the sink being one node is the caller's mistake, and
+        // it is the one to catch here: `edmonds_karp` refuses it, and this used
+        // to turn every refusal into `max_flow: 0.0`. A flow of zero is a real
+        // answer -- the sink is unreachable from the source -- so reporting it
+        // for a node that does not exist, or for a question that has no answer,
+        // is a wrong answer rather than an error.
+        if source_id == target_id {
+            return Err(ExecutionError::RuntimeError(
+                "maxFlow: source and sink are the same node; the flow from a node to \
+                 itself is unbounded".to_string(),
+            ));
+        }
+
         // Build view
         let view = crate::algo::build_view(store, None, None, cap_prop.as_deref());
-        
+
         // edmonds_karp expects u64 (AlgoNodeId), not crate::graph::NodeId
-        if let Some(result) = crate::algo::edmonds_karp(&view, source_id, target_id) {
-            let mut record = Record::new();
-            record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
-            self.results.push(record);
-        } else {
-             // No flow found or invalid nodes
-             let mut record = Record::new();
-             record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(0.0)));
-             self.results.push(record);
+        match crate::algo::edmonds_karp(&view, source_id, target_id) {
+            Some(result) => {
+                let mut record = Record::new();
+                record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
+                self.results.push(record);
+            }
+            None => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "maxFlow: no node {} in the graph",
+                    if view.node_to_index.contains_key(&source_id) { target_id } else { source_id },
+                )));
+            }
         }
 
         Ok(())

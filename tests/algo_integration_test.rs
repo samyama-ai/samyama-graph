@@ -77,3 +77,47 @@ fn test_max_flow_mst_integration() {
     assert_eq!(total_weight, 21.0);
     assert_eq!(edge_count, 3);
 }
+
+/// `CALL algo.maxFlow(n, n)` must come back, and must not come back with a number.
+///
+/// It used to hang the thread that ran it: the augmenting search finds the
+/// zero-length path from the source to itself, the residual graph does not
+/// change, and the loop repeats. A user could take a server down with one
+/// query, so the deadline is the assertion -- a test that only checked the
+/// value would hang here rather than fail.
+///
+/// The second half matters as much as the first. The operator answered every
+/// refusal with `max_flow: 0.0`, which is a real flow value: "the sink cannot
+/// be reached". A question with no answer, and a node that does not exist,
+/// both have to be errors, or the caller cannot tell them from an answer.
+#[test]
+fn max_flow_refuses_a_node_to_itself_and_an_absent_node() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Node");
+        let b = store.create_node("Node");
+        store.create_edge(a, b, EdgeType::new("LINK")).unwrap();
+
+        let run = |q: String| {
+            let query = parse_query(&q).expect("Parse failed");
+            QueryExecutor::new(&store).execute(&query).map(|_| ())
+        };
+        let same = run(format!("CALL algo.maxFlow({}, {}) YIELD max_flow", a.as_u64(), a.as_u64()));
+        let absent = run(format!("CALL algo.maxFlow({}, 999999) YIELD max_flow", a.as_u64()));
+        let real = run(format!("CALL algo.maxFlow({}, {}) YIELD max_flow", a.as_u64(), b.as_u64()));
+        let _ = tx.send((same.is_err(), absent.is_err(), real.is_ok()));
+    });
+
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok((same, absent, real)) => {
+            assert!(same, "maxFlow(n, n) must be refused, not answered with a number");
+            assert!(absent, "maxFlow with a node that is not in the graph must be refused");
+            assert!(real, "a flow between two real nodes still answers");
+        }
+        Err(_) => panic!("CALL algo.maxFlow(n, n) did not return within 30s"),
+    }
+}

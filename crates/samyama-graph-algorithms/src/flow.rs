@@ -13,9 +13,22 @@ pub struct FlowResult {
 ///
 /// Assumes `view.weights` represents capacity.
 /// If weights are missing, assumes capacity 1.0.
+///
+/// Directed: the residual graph is built from `successors` only, and each
+/// forward arc gets a reverse arc at capacity 0. Parallel edges sum. Self-loops
+/// are inert -- the BFS never revisits a node it has already reached.
+///
+/// `None` when either node is not in the view, or when `source == sink`: the
+/// flow from a node to itself is unbounded, so there is no number to report.
+/// Returning one was worse than refusing, and reporting it was impossible
+/// anyway -- the augmenting loop found the zero-length path forever and never
+/// returned. See `max_flow_to_itself_terminates`.
 pub fn edmonds_karp(view: &GraphView, source: NodeId, sink: NodeId) -> Option<FlowResult> {
     let s_idx = *view.node_to_index.get(&source)?;
     let t_idx = *view.node_to_index.get(&sink)?;
+    if s_idx == t_idx {
+        return None;
+    }
 
     let n = view.node_count;
     
@@ -170,5 +183,47 @@ mod tests {
 
         let result = edmonds_karp(&view, 1, 4).unwrap();
         assert_eq!(result.max_flow, 150.0);
+    }
+
+    /// Max flow from a node to itself must terminate.
+    ///
+    /// It used not to. BFS pops the source, finds `u == t_idx` and reports a
+    /// path; the two walks that follow are `while curr != s_idx`, which with
+    /// `curr == s_idx` run zero times, so `path_flow` stays `f64::INFINITY`
+    /// and no residual capacity changes. The next iteration finds the same
+    /// path, forever. `CALL algo.maxFlow(n, n)` hung the server, and a test
+    /// that asserts a value can only catch that by never returning -- which is
+    /// why this one runs in a thread with a deadline.
+    #[test]
+    fn max_flow_to_itself_terminates() {
+        let node_count = 2;
+        let index_to_node = vec![1, 2];
+        let mut node_to_index = HashMap::new();
+        for (i, &id) in index_to_node.iter().enumerate() {
+            node_to_index.insert(id, i);
+        }
+        let mut outgoing = vec![vec![]; 2];
+        outgoing[0].push(1);
+        let view = GraphView::from_adjacency_list(
+            node_count,
+            index_to_node,
+            node_to_index,
+            outgoing,
+            vec![vec![]; 2],
+            None,
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(edmonds_karp(&view, 1, 1).map(|r| r.max_flow));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(answer) => assert_eq!(
+                answer, None,
+                "source and sink are one node: there is no flow to measure, so this \
+                 refuses rather than reporting a number"
+            ),
+            Err(_) => panic!("edmonds_karp did not return within 10s for source == sink"),
+        }
     }
 }
