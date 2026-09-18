@@ -66,6 +66,23 @@ impl GraphView {
         })
     }
 
+    /// The first negative edge weight in the view, if there is one.
+    ///
+    /// Dijkstra and A* are only correct on non-negative weights, and both of
+    /// them *skip* a negative edge rather than refusing it -- so a graph with
+    /// one gets a shortest path computed on a different graph, and the caller
+    /// cannot tell (#1303). This is the check a call surface runs before
+    /// offering an answer it cannot stand behind. `bellman_ford` handles
+    /// negative weights and detects a negative cycle, so there is somewhere to
+    /// send the caller.
+    ///
+    /// One pass over the weight array, so it costs a scan of the edges and
+    /// nothing per node. `None` when the view is unweighted: an absent weight
+    /// is 1.0.
+    pub fn first_negative_weight(&self) -> Option<f64> {
+        self.weights.as_ref()?.iter().copied().find(|w| *w < 0.0)
+    }
+
     /// Helper to create GraphView from adjacency lists (legacy/test support)
     pub fn from_adjacency_list(
         node_count: usize,

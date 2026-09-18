@@ -74,10 +74,10 @@ the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | Shortest path | shortestPath | Out-edges | Ignored: hop counts | Never re-entered | No path: nothing comes back | The first parent to reach a node wins, in FIFO order over adjacency — deterministic for a given graph | Cost is the hop count; the path is returned source-first |
-| Weighted path | weightedPath | Out-edges | Used, 1.0 when absent. **Negative weights are silently skipped** **(differs)** | Never improves a distance | No path: nothing comes back | Equal-cost pops are in heap order, which is not defined by node id **(differs)** | None: the raw sum of weights |
-| A* | aStar | Out-edges | Used, 1.0 when absent; no negative-weight guard **(differs)** | No effect when non-negative | No path: nothing comes back | Ties break to the smaller node index. Costs within `1e-6` tie artificially, since the heap key is quantised **(differs)** | None: the exact f64 sum |
+| Weighted path | weightedPath | Out-edges | Used, 1.0 when absent. A negative weight is **refused** by the Cypher call, which names `bellmanFord`; the algorithm itself would skip it and return a path through a different graph | Never improves a distance | No path: nothing comes back | Equal-cost pops are in heap order, which is not defined by node id **(differs)** | None: the raw sum of weights |
+| A* | aStar | Out-edges | Used, 1.0 when absent. A negative weight is **refused** by the Cypher call; the algorithm itself has no guard, and its quantised heap key would order a negative edge wrongly | No effect when non-negative | No path: nothing comes back | Ties break to the smaller node index. Costs within `1e-6` tie artificially, since the heap key is quantised **(differs)** | None: the exact f64 sum |
 | All shortest paths | allShortestPaths | Out-edges | Ignored: hop counts | Never a predecessor | No path: an empty result | Every tied path is returned, then sorted lexicographically by node id | Cost is the hop count per path |
-| Yen's k shortest | yens | Out-edges | Used, 1.0 when absent; a parallel edge contributes its **minimum** weight | Not special-cased | Empty when the first path fails; fewer than `k` when candidates run out | Sorted by cost, then by the path lexicographically | None: raw weight sums |
+| Yen's k shortest | yens | Out-edges | Used, 1.0 when absent; a parallel edge contributes its **minimum** weight. A negative weight is **refused** by the Cypher call | Not special-cased | Empty when the first path fails; fewer than `k` when candidates run out | Sorted by cost, then by the path lexicographically | None: raw weight sums |
 | Bellman-Ford | bellmanFord | Out-edges | Used, 1.0 when absent. Negative weights are correct here; a negative cycle reachable from the source refuses | An ordinary edge; a negative self-loop is a negative cycle | Unreachable nodes come back as "no distance" | Nothing to break: distances only | None: raw distances |
 | All-pairs hops | allPairs, allPairsShortestPath, allPairsHops | Out-edges: `(u,v)` and `(v,u)` are different pairs | Ignored: hop counts | Excluded: `(s,s)` is never emitted | Unreachable pairs are **absent**, not infinity | Nothing to break | None |
 | Wiener index | wienerIndex | Out-edges, over ordered pairs | Ignored: hop counts | Excluded | Refuses when any ordered pair is unreachable **(differs)** | Nothing to break | None: the raw sum over ordered pairs, so twice the undirected convention |
@@ -149,9 +149,10 @@ The strongest of them, in the order that would surprise a user most:
 1. **MST returns one component.** On a disconnected graph the result is the
    minimum spanning tree of whichever component holds internal index 0, and
    nothing says so in the result.
-2. **Weighted path drops negative edges.** They are skipped, not rejected, so a
-   graph with negative weights gets an answer computed on a different graph.
-   `bellmanFord` is the call that handles them.
+2. **Weighted path, A\* and Yen's refuse negative edges.** The algorithms skip
+   them, which answers over a different graph, so the Cypher calls refuse and
+   name `bellmanFord`. A library caller reaching past Cypher still gets the
+   skip (#1303).
 3. **Degree centrality ignores its own `bidirectional` argument.** It is always
    out-degree plus in-degree.
 4. **ArticleRank drops dangling mass**, so its scores do not sum to 1 and are
