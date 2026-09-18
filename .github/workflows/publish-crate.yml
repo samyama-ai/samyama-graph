@@ -168,8 +168,13 @@ jobs:
             samyama-graph-algorithms
           )
 
-          # For the same reason, the dry run cannot be hoisted into a separate
-          # up-front pass over all six: crate N's dry run only resolves once
+          # Three, not six. The engine (`samyama`), the Rust SDK and the CLI are
+          # absent because a dev-dependency cycle blocks their publish order
+          # (#1056) — not because they are unwanted. A reader who counts the array
+          # against the sentence below should not have to guess which is stale.
+          #
+          # For the same reason as the chaining, the dry run cannot be hoisted into
+          # a separate up-front pass over the three: crate N's dry run only resolves once
           # crate N-1 is genuinely on the index. So each crate is validated
           # immediately before it is uploaded, and the chain advances one at a
           # time. cargo waits for each publish to appear on the index before
