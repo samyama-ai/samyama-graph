@@ -16067,6 +16067,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         // Return total weight
         let mut summary = Record::new();
         summary.bind("total_weight".to_string(), Value::Property(PropertyValue::Float(result.total_weight)));
+        // A disconnected graph has no spanning tree, only a spanning forest, and
+        // the two are told apart by this number alone: the edge rows look the
+        // same either way (#1302).
+        summary.bind("components".to_string(), Value::Property(PropertyValue::Integer(result.components as i64)));
         self.results.push(summary);
 
         // Return edges
