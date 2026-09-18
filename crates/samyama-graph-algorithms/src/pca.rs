@@ -4,8 +4,12 @@
 //!
 //! Two solvers are available:
 //! - **Randomized SVD** (default): Halko-Martinsson-Tropp algorithm. O(n·d·k),
-//!   numerically stable, automatic orthogonality. Industry standard (scikit-learn,
-//!   cuML, Spark MLlib).
+//!   numerically stable. Industry standard (scikit-learn, cuML, Spark MLlib).
+//!   Components come out **approximately** orthogonal: each is built as
+//!   `B^T u / sigma` with no re-orthonormalisation, and this file's own test
+//!   tolerates a dot product up to 0.05 between two of them. "Automatic
+//!   orthogonality", as this line used to read, is what the power-iteration
+//!   path gets from Gram-Schmidt, not what this one guarantees.
 //! - **Power Iteration** (legacy): Extract one eigenvector at a time from the
 //!   covariance matrix, then deflate and repeat. With Gram-Schmidt
 //!   re-orthogonalization for stability.
@@ -46,7 +50,12 @@ pub struct PcaConfig {
     pub tolerance: f64,
     /// Subtract column means before PCA (default: true)
     pub center: bool,
-    /// Divide by column std dev before PCA (default: false)
+    /// Scale each column to unit variance before PCA (default: false).
+    ///
+    /// Computed on the *centred* matrix as `sqrt(sum(x^2) / (n-1))`, which is
+    /// the column standard deviation only when `center` is also true. With
+    /// `center: false` it is a root-mean-square about zero, which is a
+    /// different normalisation and not what "std dev" suggests.
     pub scale: bool,
     /// Solver strategy (default: Auto)
     pub solver: PcaSolver,
@@ -80,6 +89,11 @@ impl Default for PcaConfig {
     }
 }
 
+/// **Component signs are not canonicalised.** An eigenvector is defined up to
+/// sign, and nothing here fixes one, so a component may come back negated
+/// between runs of different solvers or inputs. Compare `explained_variance_ratio`
+/// or absolute loadings rather than raw components; the parity check does
+/// exactly that (benchmarks#199).
 /// PCA result containing components and explained variance
 pub struct PcaResult {
     /// Principal component vectors (n_components x n_features), row-major

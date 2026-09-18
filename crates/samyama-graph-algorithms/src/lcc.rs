@@ -3,7 +3,11 @@
 //! Computes the local clustering coefficient for each node.
 //!
 //! Undirected: LCC(v) = 2 * T(v) / (deg(v) * (deg(v) - 1))
-//! Directed:   LCC(v) = T(v) / (d_tot(v) * (d_tot(v) - 1) - 2 * d_bi(v))
+//! Directed:   LCC(v) = T(v) / (2 * (d_tot(v) * (d_tot(v) - 1) - 2 * d_bi(v)))
+//!              The factor of 2 is not decoration: T(v) counts each directed
+//!              triangle once per orientation, so the denominator counts pairs
+//!              the same way. Written without it, this formula gave twice the
+//!              value the code returns.
 //!
 //! where T(v) is the number of triangles (edges among neighbors) containing v,
 //! and deg(v) is the undirected degree (union of successors + predecessors).
@@ -153,8 +157,15 @@ fn ldbc_clustering(idx: usize, neighbours: &HashSet<usize>, successor_sets: &[Ha
 /// `d*(d-1)/2`.
 ///
 /// When `directed=true`: uses undirected neighbor sets for neighborhood
-/// discovery, but counts *directed* edges (u→w) among neighbors, divides by
-/// Fagiolo's `d_tot(d_tot - 1) - 2*d_bi` (see `directed_clustering`).
+/// discovery and applies **Fagiolo's** definition, which counts each directed
+/// triangle through the node across the four predecessor/successor
+/// intersections and divides by `2 * (d_tot(d_tot - 1) - 2*d_bi)` (see
+/// `directed_clustering`).
+///
+/// It is *not* the "count directed edges u→w among neighbours" rule this
+/// comment used to describe: that is [`DirectedLcc::Ldbc`], reachable through
+/// [`local_clustering_coefficient_with`], and the two disagree wherever
+/// reciprocal edges exist — which this file's own tests assert.
 pub fn local_clustering_coefficient_directed(view: &GraphView, directed: bool) -> LccResult {
     local_clustering_coefficient_with(view, directed, DirectedLcc::Fagiolo)
 }
