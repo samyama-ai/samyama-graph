@@ -34,6 +34,8 @@ jobs:
     permissions:
       contents: write
       actions: write   # gh workflow run, for the four publish workflows
+      id-token: write       # Sigstore, for the release SBOM attestation
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +110,31 @@ jobs:
           gh release create "v$VERSION" \
             --title "Samyama Graph v$VERSION" \
             --generate-notes
+
+      # An SBOM of the tagged source, attached to the release and signed. REL-14 and
+      # TRUST-08 ask for three controls — SBOM, signed artifacts, cargo-deny clean in
+      # CI — and this is the first two; the third has gated every merge since #1287.
+      - name: SBOM for the tagged source
+        if: steps.check.outputs.new == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-source.spdx.json
+
+      - name: Attest the SBOM
+        if: steps.check.outputs.new == 'true'
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: sbom-source.spdx.json
+          sbom-path: sbom-source.spdx.json
+
+      - name: Attach the SBOM to the release
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: gh release upload "v$VERSION" sbom-source.spdx.json --clobber
 
       # GitHub starts no workflow from an event GITHUB_TOKEN raised, so the
       # Release above reaches none of the publish workflows. A dispatch is the
