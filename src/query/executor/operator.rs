@@ -12582,6 +12582,9 @@ pub struct CreateVectorIndexOperator {
     property_key: String,
     dimensions: usize,
     similarity: String,
+    /// The name the DDL gave this index, kept so Neo4j's form of
+    /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
+    name: Option<String>,
     executed: bool,
 }
 
@@ -12592,8 +12595,14 @@ impl CreateVectorIndexOperator {
             property_key,
             dimensions,
             similarity,
+            name: None,
             executed: false,
         }
+    }
+
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
     }
 }
 
@@ -12615,7 +12624,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index(self.label.as_str(), &self.property_key, self.dimensions, metric)
+        store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
+                                        &self.property_key, self.dimensions, metric)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without

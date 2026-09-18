@@ -5171,6 +5171,27 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.vector_index.create_index(label, property_key, dimensions, metric)
     }
 
+    /// Create a vector index under the name the DDL gave it (#1041).
+    pub fn create_vector_index_named(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index_named(name, label, property_key, dimensions, metric)
+    }
+
+    /// The (label, property) a vector index name refers to, and every known name.
+    pub fn resolve_vector_index(&self, name: &str) -> Option<(String, String)> {
+        self.vector_index.resolve_name(name)
+    }
+
+    pub fn vector_index_names(&self) -> Vec<String> {
+        self.vector_index.index_names()
+    }
+
     /// Search for nearest neighbors using a vector index
     pub fn vector_search(
         &self,
