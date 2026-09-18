@@ -586,6 +586,7 @@ samyama
 | Biomedical Benchmark | [100 queries, 96 pass](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
 | LDBC Results | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| Failure Modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) — what happens when something goes wrong, each row naming the test that observed it |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
 | API Spec | [api/openapi.yaml](api/openapi.yaml) |
 | Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
