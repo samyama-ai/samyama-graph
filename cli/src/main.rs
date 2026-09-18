@@ -208,28 +208,106 @@ async fn run_ping(
     Ok(())
 }
 
+/// Words the shell can complete: the Cypher a beginner reaches for first, and the
+/// shell's own commands. Schema-aware completion — labels, relationship types and
+/// property keys from the connected graph — needs a round trip and is deliberately not
+/// here yet; this is the half that works offline and on an empty graph.
+const COMPLETIONS: &[&str] = &[
+    ":help", ":status", ":ping", ":quit", ":exit",
+    "MATCH", "OPTIONAL MATCH", "WHERE", "RETURN", "CREATE", "MERGE", "DELETE",
+    "DETACH DELETE", "SET", "REMOVE", "WITH", "UNWIND", "ORDER BY", "SKIP", "LIMIT",
+    "UNION", "CALL", "YIELD", "FOREACH", "EXPLAIN", "PROFILE",
+    "count(", "collect(", "avg(", "sum(", "min(", "max(", "DISTINCT",
+];
+
+/// Completion and hinting for the shell. `rustyline` wants one type that implements
+/// the whole family, so the derive brings in the traits this does not customise.
+#[derive(rustyline::Helper, rustyline::Hinter, rustyline::Validator, rustyline::Highlighter)]
+struct ShellHelper;
+
+impl rustyline::completion::Completer for ShellHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        // Complete the word under the cursor, not the whole line: `MATCH (n) RET<tab>`
+        // should offer RETURN without discarding what precedes it.
+        let start = line[..pos].rfind(|c: char| c.is_whitespace() || c == '(')
+            .map(|i| i + 1).unwrap_or(0);
+        let word = &line[start..pos];
+        if word.is_empty() {
+            return Ok((start, Vec::new()));
+        }
+        let upper = word.to_uppercase();
+        let hits = COMPLETIONS.iter()
+            .filter(|c| c.to_uppercase().starts_with(&upper))
+            .map(|c| c.to_string())
+            .collect();
+        Ok((start, hits))
+    }
+}
+
+/// Where history lives. `~/.samyama_history`, as #1058 asked; falls back to the
+/// working directory when there is no home, rather than losing history silently.
+fn history_path() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".samyama_history")
+}
+
 async fn run_shell(
     client: &RemoteClient,
     graph: &str,
     format: &OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Samyama Interactive Shell (graph: {})", graph);
-    println!("Type Cypher queries, or :help for commands. :quit to exit.\n");
+    println!("Type Cypher queries, or :help for commands. :quit to exit.");
+    println!("History is kept in {}; Tab completes.\n", history_path().display());
 
+    // The editor owns the terminal, so a non-tty (a pipe, a test, CI) has to keep
+    // working: rustyline returns an error at construction there, and the loop falls
+    // back to plain reads rather than refusing to run.
+    let config = rustyline::Config::builder()
+        .history_ignore_space(true)
+        .max_history_size(10_000)?
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut editor = rustyline::Editor::<ShellHelper, rustyline::history::FileHistory>::with_config(config).ok();
+    if let Some(ed) = editor.as_mut() {
+        ed.set_helper(Some(ShellHelper));
+        let _ = ed.load_history(&history_path());
+    }
     let stdin = std::io::stdin();
     let mut line = String::new();
 
     loop {
-        eprint!("samyama> ");
+        let input = match editor.as_mut() {
+            Some(ed) => match ed.readline("samyama> ") {
+                Ok(l) => l,
+                // Ctrl-C clears the line and carries on; Ctrl-D ends the session.
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(rustyline::error::ReadlineError::Eof) => break,
+                Err(e) => return Err(Box::new(e)),
+            },
+            None => {
+                eprint!("samyama> ");
+                line.clear();
+                if stdin.read_line(&mut line)? == 0 {
+                    break; // EOF
+                }
+                line.clone()
+            }
+        };
 
-        line.clear();
-        if stdin.read_line(&mut line)? == 0 {
-            break; // EOF
-        }
-
-        let trimmed = line.trim();
+        let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        if let Some(ed) = editor.as_mut() {
+            let _ = ed.add_history_entry(trimmed);
         }
 
         match trimmed {
@@ -240,6 +318,9 @@ async fn run_shell(
                 println!("  :ping     — Ping server");
                 println!("  :quit     — Exit shell");
                 println!("  <cypher>  — Execute a Cypher query");
+                println!();
+                println!("Up/down walk history, Tab completes, ctrl-a/ctrl-e/ctrl-w edit,");
+                println!("ctrl-c clears the line and ctrl-d exits.");
             }
             ":status" => {
                 if let Err(e) = run_status(client, format).await {
@@ -259,6 +340,10 @@ async fn run_shell(
         }
     }
 
+    if let Some(ed) = editor.as_mut() {
+        // Best effort: a shell that cannot write history should still exit cleanly.
+        let _ = ed.save_history(&history_path());
+    }
     println!("Bye!");
     Ok(())
 }
@@ -384,5 +469,51 @@ mod cli_tests {
         for want in ["query", "status", "ping", "shell", "doctor", "completions"] {
             assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_completion_tests {
+    use super::*;
+    use rustyline::completion::Completer;
+    use rustyline::history::DefaultHistory;
+
+    fn complete(line: &str) -> (usize, Vec<String>) {
+        let h = rustyline::history::MemHistory::new();
+        let ctx = rustyline::Context::new(&h);
+        let _ = std::marker::PhantomData::<DefaultHistory>;
+        ShellHelper.complete(line, line.len(), &ctx).unwrap()
+    }
+
+    #[test]
+    fn completes_a_shell_command() {
+        let (start, hits) = complete(":qu");
+        assert_eq!(start, 0);
+        assert!(hits.contains(&":quit".to_string()), "{hits:?}");
+    }
+
+    #[test]
+    fn completes_the_word_under_the_cursor_not_the_line() {
+        // The prefix must survive: offering RETURN should not propose replacing
+        // everything typed so far, which is what a start offset of 0 would mean.
+        let line = "MATCH (n) RET";
+        let (start, hits) = complete(line);
+        assert_eq!(&line[start..], "RET");
+        assert!(hits.contains(&"RETURN".to_string()), "{hits:?}");
+    }
+
+    #[test]
+    fn completion_is_case_insensitive_and_opens_after_a_paren() {
+        assert!(complete("mat").1.contains(&"MATCH".to_string()));
+        // `count(` is a candidate, so a word starting after `(` must be seen as a word.
+        let (start, hits) = complete("RETURN count(n) , col");
+        assert_eq!(start, "RETURN count(n) , ".len());
+        assert!(hits.contains(&"collect(".to_string()), "{hits:?}");
+    }
+
+    #[test]
+    fn an_empty_word_offers_nothing() {
+        // Tab on an empty prompt should not dump the whole keyword list.
+        assert!(complete("MATCH ").1.is_empty());
     }
 }
