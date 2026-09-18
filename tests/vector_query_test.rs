@@ -197,3 +197,69 @@ fn the_dimension_mismatch_error_points_at_the_index_not_the_vector() {
     assert!(err.contains("dimensions: 4"), "the error should show the fix: {err}");
     assert!(err.contains("default is 1536"), "and where 1536 came from: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// Neo4j's spelling of the same procedure (#1041).
+//
+// `db.index.vector.queryNodes` is Neo4j's name and Neo4j's clients — and every LLM
+// that has read Neo4j's documentation — call it as `(indexName, k, queryVector)`.
+// Ours took `(label, property, queryVector, k)`: same fully-qualified name, different
+// arity and different argument meanings, so a Neo4j-shaped client got a planning
+// error. Both forms are accepted now, and the index name given at CREATE time is what
+// resolves the first one — until this, that name was parsed and thrown away, so the
+// name a user was required to supply was never usable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn neo4j_signature_finds_the_same_nodes_as_ours() {
+    let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut(
+        "CREATE VECTOR INDEX person_idx FOR (n:Person) ON (n.embedding) \
+         OPTIONS {dimensions: 3, similarity: 'cosine'}", &mut store, "default").unwrap();
+    for (name, v) in [("Alice", "[1.0, 0.0, 0.0]"), ("Bob", "[0.0, 1.0, 0.0]")] {
+        engine.execute_mut(
+            &format!("CREATE (n:Person {{name: '{name}', embedding: {v}}})"),
+            &mut store, "default").unwrap();
+    }
+
+    let ours = engine.execute(
+        "CALL db.index.vector.queryNodes('Person', 'embedding', [1.0, 0.1, 0.0], 2) \
+         YIELD node RETURN node.name AS n", &store).unwrap();
+    let theirs = engine.execute(
+        "CALL db.index.vector.queryNodes('person_idx', 2, [1.0, 0.1, 0.0]) \
+         YIELD node RETURN node.name AS n", &store).unwrap();
+
+    let names = |r: &samyama::query::executor::RecordBatch| -> Vec<String> {
+        r.records.iter()
+            .map(|rec| rec.get("n").unwrap().as_property().unwrap().as_string().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&ours), names(&theirs), "the two spellings disagree");
+    assert_eq!(names(&ours).first().map(String::as_str), Some("Alice"));
+}
+
+#[test]
+fn an_unknown_index_name_says_which_names_exist() {
+    let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine.execute_mut(
+        "CREATE VECTOR INDEX person_idx FOR (n:Person) ON (n.embedding) \
+         OPTIONS {dimensions: 3, similarity: 'cosine'}", &mut store, "default").unwrap();
+    let err = engine.execute(
+        "CALL db.index.vector.queryNodes('nope', 2, [1.0, 0.0, 0.0]) YIELD node RETURN node",
+        &store).unwrap_err().to_string();
+    assert!(err.contains("nope"), "{err}");
+    assert!(err.contains("person_idx"), "the error does not name the indexes that exist: {err}");
+}
+
+#[test]
+fn the_arity_error_describes_both_forms() {
+    let store = GraphStore::new();
+    let engine = QueryEngine::new();
+    let err = engine.execute(
+        "CALL db.index.vector.queryNodes('Person') YIELD node RETURN node", &store)
+        .unwrap_err().to_string();
+    assert!(err.contains("label") && err.contains("indexName"),
+            "a caller who gets this wrong should be told both spellings: {err}");
+}
