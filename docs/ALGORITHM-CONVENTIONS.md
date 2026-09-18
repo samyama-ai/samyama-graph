@@ -108,12 +108,12 @@ the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 | Dominating set | dominatingSet | Follows `bidirectional` | Ignored | Removed; an isolated node is always chosen | Every component is covered | Strict `>` keeps the lowest index; output sorted | None |
 | Reciprocity | reciprocity | Out-edges, both for the edge and for its reverse | Ignored | Excluded | Graph-level; refuses when there are no non-self edges | Nothing to break | `mutual / edges`, where parallel edges count once **(differs)** |
 | Node similarity | nodeSimilarity, jaccard | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | A node with no neighbours is skipped; pairs scoring 0 are dropped | Score descending, then target index ascending | Jaccard: intersection over union |
-| Cosine similarity | cosine, cosineSimilarity | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Refuses when either neighbour set is empty | Nothing to break | Intersection over `sqrt(|A||B|)` |
-| Overlap coefficient | overlap, overlapCoefficient | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Refuses when the smaller set is empty | Nothing to break | Divided by `min(|A|,|B|)` |
+| Cosine similarity | cosine, cosineSimilarity | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Refuses when either neighbour set is empty | Nothing to break | Intersection over `sqrt(\|A\|\|B\|)` |
+| Overlap coefficient | overlap, overlapCoefficient | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Refuses when the smaller set is empty | Nothing to break | Divided by `min(\|A\|,\|B\|)` |
 | Common neighbours | commonNeighbors, commonNeighbours | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Pairs scoring 0 never appear | Score descending, then both node ids ascending | None: a raw count |
 | Adamic-Adar | adamicAdar | Symmetrised neighbour sets | Ignored | Excluded from the neighbour set | Pairs scoring 0 never appear | Score descending, then both node ids ascending; the sum is taken in sorted order so the float is reproducible | None: the raw sum of `1/ln(deg)` |
 | Effective size | effectiveSize | Symmetrised neighbour sets | Ignored: the unweighted form | Excluded from the neighbour set | Refuses for an isolated node | Nothing to break | None: `n - 2t/n`, between 1 and the degree |
-| Constraint | constraint, burtConstraint | Symmetrised neighbour sets | Ignored: each tie is a uniform `1/|N|` **(differs)** | Excluded from the neighbour set | Refuses for an isolated node | The summation order is sorted so the float sum is reproducible | None: Burt's sum of squared proportions |
+| Constraint | constraint, burtConstraint | Symmetrised neighbour sets | Ignored: each tie is a uniform `1/\|N\|` **(differs)** | Excluded from the neighbour set | Refuses for an isolated node | The summation order is sorted so the float sum is reproducible | None: Burt's sum of squared proportions |
 
 ## Temporal and causal
 
@@ -146,9 +146,10 @@ implementation; this document is where the rest are at least visible.
 
 The strongest of them, in the order that would surprise a user most:
 
-1. **MST returns one component.** On a disconnected graph the result is the
-   minimum spanning tree of whichever component holds internal index 0, and
-   nothing says so in the result.
+1. **MST returns a forest, not a tree.** A disconnected graph has no spanning
+   tree, so `algo.mst` spans every component and yields `components` beside
+   `total_weight`. The edge rows look the same either way; that number is what
+   tells them apart.
 2. **Weighted path, A\* and Yen's refuse negative edges.** The algorithms skip
    them, which answers over a different graph, so the Cypher calls refuse and
    name `bellmanFord`. A library caller reaching past Cypher still gets the
