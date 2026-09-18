@@ -16195,12 +16195,97 @@ impl AlgorithmOperator {
     /// case-insensitively, so `pagerank`, `algo.pagerank`, `algo.pageRank` and
     /// `samyama.pageRank` all reach the same implementation.
     pub fn canonical_name(name: &str) -> String {
+        if let Some(rest) = name.strip_prefix("gds.") {
+            return Self::canonical_gds_name(rest);
+        }
         let bare = name
             .strip_prefix("algo.")
             .or_else(|| name.strip_prefix("samyama."))
-            .or_else(|| name.strip_prefix("gds."))
             .unwrap_or(name);
         bare.to_ascii_lowercase()
+    }
+
+    /// GDS execution modes we can answer, and the ones we must not pretend to.
+    ///
+    /// `stream` returns a row per node, which is what every algorithm here
+    /// does. `write` and `mutate` persist a property instead and `stats`
+    /// returns a summary; treating any of those as `stream` would run a
+    /// different operation under a name the user already trusts, which is
+    /// worse than not recognising the name at all.
+    const GDS_STREAMING_MODE: &'static str = "stream";
+    const GDS_OTHER_MODES: &'static [&'static str] = &["write", "mutate", "stats", "estimate"];
+
+    /// Canonical form of a `gds.*` procedure name (INT-04).
+    ///
+    /// Stripping the `gds.` prefix alone resolved `gds.pageRank`, which is not
+    /// a name anyone writes: a GDS procedure carries a maturity namespace and
+    /// an execution mode, as in `gds.pageRank.stream` and
+    /// `gds.alpha.adamicAdar.stream`. Measured against the sixteen GDS
+    /// procedures whose semantics we implement, **none** of their real
+    /// spellings resolved -- INT-04 read 0 of 16 while the prefix strip looked
+    /// like alias support.
+    ///
+    /// So: drop the `alpha.`/`beta.` maturity segment, which carries no
+    /// semantics, and drop a trailing `.stream`. Any other mode is left on the
+    /// name, so it does not resolve and the caller is told why rather than
+    /// being handed a different operation.
+    fn canonical_gds_name(rest: &str) -> String {
+        let rest = rest
+            .strip_prefix("alpha.")
+            .or_else(|| rest.strip_prefix("beta."))
+            .unwrap_or(rest);
+        let lower = rest.to_ascii_lowercase();
+        let bare = match lower.rsplit_once('.') {
+            Some((head, mode)) if mode == Self::GDS_STREAMING_MODE => head,
+            _ => lower.as_str(),
+        };
+        Self::GDS_RENAMES
+            .iter()
+            .find(|(gds, _)| *gds == bare)
+            .map(|(_, ours)| (*ours).to_string())
+            .unwrap_or_else(|| bare.to_string())
+    }
+
+    /// GDS procedures we implement under a different name.
+    ///
+    /// Only where the algorithm is the same algorithm. `gds.louvain` and our
+    /// `cdlp` are both community detection and are not the same answer, so
+    /// louvain is absent here and documented as a divergence instead: an alias
+    /// that returns a different result under a familiar name is worse than no
+    /// alias.
+    ///
+    /// `shortestPath.dijkstra` maps to `weightedpath` and not to
+    /// `shortestpath`: GDS's dijkstra is weighted and ours is an unweighted
+    /// BFS. The obvious mapping is the wrong one.
+    const GDS_RENAMES: &'static [(&'static str, &'static str)] = &[
+        ("localclusteringcoefficient", "lcc"),
+        ("labelpropagation", "cdlp"),
+        ("spanningtree", "mst"),
+        ("shortestpath.dijkstra", "weightedpath"),
+        // `triangles` is deliberately absent. GDS's `gds.alpha.triangles` lists
+        // one row per triangle and our `triangleCount` returns a count per
+        // node: the same word and a different result shape. It was in this
+        // table for one revision, and the probe's divergent-but-resolving
+        // check caught it -- the coverage ratio never would have, because a
+        // divergent name is excluded from that ratio and aliasing one by
+        // accident moves it neither way.
+    ];
+
+    /// The execution mode on a `gds.*` name, when it is one we do not run.
+    ///
+    /// Used to turn "Unknown procedure" into the reason: the procedure exists
+    /// here and the *mode* does not.
+    pub fn unsupported_gds_mode(name: &str) -> Option<(&str, String)> {
+        let rest = name.strip_prefix("gds.")?;
+        let rest = rest
+            .strip_prefix("alpha.")
+            .or_else(|| rest.strip_prefix("beta."))
+            .unwrap_or(rest);
+        let (head, mode) = rest.rsplit_once('.')?;
+        let mode = Self::GDS_OTHER_MODES
+            .iter()
+            .find(|m| mode.eq_ignore_ascii_case(m))?;
+        Some((mode, head.to_ascii_lowercase()))
     }
 
     /// Is this a name the algorithm operator can run?
