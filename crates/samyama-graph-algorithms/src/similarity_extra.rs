@@ -117,7 +117,9 @@ pub fn effective_size(view: &GraphView, u: usize) -> Option<f64> {
 
 /// Burt's constraint: how much a node's contacts are tied up in each other.
 ///
-/// The complement of effective size, and the one with the clearer reading:
+/// Burt's constraint — related to effective size and computed independently of
+/// it, not derived as its arithmetic complement, which "the complement of"
+/// wrongly implied. The reading is the clearer of the two:
 /// high constraint means no structural holes to broker across, so the node has
 /// little bargaining position however many neighbours it has.
 pub fn constraint(view: &GraphView, u: usize) -> Option<f64> {
@@ -153,7 +155,11 @@ pub fn constraint(view: &GraphView, u: usize) -> Option<f64> {
     Some(total)
 }
 
-/// Reciprocity: the fraction of edges whose reverse also exists.
+/// Reciprocity: the fraction of directed node pairs whose reverse also exists.
+///
+/// "Edges" overstated it: successors are collected into a set first, so two
+/// parallel `u -> v` edges count once and the denominator is distinct ordered
+/// pairs rather than edges. Self-loops are excluded.
 ///
 /// A directed-only measure, and meaningless on an undirected view where every
 /// edge is reciprocal by construction — so it reads the CSR as stored rather
