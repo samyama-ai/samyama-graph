@@ -3,9 +3,17 @@
 What happens when something goes wrong, what the data guarantee is afterwards,
 and what the operator should do.
 
-**Every row names the test that observed the behaviour.** A row without a test
-is a guess about the most important moment in a database's life, so the gaps are
-listed at the bottom as gaps rather than filled in with what ought to happen.
+**29 of the 31 rows name the test that observed the behaviour.** A row without a
+test is a guess about the most important moment in a database's life, so the
+gaps are listed at the bottom as gaps rather than filled in with what ought to
+happen.
+
+The two exceptions are rows **6** (power loss after COMMIT) and **21** (a
+session transaction outliving its timeout). Both carry "not tested" in place of
+an observation, and both are in the table rather than only in the gap list
+because they are the question a reader asks at exactly that point in the
+sequence — row 5 has just promised that a restart preserves everything, and row
+20 has just described what a failed statement leaves behind.
 Run any row for yourself:
 
 ```bash
