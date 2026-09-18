@@ -26,7 +26,7 @@ use samyama_graph_algorithms::{
     rich_club_coefficient, square_clustering, transitivity,
     constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
-    eigenvector_centrality, harmonic_centrality,
+    eigenvector_centrality, harmonic_centrality, pca, PcaConfig,
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::article_rank,
@@ -533,6 +533,30 @@ fn main() {
                 .to_vec()).unwrap());
         put("reciprocity",
             serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
+
+        // PCA, against a matrix this file also exports (benchmarks#199).
+        //
+        // `pca` became callable from Cypher and arrived in ALGO-02's
+        // denominator with nothing to compare it to. The tempting conclusion is
+        // that it cannot have a reference, because a component's **sign** is
+        // arbitrary and ours fixes none. That is true of the components and not
+        // of the variance: `explained_variance_ratio` is a property of the data,
+        // identical in any basis, and it is the number a user reads.
+        //
+        // The matrix is exported rather than derived on both sides. A parity
+        // check whose two halves each build "the same" input is partly checking
+        // two input builders, and when it disagrees you cannot tell which moved
+        // -- the same reason the graphs themselves are exported.
+        let features: Vec<Vec<f64>> = (0..r.n).map(|i| vec![
+            view.out_degree(i) as f64,
+            view.in_degree(i) as f64,
+            view.weights(i).map(|w| w.iter().sum::<f64>()).unwrap_or(0.0),
+            view.successors(i).iter().map(|&t| t as f64).sum::<f64>() / (r.n as f64),
+        ]).collect();
+        let p = pca(&features, PcaConfig { n_components: 3, ..Default::default() });
+        put("pca_matrix", serde_json::to_value(&features).unwrap());
+        put("pca_explained_variance_ratio",
+            serde_json::to_value(&p.explained_variance_ratio).unwrap());
 
         let mut entry = serde_json::json!({
             "name": r.name,
