@@ -15975,19 +15975,35 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             None
         };
 
+        // The source and the sink being one node is the caller's mistake, and
+        // it is the one to catch here: `edmonds_karp` refuses it, and this used
+        // to turn every refusal into `max_flow: 0.0`. A flow of zero is a real
+        // answer -- the sink is unreachable from the source -- so reporting it
+        // for a node that does not exist, or for a question that has no answer,
+        // is a wrong answer rather than an error.
+        if source_id == target_id {
+            return Err(ExecutionError::RuntimeError(
+                "maxFlow: source and sink are the same node; the flow from a node to \
+                 itself is unbounded".to_string(),
+            ));
+        }
+
         // Build view
         let view = crate::algo::build_view(store, None, None, cap_prop.as_deref());
-        
+
         // edmonds_karp expects u64 (AlgoNodeId), not crate::graph::NodeId
-        if let Some(result) = crate::algo::edmonds_karp(&view, source_id, target_id) {
-            let mut record = Record::new();
-            record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
-            self.results.push(record);
-        } else {
-             // No flow found or invalid nodes
-             let mut record = Record::new();
-             record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(0.0)));
-             self.results.push(record);
+        match crate::algo::edmonds_karp(&view, source_id, target_id) {
+            Some(result) => {
+                let mut record = Record::new();
+                record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
+                self.results.push(record);
+            }
+            None => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "maxFlow: no node {} in the graph",
+                    if view.node_to_index.contains_key(&source_id) { target_id } else { source_id },
+                )));
+            }
         }
 
         Ok(())
