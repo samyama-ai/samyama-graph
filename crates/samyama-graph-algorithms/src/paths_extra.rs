@@ -20,6 +20,11 @@ use crate::common::GraphView;
 /// not a failure to compute: with a negative cycle there *is* no shortest
 /// path, because going round again is always cheaper, and any finite number
 /// returned would be a lie.
+///
+/// A `source` outside the view returns `Some(vec![None; n])` — every distance
+/// unknown, *including the source's own*, which is otherwise always `0.0`. The
+/// caller gets a well-formed answer to a question about a node that is not
+/// there, so check the index if that distinction matters.
 pub fn bellman_ford(view: &GraphView, source: usize) -> Option<Vec<Option<f64>>> {
     let n = view.node_count;
     if source >= n {
@@ -92,10 +97,12 @@ pub fn all_pairs_hops(view: &GraphView) -> HashMap<(usize, usize), usize> {
 /// statistic that a diameter cannot give — diameter reports the worst pair
 /// and says nothing about the rest.
 ///
-/// `None` when some pair is unreachable, matching NetworkX, which returns
-/// infinity there. A graph in pieces has no finite Wiener index and reporting
-/// the sum over only the reachable pairs would silently answer a different
-/// question.
+/// `None` when some pair is unreachable. NetworkX returns infinity in that
+/// case, so the two **agree that there is no finite answer and disagree on how
+/// to say it** — this used to claim they matched, which a parity check would
+/// have to special-case rather than take at face value. A graph in pieces has
+/// no finite Wiener index, and reporting the sum over only the reachable pairs
+/// would silently answer a different question.
 pub fn wiener_index(view: &GraphView) -> Option<f64> {
     let n = view.node_count;
     if n < 2 {

@@ -186,11 +186,22 @@ fn tarjan(view: &GraphView) -> Tarjan {
                     }
                     stack.push((w, v, 0, 0));
                 } else if w != parent {
-                    // A back edge. Only *one* edge to the parent may be
-                    // ignored: with parallel edges `v == parent` twice, the
-                    // second is a genuine back edge and the pair is not a
-                    // bridge. Comparing on node identity alone would call it
-                    // one.
+                    // A back edge -- and this compares on node *identity*, so
+                    // every edge back to the parent is skipped, not just the
+                    // one the search arrived on.
+                    //
+                    // With genuine parallel edges that is wrong: two `a -> b`
+                    // edges mean removing either leaves the graph connected, so
+                    // the pair is not a bridge, and this reports one. Measured:
+                    // `a = b` plus `b -> c` yields bridges [(a,b), (b,c)].
+                    //
+                    // Skipping the parent exactly once -- the textbook fix --
+                    // would break the commoner case instead. A reciprocal pair
+                    // `a -> b`, `b -> a` is *one* undirected edge and also puts
+                    // the parent in the list twice, and it genuinely is a
+                    // bridge. The symmetrised neighbour list carries no edge
+                    // identity, so nothing here can tell the two apart:
+                    // samyama-graph#1308 needs the convention decided first.
                     t.low[v] = t.low[v].min(t.disc[w]);
                 }
             } else {
@@ -220,8 +231,12 @@ fn tarjan(view: &GraphView) -> Tarjan {
 /// Edges whose removal increases the number of connected components.
 ///
 /// The single points of failure in a topology: cut one and something becomes
-/// unreachable. Undirected, and each edge reported once as `(parent, child)`
-/// in DFS order.
+/// unreachable. Undirected, and each edge reported once as `(parent, child)` in
+/// the DFS's parent/child orientation — but the list is **sorted** before it is
+/// returned, not left in DFS discovery order as this said.
+///
+/// Parallel edges are reported as a bridge and should not be
+/// (samyama-graph#1308).
 pub fn bridges(view: &GraphView) -> Vec<(NodeId, NodeId)> {
     let mut b = tarjan(view).bridges;
     b.sort();

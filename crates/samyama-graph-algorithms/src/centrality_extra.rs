@@ -70,7 +70,10 @@ pub fn katz_centrality(
 /// are defined by each other's fixed point.
 ///
 /// Returns `(hubs, authorities)`, both normalised to sum to 1 as NetworkX
-/// does.
+/// does. `None` when the iteration has not converged — and note the test here
+/// is `err < tol` on the raw sum, not the `n * tol` the other iterative
+/// functions in this file use, so HITS is the stricter of the two on a large
+/// graph.
 pub fn hits(view: &GraphView, max_iter: usize, tol: f64) -> Option<(Vec<f64>, Vec<f64>)> {
     let n = view.node_count;
     if n == 0 {
@@ -126,6 +129,10 @@ fn normalise_sum(v: &mut [f64]) {
 ///
 /// An empty or unreachable `sources` falls back to uniform teleport, which is
 /// plain PageRank, and says so rather than dividing by zero.
+///
+/// `sources` is **not** deduplicated: naming a node twice gives it twice the
+/// teleport weight. That is usable as a crude weighting and is a surprise if
+/// the list came from a query that happened to return duplicates.
 pub fn personalised_page_rank(
     view: &GraphView,
     sources: &[usize],

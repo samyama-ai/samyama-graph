@@ -88,6 +88,14 @@ impl PartialOrd for State {
 /// Dijkstra's Algorithm (Weighted Shortest Path)
 ///
 /// Uses edge weights from GraphView if available, otherwise assumes 1.0.
+///
+/// **A negative weight is skipped, not rejected.** Dijkstra is only correct on
+/// non-negative weights, and this drops such an edge and carries on — so the
+/// path returned is the shortest path in a graph without those edges, with
+/// nothing in the result to say so. The Cypher surfaces refuse a negative
+/// weight and name `algo.bellmanFord`, which handles them and detects a
+/// negative cycle; a caller reaching this function directly gets the skip
+/// (samyama-graph#1303).
 pub fn dijkstra(
     view: &GraphView,
     source: NodeId,
