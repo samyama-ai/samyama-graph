@@ -6480,6 +6480,71 @@ type TypeIndexPair = (
 );
 type TypeIndexSlot = Option<Option<TypeIndexPair>>;
 
+/// The run of entries for one target in a sorted `TypeAdjacency` list.
+///
+/// A closing hop is an existence test between two nodes that are both already
+/// known, and it should not cost the degree of either (#1071 made that true for
+/// the variable-length walk; this is the single-hop expand). The list is sorted
+/// by `(target, edge)`, so the entries for one target are a contiguous run and
+/// two binary searches find it. Parallel edges are why this returns the run
+/// rather than one entry: each of them is a separate match.
+fn pinned_run<'a>(
+    list: &'a [(NodeId, crate::graph::EdgeId)],
+    target: NodeId,
+) -> &'a [(NodeId, crate::graph::EdgeId)] {
+    let t = target.as_u64();
+    let start = list.partition_point(|&(n, _)| n.as_u64() < t);
+    let end = start + list[start..].partition_point(|&(n, _)| n.as_u64() == t);
+    &list[start..end]
+}
+
+/// Membership in a closing node's adjacency, walked with forward-only cursors.
+///
+/// The cyclic-close prune asks, for every candidate the expand walks, whether
+/// that candidate neighbours the node the pattern closes onto (#1082). Both
+/// sides are `TypeAdjacency` lists, sorted by `(target, edge)`, and the
+/// candidates arrive in that same order — so the question can be answered by
+/// advancing a cursor rather than by a binary search per candidate: O(m + n)
+/// over the pair instead of O(m log n).
+///
+/// The cursors only ever move forward, which is why [`Self::restart`] exists:
+/// an undirected walk reads the outgoing list and then the incoming one, and
+/// the second starts from the beginning again.
+///
+/// Duplicate targets are what parallel edges look like here, and the cursor
+/// stops *at* the first entry for a target rather than past it, so a repeated
+/// candidate is answered the same way twice.
+struct CoCursor<'a> {
+    lists: &'a [&'a [(NodeId, crate::graph::EdgeId)]],
+    pos: Vec<usize>,
+}
+
+impl<'a> CoCursor<'a> {
+    fn new(lists: &'a [&'a [(NodeId, crate::graph::EdgeId)]]) -> Self {
+        Self { lists, pos: vec![0; lists.len()] }
+    }
+
+    /// Begin a new sorted candidate list.
+    fn restart(&mut self) {
+        self.pos.iter_mut().for_each(|p| *p = 0);
+    }
+
+    /// Does `target` appear in any of the closing node's lists?
+    fn contains(&mut self, target: NodeId) -> bool {
+        let t = target.as_u64();
+        let mut found = false;
+        for (list, pos) in self.lists.iter().zip(self.pos.iter_mut()) {
+            while *pos < list.len() && list[*pos].0.as_u64() < t {
+                *pos += 1;
+            }
+            if *pos < list.len() && list[*pos].0.as_u64() == t {
+                found = true;
+            }
+        }
+        found
+    }
+}
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -7011,24 +7076,11 @@ impl ExpandOperator {
             if !label_ok {
                 return false;
             }
-            // The cyclic close, applied here instead of two operators later.
-            //
-            // `co_lists` is empty when the type index is not built yet -- the
-            // first `TYPE_INDEX_AFTER_ROWS` rows, or a type the store declined
-            // to index -- and then this test is simply skipped. That is the
-            // correct fallback rather than a hole: the closing hop downstream
-            // still rejects the row, so skipping costs rows, never answers.
-            if !co_lists.is_empty() {
-                // Binary search, which is what `TypeAdjacency`'s sort is for.
-                // A linear scan here would replace one walk of `N(b)` with a
-                // walk of `N(a)` per candidate and be strictly worse.
-                let shared = co_lists
-                    .iter()
-                    .any(|l| l.binary_search_by_key(&target.as_u64(), |&(t, _)| t.as_u64()).is_ok());
-                if !shared {
-                    return false;
-                }
-            }
+            // The cyclic close is answered by `CoCursor` at the walk below,
+            // not here: it reads the candidates in the order the sorted list
+            // produces them, which is what lets it advance a cursor instead of
+            // binary-searching per candidate (#1082). `keeps` is called from
+            // the unsorted walks too, where no cursor is possible.
             if target_props.is_empty() {
                 return true;
             }
@@ -7040,11 +7092,35 @@ impl ExpandOperator {
             }
         };
 
+        // One cursor per record, shared by both lists an undirected walk reads.
+        // `None` when there is no close to test, which is every non-cyclic
+        // expand and any walk the type index declined.
+        let mut co = (!co_lists.is_empty()).then(|| CoCursor::new(&co_lists));
+        // A pinned far end turns the walk into a lookup: the sorted list is cut
+        // to that target's run before it is read, so a closing hop costs two
+        // binary searches instead of the node's degree.
+        macro_rules! walk_list {
+            ($list:expr) => {
+                match pinned_target {
+                    Some(p) => pinned_run($list, p),
+                    None => $list,
+                }
+            };
+        }
+        macro_rules! closes {
+            ($target:expr) => {
+                match co.as_mut() {
+                    Some(c) => c.contains($target),
+                    None => true,
+                }
+            };
+        }
+
         match self.direction {
             Direction::Outgoing => {
                 if typed.is_some() {
-                    for &(target, eid) in out_of(&typed, node_id) {
-                        if keeps(target, eid) {
+                    for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
+                        if closes!(target) && keeps(target, eid) {
                             collected.push((eid, node_id, target));
                         }
                     }
@@ -7058,8 +7134,8 @@ impl ExpandOperator {
             }
             Direction::Incoming => {
                 if typed.is_some() {
-                    for &(source, eid) in in_of(&typed, node_id) {
-                        if keeps(source, eid) {
+                    for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
+                        if closes!(source) && keeps(source, eid) {
                             collected.push((eid, source, node_id));
                         }
                     }
@@ -7072,19 +7148,23 @@ impl ExpandOperator {
                 }
             }
             Direction::Both if typed.is_some() => {
-                for &(target, eid) in out_of(&typed, node_id) {
-                    if keeps(target, eid) {
+                for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
+                    if closes!(target) && keeps(target, eid) {
                         collected.push((eid, node_id, target));
                     }
                 }
-                for &(source, eid) in in_of(&typed, node_id) {
+                // A second sorted list, so the cursors start over.
+                if let Some(c) = co.as_mut() {
+                    c.restart();
+                }
+                for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
                     // Same self-loop rule as the walk below: an edge incident
                     // to its own node appears in both indexes and must be
                     // taken once (#640).
                     if source == node_id {
                         continue;
                     }
-                    if keeps(source, eid) {
+                    if closes!(source) && keeps(source, eid) {
                         collected.push((eid, source, node_id));
                     }
                 }

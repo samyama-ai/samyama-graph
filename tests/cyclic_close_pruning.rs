@@ -230,3 +230,121 @@ fn the_three_hops_must_be_three_distinct_edges() {
         "one edge cannot be walked three times"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The membership test walks the closing node's list with a cursor that only
+// moves forward (#1082). That is valid because `TypeAdjacency` sorts each
+// node's entries by `(target, edge)`, and it is wrong the moment something
+// it is asked about arrives out of order or twice. These fixtures are the
+// shapes where that happens: parallel edges (one target, several edge ids),
+// self-loops (a node in its own list, and in both directions), and a close
+// over both directions at once (two sorted lists consulted per candidate).
+//
+// Each asserts against the same graph answered without the prune, so a cursor
+// that skipped a match fails here rather than silently returning fewer rows.
+// ---------------------------------------------------------------------------
+
+/// The unpruned answer to the same question: the close as a separate MATCH,
+/// which the planner cannot fold into the walk.
+fn unpruned(store: &GraphStore) -> i64 {
+    count(
+        store,
+        "MATCH (a:N)-[:R]-(b:N)-[:R]-(c:N) WITH a, b, c MATCH (c)-[:R]-(a) RETURN count(a) AS n",
+    )
+}
+
+#[test]
+fn parallel_edges_between_the_same_pair_are_all_found() {
+    let mut store = GraphStore::new();
+    let ns: Vec<NodeId> = (0..600).map(|_| store.create_node("N")).collect();
+    let n = ns.len();
+    for i in 0..n {
+        store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+        store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+        // A second edge to the same target: the entry repeats, with a
+        // different edge id, and a cursor that advances past the first would
+        // lose every match through the second.
+        store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+    }
+    assert_eq!(count(&store, TRI), unpruned(&store), "parallel edges lost matches");
+    assert!(count(&store, TRI) > 0, "the fixture produced no triangles");
+}
+
+#[test]
+fn self_loops_do_not_move_the_cursor_past_a_real_neighbour() {
+    // A self-loop puts a node in its own list, in both directions, which is
+    // where a forward-only cursor can overshoot the neighbour that follows it.
+    //
+    // The reference here is the *same ring without the loops*, not the close
+    // as a second MATCH: relationship isomorphism does not span two clauses, so
+    // the split form lets the loop be reused as the closing edge and counts
+    // 8,400 where the pattern counts 3,600. The invariant that does hold is
+    // that a self-loop cannot complete a triangle of three distinct edges over
+    // these nodes, so adding loops must not change the count.
+    let ring_with = |loops: bool| {
+        let mut store = GraphStore::new();
+        let ns: Vec<NodeId> = (0..600).map(|_| store.create_node("N")).collect();
+        let n = ns.len();
+        for i in 0..n {
+            if loops {
+                store.create_edge(ns[i], ns[i], "R").unwrap();
+            }
+            store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+            store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+        }
+        store
+    };
+    let with_loops = count(&ring_with(true), TRI);
+    assert_eq!(with_loops, count(&ring_with(false), TRI), "self-loops changed the answer");
+    assert!(with_loops > 0, "the fixture produced no triangles");
+}
+
+#[test]
+fn a_close_over_both_directions_consults_both_lists() {
+    // Every edge is created in one direction only, and the pattern is
+    // undirected, so a triangle's closing edge may sit in either of the
+    // closing node's two lists. Both cursors have to be maintained.
+    let mut store = GraphStore::new();
+    let ns: Vec<NodeId> = (0..600).map(|_| store.create_node("N")).collect();
+    let n = ns.len();
+    for i in 0..n {
+        if i % 2 == 0 {
+            store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+            store.create_edge(ns[(i + 2) % n], ns[i], "R").unwrap();
+        } else {
+            store.create_edge(ns[(i + 1) % n], ns[i], "R").unwrap();
+            store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+        }
+    }
+    assert_eq!(count(&store, TRI), unpruned(&store), "a close over both lists lost matches");
+    assert!(count(&store, TRI) > 0, "the fixture produced no triangles");
+}
+
+/// The closing hop is a lookup, and a lookup must return *every* matching edge.
+///
+/// With the far end pinned the expand cuts the sorted list to that target's run
+/// rather than reading the node's degree (#1082). Parallel edges make that run
+/// longer than one entry, and each of them completes a different triangle: two
+/// `a`-`c` edges double the triangle count, and a lookup that returned the first
+/// would quietly halve it.
+#[test]
+fn parallel_closing_edges_each_complete_the_pattern() {
+    let build = |closing_copies: usize| {
+        let mut store = GraphStore::new();
+        let ns: Vec<NodeId> = (0..600).map(|_| store.create_node("N")).collect();
+        let n = ns.len();
+        for i in 0..n {
+            store.create_edge(ns[i], ns[(i + 1) % n], "R").unwrap();
+            for _ in 0..closing_copies {
+                store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
+            }
+        }
+        store
+    };
+    let one = count(&build(1), TRI);
+    let two = count(&build(2), TRI);
+    assert!(one > 0, "the fixture produced no triangles");
+    // Each triangle uses exactly one chord edge, so doubling the chords doubles
+    // the triangles; the six orderings of each are counted in both.
+    assert_eq!(two, one * 2, "a parallel closing edge was not matched");
+}
