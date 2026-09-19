@@ -333,3 +333,37 @@ jobs:
           fi
           echo
           echo "all gates ran and passed"
+
+  python-sdk:
+    # `sdk/python` holds 95 tests and until now no workflow ran them on a pull
+    # request: `cargo test --workspace` cannot reach the directory because the
+    # crate is `exclude`d from the workspace, and the only files that mentioned
+    # `sdk/python` were the four publish workflows, which run on a tag. The
+    # tests were therefore green in whatever state they were last run by hand.
+    #
+    # The MCP tools are generated from a discovered schema, so a defect here is
+    # a wrong tool handed to a model rather than a test failure anyone notices.
+    name: python-sdk (MCP tools and schema discovery)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install pytest fastmcp
+      - name: Tests
+        working-directory: sdk/python
+        # The suites that need the compiled extension (`test_embedded.py`,
+        # `test_vector.py`) are not selected: building it needs maturin and a
+        # full release compile, which belongs in the nightly sweep rather than
+        # on every pull request. Naming the files that do run keeps that
+        # deliberate -- a bare `pytest tests/` would collect them and fail on
+        # the import, and the usual repair is to make the failure disappear.
+        run: |
+          PYTHONPATH=. python -m pytest -q \
+            tests/test_mcp_schema.py \
+            tests/test_mcp_generators.py \
+            tests/test_mcp_escape.py \
+            tests/test_mcp_server.py
