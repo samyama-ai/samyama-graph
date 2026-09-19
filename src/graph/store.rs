@@ -7794,9 +7794,26 @@ mod tests {
         let txn_b = store.begin_transaction(IsolationLevel::SnapshotIsolation);
         store.txn_write_edge(txn_b, eid);
 
-        store.commit_transaction(txn_a).unwrap();
-        // B should conflict on the same edge
-        assert!(store.commit_transaction(txn_b).is_err());
+        let version_a = store.commit_transaction(txn_a).expect("A commits first");
+
+        // `is_err()` was the whole assertion here. It confirmed a call failed
+        // and not that the conflict was detected, nor that A's write survived
+        // it -- a commit that failed for any other reason passed this test
+        // (#1311).
+        let err = store
+            .commit_transaction(txn_b)
+            .expect_err("B wrote the same edge and must conflict");
+        assert!(
+            matches!(err, GraphError::WriteConflict { .. }),
+            "the failure must be a write conflict, not any error: {err:?}"
+        );
+
+        // And the half that matters to a user: losing B must not lose A.
+        assert!(store.has_edge(eid), "A's edge is gone after B's conflict");
+        assert!(
+            version_a > 0,
+            "A's commit produced a version, so it really did commit"
+        );
     }
 
     #[test]

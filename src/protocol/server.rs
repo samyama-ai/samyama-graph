@@ -845,8 +845,32 @@ mod tests {
             let n = stream.read(&mut buf).await.unwrap();
             // Should get an error response
             let response = String::from_utf8_lossy(&buf[..n]);
-            assert!(response.contains("ERR") || response.contains("-"),
-                "Expected error response, got: {}", response);
+            // The old assertion was `contains("ERR") || contains("-")`. Every
+            // RESP error frame begins with `-`, and so does any reply carrying
+            // a minus sign anywhere, so it was close to unfalsifiable: it could
+            // not tell an error from a success that happened to contain a
+            // hyphen (#1311).
+            //
+            // What a client actually needs from a protocol error is that the
+            // frame is an error frame, that it is terminated so the client can
+            // move on, and that it says what was wrong with the bytes rather
+            // than just that something was.
+            assert!(
+                response.starts_with('-'),
+                "a protocol error must come back as a RESP error frame, got: {response:?}"
+            );
+            assert!(
+                response.ends_with("\r\n"),
+                "the frame must be terminated or the client hangs: {response:?}"
+            );
+            assert!(
+                response.to_lowercase().contains("protocol error"),
+                "the reply must name the class of fault: {response:?}"
+            );
+            assert!(
+                response.contains("array length"),
+                "and what was wrong with these bytes -- a bad array length: {response:?}"
+            );
             drop(stream);
         });
 
