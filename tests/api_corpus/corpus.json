@@ -2530,7 +2530,7 @@
       "query": "RETURN no_such_function(1)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `no_such_function` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success"
+      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `no_such_function` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success\n --> 1:8\n  |\n1 | RETURN no_such_function(1)\n  |        ^^^^^^^^^^^^^^^^"
     },
     "status": 400
   },
@@ -2542,7 +2542,7 @@
       "query": "CALL db.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: db.nope"
+      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: db.nope\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
     },
     "status": 400
   },
@@ -2554,7 +2554,7 @@
       "query": "CALL algo.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.UnknownAlgorithm] Unknown algorithm: algo.nope. Available: pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
+      "error": "[Samyama.ClientError.Procedure.UnknownAlgorithm] Unknown algorithm: algo.nope. Available: pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})\n --> 1:6\n  |\n1 | CALL algo.nope()\n  |      ^^^^^^^^^"
     },
     "status": 400
   },
@@ -2595,7 +2595,7 @@
       "query": "MATCH (a) RETURN b"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.VariableNotBound] `b` is not bound: nothing in this query defines it"
+      "error": "[Samyama.ClientError.Statement.VariableNotBound] `b` is not bound: nothing in this query defines it\n --> 1:18\n  |\n1 | MATCH (a) RETURN b\n  |                  ^"
     },
     "status": 400
   },
@@ -2619,7 +2619,7 @@
       "query": "CALL gds.pageRank.write({})"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.NotFound] `gds.pageRank.write` is not supported: this engine streams results, and GDS's `write` mode writes them. Call `gds.pagerank.stream` or `algo.pagerank` and write the result yourself with SET."
+      "error": "[Samyama.ClientError.Procedure.NotFound] `gds.pageRank.write` is not supported: this engine streams results, and GDS's `write` mode writes them. Call `gds.pagerank.stream` or `algo.pagerank` and write the result yourself with SET.\n --> 1:6\n  |\n1 | CALL gds.pageRank.write({})\n  |      ^^^^^^^^^^^^^^^^^^"
     },
     "status": 400
   },
