@@ -136,4 +136,10 @@ export interface JsonImportResult {
 export interface ClientOptions {
   /** Base URL for HTTP transport (default: http://localhost:8080) */
   url?: string;
+  /** Request deadline in milliseconds (default: 30000). */
+  timeoutMs?: number;
+  /** Retries for a timeout or connection failure (default: 2). */
+  maxRetries?: number;
+  /** Delay before the first retry, doubled each attempt (default: 100). */
+  retryBaseDelayMs?: number;
 }
