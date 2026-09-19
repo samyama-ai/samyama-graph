@@ -48,7 +48,7 @@ pub mod vector_ext;
 
 pub use client::SamyamaClient;
 pub use embedded::EmbeddedClient;
-pub use remote::RemoteClient;
+pub use remote::{ConnectionConfig, RemoteClient};
 pub use error::{SamyamaError, SamyamaResult};
 pub use models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 
