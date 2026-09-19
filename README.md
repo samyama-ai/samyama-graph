@@ -133,6 +133,20 @@ curl -X POST http://localhost:8080/api/query \
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
 
+The visualizer is a page on the public web calling a server on your machine, so
+the server has to name it. Start Samyama with the origin allowed:
+
+```bash
+samyama --cors-origin https://graph.samyama.cloud
+```
+
+or `SAMYAMA_CORS_ORIGINS=https://graph.samyama.cloud`. Without it the browser
+refuses the call. **This is deliberate** — `/api/query` runs arbitrary Cypher
+including `DELETE` and reads no credential from the request, so until v1.9 any
+web page you happened to visit could drive it
+([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)). The server
+also listens on loopback unless `--host` says otherwise.
+
 1. Open https://graph.samyama.cloud/ in your browser.
 2. Sign up for a new account, or sign in if you already have one.
 3. From the left sidebar, click **Home**.
