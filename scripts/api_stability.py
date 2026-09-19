@@ -183,6 +183,210 @@ def requests() -> list[dict]:
     q("algo_wcc", "CALL algo.wcc() YIELD node, componentId RETURN count(*) AS n")
     q("algo_triangle_count", "CALL algo.triangleCount() YIELD node, triangles RETURN count(*) AS n")
 
+    # --- writes, and what they return ------------------------------------
+    #
+    # At the end, because they change the fixture: everything above sees the
+    # graph the FIXTURE built, and everything from here sees what the previous
+    # write left. The order is the contract as much as the responses are.
+    q("create_node", "CREATE (:Temp {n: 1})")
+    q("create_node_returning", "CREATE (t:Temp2 {n: 2}) RETURN t")
+    q("create_edge", "MATCH (a:Temp), (b:Temp2) CREATE (a)-[:TMP {w: 1}]->(b)")
+    q("set_property", "MATCH (t:Temp) SET t.n = 99 RETURN t.n AS n")
+    q("set_multiple", "MATCH (t:Temp) SET t.a = 1, t.b = 'x' RETURN t.a AS a, t.b AS b")
+    q("remove_property", "MATCH (t:Temp) REMOVE t.a RETURN t.a AS a")
+    q("set_label", "MATCH (t:Temp) SET t:Extra RETURN labels(t) AS labels")
+    q("remove_label", "MATCH (t:Temp) REMOVE t:Extra RETURN labels(t) AS labels")
+    q("merge_creates", "MERGE (m:Merged {k: 1}) RETURN m.k AS k")
+    q("merge_matches", "MERGE (m:Merged {k: 1}) RETURN count(m) AS n")
+    q("merge_on_create", "MERGE (m:Merged2 {k: 2}) ON CREATE SET m.made = true RETURN m.made AS made")
+    q("delete_edge", "MATCH ()-[r:TMP]->() DELETE r")
+    q("detach_delete", "MATCH (t:Temp2) DETACH DELETE t")
+    q("delete_node", "MATCH (t:Temp) DELETE t")
+    q("count_after_deletes", "MATCH (n:Temp) RETURN count(n) AS n")
+    q("create_index", "CREATE INDEX ON :Person(name)")
+    q("create_index_twice", "CREATE INDEX ON :Person(name)")
+    q("show_indexes", "SHOW INDEXES")
+    q("create_constraint", "CREATE CONSTRAINT ON (p:Person) ASSERT p.name IS UNIQUE")
+    q("show_constraints", "SHOW CONSTRAINTS")
+
+    # --- more of the read surface, after the writes above -----------------
+    q("scan_after_writes", "MATCH (n) RETURN count(n) AS n")
+    q("order_by_null_last", "MATCH (p:Person) RETURN p.city AS city ORDER BY city")
+    # `ORDER BY` on every multi-row query in this corpus, including the ones
+    # where it looks redundant. Cypher promises no order without it, and this
+    # engine delivers on that promise: `MATCH (c:Company) RETURN c.name` came
+    # back as Acme,Globex on one run and Globex,Acme on the next, because the
+    # label index is a hash set. A corpus that recorded one of those orders
+    # would fail at random, and a gate that fails at random gets switched off.
+    q("limit_larger_than_result", "MATCH (c:Company) RETURN c.name AS name ORDER BY name LIMIT 100")
+    q("skip_past_the_end", "MATCH (c:Company) RETURN c.name AS name SKIP 100")
+    q("nested_map_literal", "RETURN {a: {b: [1, 2]}} AS m")
+    q("nested_list_literal", "RETURN [[1, 2], [3]] AS l")
+    q("empty_list", "RETURN [] AS l")
+    q("empty_map", "RETURN {} AS m")
+    q("negative_numbers", "RETURN -1 AS i, -1.5 AS f")
+    q("large_integer", "RETURN 9223372036854775807 AS i")
+    q("integer_overflow", "RETURN 9223372036854775807 + 1 AS i")
+    q("division_by_zero", "RETURN 1 / 0 AS x")
+    q("float_division_by_zero", "RETURN 1.0 / 0.0 AS x")
+    q("modulo_by_zero", "RETURN 1 % 0 AS x")
+    q("string_comparison", "RETURN 'a' < 'b' AS lt")
+    q("list_equality", "RETURN [1, 2] = [1, 2] AS eq")
+    q("map_equality", "RETURN {a: 1} = {a: 1} AS eq")
+    q("null_equality", "RETURN null = null AS eq")
+    q("null_is_null", "RETURN null IS NULL AS n")
+    q("boolean_of_null", "RETURN NOT null AS n")
+    q("coalesce_all_null", "RETURN coalesce(null, null) AS c")
+    q("case_no_else", "RETURN CASE WHEN false THEN 1 END AS c")
+    q("with_where_false", "MATCH (p:Person) WITH p WHERE false RETURN count(p) AS n")
+    q("union_all_duplicates", "RETURN 1 AS x UNION ALL RETURN 1 AS x")  # one value, so order cannot vary
+    q("union_distinct", "RETURN 1 AS x UNION RETURN 1 AS x")
+    q("unwind_empty", "UNWIND [] AS i RETURN i")
+    q("unwind_null", "UNWIND null AS i RETURN i")
+    q("unwind_nested", "UNWIND [[1, 2]] AS pair UNWIND pair AS i RETURN i")
+    q("optional_match_then_where", "MATCH (p:Person) OPTIONAL MATCH (p)-[:NOPE]->(x) RETURN count(x) AS n")
+    q("variable_length_zero", "MATCH (a:Person)-[:KNOWS*0..1]->(b) RETURN count(b) AS n")
+    q("variable_length_unbounded", "MATCH (a:Person {name: 'Alice'})-[:KNOWS*]->(b) RETURN count(b) AS n")
+    q("shortest_path_procedure", "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Carol'}) "
+                                 "CALL algo.shortestPath(id(a), id(b)) YIELD node RETURN count(*) AS n")
+    q("pattern_in_where", "MATCH (p:Person) WHERE (p)-[:KNOWS]->() RETURN count(p) AS n")
+    q("not_pattern_in_where", "MATCH (p:Person) WHERE NOT (p)-[:KNOWS]->() RETURN count(p) AS n")
+    q("count_distinct_property", "MATCH (p:Person) RETURN count(DISTINCT p.age) AS n")
+    q("collect_distinct",
+      "MATCH (p:Person) WITH DISTINCT p.city AS city ORDER BY city RETURN collect(city) AS cities")
+    q("aggregate_over_empty", "MATCH (n:Nothing) RETURN count(n) AS c, sum(n.x) AS s, avg(n.x) AS a")
+    q("min_max_over_strings", "MATCH (p:Person) RETURN min(p.name) AS lo, max(p.name) AS hi")
+    q("order_by_aggregate", "MATCH (p:Person) RETURN p.city AS city, count(p) AS n ORDER BY n DESC, city")
+    q("with_skip_limit", "MATCH (p:Person) WITH p ORDER BY p.name SKIP 1 LIMIT 1 RETURN p.name AS name")
+    q("multiple_with", "MATCH (p:Person) WITH p WITH count(p) AS n RETURN n")
+    q("distinct_on_two_columns", "MATCH (p:Person) RETURN DISTINCT p.city AS city, p.age AS age ORDER BY city, age")
+    q("string_concat_number", "RETURN 'n=' + 1 AS s")
+    q("list_concat", "RETURN [1] + [2] AS l")
+    q("in_empty_list", "RETURN 1 IN [] AS x")
+    q("in_with_null", "RETURN 1 IN [null] AS x")
+    q("regex_match", "MATCH (p:Person) WHERE p.name =~ 'A.*' RETURN count(p) AS n")
+    q("starts_ends_contains", "RETURN 'hello' STARTS WITH 'he' AS s, 'hello' ENDS WITH 'lo' AS e, "
+                              "'hello' CONTAINS 'ell' AS c")
+    q("explain_join", "EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b")
+    # PROFILE is deliberately absent. Its body carries wall-clock timings, so it
+    # differs on every run -- correctly, and a profile that did not vary would be
+    # the suspicious one. Recording it would make this gate fail at random.
+    # EXPLAIN above covers the plan text, which is what the contract is about.
+
+    # --- algorithms, which clients call by name and branch on the shape of -
+    q("algo_pagerank_named", "CALL algo.pageRank({iterations: 2}) YIELD node, score RETURN count(*) AS n")
+    q("algo_scc", "CALL algo.scc() YIELD node, componentId RETURN count(*) AS n")
+    q("algo_cdlp", "CALL algo.cdlp() YIELD node, communityId RETURN count(*) AS n")
+    q("algo_lcc", "CALL algo.lcc() YIELD node, coefficient RETURN count(*) AS n")
+    q("algo_degree", "CALL algo.degreeCentrality() YIELD node, score RETURN count(*) AS n")
+    q("algo_mst", "CALL algo.mst() YIELD source, target RETURN count(*) AS n")
+    q("algo_bare_name", "CALL pageRank({iterations: 1}) YIELD node RETURN count(*) AS n")
+    q("algo_gds_stream", "CALL gds.pageRank.stream({iterations: 1}) YIELD node RETURN count(*) AS n")
+    q("db_labels_after_writes", "CALL db.labels() YIELD label RETURN label ORDER BY label")
+    q("db_schema_for_llm", "CALL db.schema.forLLM(2000) YIELD complete RETURN complete")
+
+    # --- functions, one response shape each --------------------------------
+    q("fn_id_and_labels", "MATCH (p:Person) WITH p ORDER BY p.name LIMIT 1 RETURN id(p) AS id, labels(p) AS l")
+    q("fn_properties", "MATCH (p:Person) WITH p ORDER BY p.name LIMIT 1 RETURN properties(p) AS props")
+    q("fn_nodes_and_rels", "MATCH path = (:Person {name: 'Alice'})-[:KNOWS]->() "
+                           "RETURN size(nodes(path)) AS n, size(relationships(path)) AS r")
+    q("fn_length_of_path", "MATCH path = (:Person {name: 'Alice'})-[:KNOWS]->() RETURN length(path) AS l")
+    q("fn_startnode_endnode", "MATCH ()-[r:KNOWS]->() WITH r LIMIT 1 "
+                              "RETURN startNode(r).name AS s, endNode(r).name AS e")
+    q("fn_type_of_rel", "MATCH ()-[r]->() WITH r LIMIT 1 RETURN type(r) AS t")
+    q("fn_exists_on_missing", "MATCH (p:Person) RETURN exists(p.nope) AS e ORDER BY e LIMIT 1")
+    q("fn_timestamp_shape", "RETURN timestamp() > 0 AS positive")
+    q("fn_randomuuid_shape", "RETURN size(randomUUID()) AS len")
+    q("fn_rand_range", "RETURN rand() >= 0.0 AND rand() < 1.0 AS in_range")
+    q("fn_tostring_of_types", "RETURN toString(1) AS i, toString(1.5) AS f, toString(true) AS b")
+    q("fn_tointeger_of_bad", "RETURN toInteger('nope') AS i")
+    q("fn_tofloat_of_bad", "RETURN toFloat('nope') AS f")
+    q("fn_trim_family", "RETURN trim('  a  ') AS t, ltrim('  a') AS l, rtrim('a  ') AS r")
+    q("fn_isempty", "RETURN isEmpty('') AS s, isEmpty([]) AS l")
+    q("fn_math", "RETURN pi() > 3 AS p, e() > 2 AS e, exp(0) AS x, log(1) AS lg")
+    q("fn_trig", "RETURN sin(0) AS s, cos(0) AS c, tan(0) AS t")
+    q("fn_degrees_radians", "RETURN degrees(0) AS d, radians(0) AS r")
+    q("fn_percentile", "MATCH (p:Person) RETURN percentileCont(p.age, 0.5) AS median")
+    q("fn_stdev", "MATCH (p:Person) RETURN stDev(p.age) AS sd")
+
+    # --- more error classes ------------------------------------------------
+    q("error_divide_string", "RETURN 'a' / 2")
+    q("error_unknown_label_function", "MATCH (n) RETURN nosuchfn(n)")
+    q("error_bad_parameter_count", "RETURN toUpper()")
+    q("error_negative_limit", "MATCH (n) RETURN n LIMIT -1")
+    q("error_negative_skip", "MATCH (n) RETURN n SKIP -1")
+    q("error_order_by_unknown", "MATCH (p:Person) RETURN p.name AS name ORDER BY nope")
+    q("error_merge_without_pattern", "MERGE 1")
+    q("error_return_star_no_scope", "RETURN *")
+    q("error_unclosed_string", "RETURN 'abc")
+    q("error_unbalanced_brackets", "RETURN [1, 2")
+    q("error_create_index_twice_constraint", "CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE; CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE")
+    q("error_vector_index_bad_dimensions", "CREATE VECTOR INDEX bad FOR (n:V) ON (n.e) OPTIONS {dimensions: -1}")
+
+    # --- algorithms, which clients call by name and branch on the shape of -
+    q("algo_pagerank_named", "CALL algo.pageRank({iterations: 2}) YIELD node, score RETURN count(*) AS n")
+    q("algo_scc", "CALL algo.scc() YIELD node, componentId RETURN count(*) AS n")
+    q("algo_cdlp", "CALL algo.cdlp() YIELD node, communityId RETURN count(*) AS n")
+    q("algo_lcc", "CALL algo.lcc() YIELD node, coefficient RETURN count(*) AS n")
+    q("algo_degree", "CALL algo.degreeCentrality() YIELD node, score RETURN count(*) AS n")
+    q("algo_mst", "CALL algo.mst() YIELD source, target RETURN count(*) AS n")
+    q("algo_bare_name", "CALL pageRank({iterations: 1}) YIELD node RETURN count(*) AS n")
+    q("algo_gds_stream", "CALL gds.pageRank.stream({iterations: 1}) YIELD node RETURN count(*) AS n")
+    q("db_labels_after_writes", "CALL db.labels() YIELD label RETURN label ORDER BY label")
+
+    # --- functions, one response shape each --------------------------------
+    q("fn_id_and_labels", "MATCH (p:Person) WITH p ORDER BY p.name LIMIT 1 RETURN id(p) AS id, labels(p) AS l")
+    q("fn_properties", "MATCH (p:Person) WITH p ORDER BY p.name LIMIT 1 RETURN properties(p) AS props")
+    q("fn_nodes_and_rels", "MATCH path = (:Person {name: 'Alice'})-[:KNOWS]->() "
+                           "RETURN size(nodes(path)) AS n, size(relationships(path)) AS r")
+    q("fn_length_of_path", "MATCH path = (:Person {name: 'Alice'})-[:KNOWS]->() RETURN length(path) AS l")
+    q("fn_startnode_endnode", "MATCH ()-[r:KNOWS]->() WITH r ORDER BY id(r) LIMIT 1 "
+                              "RETURN startNode(r).name AS s, endNode(r).name AS e")
+    q("fn_type_of_rel", "MATCH ()-[r]->() WITH r ORDER BY id(r) LIMIT 1 RETURN type(r) AS t")
+    q("fn_timestamp_shape", "RETURN timestamp() > 0 AS positive")
+    q("fn_randomuuid_shape", "RETURN size(randomUUID()) AS len")
+    q("fn_rand_range", "RETURN rand() >= 0.0 AND rand() < 1.0 AS in_range")
+    q("fn_tostring_of_types", "RETURN toString(1) AS i, toString(1.5) AS f, toString(true) AS b")
+    q("fn_tointeger_of_bad", "RETURN toInteger('nope') AS i")
+    q("fn_tofloat_of_bad", "RETURN toFloat('nope') AS f")
+    q("fn_trim_family", "RETURN trim('  a  ') AS t, ltrim('  a') AS l, rtrim('a  ') AS r")
+    q("fn_isempty", "RETURN isEmpty('') AS s, isEmpty([]) AS l")
+    q("fn_math", "RETURN pi() > 3 AS p, e() > 2 AS e, exp(0) AS x, log(1) AS lg")
+    q("fn_trig", "RETURN sin(0) AS s, cos(0) AS c, tan(0) AS t")
+    q("fn_degrees_radians", "RETURN degrees(0) AS d, radians(0) AS r")
+    q("fn_percentile", "MATCH (p:Person) RETURN percentileCont(p.age, 0.5) AS median")
+    q("fn_stdev", "MATCH (p:Person) RETURN stDev(p.age) AS sd")
+
+    # --- too few arguments, which used to abort the process (#1365) --------
+    #
+    # Nine of them, because the fix is a table and a table can lose a row. If
+    # one of these ever answers with anything other than an ArgumentError, the
+    # corpus says so on the pull request that did it.
+    q("arity_toupper_none", "RETURN toUpper()")
+    q("arity_abs_none", "RETURN abs()")
+    q("arity_size_none", "RETURN size()")
+    q("arity_atan2_one", "RETURN atan2(1)")
+    q("arity_haslabels_one", "MATCH (p:Person) RETURN hasLabels(p)")
+    q("arity_tostring_none", "RETURN toString()")
+    q("arity_id_none", "RETURN id()")
+    q("arity_keys_none", "RETURN keys()")
+    q("arity_type_none", "RETURN type()")
+    # `left`/`right` with one argument: refused on the *type* when given an
+    # integer, and an abort when given a string, until the table had them at
+    # two. The string form is the one worth recording.
+    q("arity_left_one_string", "RETURN left('abc')")
+    q("arity_right_one_string", "RETURN right('abc')")
+
+    # --- more error classes ------------------------------------------------
+    q("error_divide_string", "RETURN 'a' / 2")
+    q("error_unknown_label_function", "MATCH (n) RETURN nosuchfn(n)")
+    q("error_negative_limit", "MATCH (n) RETURN n LIMIT -1")
+    q("error_negative_skip", "MATCH (n) RETURN n SKIP -1")
+    q("error_order_by_unknown", "MATCH (p:Person) RETURN p.name AS name ORDER BY nope")
+    q("error_return_star_no_scope", "RETURN *")
+    q("error_unclosed_string", "RETURN 'abc")
+    q("error_unbalanced_brackets", "RETURN [1, 2")
+
     # --- errors are contract too -----------------------------------------
     #
     # An error that stops being an error, or an error whose code changes,
