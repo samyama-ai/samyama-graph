@@ -486,7 +486,7 @@ re-derived or refuted.
 | SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
 | SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
 | Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
-| FinBench | **21 read queries run, 18 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
+| FinBench | **21 read queries run, 21 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
 
 One of those is not clean, and saying so is the point of publishing them:
 three FinBench queries are pinned to ids the generated data does not
