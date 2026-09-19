@@ -371,6 +371,11 @@ def requests() -> list[dict]:
     q("arity_id_none", "RETURN id()")
     q("arity_keys_none", "RETURN keys()")
     q("arity_type_none", "RETURN type()")
+    # `left`/`right` with one argument: refused on the *type* when given an
+    # integer, and an abort when given a string, until the table had them at
+    # two. The string form is the one worth recording.
+    q("arity_left_one_string", "RETURN left('abc')")
+    q("arity_right_one_string", "RETURN right('abc')")
 
     # --- more error classes ------------------------------------------------
     q("error_divide_string", "RETURN 'a' / 2")

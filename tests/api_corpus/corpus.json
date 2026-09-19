@@ -6168,6 +6168,30 @@
   },
   {
     "method": "POST",
+    "name": "arity_left_one_string",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN left('abc')"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `left()` takes at least 2 arguments; got 1"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "arity_right_one_string",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN right('abc')"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `right()` takes at least 2 arguments; got 1"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
     "name": "error_divide_string",
     "path": "/api/query",
     "request": {
