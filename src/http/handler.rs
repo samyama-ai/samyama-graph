@@ -475,7 +475,14 @@ fn render_query_result(
                             }
                             let node_json = json!({
                                 "id": id.as_u64().to_string(),
-                                "labels": node.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                                // Sorted: a node's labels are a set, and
+                                // serialising the hash order made the same
+                                // node come back as ["Employee","Person"] on
+                                // one call and ["Person","Employee"] on the
+                                // next. Cypher's `labels()` has sorted since
+                                // it was written; this is the same contract
+                                // (#1353).
+                                "labels": sorted_label_strs(&node.labels),
                                 "properties": properties,
                             });
                             nodes.insert(id.as_u64().to_string(), node_json.clone());
@@ -586,6 +593,26 @@ pub async fn status_handler(
 }
 
 /// Handler for graph schema introspection
+/// How many nodes of a label `/api/schema` reads to work out which properties
+/// it has. A property graph lets two nodes of a label carry different keys, so
+/// this is a sample; `properties_sampled_from` in the response reports how big
+/// it was, because a partial answer that looks complete is worse than one that
+/// says so.
+/// A node's labels as a sorted list.
+///
+/// Labels are held in a `HashSet`, so iterating one and serialising the result
+/// makes the response depend on hash order -- the same node came back as
+/// `["Employee","Person"]` on one call and `["Person","Employee"]` on the next
+/// (#1353). Sorted is deterministic and matches what Cypher's `labels()`
+/// already returns.
+pub fn sorted_label_strs(labels: &std::collections::HashSet<crate::graph::Label>) -> Vec<String> {
+    let mut v: Vec<String> = labels.iter().map(|l| l.as_str().to_string()).collect();
+    v.sort_unstable();
+    v
+}
+
+const SCHEMA_PROPERTY_SAMPLE: usize = 1000;
+
 pub async fn schema_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -594,17 +621,29 @@ pub async fn schema_handler(
     let total_nodes = store_guard.node_count();
     let total_edges = store_guard.edge_count();
 
-    // Build node types: use label_index for counts, sample 1 node per label for property types
+    // Build node types: counts from label_index, property types from a bounded
+    // sample of nodes per label.
+    //
+    // This used to read **one** node, taken with `.iter().next()` over a hash
+    // set -- so it was an arbitrary node, not the first one. Two consequences,
+    // both of which reached the client as fact: a property that node happened
+    // not to carry was reported as absent for the whole label, and the same
+    // graph answered differently on successive calls. `properties_sampled_from`
+    // is reported beside the property map so a caller can tell a complete
+    // answer from a partial one instead of assuming.
+    let mut labels_sorted = store_guard.all_labels();
+    labels_sorted.sort_by_key(|l| l.as_str().to_string());
     let mut node_types = Vec::new();
-    for label in store_guard.all_labels() {
+    for label in labels_sorted {
         let count = store_guard.label_node_count(label);
         let mut properties = BTreeMap::new();
 
-        // Sample a single node to discover property names and types (O(1))
-        if let Some(&sample_id) = store_guard
+        let sample_ids: Vec<_> = store_guard
             .label_index_ids(label)
-            .and_then(|ids| ids.iter().next())
-        {
+            .map(|ids| ids.iter().take(SCHEMA_PROPERTY_SAMPLE).copied().collect())
+            .unwrap_or_default();
+        let sampled = sample_ids.len();
+        for sample_id in sample_ids {
             // Merged, not `node.properties`: a snapshot-imported graph keeps
             // its properties in the columnar store and its row maps are
             // empty, so reading the row reported "this label has no
@@ -628,6 +667,7 @@ pub async fn schema_handler(
             "label": label.as_str(),
             "count": count,
             "properties": properties,
+            "properties_sampled_from": sampled,
         }));
     }
 
@@ -645,8 +685,12 @@ pub async fn schema_handler(
         entry.1.insert(pattern.target_label.as_str().to_string());
     }
 
+    // Sorted for the same reason as the labels: an unordered response is a
+    // response no client can diff and no recorded corpus can defend (API-16).
+    let mut edge_types_sorted = store_guard.all_edge_types();
+    edge_types_sorted.sort_by_key(|t| t.as_str().to_string());
     let mut edge_types = Vec::new();
-    for edge_type in store_guard.all_edge_types() {
+    for edge_type in edge_types_sorted {
         let count = store_guard.edge_type_count(edge_type);
         let (source_labels, target_labels) = edge_source_targets
             .get(edge_type.as_str())

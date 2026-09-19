@@ -1,0 +1,2751 @@
+[
+  {
+    "method": "POST",
+    "name": "return_literal",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "1"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_float",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1.5"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "1.5"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1.5
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_string",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 'x'"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "'x'"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "x"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_bool",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN true"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "true"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          true
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_null",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN null"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "null"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_list",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN [1, 2, 3]"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "[1, 2, 3]"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            1,
+            2,
+            3
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_map",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN {a: 1, b: 'two'}"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "{a: 1, b: 'two'}"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "a": 1,
+            "b": "two"
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "return_alias",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1 AS one, 2 AS two"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "one",
+        "two"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1,
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "scan_all",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (n) RETURN count(n) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          6
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "scan_label",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN count(p) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          4
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "node_shape",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Alice'}) RETURN p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "p"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [
+        {
+          "id": "1",
+          "labels": [
+            "Person"
+          ],
+          "properties": {
+            "age": 30,
+            "city": "Pune",
+            "name": "Alice"
+          }
+        }
+      ],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "id": "1",
+            "labels": [
+              "Person"
+            ],
+            "properties": {
+              "age": 30,
+              "city": "Pune",
+              "name": "Alice"
+            }
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "multi_label_node",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (e:Employee) RETURN e"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "e"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [
+        {
+          "id": "4",
+          "labels": [
+            "Employee",
+            "Person"
+          ],
+          "properties": {
+            "age": 33,
+            "city": "Pune",
+            "name": "Dan"
+          }
+        }
+      ],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "id": "4",
+            "labels": [
+              "Employee",
+              "Person"
+            ],
+            "properties": {
+              "age": 33,
+              "city": "Pune",
+              "name": "Dan"
+            }
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "edge_shape",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH ()-[r:KNOWS]->() RETURN r"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "r"
+      ],
+      "edges": [
+        {
+          "id": "1",
+          "properties": {
+            "since": 2019
+          },
+          "source": "1",
+          "target": "2",
+          "type": "KNOWS"
+        },
+        {
+          "id": "2",
+          "properties": {
+            "since": 2021
+          },
+          "source": "2",
+          "target": "3",
+          "type": "KNOWS"
+        }
+      ],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "id": "1",
+            "properties": {
+              "since": 2019
+            },
+            "source": "1",
+            "target": "2",
+            "type": "KNOWS"
+          }
+        ],
+        [
+          {
+            "id": "2",
+            "properties": {
+              "since": 2021
+            },
+            "source": "2",
+            "target": "3",
+            "type": "KNOWS"
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "path_shape",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH p = (:Person {name: 'Alice'})-[:KNOWS]->() RETURN p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "p"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "edges": [
+              "1"
+            ],
+            "length": 1,
+            "nodes": [
+              "1",
+              "2"
+            ]
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "property_access",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.name AS name ORDER BY name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Alice"
+        ],
+        [
+          "Bob"
+        ],
+        [
+          "Carol"
+        ],
+        [
+          "Dan"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "missing_property",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Carol'}) RETURN p.city AS city"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "city"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "order_desc",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.name AS name ORDER BY name DESC"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Dan"
+        ],
+        [
+          "Carol"
+        ],
+        [
+          "Bob"
+        ],
+        [
+          "Alice"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "skip_limit",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.name AS name ORDER BY name SKIP 1 LIMIT 2"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Bob"
+        ],
+        [
+          "Carol"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "distinct",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN DISTINCT p.city AS city ORDER BY city"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "city"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Delhi"
+        ],
+        [
+          "Pune"
+        ],
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "where_numeric",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WHERE p.age > 30 RETURN p.name AS name ORDER BY name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Carol"
+        ],
+        [
+          "Dan"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "where_string",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WHERE p.name STARTS WITH 'A' RETURN p.name AS name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Alice"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "where_null",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WHERE p.city IS NULL RETURN p.name AS name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Carol"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "where_in",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WHERE p.name IN ['Alice', 'Bob'] RETURN count(p) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "optional_match",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) RETURN p.name AS name, c.name AS company ORDER BY name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name",
+        "company"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Alice",
+          "Acme"
+        ],
+        [
+          "Bob",
+          null
+        ],
+        [
+          "Carol",
+          null
+        ],
+        [
+          "Dan",
+          "Globex"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "aggregate_sum",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN sum(p.age) AS total"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "total"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          129
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "aggregate_avg",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN avg(p.age) AS mean"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "mean"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          32.25
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "aggregate_minmax",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN min(p.age) AS lo, max(p.age) AS hi"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "lo",
+        "hi"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          25,
+          41
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "aggregate_collect",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN collect(p.name) AS names"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "names"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "Alice",
+            "Bob",
+            "Carol",
+            "Dan"
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "group_by",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.city AS city, count(p) AS n ORDER BY city"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "city",
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Delhi",
+          1
+        ],
+        [
+          "Pune",
+          2
+        ],
+        [
+          null,
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "with_chain",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WITH p.city AS city, count(p) AS n WHERE n > 1 RETURN city, n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "city",
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Pune",
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "unwind",
+    "path": "/api/query",
+    "request": {
+      "query": "UNWIND [1, 2, 3] AS i RETURN i * 2 AS doubled"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "doubled"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2
+        ],
+        [
+          4
+        ],
+        [
+          6
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "union",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1 AS x UNION RETURN 2 AS x"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "x"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "exists_subquery",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->() } RETURN p.name AS name ORDER BY name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Alice"
+        ],
+        [
+          "Bob"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "var_length",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (:Person {name: 'Alice'})-[:KNOWS*1..2]->(o) RETURN count(o) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "two_hop",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (:Person {name: 'Alice'})-[:KNOWS]->()-[:KNOWS]->(o) RETURN o.name AS name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Carol"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "labels_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (e:Employee) RETURN labels(e) AS labels"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "labels"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "Employee",
+            "Person"
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "type_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH ()-[r]->() RETURN DISTINCT type(r) AS t ORDER BY t"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "t"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "KNOWS"
+        ],
+        [
+          "WORKS_AT"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "keys_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Alice'}) RETURN keys(p) AS k"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "k"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "age",
+            "city",
+            "name"
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "id_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Alice'}) RETURN id(p) AS id"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "id"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "coalesce",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Carol'}) RETURN coalesce(p.city, 'unknown') AS city"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "city"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "unknown"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "case_expr",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN CASE WHEN p.age > 30 THEN 'older' ELSE 'younger' END AS band ORDER BY band"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "band"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "older"
+        ],
+        [
+          "older"
+        ],
+        [
+          "younger"
+        ],
+        [
+          "younger"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "string_fns",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN toUpper('ab') AS u, toLower('CD') AS l, substring('hello', 1, 3) AS s, size('hello') AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "u",
+        "l",
+        "s",
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "AB",
+          "cd",
+          "ell",
+          5
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "numeric_fns",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN abs(-2) AS a, ceil(1.2) AS c, floor(1.8) AS f, round(1.5) AS r, sqrt(9.0) AS q, sign(-3) AS g"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "a",
+        "c",
+        "f",
+        "r",
+        "q",
+        "g"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2,
+          2,
+          1,
+          2,
+          3.0,
+          -1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "list_fns",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN head([1,2,3]) AS h, last([1,2,3]) AS l, tail([1,2,3]) AS t"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "h",
+        "l",
+        "t"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1,
+          3,
+          [
+            2,
+            3
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "type_coercion",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN toInteger('42') AS i, toFloat('1.5') AS f, toString(7) AS s"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "i",
+        "f",
+        "s"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          42,
+          1.5,
+          "7"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "null_arithmetic",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1 + null AS x"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "x"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "null_comparison",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1 > null AS x"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "x"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "explain",
+    "path": "/api/query",
+    "request": {
+      "query": "EXPLAIN MATCH (p:Person) RETURN p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "plan"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Project (p)\n+- NodeScan (var=p, labels=[\"Person\"])\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 6\n  Total edges: 4\n  Avg out-degree: 0.67\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "list_slice",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN [1,2,3,4,5][1..3] AS s"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "s"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            2,
+            3
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "list_index",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN [1,2,3][0] AS first"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "first"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "list_comprehension",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN [x IN [1,2,3] WHERE x > 1 | x * 10] AS xs"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "xs"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            20,
+            30
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "map_projection_keys",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN keys({a: 1, b: 2}) AS k"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "k"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "a",
+            "b"
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "string_split_join",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN split('a,b,c', ',') AS parts"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "parts"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "a",
+            "b",
+            "c"
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "string_trim",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN trim('  x  ') AS t, replace('abc', 'b', 'z') AS r"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "t",
+        "r"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "x",
+          "azc"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "string_left_right",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN left('hello', 2) AS l, right('hello', 2) AS r, reverse('abc') AS v"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "l",
+        "r",
+        "v"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "he",
+          "lo",
+          "cba"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "range_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN range(1, 5) AS r"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "r"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "size_of_list",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN size([1,2,3]) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          3
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "exists_fn",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Alice'}) RETURN exists(p.city) AS has_city"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "has_city"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          true
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "boolean_ops",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN true AND false AS a, true OR false AS o, NOT true AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "a",
+        "o",
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          false,
+          true,
+          false
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "comparison_chain",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 1 < 2 AS lt, 2 <= 2 AS le, 3 <> 4 AS ne"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "lt",
+        "le",
+        "ne"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          true,
+          true,
+          true
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "modulo_and_power",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 7 % 3 AS m, 2 ^ 3 AS p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "m",
+        "p"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1,
+          8.0
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "integer_division",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 7 / 2 AS i, 7.0 / 2 AS f"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "i",
+        "f"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          3,
+          3.5
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "date_literal",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN date('2024-01-15') AS d"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "d"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "2024-01-15"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "datetime_literal",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN datetime('2024-01-15T10:30:00Z') AS dt"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "dt"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "2024-01-15T10:30Z"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "duration_literal",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN duration({days: 3}) AS dur"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "dur"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          {
+            "days": 3,
+            "months": 0,
+            "nanos": 0,
+            "seconds": 0
+          }
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "date_component",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN date('2024-01-15').year AS y"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.TypeError] Type error: cannot index Date: it is not a list or a map"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "count_star",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          4
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "count_distinct",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN count(DISTINCT p.city) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "order_by_two_keys",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY age DESC, name ASC"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name",
+        "age"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Carol",
+          41
+        ],
+        [
+          "Dan",
+          33
+        ],
+        [
+          "Alice",
+          30
+        ],
+        [
+          "Bob",
+          25
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "limit_zero",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) RETURN p.name AS name LIMIT 0"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "empty_result",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person {name: 'Nobody'}) RETURN p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "p"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "optional_match_no_hit",
+    "path": "/api/query",
+    "request": {
+      "query": "OPTIONAL MATCH (p:Person {name: 'Nobody'}) RETURN p"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "p"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          null
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "anonymous_relationship",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (a)-[]->(b) RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          4
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "undirected_pattern",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          4
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "edge_property_filter",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH ()-[r:KNOWS]->() WHERE r.since > 2020 RETURN count(r) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "edge_property_projection",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH ()-[r:WORKS_AT]->() RETURN r.role AS role ORDER BY role"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "role"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "eng"
+        ],
+        [
+          "ops"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "with_order_limit",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WITH p ORDER BY p.age DESC LIMIT 2 RETURN p.name AS name"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "name"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Carol"
+        ],
+        [
+          "Dan"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "nested_aggregate",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (p:Person) WITH count(p) AS n RETURN n * 2 AS doubled"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "doubled"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          8
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "db_labels",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL db.labels() YIELD label RETURN label ORDER BY label"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "label"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Company"
+        ],
+        [
+          "Employee"
+        ],
+        [
+          "Person"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "db_relationship_types",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "relationshipType"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "KNOWS"
+        ],
+        [
+          "WORKS_AT"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "db_property_keys",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "propertyKey"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "age"
+        ],
+        [
+          "city"
+        ],
+        [
+          "industry"
+        ],
+        [
+          "name"
+        ],
+        [
+          "role"
+        ],
+        [
+          "since"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "db_schema_visualization",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL db.schema.visualization() YIELD source_label, relationship_type, target_label RETURN source_label, relationship_type, target_label ORDER BY source_label, relationship_type, target_label"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "source_label",
+        "relationship_type",
+        "target_label"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          "Employee",
+          "WORKS_AT",
+          "Company"
+        ],
+        [
+          "Person",
+          "KNOWS",
+          "Person"
+        ],
+        [
+          "Person",
+          "WORKS_AT",
+          "Company"
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "algo_pagerank",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL algo.pageRank({iterations: 3}) YIELD node, score RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          6
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "algo_wcc",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL algo.wcc() YIELD node, componentId RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          6
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "algo_triangle_count",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL algo.triangleCount() YIELD node, triangles RETURN count(*) AS n"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "n"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          1
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "error_syntax",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH ("
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | MATCH (\n  |        ^---\n  |\n  = expected labels, properties, or variable"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_unknown_function",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN no_such_function(1)"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `no_such_function` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_unknown_procedure",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL db.nope()"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: db.nope"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_unknown_algorithm",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL algo.nope()"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Procedure.UnknownAlgorithm] Unknown algorithm: algo.nope. Available: pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_type_mismatch",
+    "path": "/api/query",
+    "request": {
+      "query": "RETURN 'a' + [1]"
+    },
+    "response": {
+      "cached": false,
+      "columns": [
+        "'a' + [1]"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          [
+            "a",
+            1
+          ]
+        ]
+      ],
+      "snapshot_version": 1
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "error_undefined_variable",
+    "path": "/api/query",
+    "request": {
+      "query": "MATCH (a) RETURN b"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.VariableNotBound] `b` is not bound: nothing in this query defines it"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_empty_query",
+    "path": "/api/query",
+    "request": {
+      "query": ""
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:1\n  |\n1 | \n  | ^---\n  |\n  = expected query"
+    },
+    "status": 400
+  },
+  {
+    "method": "POST",
+    "name": "error_gds_write_mode",
+    "path": "/api/query",
+    "request": {
+      "query": "CALL gds.pageRank.write({})"
+    },
+    "response": {
+      "error": "[Samyama.ClientError.Procedure.NotFound] `gds.pageRank.write` is not supported: this engine streams results, and GDS's `write` mode writes them. Call `gds.pagerank.stream` or `algo.pagerank` and write the result yourself with SET."
+    },
+    "status": 400
+  },
+  {
+    "method": "GET",
+    "name": "status",
+    "path": "/api/status",
+    "request": null,
+    "response": {
+      "cache": {
+        "hits": "<count>",
+        "misses": "<count>",
+        "size": "<count>"
+      },
+      "status": "healthy",
+      "storage": {
+        "edges": 4,
+        "nodes": 6
+      },
+      "version": "<version>"
+    },
+    "status": 200
+  },
+  {
+    "method": "GET",
+    "name": "schema",
+    "path": "/api/schema",
+    "request": null,
+    "response": {
+      "constraints": [],
+      "edge_types": [
+        {
+          "count": 2,
+          "source_labels": [
+            "Person"
+          ],
+          "target_labels": [
+            "Person"
+          ],
+          "type": "KNOWS"
+        },
+        {
+          "count": 2,
+          "source_labels": [
+            "Employee",
+            "Person"
+          ],
+          "target_labels": [
+            "Company"
+          ],
+          "type": "WORKS_AT"
+        }
+      ],
+      "indexes": [],
+      "node_types": [
+        {
+          "count": 2,
+          "label": "Company",
+          "properties": {
+            "industry": "String",
+            "name": "String"
+          },
+          "properties_sampled_from": 2
+        },
+        {
+          "count": 1,
+          "label": "Employee",
+          "properties": {
+            "age": "Integer",
+            "city": "String",
+            "name": "String"
+          },
+          "properties_sampled_from": 1
+        },
+        {
+          "count": 4,
+          "label": "Person",
+          "properties": {
+            "age": "Integer",
+            "city": "String",
+            "name": "String"
+          },
+          "properties_sampled_from": 4
+        }
+      ],
+      "statistics": {
+        "avg_out_degree": 0.6666666666666666,
+        "total_edges": 4,
+        "total_nodes": 6
+      }
+    },
+    "status": 200
+  },
+  {
+    "method": "GET",
+    "name": "vector_indexes_empty",
+    "path": "/api/vector/indexes",
+    "request": null,
+    "response": {
+      "count": 0,
+      "indexes": []
+    },
+    "status": 200
+  },
+  {
+    "method": "POST",
+    "name": "query_missing_field",
+    "path": "/api/query",
+    "request": {
+      "not_a_query": "x"
+    },
+    "response": "Failed to deserialize the JSON body into the target type: missing field `query` at line 1 column 20",
+    "status": 422
+  },
+  {
+    "method": "POST",
+    "name": "query_unknown_graph",
+    "path": "/api/query",
+    "request": {
+      "graph": "no_such_graph",
+      "query": "RETURN 1"
+    },
+    "response": {
+      "error": "This build serves a single graph ('default'); the requested graph 'no_such_graph' does not exist and the argument cannot be honoured. Previously it was ignored and the query silently ran against 'default', merging datasets. Omit the argument, or use a separate data directory per dataset.",
+      "graph": "no_such_graph"
+    },
+    "status": 400
+  }
+]

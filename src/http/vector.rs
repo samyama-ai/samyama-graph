@@ -261,7 +261,9 @@ pub async fn search_handler(
                             }
                             json!({
                                 "id": node_id.as_u64(),
-                                "labels": n.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                                // Sorted, as in the query handler: the hash
+                                // order of a label set is not a contract (#1353).
+                                "labels": crate::http::handler::sorted_label_strs(&n.labels),
                                 "properties": properties,
                             })
                         })

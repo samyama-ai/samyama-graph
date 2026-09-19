@@ -269,6 +269,19 @@ jobs:
         # job, and the recorded file carries the date it was taken.
         run: cargo run --release --example algo_parity_check
 
+      - name: CH-API-STABILITY — the recorded request/response corpus still replays
+        id: ch_api_stability
+        continue-on-error: true
+        # API-16. A renamed field, a type that changes from integer to string,
+        # an error that stops being an error: each breaks every client, and
+        # none of them fails a test that asks whether a query returns the right
+        # rows. The corpus asks whether the answer is the *same*, not whether
+        # it is right.
+        run: |
+          set -euo pipefail
+          cargo build --release --bin samyama
+          python3 scripts/api_stability.py --check
+
       - name: GATES — every gate above ran, and every one of them passed
         # Each gate is `continue-on-error` so that one red does not skip the
         # rest. This step is what makes the job fail, and it is the only place
@@ -294,6 +307,7 @@ jobs:
           CH_DETERM_THREADS_OUTCOME: ${{ steps.ch_determ_threads.outcome }}
           LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
           CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
+          CH_API_STABILITY_OUTCOME: ${{ steps.ch_api_stability.outcome }}
         run: |
           failed=""
           check() {
@@ -311,6 +325,7 @@ jobs:
           check ch_determ_threads "CH-DETERM-THREADS"
           check lint_ratchet "LINT-RATCHET"
           check ch_algo_parity "CH-ALGO-PARITY"
+          check ch_api_stability "CH-API-STABILITY"
           if [ -n "$failed" ]; then
             echo
             echo "failed gates:$failed"
