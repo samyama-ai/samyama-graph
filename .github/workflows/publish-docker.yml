@@ -91,9 +91,24 @@ jobs:
           sbom-path: sbom-image.spdx.json
           push-to-registry: true
 
+  # Run on both architectures the image is built for.
+  #
+  # `platforms: linux/amd64,linux/arm64` produced two images and this job
+  # started one of them. An arm64 image that has never been started is an
+  # image, not a release -- and it is pushed to GHCR either way, so the first
+  # person to find out it does not run is whoever pulls it (#1327).
   smoke-test:
     needs: build-and-push
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    name: smoke-test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       # Auth lets the first release pull the package while it's still private.
       # GHCR packages default to private on first publish — flip to public in
