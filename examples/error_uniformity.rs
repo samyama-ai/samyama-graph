@@ -42,8 +42,7 @@ use std::sync::Arc;
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::http::HttpServer;
 use samyama::protocol::server::{RespServer, ServerConfig};
-use samyama::query::executor::QueryExecutor;
-use samyama::query::parser::parse_query;
+use samyama::query::QueryEngine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -108,13 +107,19 @@ fn strip_envelope(surface: &str, msg: &str) -> String {
     }
 }
 
+/// The embedded surface, through `QueryEngine` -- which is what
+/// `samyama_sdk::EmbeddedClient` holds and uses.
+///
+/// This called `parse_query` then `QueryExecutor::execute` directly, an
+/// internal pair no embedded user reaches. It made no difference until errors
+/// started carrying a span, which `QueryEngine` attaches because it is the
+/// layer that has the query text; then this arm was the only one without one
+/// and the three surfaces "disagreed" on a difference that exists nowhere but
+/// in this probe (LANG-12).
 fn embedded(store: &GraphStore, q: &str) -> String {
-    match parse_query(q) {
+    match QueryEngine::new().execute(q, store) {
         Err(e) => format!("{e}"),
-        Ok(p) => match QueryExecutor::new(store).execute(&p) {
-            Err(e) => format!("{e}"),
-            Ok(_) => String::new(),
-        },
+        Ok(_) => String::new(),
     }
 }
 

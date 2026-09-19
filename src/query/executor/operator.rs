@@ -531,12 +531,22 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
     let left_prop = match left {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
-        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+        // The operator is named in backticks so the message says *where* as
+        // well as what. It is also what lets the span machinery find it in the
+        // query text -- an error that names no token can only be pointed at by
+        // guessing (LANG-12).
+        _ => return Err(ExecutionError::TypeError(format!(
+            "`{}` needs a value on the left, and got a node, relationship or path",
+            op.symbol()
+        ))),
     };
     let right_prop = match right {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
-        _ => return Err(ExecutionError::TypeError("Binary op requires property values".to_string())),
+        _ => return Err(ExecutionError::TypeError(format!(
+            "`{}` needs a value on the right, and got a node, relationship or path",
+            op.symbol()
+        ))),
     };
     // Cypher's three-valued logic: any comparison with a null operand is *unknown*, not
     // true or false, and a WHERE treats unknown as "exclude". Evaluating `null <> 1` as
@@ -701,7 +711,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             // graph, not an exceptional one (#457). The logical and comparison operators
             // already propagate null this way; arithmetic was the outlier.
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("Add requires numeric or string operands".to_string())),
+            _ => return Err(ExecutionError::TypeError(
+                "`+` requires numeric or string operands".to_string())),
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
             (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_sub(*r).ok_or_else(|| int_out_of_range(*l, "-", *r))?),

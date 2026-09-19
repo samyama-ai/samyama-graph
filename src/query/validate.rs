@@ -2657,8 +2657,11 @@ fn validate_aggregate_placement(query: &Query) -> Result<(), ValidationError> {
     }
     for p in where_predicates {
         if contains_aggregate(p) {
+            // `WHERE` in backticks: it names the clause at fault, and it is
+            // what lets the error be pointed at a position in the query text
+            // rather than described in prose (LANG-12).
             return Err(ValidationError::AggregateNotAllowed(
-                "in WHERE: it filters one row at a time, and an aggregate needs \
+                "in `WHERE`: it filters one row at a time, and an aggregate needs \
                  the group. Aggregate in a WITH and filter on the alias",
             ));
         }

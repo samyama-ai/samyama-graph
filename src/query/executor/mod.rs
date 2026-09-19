@@ -479,9 +479,16 @@ impl<'a> QueryExecutor<'a> {
 
         // Check if this is a write query - if so, error out
         if plan.is_write {
-            return Err(ExecutionError::write_in_read(
-                "Cannot execute write query with read-only executor. Use MutQueryExecutor instead.".to_string()
-            ));
+            // Names the clause that writes, for two reasons. It is what the
+            // user has to change, and "read-only executor / MutQueryExecutor"
+            // named two internal Rust types at somebody who is holding a
+            // Cypher string and an HTTP endpoint. Naming the clause also lets
+            // the error be pointed at a position in the query (LANG-12).
+            let clause = query.write_clause().unwrap_or("this query");
+            return Err(ExecutionError::write_in_read(format!(
+                "`{clause}` writes, and this connection is read-only. Send the \
+                 statement on a write path instead."
+            )));
         }
 
         // Handle PROFILE - execute the query and attribute the wall-clock to
