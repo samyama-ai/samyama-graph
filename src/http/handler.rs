@@ -1076,15 +1076,25 @@ pub async fn export_snapshot_handler(
 
     let mut buf = Vec::new();
     match crate::snapshot::export_tenant(&store_guard, &mut buf) {
-        Ok(_stats) => (
-            axum::http::StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-                (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"snapshot.sgsnap\""),
-            ],
-            buf,
-        )
-            .into_response(),
+        Ok(stats) => {
+            // The loss report rides on a header as well as inside the file
+            // (INT-06). The body is the snapshot, so there is nowhere else to
+            // put it for a client that is streaming the download to disk and
+            // will not parse the gzip to find out what it did not get.
+            let losses = serde_json::to_string(&stats.dropped)
+                .unwrap_or_else(|_| "[]".to_string());
+            (
+                axum::http::StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (axum::http::header::CONTENT_DISPOSITION,
+                     "attachment; filename=\"snapshot.sgsnap\"".to_string()),
+                    (axum::http::HeaderName::from_static("x-samyama-export-dropped"), losses),
+                ],
+                buf,
+            )
+                .into_response()
+        }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
