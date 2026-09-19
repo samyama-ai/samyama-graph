@@ -592,6 +592,126 @@ pub async fn status_handler(
     }))
 }
 
+/// `GET /metrics` — Prometheus text exposition (REL-10).
+///
+/// Hand-rolled rather than pulling in a metrics crate: what is exported here
+/// is a handful of gauges already computed for `/api/memory`, and the text
+/// format is four lines of rules. A registry, a collector trait and a
+/// dependency would be the shape of a metrics system without any more metrics
+/// in it.
+///
+/// Gauges only, and no counters over time: nothing in the engine keeps a
+/// monotonic request count today, and a "counter" that resets whenever it is
+/// asked is worse than an absent one -- Prometheus reads a reset as a restart
+/// and produces a spike.
+pub async fn metrics_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let store_guard = state.store.read().await;
+    let r = store_guard.memory_report();
+    let stats = state.engine.cache_stats();
+    let indexes = store_guard.property_index.index_memory();
+
+    let mut out = String::new();
+    let mut gauge = |name: &str, help: &str, value: String| {
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"));
+    };
+    gauge("samyama_nodes", "Nodes in the graph.", store_guard.node_count().to_string());
+    gauge("samyama_edges", "Edges in the graph.", store_guard.edge_count().to_string());
+    gauge(
+        "samyama_memory_attributed_bytes",
+        "Resident bytes attributed to the graph. An estimate from a walk of the          structures, and a floor: allocator slack and the Arc-held indexes are not          counted.",
+        r.attributed().to_string(),
+    );
+    gauge(
+        "samyama_index_memory_bytes",
+        "Resident bytes held by property indexes and unique constraints.",
+        indexes.iter().map(|i| i.bytes).sum::<usize>().to_string(),
+    );
+    gauge("samyama_query_cache_entries", "Parsed statements held in the AST cache.",
+          state.engine.cache_len().to_string());
+    gauge("samyama_query_cache_hits", "AST cache hits since start.", stats.hits().to_string());
+    gauge("samyama_query_cache_misses", "AST cache misses since start.", stats.misses().to_string());
+
+    // Per-index, because "indexes cost 4 GB" and "this one index costs 4 GB"
+    // lead to different actions.
+    out.push_str("# HELP samyama_index_bytes Resident bytes of one index.\n");
+    out.push_str("# TYPE samyama_index_bytes gauge\n");
+    for i in &indexes {
+        out.push_str(&format!(
+            "samyama_index_bytes{{label=\"{}\",property=\"{}\",kind=\"{}\"}} {}\n",
+            i.label.replace('"', ""), i.property.replace('"', ""), i.kind, i.bytes
+        ));
+    }
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        out,
+    )
+}
+
+/// `GET /api/memory` — where the memory goes (COST-06).
+///
+/// COST-06 asks that the engine report memory per graph, index and tenant so a
+/// customer can attribute cost. `GraphStore::memory_report` has had the
+/// per-component walk for some time and nothing exposed it, which is the same
+/// as not having it: the number has to leave the process for anyone outside to
+/// act on it.
+///
+/// **Every figure is an estimate and the response says so.** It is a walk of
+/// the structures, not a reading of the allocator: `HashMap` load factor,
+/// `BTreeMap` node overhead and allocator slack are not visible from here, and
+/// the `Arc`-held hierarchy and vector indexes are still not walked at all.
+/// `attributed_bytes` is a floor on the graph's footprint, not the process's
+/// RSS, and calling it `total` would invite exactly the comparison it cannot
+/// survive.
+pub async fn memory_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let store_guard = state.store.read().await;
+    let r = store_guard.memory_report();
+    let indexes = store_guard.property_index.index_memory();
+    let index_bytes: usize = indexes.iter().map(|i| i.bytes).sum();
+    let nodes = store_guard.node_count();
+    let edges = store_guard.edge_count();
+    Json(json!({
+        "estimate": true,
+        "note": concat!(
+            "A walk of the graph's structures, not a reading of the allocator. ",
+            "Allocator slack, hash-map load factor and the Arc-held vector and ",
+            "hierarchy indexes are not included, so these are floors."),
+        "graph": {
+            "nodes": nodes,
+            "edges": edges,
+            "attributed_bytes": r.attributed(),
+            // Null, not zero, on an edgeless graph: 0.0 bytes per edge is a
+            // claim, and it is false.
+            "bytes_per_edge": if edges > 0 {
+                Some(r.attributed() as f64 / edges as f64)
+            } else {
+                None
+            },
+            "components": {
+                "node_columns": r.node_columns,
+                "edge_columns": r.edge_columns,
+                "node_versions": r.node_versions,
+                "node_properties": r.node_properties,
+                "node_labels": r.node_labels,
+                "edge_endpoints": r.edge_endpoints,
+                "edge_type_ids": r.edge_type_ids,
+                "edge_properties": r.edge_properties,
+                "adjacency_write_buffer": r.adjacency_write_buffer,
+                "adjacency_frozen": r.adjacency_frozen,
+                "label_index": r.label_index,
+                "edge_type_index": r.edge_type_index,
+            },
+        },
+        "index_memory_bytes": index_bytes,
+        "indexes": indexes,
+        "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
+    }))
+}
+
 /// Handler for graph schema introspection
 /// How many nodes of a label `/api/schema` reads to work out which properties
 /// it has. A property graph lets two nodes of a label carry different keys, so
