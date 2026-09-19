@@ -150,6 +150,9 @@ pub struct QueryEngine {
     stats: CacheStats,
     /// Per-query timeout in seconds (0 = no timeout)
     query_timeout_secs: u64,
+    /// Log a query that takes longer than this, in milliseconds. `0` disables
+    /// the log. See `SLOW_QUERY_MS`.
+    slow_query_ms: u64,
     /// Rows a single operator may produce before the query is refused
     /// (0 = unlimited). See `executor::budget`.
     row_budget: u64,
@@ -205,6 +208,14 @@ fn canonical_params(params: &std::collections::HashMap<String, crate::graph::Pro
     pairs.iter().map(|(k, v)| format!("{k}={v:?}")).collect::<Vec<_>>().join("\u{1f}")
 }
 
+/// A query slower than this is logged at `warn`. Overridable with
+/// `SLOW_QUERY_MS`; `0` switches the log off.
+///
+/// 1000 ms because PERF-19 puts the agent-loop budget at a p95 of 500 ms and a
+/// p99 of 2 s: a query past a second is already outside the band the product
+/// promises, and one that nobody can see is one nobody fixes (REL-10).
+const DEFAULT_SLOW_QUERY_MS: u64 = 1000;
+
 impl QueryEngine {
     /// Create a new query engine with the default cache capacity (1024 entries)
     pub fn new() -> Self {
@@ -219,6 +230,8 @@ impl QueryEngine {
             stats: CacheStats::new(),
             query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
+            slow_query_ms: std::env::var("SLOW_QUERY_MS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_SLOW_QUERY_MS),
             row_budget: executor::budget::configured_budget(),
             result_cache: Mutex::new(LruCache::new(cap)),
             result_cache_bytes: Mutex::new(0),
@@ -228,6 +241,43 @@ impl QueryEngine {
             result_stats: CacheStats::new(),
             plan_hash: false,
         }
+    }
+
+    /// Log a query that ran past `slow_query_ms`.
+    ///
+    /// The **query text** is in the line, not just a duration. A slow-query
+    /// log that says "a query took 4.2 s" tells an operator that something is
+    /// wrong and nothing about what; the text is the only part they can act on
+    /// without us (REL-10).
+    fn log_if_slow(&self, query_str: &str, elapsed: std::time::Duration, rows: usize) {
+        if self.slow_query_ms == 0 {
+            return;
+        }
+        let ms = elapsed.as_millis() as u64;
+        if ms < self.slow_query_ms {
+            return;
+        }
+        // Truncated: a generated query can be megabytes, and a log line that
+        // fills the disk is its own outage.
+        let text: String = query_str.chars().take(512).collect();
+        tracing::warn!(
+            elapsed_ms = ms,
+            rows,
+            threshold_ms = self.slow_query_ms,
+            query = %text,
+            "slow query"
+        );
+    }
+
+    /// Log a query slower than `ms`; `0` switches the log off.
+    ///
+    /// The environment variable supplies the default. This exists so a caller
+    /// -- a test, or an embedding application with its own idea of slow -- can
+    /// set it without touching process-wide state, which is both racy across
+    /// threads and, in recent Rust, unsafe.
+    pub fn with_slow_query_ms(mut self, ms: u64) -> Self {
+        self.slow_query_ms = ms;
+        self
     }
 
     /// Set the per-operator row budget; `0` disables enforcement entirely.
@@ -324,7 +374,9 @@ impl QueryEngine {
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
             );
         }
+        let started = std::time::Instant::now();
         let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
+        self.log_if_slow(query_str, started.elapsed(), result.records.len());
 
         Ok(result)
     }
@@ -465,7 +517,9 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
+        let started = std::time::Instant::now();
         let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
+        self.log_if_slow(query_str, started.elapsed(), result.records.len());
 
         Ok(result)
     }
