@@ -272,9 +272,40 @@ impl Wal {
 
                 let len = u32::from_le_bytes(len_bytes) as usize;
 
-                // Read record data
+                // Read record data.
+                //
+                // A record whose body is short is a **torn tail**: the process
+                // died between writing the length prefix and writing the bytes
+                // it promised. That is the ordinary shape of a crash, and the
+                // record was never acknowledged to anyone, so dropping it is
+                // correct.
+                //
+                // Propagating the error here was not. It abandoned the whole
+                // replay and took every complete record before it down with the
+                // torn one -- so a clean crash made the WAL unreplayable rather
+                // than replayable up to the last good record. The length-prefix
+                // read above has always stopped cleanly on a short read; this
+                // is the same stop, for the same reason, one field later
+                // (samyama-graph#1311).
+                //
+                // A failed **checksum** still errors. That is corruption of a
+                // record that was written in full, which is a different fact
+                // from a write that did not finish, and quietly discarding it
+                // would hide a damaged disk.
                 buf.resize(len, 0);
-                reader.read_exact(&mut buf)?;
+                match reader.read_exact(&mut buf) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        warn!(
+                            "WAL {}: a record promising {} bytes is short; the write \
+                             did not finish. Replaying up to the previous record.",
+                            file_path.display(),
+                            len
+                        );
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
 
                 // Deserialize
                 let record: WalRecord = bincode::deserialize(&buf)?;
