@@ -63,8 +63,18 @@ class SamyamaClient:
         """An in-process store. No server, no socket."""
         ...
     @staticmethod
-    def connect(url: str) -> SamyamaClient:
-        """A client for a server already running at `url`."""
+    def connect(
+        url: str,
+        timeout_seconds: float | None = 30.0,
+        connect_timeout_seconds: float | None = 5.0,
+        max_retries: int = 2,
+        retry_base_delay_ms: int = 100,
+    ) -> SamyamaClient:
+        """A client for a server already running at `url`.
+
+        `timeout_seconds` bounds a whole request; `None` means no timeout, which
+        is what this used to do unconditionally (samyama-graph#1326).
+        """
         ...
 
     def query(self, cypher: str, graph: str = "default") -> QueryResult: ...

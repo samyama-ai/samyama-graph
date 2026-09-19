@@ -334,6 +334,30 @@ jobs:
           echo
           echo "all gates ran and passed"
 
+  typescript-sdk:
+    # 22 tests, none of which ran on a pull request until now. `sdk/typescript`
+    # is not a cargo crate, so `cargo test --workspace` cannot reach it and the
+    # only workflows mentioning it publish on a tag. Six of the tests are about
+    # request deadlines and retry, which is precisely the behaviour that is
+    # invisible until a server goes quiet in production (#1326).
+    name: typescript-sdk (transport and connection management)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        working-directory: sdk/typescript
+        run: npm ci || npm install
+      - name: Typecheck
+        working-directory: sdk/typescript
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: Tests
+        working-directory: sdk/typescript
+        run: npm run build && npm test
+
   python-sdk:
     # `sdk/python` holds 95 tests and until now no workflow ran them on a pull
     # request: `cargo test --workspace` cannot reach the directory because the
