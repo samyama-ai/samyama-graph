@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -320,6 +320,8 @@ impl HttpServer {
             .route("/api/verify", post(verify_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/memory", get(memory_handler))
+            .route("/metrics", get(metrics_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/sample", post(sample_handler))
             .route("/api/import/csv", post(import_csv_handler))
