@@ -165,6 +165,17 @@ One thing, verified:
 
 ## Known inconsistency
 
+**Row order without `ORDER BY` is not stable between runs.** Cypher promises
+nothing about it and this engine delivers exactly nothing: a label scan
+iterates a hash set, so `MATCH (c:Company) RETURN c.name` came back as
+`Acme, Globex` on one call and `Globex, Acme` on the next, on the same graph in
+the same process. The consequence worth spelling out is that **`SKIP`/`LIMIT`
+paging without `ORDER BY` can skip a row or return one twice** — page 2 may be
+drawn from a different ordering than page 1. Neo4j has the same freedom and a
+far more stable scan order in practice, so a query ported from it can start
+dropping rows here with nothing looking wrong ([#1364](https://github.com/samyama-ai/samyama-graph/issues/1364)).
+
+
 Algorithm procedures do not share a calling convention. `algo.pageRank` and `algo.or.solve` take a config map; `algo.shortestPath`, `algo.weightedPath`, `algo.maxFlow`, `algo.mst`, `algo.cdlp` and `algo.lcc` take **positional** arguments. This is still inconsistent, but an unknown or misused name now reports the full list with each procedure's argument shape, so it costs one failed attempt rather than three.
 
 ## Maintaining this page
