@@ -1,113 +1,113 @@
 id,class,name,indexed_ms,baseline_ms,speedup,rows,agree
-H1-01,H1,"order test: terms under T (subtree 9331)",10.3459,2.0238,0.20,1,true
-H1-02,H1,"order test: terms under T0 (subtree 1555)",11.0048,2.3739,0.22,1,true
-H1-03,H1,"order test: terms under T05 (subtree 259)",12.1469,1.4416,0.12,1,true
-H1-04,H1,"order test: terms under T053 (subtree 43)",10.8727,1.8219,0.17,1,true
-H1-05,H1,"order test: terms under T0531 (subtree 7)",10.3279,1.4675,0.14,1,true
-H1-06,H1,"order test: days under Year Y2019",3.3025,1.5134,0.46,1,true
-H1-07,H1,"order test: days under Month Y2019M01",2.5285,0.4301,0.17,1,true
-H1-08,H1,"order test: days under Quarter Y2019Q1 (code is not a prefix)",2.3889,4.8202,2.02,1,true
-H1-09,H1,"order test: zips under Country CO0",1.8390,1.0824,0.59,1,true
-H1-10,H1,"order test: zips under State CO0S0",1.9827,0.5844,0.29,1,true
-H1-11,H1,"order test: zips under City CO0S0T0",2.0723,0.7466,0.36,1,true
-H1-12,H1,"order test on a multi-parent DAG: techniques under K0_0",0.1390,0.1139,0.82,1,true
-H1-13,H1,"order test on a multi-parent DAG: techniques under K0_5",0.0914,0.1082,1.18,1,true
-H1-14,H1,"order test: terms under T1",10.8780,1.6775,0.15,1,true
-H1-15,H1,"order test: terms under T2",11.6232,2.7484,0.24,1,true
-H2-01,H2,"sum over the T subtree (9331 nodes)",0.0045,40.3873,8968.97,1,true
-H2-02,H2,"sum over the T0 subtree (1555 nodes)",0.0050,38.2786,7733.06,1,true
-H2-03,H2,"sum over the T05 subtree (259 nodes)",0.0131,44.1250,3368.83,1,true
-H2-04,H2,"sum over the T053 subtree (43 nodes)",0.0047,40.2155,8561.95,1,true
-H2-05,H2,"sum over the T0531 subtree (7 nodes)",0.0046,38.1754,8284.58,1,true
-H2-06,H2,"sum over the T05314 subtree (1 nodes)",0.0070,39.2700,5628.49,1,true
-H2-07,H2,"sum over the Year Y2019 subtree (353 nodes)",0.0045,6.5712,1447.09,1,true
-H2-08,H2,"sum over the Month Y2019M01 subtree (29 nodes)",0.0092,7.0236,762.52,1,true
-H2-09,H2,"sum over the Quarter Y2019Q1 subtree (88 nodes)",0.0109,6.5142,599.23,1,true
-H2-10,H2,"sum over the Country CO0 subtree (446 nodes)",0.0050,5.2431,1045.90,1,true
-H2-11,H2,"sum over the State CO0S0 subtree (89 nodes)",0.0048,5.2457,1082.48,1,true
-H2-12,H2,"sum over the City CO0S0T0 subtree (11 nodes)",0.0042,5.6985,1353.90,1,true
-H2-13,H2,"sum over the multi-parent subtree of K0_0",0.0042,3.5145,827.90,1,true
-H2-14,H2,"sum over the multi-parent subtree of K0_5",0.0029,3.4539,1180.43,1,true
-H2-15,H2,"sum over the multi-parent subtree of K1_0",0.0030,3.7452,1238.90,1,true
-H2-16,H2,"sum over the multi-parent subtree of K2_3",0.0041,3.6035,872.32,1,true
-H2-17,H2,"sum over the T1 subtree",0.0033,37.8696,11623.57,1,true
-H2-18,H2,"sum over the T2 subtree",0.0062,39.2859,6387.96,1,true
-H2-19,H2,"sum over the T3 subtree",0.0049,39.4225,8053.63,1,true
-H2-20,H2,"sum over the T4 subtree",0.0044,40.3629,9082.55,1,true
-H2-21,H2,"count over the T0 subtree (1555 nodes)",0.0047,52.4427,11217.69,1,true
-H2-22,H2,"count over the T05 subtree (259 nodes)",0.0051,39.2180,7752.12,1,true
-H2-23,H2,"count over the T053 subtree (43 nodes)",0.0051,37.2570,7235.78,1,true
-H2-24,H2,"count over the T0531 subtree (7 nodes)",0.0045,36.3052,8069.61,1,true
-H3-01,H3,"roll-up for every ontology node at level 1",1.1812,7.5184,6.37,6,true
-H3-02,H3,"roll-up for every ontology node at level 2",1.1992,7.5951,6.33,36,true
-H3-03,H3,"roll-up for every ontology node at level 3",1.8486,7.6704,4.15,216,true
-H3-04,H3,"roll-up for every ontology node at level 4",2.5565,8.1010,3.17,1296,true
-H3-05,H3,"roll-up for every Month",0.0658,1.4906,22.65,96,true
-H3-06,H3,"roll-up for every Quarter",0.0273,1.4297,52.38,32,true
-H3-07,H3,"roll-up for every Year",0.0108,1.3374,123.86,8,true
-H3-08,H3,"roll-up for every State",0.0192,0.9188,47.90,20,true
-H3-09,H3,"roll-up for every City",0.1151,1.0058,8.74,160,true
-H4-01,H4,"events about anything under T0, in any period under Y2019M01",13.5576,20.3622,1.50,1,true
-H4-02,H4,"events about anything under T0, in any period under Y2019",13.3785,20.4146,1.53,1,true
-H4-03,H4,"events about anything under T05, in any period under Y2019M01",13.2582,19.0719,1.44,1,true
-H4-04,H4,"events about anything under T, in any period under Y2020M06",14.9706,21.9641,1.47,1,true
-H4-05,H4,"events about anything under T1, in any period under Y2021",13.8501,19.3240,1.40,1,true
-H4-06,H4,"events about anything under T05, in any period under Y2019",13.2478,18.5920,1.40,1,true
-H4-07,H4,"ontology x time x geography: events under T0, Y2019, CO0",24.5599,24.5094,1.00,1,true
-H4-08,H4,"ontology x time x geography: events under T0, Y2019, CO0S0",23.7099,24.9273,1.05,1,true
-H4-09,H4,"ontology x time x geography: events under T, Y2020, CO1",25.7729,28.1422,1.09,1,true
-H4-10,H4,"ontology x time x geography: events under T05, Y2019, CO0",23.9846,23.6227,0.98,1,true
-H4-11,H4,"ontology x time x geography: events under T1, Y2021, CO2",23.8461,24.7814,1.04,1,true
-H4-12,H4,"ontology x time x geography: events under T, Y2019, CO0S0T0",23.6594,27.3205,1.15,1,true
-H5-01,H5,"events using any technique under K0_0 (DAG axis)",4.6202,13.0529,2.83,1,true
-H5-02,H5,"events using any technique under K0_5 (DAG axis)",4.6390,13.2817,2.86,1,true
-H5-03,H5,"events using any technique under K1_0 (DAG axis)",4.6928,15.9197,3.39,1,true
-H5-04,H5,"events using any technique under K2_3 (DAG axis)",4.6985,20.7790,4.42,1,true
-H5-05,H5,"events about anything under T, summed by measure",7.1587,24.3904,3.41,1,true
-H5-06,H5,"events about anything under T0, summed by measure",5.3631,24.7980,4.62,1,true
-H5-07,H5,"events about anything under T05, summed by measure",5.7221,24.8217,4.34,1,true
-H5-08,H5,"events about anything under T053, summed by measure",6.3528,25.0899,3.95,1,true
-H5-09,H5,"events located anywhere under CO0",5.3223,6.6008,1.24,1,true
-H5-10,H5,"events located anywhere under CO1",4.9926,8.1819,1.64,1,true
-H6-01,H6,"terms NOT under T",10.3316,1.9952,0.19,1,true
-H6-02,H6,"terms NOT under T0",12.7723,2.4650,0.19,1,true
-H6-03,H6,"terms NOT under T05",12.1156,2.3226,0.19,1,true
-H6-04,H6,"terms NOT under T053",12.5930,3.0592,0.24,1,true
-H6-05,H6,"terms NOT under T0531",13.4247,2.9273,0.22,1,true
-H6-06,H6,"set difference: under T0 but not under T01",15.5916,2.2419,0.14,1,true
-H6-07,H6,"set difference: under T0 but not under T05",11.9782,2.3376,0.20,1,true
-H6-08,H6,"set difference: under T but not under T0",24.7811,4.0608,0.16,1,true
-H6-09,H6,"set difference: under T05 but not under T053",12.6645,2.6387,0.21,1,true
-H6-10,H6,"set difference: under T1 but not under T12",17.4564,3.4056,0.20,1,true
-H7-01,H7,"lowest common ancestor of T012 and T034",9.1372,15.1318,1.66,1,true
-H7-02,H7,"lowest common ancestor of T0120 and T0121",6.3199,9.8093,1.55,1,true
-H7-03,H7,"lowest common ancestor of T01 and T02",7.7482,11.9844,1.55,1,true
-H7-04,H7,"lowest common ancestor of T0 and T1",5.9743,9.0388,1.51,1,true
-H7-05,H7,"lowest common ancestor of T01234 and T01235",5.9160,11.0354,1.87,1,true
-H7-06,H7,"lowest common ancestor of T0123 and T0143",9.2563,11.1846,1.21,1,true
-H7-07,H7,"lowest common ancestor of T5 and T0",9.3760,12.5161,1.33,1,true
-H7-08,H7,"lowest common ancestor of T012 and T012",6.4457,13.2304,2.05,1,true
-H7-09,H7,"lowest common ancestor of T00000 and T55555",6.1493,10.5880,1.72,1,true
-H7-10,H7,"lowest common ancestor of T010 and T011",5.9577,8.9328,1.50,1,true
-H8-01,H8,"rank level-1 ontology subtrees by rolled-up measure",0.8678,7.1659,8.26,6,true
-H8-02,H8,"rank level-2 ontology subtrees by rolled-up measure",1.6130,7.5771,4.70,36,true
-H8-03,H8,"rank level-3 ontology subtrees by rolled-up measure",2.9090,7.7332,2.66,216,true
-H8-04,H8,"rank every Month by rolled-up measure",0.4285,1.4398,3.36,96,true
-H8-05,H8,"rank every Quarter by rolled-up measure",0.1335,1.4736,11.04,32,true
-H8-06,H8,"rank every Year by rolled-up measure",0.0253,1.3109,51.86,8,true
-H8-07,H8,"rank every State by rolled-up measure",0.0902,0.9151,10.14,20,true
-H8-08,H8,"rank every City by rolled-up measure",0.9939,1.0226,1.03,160,true
-H9-01,H9,"200-NN vector search restricted to the T0 subtree",,,,,skipped
-H9-02,H9,"200-NN vector search restricted to the T05 subtree",,,,,skipped
-H9-03,H9,"200-NN vector search restricted to the T1 subtree",,,,,skipped
-H9-04,H9,"200-NN vector search restricted to the T subtree",,,,,skipped
-H10-01,H10,"monthly roll-up window across 2019",0.0384,0.3356,8.73,12,true
-H10-02,H10,"monthly roll-up window across 2020",0.0386,0.3754,9.72,12,true
-H10-03,H10,"monthly roll-up window across 2021",0.0404,0.3638,9.00,12,true
-H10-04,H10,"monthly roll-up window across 2022",0.0387,0.3306,8.55,12,true
-H10-05,H10,"quarterly roll-up window across 2019",0.0177,0.2948,16.69,4,true
-H10-06,H10,"quarterly roll-up window across 2020",0.0169,0.3060,18.16,4,true
-H10-07,H10,"quarterly roll-up window across 2021",0.0169,0.2965,17.50,4,true
-H10-08,H10,"whole-year roll-up for 2019",0.0044,6.1163,1388.49,1,true
-H10-09,H10,"whole-year roll-up for 2020",0.0104,8.9618,858.00,1,true
-H10-10,H10,"whole-year roll-up for 2021",0.0045,5.9479,1310.39,1,true
+H1-01,H1,"order test: terms under T (subtree 9331)",2.0468,3.3979,1.66,1,true
+H1-02,H1,"order test: terms under T0 (subtree 1555)",1.2690,3.0102,2.37,1,true
+H1-03,H1,"order test: terms under T05 (subtree 259)",1.1457,2.5884,2.26,1,true
+H1-04,H1,"order test: terms under T053 (subtree 43)",1.0985,2.6624,2.42,1,true
+H1-05,H1,"order test: terms under T0531 (subtree 7)",1.0957,2.5439,2.32,1,true
+H1-06,H1,"order test: days under Year Y2019",0.3862,1.0670,2.76,1,true
+H1-07,H1,"order test: days under Month Y2019M01",0.3850,1.0710,2.78,1,true
+H1-08,H1,"order test: days under Quarter Y2019Q1 (code is not a prefix)",0.3693,0.0569,0.15,1,true
+H1-09,H1,"order test: zips under Country CO0",0.2635,0.8104,3.08,1,true
+H1-10,H1,"order test: zips under State CO0S0",0.2044,0.7578,3.71,1,true
+H1-11,H1,"order test: zips under City CO0S0T0",0.1962,0.7593,3.87,1,true
+H1-12,H1,"order test on a multi-parent DAG: techniques under K0_0",0.0090,0.0221,2.44,1,true
+H1-13,H1,"order test on a multi-parent DAG: techniques under K0_5",0.0102,0.0222,2.17,1,true
+H1-14,H1,"order test: terms under T1",1.3298,3.4433,2.59,1,true
+H1-15,H1,"order test: terms under T2",1.2628,2.5397,2.01,1,true
+H2-01,H2,"sum over the T subtree (9331 nodes)",0.0027,2.3170,846.87,1,true
+H2-02,H2,"sum over the T0 subtree (1555 nodes)",0.0026,0.3949,150.44,1,true
+H2-03,H2,"sum over the T05 subtree (259 nodes)",0.0028,0.0749,27.08,1,true
+H2-04,H2,"sum over the T053 subtree (43 nodes)",0.0028,0.0219,7.82,1,true
+H2-05,H2,"sum over the T0531 subtree (7 nodes)",0.0028,0.0128,4.58,1,true
+H2-06,H2,"sum over the T05314 subtree (1 nodes)",0.0028,0.0105,3.75,1,true
+H2-07,H2,"sum over the Year Y2019 subtree (353 nodes)",0.0026,0.0920,35.62,1,true
+H2-08,H2,"sum over the Month Y2019M01 subtree (29 nodes)",0.0026,0.0192,7.36,1,true
+H2-09,H2,"sum over the Quarter Y2019Q1 subtree (88 nodes)",0.0026,0.0322,12.33,1,true
+H2-10,H2,"sum over the Country CO0 subtree (446 nodes)",0.0026,0.1232,47.64,1,true
+H2-11,H2,"sum over the State CO0S0 subtree (89 nodes)",0.0026,0.0340,13.19,1,true
+H2-12,H2,"sum over the City CO0S0T0 subtree (11 nodes)",0.0026,0.0144,5.48,1,true
+H2-13,H2,"sum over the multi-parent subtree of K0_0",0.0027,0.0167,6.29,1,false
+H2-14,H2,"sum over the multi-parent subtree of K0_5",0.0027,0.0167,6.14,1,false
+H2-15,H2,"sum over the multi-parent subtree of K1_0",0.0026,0.0131,4.95,1,true
+H2-16,H2,"sum over the multi-parent subtree of K2_3",0.0027,0.0110,4.14,1,true
+H2-17,H2,"sum over the T1 subtree",0.0026,0.3980,151.04,1,true
+H2-18,H2,"sum over the T2 subtree",0.0027,0.4024,146.53,1,true
+H2-19,H2,"sum over the T3 subtree",0.0027,0.3945,147.97,1,true
+H2-20,H2,"sum over the T4 subtree",0.0027,0.4128,150.37,1,true
+H2-21,H2,"count over the T0 subtree (1555 nodes)",0.0025,0.4048,163.58,1,true
+H2-22,H2,"count over the T05 subtree (259 nodes)",0.0026,0.0761,28.99,1,true
+H2-23,H2,"count over the T053 subtree (43 nodes)",0.0026,0.0227,8.58,1,true
+H2-24,H2,"count over the T0531 subtree (7 nodes)",0.0026,0.0130,5.10,1,true
+H3-01,H3,"roll-up for every ontology node at level 1",4.7071,4.1325,0.88,6,true
+H3-02,H3,"roll-up for every ontology node at level 2",3.8021,4.0645,1.07,36,true
+H3-03,H3,"roll-up for every ontology node at level 3",4.1027,4.2246,1.03,216,true
+H3-04,H3,"roll-up for every ontology node at level 4",5.6007,6.0095,1.07,1296,true
+H3-05,H3,"roll-up for every Month",0.0894,0.8331,9.32,96,true
+H3-06,H3,"roll-up for every Quarter",0.0300,0.7757,25.82,32,true
+H3-07,H3,"roll-up for every Year",0.0124,0.7416,59.60,8,true
+H3-08,H3,"roll-up for every State",0.0208,0.4967,23.87,20,true
+H3-09,H3,"roll-up for every City",0.1413,0.6171,4.37,160,true
+H4-01,H4,"events about anything under T0, in any period under Y2019M01",12.5017,1.1511,0.09,1,true
+H4-02,H4,"events about anything under T0, in any period under Y2019",11.1938,1.4533,0.13,1,true
+H4-03,H4,"events about anything under T05, in any period under Y2019M01",11.2953,0.2287,0.02,1,true
+H4-04,H4,"events about anything under T, in any period under Y2020M06",11.4980,6.5743,0.57,1,true
+H4-05,H4,"events about anything under T1, in any period under Y2021",11.0267,1.4235,0.13,1,true
+H4-06,H4,"events about anything under T05, in any period under Y2019",11.1468,0.5093,0.05,1,true
+H4-07,H4,"ontology x time x geography: events under T0, Y2019, CO0",18.6197,1.8678,0.10,1,true
+H4-08,H4,"ontology x time x geography: events under T0, Y2019, CO0S0",18.2426,1.5524,0.09,1,true
+H4-09,H4,"ontology x time x geography: events under T, Y2020, CO1",19.4689,7.9382,0.41,1,true
+H4-10,H4,"ontology x time x geography: events under T05, Y2019, CO0",17.5173,1.0186,0.06,1,true
+H4-11,H4,"ontology x time x geography: events under T1, Y2021, CO2",19.8106,1.9377,0.10,1,true
+H4-12,H4,"ontology x time x geography: events under T, Y2019, CO0S0T0",18.5844,7.8134,0.42,1,true
+H5-01,H5,"events using any technique under K0_0 (DAG axis)",0.0908,0.1916,2.11,1,true
+H5-02,H5,"events using any technique under K0_5 (DAG axis)",0.0935,0.1938,2.07,1,true
+H5-03,H5,"events using any technique under K1_0 (DAG axis)",0.0464,0.0890,1.92,1,true
+H5-04,H5,"events using any technique under K2_3 (DAG axis)",0.0187,0.0419,2.24,1,true
+H5-05,H5,"events about anything under T, summed by measure",2.4045,5.1624,2.15,1,true
+H5-06,H5,"events about anything under T0, summed by measure",0.4040,0.8496,2.10,1,true
+H5-07,H5,"events about anything under T05, summed by measure",0.0699,0.1540,2.20,1,true
+H5-08,H5,"events about anything under T053, summed by measure",0.0159,0.0362,2.28,1,true
+H5-09,H5,"events located anywhere under CO0",0.2190,0.4260,1.95,1,true
+H5-10,H5,"events located anywhere under CO1",0.2183,0.4321,1.98,1,true
+H6-01,H6,"terms NOT under T",1.0649,2.5729,2.42,1,true
+H6-02,H6,"terms NOT under T0",1.8871,3.3775,1.79,1,true
+H6-03,H6,"terms NOT under T05",2.0143,3.6311,1.80,1,true
+H6-04,H6,"terms NOT under T053",2.0387,3.1583,1.55,1,true
+H6-05,H6,"terms NOT under T0531",1.9468,2.9213,1.50,1,true
+H6-06,H6,"set difference: under T0 but not under T01",8.5917,3.3792,0.39,1,true
+H6-07,H6,"set difference: under T0 but not under T05",7.6466,3.4044,0.45,1,true
+H6-08,H6,"set difference: under T but not under T0",7.8555,3.9599,0.50,1,true
+H6-09,H6,"set difference: under T05 but not under T053",7.5938,3.3849,0.45,1,true
+H6-10,H6,"set difference: under T1 but not under T12",7.6182,3.4520,0.45,1,true
+H7-01,H7,"lowest common ancestor of T012 and T034",5.2952,0.5964,0.11,1,true
+H7-02,H7,"lowest common ancestor of T0120 and T0121",5.2205,0.6012,0.12,1,true
+H7-03,H7,"lowest common ancestor of T01 and T02",5.2614,0.6027,0.11,1,true
+H7-04,H7,"lowest common ancestor of T0 and T1",5.1719,0.5961,0.12,1,true
+H7-05,H7,"lowest common ancestor of T01234 and T01235",5.1932,0.6045,0.12,1,true
+H7-06,H7,"lowest common ancestor of T0123 and T0143",5.2353,0.6127,0.12,1,true
+H7-07,H7,"lowest common ancestor of T5 and T0",5.2796,0.5997,0.11,1,true
+H7-08,H7,"lowest common ancestor of T012 and T012",5.2968,0.5954,0.11,1,true
+H7-09,H7,"lowest common ancestor of T00000 and T55555",5.2291,0.6169,0.12,1,true
+H7-10,H7,"lowest common ancestor of T010 and T011",5.1736,0.5950,0.12,1,true
+H8-01,H8,"rank level-1 ontology subtrees by rolled-up measure",1.8307,4.0979,2.24,6,true
+H8-02,H8,"rank level-2 ontology subtrees by rolled-up measure",1.9066,4.1555,2.18,36,true
+H8-03,H8,"rank level-3 ontology subtrees by rolled-up measure",2.2597,4.3033,1.90,216,true
+H8-04,H8,"rank every Month by rolled-up measure",0.1174,0.8167,6.96,96,true
+H8-05,H8,"rank every Quarter by rolled-up measure",0.0443,0.7426,16.76,32,true
+H8-06,H8,"rank every Year by rolled-up measure",0.0154,0.7181,46.48,8,true
+H8-07,H8,"rank every State by rolled-up measure",0.0299,0.5069,16.98,20,true
+H8-08,H8,"rank every City by rolled-up measure",0.2061,0.6539,3.17,160,true
+H9-01,H9,"200-NN vector search restricted to the T0 subtree",0.2675,0.6214,2.32,0,false
+H9-02,H9,"200-NN vector search restricted to the T05 subtree",0.2670,0.3468,1.30,0,false
+H9-03,H9,"200-NN vector search restricted to the T1 subtree",0.2613,0.2534,0.97,0,false
+H9-04,H9,"200-NN vector search restricted to the T subtree",0.2683,0.2279,0.85,0,false
+H10-01,H10,"monthly roll-up window across 2019",0.0392,0.1282,3.27,12,true
+H10-02,H10,"monthly roll-up window across 2020",0.0368,0.1286,3.49,12,true
+H10-03,H10,"monthly roll-up window across 2021",0.0373,0.1314,3.52,12,true
+H10-04,H10,"monthly roll-up window across 2022",0.0371,0.1284,3.46,12,true
+H10-05,H10,"quarterly roll-up window across 2019",0.0186,0.1103,5.94,4,true
+H10-06,H10,"quarterly roll-up window across 2020",0.0188,0.1136,6.05,4,true
+H10-07,H10,"quarterly roll-up window across 2021",0.0187,0.1109,5.94,4,true
+H10-08,H10,"whole-year roll-up for 2019",0.0026,0.1029,39.49,1,true
+H10-09,H10,"whole-year roll-up for 2020",0.0026,0.0973,37.34,1,true
+H10-10,H10,"whole-year roll-up for 2021",0.0026,0.1008,38.12,1,true
