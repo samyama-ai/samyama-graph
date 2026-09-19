@@ -621,6 +621,28 @@ async fn start_server() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    // Origins allowed to call the HTTP API from a browser, and the only origins
+    // the Private Network Access opt-in is echoed to. Repeatable `--cors-origin`,
+    // or `SAMYAMA_CORS_ORIGINS` as a comma-separated list. Empty by default:
+    // before #1328 the server accepted every origin and echoed PNA to whoever
+    // asked, so a page on the open web could drive `/api/query`.
+    let mut cors_origins: Vec<String> = Vec::new();
+    {
+        let args: Vec<String> = std::env::args().collect();
+        for (i, a) in args.iter().enumerate() {
+            if a == "--cors-origin" {
+                if let Some(v) = args.get(i + 1) {
+                    cors_origins.push(v.clone());
+                }
+            }
+        }
+        if let Ok(env) = std::env::var("SAMYAMA_CORS_ORIGINS") {
+            cors_origins.extend(
+                env.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()),
+            );
+        }
+    }
+
     // Parse --data-path <dir> (snapshot/RocksDB persistence dir) and --ephemeral
     // (no persistence — guarantees an empty store, no CWD-relative ./samyama_data
     // recovery). --ephemeral wins if both are given.
@@ -814,9 +836,16 @@ async fn start_server() {
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);
     let http_persistence = persistence.clone();
+    let http_bind_host = config.address.clone();
+    let http_cors_origins = cors_origins.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
+            // The same host as the RESP listener. The HTTP server used to bind
+            // 0.0.0.0 unconditionally while RESP defaulted to loopback, so
+            // `--host` said one thing and half the server did another (#1328).
+            .with_bind_host(http_bind_host)
+            .with_allowed_origins(http_cors_origins)
             .with_tenant_manager(http_tenants);
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);

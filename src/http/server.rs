@@ -58,6 +58,7 @@ async fn static_handler() -> impl IntoResponse {
 /// outside it, on the response it produces. Only echoed when the request actually asks for
 /// it, so ordinary same-origin traffic is unaffected.
 async fn allow_private_network(
+    allowed: Arc<Vec<String>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -65,14 +66,59 @@ async fn allow_private_network(
         .headers()
         .get("access-control-request-private-network")
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"true"));
+    // Echoed only to an origin on the list. The previous version echoed to
+    // whichever origin asked, which is the whole protection: Chrome sends the
+    // preflight precisely so a *public* page cannot reach a private address
+    // without the local service naming it. Answering "yes" to everyone
+    // converts the check into a permission (#1328).
+    let permitted = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|o| allowed.iter().any(|a| a == o));
     let mut res = next.run(req).await;
-    if asked {
+    if asked && permitted {
         res.headers_mut().insert(
             "access-control-allow-private-network",
             axum::http::HeaderValue::from_static("true"),
         );
     }
     res
+}
+
+/// Is this address loopback-only?
+///
+/// Used for the warning on start-up, so it errs towards warning: anything that
+/// does not parse as a loopback IP is treated as routable.
+fn is_loopback(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+        || host.eq_ignore_ascii_case("localhost")
+}
+
+/// CORS for exactly the configured origins.
+///
+/// An empty list produces a layer that allows no cross-origin request, which is
+/// the default. `CorsLayer::permissive()` was the previous behaviour and it
+/// accepts any origin with credentials-free requests — enough for a page on the
+/// open web to drive `/api/query`, which executes arbitrary Cypher (#1328).
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() {
+        return CorsLayer::new();
+    }
+    let parsed: Vec<axum::http::HeaderValue> = origins
+        .iter()
+        .filter_map(|o| match o.parse() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!("ignoring unparseable CORS origin {o:?}");
+                None
+            }
+        })
+        .collect();
+    CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
 }
 
 /// Shared application state for HTTP routes
@@ -141,12 +187,50 @@ pub struct HttpServer {
     tenants: Option<Arc<TenantManager>>,
     embed_pipeline: Option<Arc<EmbedPipeline>>,
     persistence: Option<Arc<crate::persistence::PersistenceManager>>,
+    /// Address to listen on. Loopback unless asked otherwise (#1328).
+    bind_host: String,
+    /// Origins allowed to make cross-origin calls, and the only origins the
+    /// Private Network Access opt-in is echoed to. Empty by default (#1328).
+    allowed_origins: Vec<String>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
-        Self { store, port, data_path: None, tenants: None, embed_pipeline: None, persistence: None }
+        Self {
+            store,
+            port,
+            data_path: None,
+            tenants: None,
+            embed_pipeline: None,
+            persistence: None,
+            // Loopback, not 0.0.0.0. `/api/query` executes arbitrary Cypher
+            // including DELETE and nothing authenticates the caller, so the
+            // default must not put that on a routable address. The Docker image
+            // passes `--host 0.0.0.0` explicitly, which is the deliberate act
+            // this default exists to require (#1328).
+            bind_host: "127.0.0.1".to_string(),
+            allowed_origins: Vec::new(),
+        }
+    }
+
+    /// Address to listen on. Anything other than a loopback address publishes
+    /// an unauthenticated write API to the network.
+    pub fn with_bind_host(mut self, host: impl Into<String>) -> Self {
+        self.bind_host = host.into();
+        self
+    }
+
+    /// Origins permitted to call this server from a browser.
+    ///
+    /// Empty means no cross-origin request is allowed and the Private Network
+    /// Access header is never echoed. `CorsLayer::permissive()` plus an
+    /// unconditional PNA echo used to accept every origin, which turned the
+    /// browser's defence against a public page reaching a private address into
+    /// a permission granted to whoever asked (#1328).
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = origins;
+        self
     }
 
     /// Set the data directory for snapshot persistence (HA-08)
@@ -189,10 +273,17 @@ impl HttpServer {
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let app = self.build_router();
 
-        let addr = format!("0.0.0.0:{}", self.port);
+        let addr = format!("{}:{}", self.bind_host, self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-        info!("Visualizer available at http://localhost:{}", self.port);
+        info!("HTTP API on http://{addr}");
+        if !is_loopback(&self.bind_host) {
+            tracing::warn!(
+                "listening on {} — /api/query executes arbitrary Cypher and no \
+                 credential is read off the request (#1328)",
+                self.bind_host
+            );
+        }
 
         axum::serve(listener, app).await?;
 
@@ -252,8 +343,14 @@ impl HttpServer {
             app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
         }
 
-        app.layer(CorsLayer::permissive())
-            .layer(axum::middleware::from_fn(allow_private_network))
+        let cors = cors_layer(&self.allowed_origins);
+        let origins = Arc::new(self.allowed_origins.clone());
+        app.layer(cors).layer(axum::middleware::from_fn(
+            move |req, next| {
+                let origins = Arc::clone(&origins);
+                async move { allow_private_network(origins, req, next).await }
+            },
+        ))
     }
 }
 
@@ -410,11 +507,16 @@ mod tests {
             transactions: Default::default(),
         };
 
+        // Deliberately no CORS layer here. This assembles a miniature router to
+        // check the handlers type-check together; the shipped stack is what
+        // `HttpServer::router()` returns and what `tests/http_origin_allowlist.rs`
+        // drives. A permissive layer in a test router proves nothing about the
+        // server and leaves the string in the source, where CH-SEC reads it and
+        // reports a permissive CORS policy the server does not have (#1328).
         let _app: Router = Router::new()
             .route("/", get(static_handler))
             .route("/api/query", post(query_handler))
             .route("/api/status", get(status_handler))
-            .layer(CorsLayer::permissive())
             .with_state(state);
     }
 
