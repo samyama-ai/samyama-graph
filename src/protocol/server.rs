@@ -499,6 +499,97 @@ mod tests {
         assert!(guard.session_transaction_version().is_none(), "the store still has a transaction open");
     }
 
+    /// #1311 item 5: the transaction deadline had never been tripped.
+    ///
+    /// `session_transaction_timeout()` was read at BEGIN, `ConnTxn.timed_out`
+    /// was set when the deadline fired, and the COMMIT arm had a branch that
+    /// produced a specific message for it -- and no test set, tripped or
+    /// asserted any of them. A timeout nobody has watched is a timeout nobody
+    /// knows the shape of: whether the write is rolled back, whether the store
+    /// is left with a transaction open, and what the client is actually told.
+    ///
+    /// All three are asserted here, because the useful part of a timeout is
+    /// not that it fires but what it leaves behind.
+    ///
+    /// `SAMYAMA_TX_TIMEOUT_SECS` has a one-second floor, so this test costs a
+    /// second. It sets the variable for the whole process, which is safe only
+    /// because every other transaction test in this binary finishes in
+    /// milliseconds and so cannot reach a one-second deadline.
+    #[tokio::test]
+    async fn a_transaction_left_open_past_its_deadline_is_rolled_back() {
+        std::env::set_var("SAMYAMA_TX_TIMEOUT_SECS", "1");
+
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = Arc::new(CommandHandler::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = handle_connection(socket, s, h, None, None, None).await;
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let send = |parts: &[&str]| {
+            let mut bytes = Vec::new();
+            cmd(parts).encode(&mut bytes).unwrap();
+            bytes
+        };
+        let mut reply = [0u8; 512];
+
+        client.write_all(&send(&["GRAPH.BEGIN"])).await.unwrap();
+        let _ = client.read(&mut reply).await.unwrap();
+        client
+            .write_all(&send(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]))
+            .await
+            .unwrap();
+        let _ = client.read(&mut reply).await.unwrap();
+
+        // The next `store.read()` blocks until the transaction releases its
+        // write guard, which happens when the deadline fires. So the wait *is*
+        // the measurement, and the elapsed time is asserted below: without it
+        // this test passes under the 30-second default too, just thirty times
+        // slower, and could not tell a honoured deadline from an ignored one.
+        let opened = std::time::Instant::now();
+
+        // 1. The write is gone, and the deadline that removed it was the
+        //    configured one.
+        {
+            let guard = store.read().await;
+            let waited = opened.elapsed();
+            assert!(
+                waited < std::time::Duration::from_secs(5),
+                "the transaction held its guard for {waited:?}; the 1s deadline was \
+                 not honoured (the 30s default would also end up here, eventually)"
+            );
+            assert_eq!(
+                guard.node_count(),
+                0,
+                "a transaction past its deadline kept its write"
+            );
+            assert!(
+                guard.session_transaction_version().is_none(),
+                "the store still has a transaction open after the deadline"
+            );
+        }
+
+        // 2. The client is told *why*, not just that nothing is open. The
+        //    distinction is the whole point of `timed_out`: "you have no
+        //    transaction" and "your transaction was taken away from you" are
+        //    different things for an operator to read in a log.
+        client.write_all(&send(&["GRAPH.COMMIT"])).await.unwrap();
+        let n = client.read(&mut reply).await.unwrap();
+        let msg = String::from_utf8_lossy(&reply[..n]).to_string();
+        assert!(
+            msg.contains("rolled back") && msg.contains("longer than"),
+            "the reply must say the transaction timed out, not merely that none is open: {msg}"
+        );
+
+        drop(client);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        std::env::remove_var("SAMYAMA_TX_TIMEOUT_SECS");
+    }
+
     /// #1274: a COMMIT that could not be persisted used to log a warning and
     /// reply with the version, so the client was told a write was durable that a
     /// restart would lose. It must be refused and rolled back, in memory and on
