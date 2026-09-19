@@ -118,9 +118,18 @@ def kill9(proc: subprocess.Popen) -> None:
     proc.wait(timeout=30)
 
 
-def longest_prefix(acked: list[int], survived: set[int]) -> int:
+def prefix_length(issued: list[int], survived: set[int]) -> int:
+    """How far down the issue order the recovered state runs without a gap.
+
+    Measured over everything *issued*, not everything acknowledged. The write
+    that was in flight when the signal landed may well have reached disk, and
+    counting the prefix over acknowledged ids alone called that a hole: a first
+    sweep reported 156 of 997 kill points recovering to "not a prefix" when
+    every one of them was a clean prefix with the in-flight write on the end.
+    A check that cries wolf on correct behaviour gets switched off.
+    """
     n = 0
-    for i in acked:
+    for i in issued:
         if i in survived:
             n += 1
         else:
@@ -220,7 +229,11 @@ def one_cycle(cycle: int, rng: random.Random, mode: str,
             "acked_lost_count": len(acked_set - survived),
             "unacked_present": sorted(survived - acked_set - undecided)[:20],
             "unacked_present_count": len(survived - acked_set - undecided),
-            "longest_acked_prefix_intact": longest_prefix(acked, survived),
+            "prefix_intact": prefix_length(in_flight, survived),
+            # A gap is a surviving write with an *earlier* issued write missing
+            # in front of it -- a state no ordering of the commit log can
+            # produce. Losing the tail is not a gap.
+            "survivors_past_the_gap": len(survived) - prefix_length(in_flight, survived),
         }
     finally:
         shutil.rmtree(data_dir, ignore_errors=True)
@@ -268,10 +281,7 @@ def main() -> int:
     errored = [r for r in results if "error" in r]
     lost = [r for r in ran if r["acked_lost_count"] > 0]
     phantom = [r for r in ran if r["unacked_present_count"] > 0]
-    not_a_prefix = [
-        r for r in ran
-        if r["longest_acked_prefix_intact"] != r["survived"] - r["unacked_present_count"]
-    ]
+    not_a_prefix = [r for r in ran if r["survivors_past_the_gap"] > 0]
 
     doc = {
         "binary": str(BINARY),
