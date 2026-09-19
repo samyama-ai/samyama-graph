@@ -73,7 +73,7 @@ use crate::graph::PropertyValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use rayon::prelude::*;
 use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem};
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 // Thread-local query deadline for cooperative timeout inside operator materialization loops.
@@ -14181,6 +14181,27 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// The allowed list is the keys the function actually reads. `writeProperty`
     /// and `mutate` are not among them anywhere, which is ALGO-06 being unbuilt
     /// -- and unbuilt is a thing a caller can be told.
+    /// Every solver `or.solve` can actually run.
+    ///
+    /// Fourteen of the twenty-nine in `samyama-optimization` used to be absent
+    /// from the dispatch while shipping in the crate, so a caller asking for
+    /// `PSO` got Jaya under a `PSO` label. The list is here rather than implied
+    /// by a `match`, so the refusal message and the dispatch cannot drift
+    /// apart (#1341).
+    const SOLVERS: &'static [&'static str] = &[
+        "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
+        "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
+        "BMR", "BWR", "BMWR", "MOBMWR",
+        "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "Firefly", "Cuckoo", "GWO", "Bat",
+        "NSGA2", "MORaoDE", "SAPHR",
+    ];
+
+    /// Is this a name `or.solve` will run, rather than quietly substitute?
+    fn is_known_solver(name: &str) -> bool {
+        Self::SOLVERS.iter().any(|s| s.eq_ignore_ascii_case(name))
+    }
+
     fn reject_unknown_config_keys(
         args: &[Expression],
         call: &str,
@@ -15946,33 +15967,63 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
 
         // Extract parameters
+        // Every other algorithm function here takes camelCase; this one took
+        // snake_case, so `{maxIterations: 5}` ran a hundred iterations and
+        // reported success. Both spellings are accepted now, and anything else
+        // is refused (#1341).
+        Self::reject_unknown_config_keys(&self.args, "or.solve", &[
+            "algorithm", "budget", "costProperties", "costProperty", "cost_properties",
+            "cost_property", "label", "lowerBound", "max", "maxIterations", "max_iterations",
+            "minTotal", "min", "min_total", "populationSize", "population_size",
+            "property", "upperBound",
+        ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
+        if !Self::is_known_solver(algorithm) {
+            // The old `_ =>` arm ran Jaya for any name and bound the *requested*
+            // name into the result, so three runs of Jaya came back labelled
+            // PSO, DE and Jaya. A comparison between them measured nothing and
+            // said it measured three algorithms (#1341).
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: unknown algorithm `{algorithm}`. Available: {}",
+                Self::SOLVERS.join(", ")
+            )));
+        }
         let label_str = config_map.get("label").and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'label' in config".to_string()))?;
         let property = config_map.get("property").and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
         
-        let min_val = config_map.get("min").and_then(|v| v.as_float()).unwrap_or(0.0);
-        let max_val = config_map.get("max").and_then(|v| v.as_float()).unwrap_or(100.0);
+        let cfg_f = |a: &str, b: &str| {
+            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_float())
+        };
+        let cfg_i = |a: &str, b: &str| {
+            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_integer())
+        };
+        let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
+        let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
         
         // Objective: minimize sum(variable * cost_property)
-        let cost_prop = config_map.get("cost_property").and_then(|v| v.as_string());
+        let cost_prop = config_map.get("costProperty")
+            .or_else(|| config_map.get("cost_property"))
+            .and_then(|v| v.as_string());
         
         // Support multiple objectives
         let mut cost_props: Vec<String> = Vec::new();
         if let Some(cp) = cost_prop {
             cost_props.push(cp.to_string());
-        } else if let Some(PropertyValue::Array(arr)) = config_map.get("cost_properties") {
+        } else if let Some(PropertyValue::Array(arr)) =
+            config_map.get("costProperties").or_else(|| config_map.get("cost_properties"))
+        {
             for v in arr {
                 if let Some(s) = v.as_string() { cost_props.push(s.to_string()); }
             }
         }
 
         let budget = config_map.get("budget").and_then(|v| v.as_float());
-        let min_total = config_map.get("min_total").and_then(|v| v.as_float());
-        
-        let pop_size = config_map.get("population_size").and_then(|v| v.as_integer()).unwrap_or(50) as usize;
-        let max_iter = config_map.get("max_iterations").and_then(|v| v.as_integer()).unwrap_or(100) as usize;
+        let min_total = cfg_f("minTotal", "min_total");
+
+        let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;
+        let max_iter = cfg_i("maxIterations", "max_iterations").unwrap_or(100) as usize;
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
@@ -16025,6 +16076,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if algorithm == "NSGA2" || algorithm == "MOTLBO" || cost_props.len() > 1 {
             let res = match algorithm {
                 "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
+                "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
+                "MORaoDE" => MORaoDESolver::new(solver_config).solve(&problem),
                 _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
             };
 
@@ -16061,7 +16114,34 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "GSA" => GSASolver::new(solver_config).solve(&problem),
                 "HS" => HSSolver::new(solver_config).solve(&problem),
                 "FPA" => FPASolver::new(solver_config).solve(&problem),
-                _ => JayaSolver::new(solver_config).solve(&problem), // Default to Jaya
+                // Shipped in the crate and previously unreachable (#1341).
+                "PSO" => PSOSolver::new(solver_config).solve(&problem),
+                "DE" => DESolver::new(solver_config).solve(&problem),
+                "BMR" => BMRSolver::new(solver_config).solve(&problem),
+                "BWR" => BWRSolver::new(solver_config).solve(&problem),
+                "BMWR" => BMWRSolver::new(solver_config).solve(&problem),
+                "QOJaya" => QOJayaSolver::new(solver_config).solve(&problem),
+                "SAMPJaya" => SAMPJayaSolver::new(solver_config).solve(&problem),
+                "EHRJaya" => EHRJayaSolver::new(solver_config).solve(&problem),
+                "ITLBO" => ITLBOSolver::new(solver_config).solve(&problem),
+                "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
+                "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
+                "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                // Jaya by name, and by omitting `algorithm` -- the default is
+                // applied where the name is read, not here.
+                "Jaya" => JayaSolver::new(solver_config).solve(&problem),
+                // Not a catch-all. `SOLVERS` has already accepted this name, so
+                // arriving here means the list and the dispatch have drifted
+                // apart, and running Jaya instead is how that drift stayed
+                // invisible for fourteen solvers. A test asserting a solver
+                // "runs" is worth nothing while a missing arm silently runs
+                // something else (#1341).
+                other => {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "or.solve: `{other}` is listed as available but has no \
+                         implementation wired to it; this is a bug in the dispatch"
+                    )))
+                }
             };
 
             // 4. Write back results
