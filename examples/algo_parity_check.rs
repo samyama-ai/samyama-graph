@@ -407,7 +407,9 @@ fn main() {
                     let zero = vec![0.0; nodes];
                     checks += 1;
                     let want_w = wdist[key].as_f64().unwrap();
-                    match a_star(&view, sv, tv, &zero) {
+                    match a_star(&view, sv, tv, &zero)
+                        .expect("the parity graphs are built with non-negative weights")
+                    {
                         Some((_, cost)) if (cost - want_w).abs()
                             / want_w.abs().max(1e-12) <= TOL_PATH => {}
                         Some((_, cost)) => failures.push(format!(
@@ -428,7 +430,8 @@ fn main() {
                     let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
                     let want_lens: Vec<f64> =
                         lens.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
-                    let ours = yens_k_shortest(&view, sv, tv, want_lens.len());
+                    let ours = yens_k_shortest(&view, sv, tv, want_lens.len())
+                        .expect("the parity graphs are built with non-negative weights");
                     checks += 1;
                     let ok = ours.len() == want_lens.len()
                         && ours.iter().zip(&want_lens).all(|((_, c), w)| {
