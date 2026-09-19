@@ -299,14 +299,18 @@ impl GraphStatistics {
         result.push_str(&format!("  Total edges: {}\n", self.total_edges));
         result.push_str(&format!("  Avg out-degree: {:.2}\n", self.avg_out_degree));
         result.push_str(&format!("  Labels:\n"));
+        // By count, then by name. Sorting on the count alone left ties in hash
+        // order, so the same graph formatted differently between runs -- and
+        // this text is what EXPLAIN returns, which makes two plans for the same
+        // query impossible to diff (#1353).
         let mut labels: Vec<_> = self.label_counts.iter().collect();
-        labels.sort_by(|a, b| b.1.cmp(a.1));
+        labels.sort_by(|a, b| b.1.cmp(a.1).then(a.0.as_str().cmp(b.0.as_str())));
         for (label, count) in labels {
             result.push_str(&format!("    :{} = {} nodes\n", label.as_str(), count));
         }
         result.push_str(&format!("  Edge types:\n"));
         let mut types: Vec<_> = self.edge_type_counts.iter().collect();
-        types.sort_by(|a, b| b.1.cmp(a.1));
+        types.sort_by(|a, b| b.1.cmp(a.1).then(a.0.as_str().cmp(b.0.as_str())));
         for (etype, count) in types {
             result.push_str(&format!("    :{} = {} edges\n", etype.as_str(), count));
         }
