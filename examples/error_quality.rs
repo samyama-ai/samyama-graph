@@ -17,10 +17,16 @@
 //! The corpus is written by fault class rather than by what the engine
 //! happens to produce, so the classes we handle badly are visible rather than
 //! absent.
+//!
+//! **Errors are taken from `QueryEngine`, not from the executor.** This used to
+//! call `parse_query` then `QueryExecutor::execute` directly, which is an
+//! internal pair no user reaches: HTTP, RESP and the CLI all go through
+//! `QueryEngine`, and that is where the query text is in scope and where the
+//! span is attached. Measuring the inner API measured an error no caller ever
+//! sees.
 
 use samyama::graph::{GraphStore, Label};
-use samyama::query::executor::QueryExecutor;
-use samyama::query::parser::parse_query;
+use samyama::query::QueryEngine;
 
 /// (class, query) — one representative of each fault a user actually hits.
 const CASES: &[(&str, &str)] = &[
@@ -113,17 +119,15 @@ fn main() {
     store.set_node_property("default", n, "name",
                             samyama::graph::PropertyValue::String("a".into())).unwrap();
 
+    let engine = QueryEngine::new();
     let mut rows = Vec::new();
     for (class, q) in CASES {
-        let msg = match parse_query(q) {
+        let msg = match engine.execute(q, &store) {
             Err(e) => format!("{e}"),
-            Ok(p) => match QueryExecutor::new(&store).execute(&p) {
-                Err(e) => format!("{e}"),
-                // A query we expected to fail and which succeeded is a
-                // finding of its own -- it is the class LANG-03 is about --
-                // so it is recorded rather than skipped.
-                Ok(_) => String::new(),
-            },
+            // A query we expected to fail and which succeeded is a finding of
+            // its own -- it is the class LANG-03 is about -- so it is recorded
+            // rather than skipped.
+            Ok(_) => String::new(),
         };
         rows.push(serde_json::json!({
             "class": class,

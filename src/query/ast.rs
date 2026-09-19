@@ -789,6 +789,38 @@ pub enum BinaryOp {
     RegexMatch,
 }
 
+impl BinaryOp {
+    /// How this operator is written in Cypher.
+    ///
+    /// Used in error messages so they name the operator the user typed, which
+    /// is both clearer than "binary op" and what lets an error be pointed at a
+    /// position in the query text (LANG-12).
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            BinaryOp::Eq => "=",
+            BinaryOp::Ne => "<>",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::And => "AND",
+            BinaryOp::Or => "OR",
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Pow => "^",
+            BinaryOp::Xor => "XOR",
+            BinaryOp::Mod => "%",
+            BinaryOp::StartsWith => "STARTS WITH",
+            BinaryOp::EndsWith => "ENDS WITH",
+            BinaryOp::Contains => "CONTAINS",
+            BinaryOp::In => "IN",
+            BinaryOp::RegexMatch => "=~",
+        }
+    }
+}
+
 /// Unary operators
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnaryOp {
@@ -1071,6 +1103,35 @@ impl Query {
     ///
     /// `union_queries` and `call_subquery` are checked recursively: a read query
     /// whose subquery writes is a write.
+    /// The first clause that writes, by the name a user typed it as.
+    ///
+    /// For error messages: "`DELETE` writes, and this connection is read-only"
+    /// tells a caller what to change, where the type names of the two Rust
+    /// executors did not.
+    pub fn write_clause(&self) -> Option<&'static str> {
+        if let Some(c) = self.clauses.iter().find(|c| c.is_write()) {
+            return Some(c.kind());
+        }
+        // The legacy fields, which hold the write when the query was parsed
+        // into the older shape rather than into `clauses`. Checking only
+        // `clauses` reported `MATCH (n) DELETE n` as having no write clause,
+        // which is the same two-AST-shapes trap the rest of this file warns
+        // about.
+        if self.create_clause.is_some() {
+            return Some("CREATE");
+        }
+        if self.delete_clause.is_some() {
+            return Some("DELETE");
+        }
+        if !self.set_clauses.is_empty() {
+            return Some("SET");
+        }
+        if !self.remove_clauses.is_empty() {
+            return Some("REMOVE");
+        }
+        None
+    }
+
     pub fn is_write(&self) -> bool {
         if self.clauses.iter().any(Clause::is_write) {
             return true;

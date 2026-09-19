@@ -76,6 +76,7 @@ pub mod star;
 pub mod validate;
 pub mod executor;
 pub mod csv_source;
+pub mod span;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -330,7 +331,12 @@ impl QueryEngine {
         self.stats.record_miss();
 
         // Parse and cache (LRU evicts automatically when full)
-        let query = parse_query(query_str)?;
+        // Annotated here as well as after execution. Semantic checks -- an
+        // unbound variable, an unknown function -- are raised by the parser,
+        // so half the errors a user sees never reach the executor and a hook
+        // on execution alone missed exactly those. `pest`'s own grammar errors
+        // already carry a caret and are left alone.
+        let query = parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?;
         {
             let mut cache = self.ast_cache.lock().unwrap();
             cache.put(normalized, query.clone());
@@ -374,9 +380,23 @@ impl QueryEngine {
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
             );
         }
+        // Both sides of this: the span on the error (#1358) and the timing
+        // for the slow-query log. Taking either alone would silently revert
+        // the other -- two correct fixes at one call site.
         let started = std::time::Instant::now();
-        let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
-        self.log_if_slow(query_str, started.elapsed(), result.records.len());
+        let outcome = executor
+            .with_row_budget(self.row_budget)
+            .with_plan_hash(self.plan_hash)
+            .execute(&query);
+        // Logged before the `?`, so a query that ran for two minutes and then
+        // failed is in the log. That one is usually the more interesting of
+        // the two.
+        self.log_if_slow(
+            query_str,
+            started.elapsed(),
+            outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+        );
+        let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
     }
@@ -517,11 +537,70 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
+        // Both sides of this: the span on the error (#1358) and the timing
+        // for the slow-query log. Taking either alone would silently revert
+        // the other -- two correct fixes at one call site.
         let started = std::time::Instant::now();
-        let result = executor.with_row_budget(self.row_budget).with_plan_hash(self.plan_hash).execute(&query)?;
-        self.log_if_slow(query_str, started.elapsed(), result.records.len());
+        let outcome = executor
+            .with_row_budget(self.row_budget)
+            .with_plan_hash(self.plan_hash)
+            .execute(&query);
+        // Logged before the `?`, so a query that ran for two minutes and then
+        // failed is in the log. That one is usually the more interesting of
+        // the two.
+        self.log_if_slow(
+            query_str,
+            started.elapsed(),
+            outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+        );
+        let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
+    }
+}
+
+/// An error carrying the message it had plus a caret pointing into the query.
+///
+/// A separate type rather than a field on every error: the span is a property
+/// of *this execution of this text*, not of the error value, and the same
+/// `ExecutionError` raised from a prepared statement or an internal call has no
+/// query text to point into.
+#[derive(Debug)]
+pub struct SpannedError {
+    message: String,
+    /// The error as it was before the span was added, so a caller that wants
+    /// the bare message or the code can still get at it.
+    source: Box<dyn std::error::Error>,
+}
+
+impl SpannedError {
+    /// The original error.
+    pub fn inner(&self) -> &(dyn std::error::Error + 'static) {
+        self.source.as_ref()
+    }
+}
+
+impl std::fmt::Display for SpannedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for SpannedError {}
+
+/// Point an error at the query text, when the message names something findable.
+///
+/// Returns the error unchanged otherwise. LANG-12 asks for a span on every
+/// error; giving one to an error that names nothing would satisfy the count
+/// and help nobody, so the ones that cannot be located stay as they are and
+/// the measurement stays honest about them.
+fn with_span(
+    e: Box<dyn std::error::Error>,
+    query_str: &str,
+) -> Box<dyn std::error::Error> {
+    match span::annotate(&e.to_string(), query_str) {
+        Some(message) => Box::new(SpannedError { message, source: e }),
+        None => e,
     }
 }
 
