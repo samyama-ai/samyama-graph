@@ -97,23 +97,36 @@ cargo bench --bench hierarchy_benchmark        # index micro-benchmarks
 ```
 
 Every query is answered twice — once with the hierarchy indexes declared, once without —
-and the unindexed run is the ground truth. **112/112 agree.** Class H9
-(hierarchy-filtered vector search) was specified but skipped behind a `CALL … YIELD`
-composition gap; #443 removed that skip and its four queries now run and agree.
+and the unindexed run is the ground truth. **106 of 112 agree.**
 
 | Class | n | Speedup | Class | n | Speedup |
 |---|---:|---:|---|---:|---:|
-| H1 order test | 15 | 1.1× | H6 anti-subsumption | 10 | 0.3× |
-| H2 single roll-up | 24 | **8596×** | H7 lowest common ancestor | 10 | 1.7× |
-| H3 level roll-up | 9 | 5.9× | H8 top-k over roll-up | 8 | 5.3× |
-| H4 cross-hierarchy | 12 | 1.1× | H10 temporal windows | 10 | 108.5× |
-| H5 hierarchy × traversal | 10 | **27.4×** | H9 hierarchy × vector | 4 | 0.9× |
-| | | | **All** | **112** | **see note** |
+| H1 order test | 15 | 2.2× | H6 anti-subsumption | 10 | 0.7× |
+| H2 single roll-up | 24 | **83.4×** | H7 lowest common ancestor | 10 | 0.1× |
+| H3 level roll-up | 9 | 1.2× | H8 top-k over roll-up | 8 | 2.5× |
+| H4 cross-hierarchy | 12 | 0.2× | H10 temporal windows | 10 | 5.4× |
+| H5 hierarchy × traversal | 10 | 2.1× | H9 hierarchy × vector | 4 | 1.4× |
+| | | | **All** | **112** | **0.5×** |
 
-> **Provenance.** The per-class speedups above were measured before #443 unblocked H9, so they
-> cover 108 of the 112 queries. H9 itself measures ~0.9× — vector × hierarchy composes but is not
-> ordered by selectivity (#445). The class figures need a re-run on the documented hardware; the
-> 112/112 agreement above is from the current corpus and is not hardware-dependent.
+> **Provenance.** Commit `2e3ff44`, Vultr `voc-c-16c-32gb` (16 vCPU / 31 GB, AMD EPYC-Rome),
+> 20 reps, median per query, load average 0.19 at the start of the run. The artifact behind this
+> table is [`benchmarks/hier/results/`](../benchmarks/hier/results/), and
+> `PROVENANCE.json` there carries the same commit, host and load so the two can be checked
+> against each other — which is what the previous figures could not be (#476).
+>
+> **These numbers replace an earlier set that no longer reproduces.** The table used to read
+> H2 8596×, H5 27.4× and an aggregate of 3.0×, against a committed CSV that said 4721×, 3.30×
+> and 2.18×. Neither matches a run of current `main`: the aggregate is **0.5×** — the index is
+> a net slowdown across the corpus — with the win concentrated in H2 and H10 and real losses in
+> H4 and H7.
+>
+> **The agreement claim was wrong and is the more serious of the two.** "112/112 agree" was
+> published; a run of current `main` disagrees on six. Two are answer differences — the
+> hierarchy index returns a distinct-node sum where a variable-length pattern is defined over
+> paths, so a multi-parent subtree sums differently with the index on (#1343). Four are H9,
+> where the *baseline* query cannot run at all because it calls `subsumes()`, which requires the
+> index the baseline arm removes — so H9 has no baseline and its "speedup" is not a comparison
+> (#445).
 
 Against **Neo4j** on an identical graph: H2 **1124×**, H10 144×, H3 88×, H1 9.1×, H5 8.2× —
 **94× across the 58 queries expressible on both engines**, with no class losing. Without the
