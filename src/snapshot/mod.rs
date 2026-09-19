@@ -151,6 +151,8 @@ pub fn export_tenant_with_compression(
     let node_count = nodes.len() as u64;
     let total_edge_count = full_edges.len() as u64 + adjacency_edge_count;
 
+    let dropped = losses(store, total_edge_count);
+
     // Create gzip encoder
     let mut gz = GzEncoder::new(writer, Compression::new(compression_level.min(9)));
 
@@ -165,6 +167,7 @@ pub fn export_tenant_with_compression(
         edge_types: edge_types.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         samyama_version: crate::VERSION.to_string(),
+        dropped: dropped.clone(),
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -297,7 +300,88 @@ pub fn export_tenant_with_compression(
         labels,
         edge_types,
         bytes_written: 0,
+        dropped,
     })
+}
+
+/// What this export will not carry, for this graph (INT-06).
+///
+/// Only things that are actually there: a graph with no vector index produces
+/// no vector-index row. A standing list of everything the format *could* drop
+/// is a disclaimer, and nobody reads those; a list of what happened to this
+/// graph is a finding.
+///
+/// Each row says what it means for the restored graph rather than naming an
+/// internal structure, because the reader of this is deciding whether the
+/// restore is good enough.
+fn losses(store: &GraphStore, edge_count: u64) -> Vec<crate::snapshot::format::Dropped> {
+    use crate::snapshot::format::Dropped;
+    let mut out = Vec::new();
+
+    let indexes = store.property_index.list_indexes();
+    if !indexes.is_empty() {
+        out.push(Dropped {
+            what: "property_indexes".to_string(),
+            count: indexes.len() as u64,
+            detail: format!(
+                "Index declarations are not in the file. After import the data is \
+                 complete and unindexed, so queries that relied on them scan. \
+                 Re-create: {}",
+                indexes
+                    .iter()
+                    .map(|(l, p)| format!("CREATE INDEX ON :{}({p})", l.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+
+    let constraints = store.property_index.list_constraints();
+    if !constraints.is_empty() {
+        out.push(Dropped {
+            what: "unique_constraints".to_string(),
+            count: constraints.len() as u64,
+            // Worse than a missing index: an index costs speed, a missing
+            // constraint lets the restored graph accept duplicates the original
+            // refused.
+            detail: format!(
+                "Uniqueness is not enforced on the restored graph until these are \
+                 re-created: {}",
+                constraints
+                    .iter()
+                    .map(|(l, p)| format!("CREATE CONSTRAINT ON (n:{}) ASSERT n.{p} IS UNIQUE",
+                                          l.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+
+    let vectors = store.vector_index.list_indices();
+    if !vectors.is_empty() {
+        out.push(Dropped {
+            what: "vector_index_declarations".to_string(),
+            count: vectors.len() as u64,
+            detail: "The vectors themselves are node properties and survive. The \
+                     index declaration -- its name, dimensions and metric -- does \
+                     not, so vector search finds nothing until the index is \
+                     re-created."
+                .to_string(),
+        });
+    }
+
+    if edge_count > 0 {
+        out.push(Dropped {
+            what: "edge_creation_timestamps".to_string(),
+            count: edge_count,
+            detail: "Edges carry id, endpoints, type and properties. Creation time \
+                     is not among them, so a temporal query over edge age answers \
+                     differently after a round trip. Node timestamps do survive."
+                .to_string(),
+        });
+    }
+
+    out
 }
 
 /// Import nodes and edges from a .sgsnap stream into the store.
@@ -1427,6 +1511,7 @@ mod tests {
             edge_types: vec![],
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
+            dropped: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -1453,6 +1538,7 @@ mod tests {
             edge_types: vec![],
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
+            dropped: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
