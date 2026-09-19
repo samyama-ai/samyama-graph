@@ -5,8 +5,16 @@
 //! preflight and requires `Access-Control-Allow-Private-Network: true` in reply; without it
 //! the request is blocked in the browser and never reaches the engine at all.
 //!
-//! `CorsLayer::permissive()` does not cover this — tower-http has no PNA support — so the
-//! header has to be added alongside it, and this test is what keeps it there.
+//! tower-http has no PNA support, so the header is added alongside the CORS
+//! layer, and this test is what keeps it there.
+//!
+//! **The opt-in is now per origin** (#1328). It used to be echoed to whichever
+//! origin sent the request header, which grants nothing to the Studio and
+//! removes the protection for everyone — a public page could drive
+//! `/api/query`, which executes arbitrary Cypher and reads no credential. So
+//! `app()` names the Studio explicitly; that naming is the deliberate act the
+//! design now requires. `tests/http_origin_allowlist.rs` holds the other half:
+//! that an unlisted origin gets nothing.
 
 use std::sync::Arc;
 
@@ -17,9 +25,13 @@ use samyama::http::server::HttpServer;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+const STUDIO: &str = "https://graph.samyama.cloud";
+
 fn app() -> axum::Router {
     let store = Arc::new(RwLock::new(GraphStore::new()));
-    HttpServer::new(store, 0).router()
+    HttpServer::new(store, 0)
+        .with_allowed_origins(vec![STUDIO.to_string()])
+        .router()
 }
 
 #[tokio::test]
@@ -29,7 +41,7 @@ async fn preflight_from_a_public_origin_opts_into_the_loopback_address_space() {
             Request::builder()
                 .method("OPTIONS")
                 .uri("/api/status")
-                .header("Origin", "https://graph.samyama.cloud")
+                .header("Origin", STUDIO)
                 .header("Access-Control-Request-Method", "GET")
                 .header("Access-Control-Request-Private-Network", "true")
                 .body(Body::empty())
@@ -54,7 +66,7 @@ async fn the_header_is_not_sent_when_it_was_not_asked_for() {
             Request::builder()
                 .method("OPTIONS")
                 .uri("/api/status")
-                .header("Origin", "https://graph.samyama.cloud")
+                .header("Origin", STUDIO)
                 .header("Access-Control-Request-Method", "GET")
                 .body(Body::empty())
                 .unwrap(),
