@@ -2703,7 +2703,119 @@ fn point_distance(a: &Point, b: &Point) -> ExecutionResult<f64> {
     Ok(2.0 * EARTH_RADIUS_M * h.sqrt().asin())
 }
 
+/// The fewest arguments each function can be called with.
+///
+/// **Calling one of these with too few arguments used to abort the process.**
+/// `RETURN toUpper()` panicked on `args[0]` with "index out of bounds: the len
+/// is 0 but the index is 0", which unwound the tokio worker and took the server
+/// down -- and with no persistence configured, the whole in-memory graph with
+/// it. Fourteen characters, over an HTTP endpoint that reads no credential
+/// (#1328), from any caller.
+///
+/// A table rather than a guard in each of the 97 places that index `args`,
+/// because the next function somebody adds will index them too. The table is
+/// checked once before dispatch, and `tests/function_arity.rs` calls **every**
+/// name in `KNOWN_FUNCTIONS` with zero to three arguments, so a new function
+/// that needs a row and does not have one fails there rather than in
+/// production.
+///
+/// A name absent from this table is unconstrained: aggregates, `rand()`, `pi()`
+/// and the rest take what they take.
+const MIN_ARITY: &[(&str, usize)] = &[
+    ("abs", 1),
+    ("acos", 1),
+    ("asin", 1),
+    ("atan", 1),
+    ("ceil", 1),
+    ("cos", 1),
+    ("cosh", 1),
+    ("cot", 1),
+    ("degrees", 1),
+    ("distance", 1),
+    ("elementid", 1),
+    ("endnode", 1),
+    ("exists", 1),
+    ("exp", 1),
+    ("floor", 1),
+    ("haversin", 1),
+    ("head", 1),
+    ("id", 1),
+    ("isempty", 1),
+    ("isnan", 1),
+    ("keys", 1),
+    ("labels", 1),
+    ("last", 1),
+    ("left", 1),
+    ("length", 1),
+    ("log", 1),
+    ("log10", 1),
+    ("ltrim", 1),
+    ("nodes", 1),
+    ("point", 1),
+    ("properties", 1),
+    ("radians", 1),
+    ("relationships", 1),
+    ("rels", 1),
+    ("reverse", 1),
+    ("right", 1),
+    ("round", 1),
+    ("rtrim", 1),
+    ("sign", 1),
+    ("sin", 1),
+    ("sinh", 1),
+    ("size", 1),
+    ("sqrt", 1),
+    ("startnode", 1),
+    ("tail", 1),
+    ("tan", 1),
+    ("tanh", 1),
+    ("toboolean", 1),
+    ("tobooleanornull", 1),
+    ("tofloat", 1),
+    ("tofloatornull", 1),
+    ("toint", 1),
+    ("tointeger", 1),
+    ("tointegerornull", 1),
+    ("tolower", 1),
+    ("tolowercase", 1),
+    ("tostring", 1),
+    ("tostringornull", 1),
+    ("toupper", 1),
+    ("touppercase", 1),
+    ("trim", 1),
+    ("type", 1),
+    ("valuetype", 1),
+    ("atan2", 2),
+    ("haslabels", 2),
+    ("point.distance", 2),
+    ("point.withinbbox", 3),
+];
+
+/// How many arguments this function needs at minimum, if it is constrained.
+///
+/// Case-insensitive, because `eval_function` is reached with the name as the
+/// user typed it. A case-sensitive lookup guarded `toupper()` and left
+/// `toUpper()` -- the spelling everybody actually writes -- still aborting the
+/// process. The first version of the sweep test spelled every name in lower
+/// case and passed against exactly that hole.
+fn min_arity(name: &str) -> Option<usize> {
+    let lower = name.to_ascii_lowercase();
+    MIN_ARITY.iter().find(|(n, _)| *n == lower).map(|(_, m)| *m)
+}
+
 pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
+    // Arity before dispatch. Every arm below is free to index `args` because
+    // this ran first.
+    if let Some(min) = min_arity(name) {
+        if args.len() < min {
+            return Err(ExecutionError::bad_argument(format!(
+                "`{name}()` takes at least {min} argument{}; got {}",
+                if min == 1 { "" } else { "s" },
+                args.len()
+            )));
+        }
+    }
+
     let lowered = name.to_lowercase();
 
     // Null in, null out. In Cypher null means "unknown", so a question asked
