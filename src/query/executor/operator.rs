@@ -14296,7 +14296,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         // Run Algorithm
         let result = if let Some(prop) = weight_prop.as_deref() {
             Self::refuse_negative_weights(&view, "shortestPath", prop)?;
+            // The library refuses too now, so the guard above is belt and
+            // braces rather than the only thing standing there (#1303).
             crate::algo::dijkstra(&view, source_id, target_id)
+                .map_err(|e| ExecutionError::RuntimeError(format!("shortestPath: {e}")))?
         } else {
             crate::algo::bfs(&view, source_id, target_id)
         };
@@ -15114,6 +15117,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             PathKind::All => crate::algo::all_shortest_paths(&view, s, t, limit)
                 .into_iter().map(|p| (p, None)).collect(),
             PathKind::Yens => crate::algo::yens_k_shortest(&view, s, t, k)
+                .map_err(|e| ExecutionError::RuntimeError(format!("yens: {e}")))?
                 .into_iter().map(|(p, c)| (p, Some(c))).collect(),
             PathKind::AStar => {
                 // An absent heuristic is all zeros, which makes this exactly
@@ -15130,6 +15134,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     }).unwrap_or(0.0)
                 }).collect();
                 crate::algo::a_star(&view, s, t, &h)
+                    .map_err(|e| ExecutionError::RuntimeError(format!("aStar: {e}")))?
                     .map(|(p, c)| vec![(p, Some(c))]).unwrap_or_default()
             }
         };
@@ -15910,7 +15915,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let view = crate::algo::build_view(store, None, None, Some(&weight_prop));
         Self::refuse_negative_weights(&view, "weightedPath", &weight_prop)?;
 
-        if let Some(result) = crate::algo::dijkstra(&view, source_id, target_id) {
+        let shortest = crate::algo::dijkstra(&view, source_id, target_id)
+            .map_err(|e| ExecutionError::RuntimeError(format!("weightedPath: {e}")))?;
+        if let Some(result) = shortest {
              let mut record = Record::new();
              record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
              

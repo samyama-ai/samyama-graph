@@ -800,7 +800,9 @@ async fn main() {
 
     println!("    Finding shortest path from cmendez (entry) to ot-scada-01 (target)...");
 
-    match client.dijkstra(entry_point.as_u64(), target_asset.as_u64(), None, None, None).await {
+    match client.dijkstra(entry_point.as_u64(), target_asset.as_u64(), None, None, None).await
+        .expect("this demo builds no negative weights")
+    {
         Some(path_result) => {
             println!("    Path found! Cost (hops): {}", path_result.cost);
             println!("    Path:");
@@ -824,7 +826,9 @@ async fn main() {
             // Try alternative path: entry -> int-git-01 -> int-ci-01 -> int-app-01 -> int-dc-01
             let intermediate = *server_ids.get("int-dc-01").unwrap();
             println!("    Trying path to int-dc-01 (Domain Controller) instead...");
-            match client.dijkstra(entry_point.as_u64(), intermediate.as_u64(), None, None, None).await {
+            match client.dijkstra(entry_point.as_u64(), intermediate.as_u64(), None, None, None).await
+                .expect("this demo builds no negative weights")
+            {
                 Some(path_result) => {
                     println!("    Path found! Cost (hops): {}", path_result.cost);
                     println!("    Path:");
