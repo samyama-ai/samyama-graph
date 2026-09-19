@@ -49,7 +49,14 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BINARY = REPO / "target" / "release" / "samyama"
+
+#: The server under test. `--binary` pins it to a copy, which a long sweep
+#: needs: `cargo build` replaces `target/release/samyama` in place, so a build
+#: started while a sweep is running silently moves the sweep onto a different
+#: engine half way through -- and the result would be attributed to whichever
+#: commit was checked out at the end.
+DEFAULT_BINARY = REPO / "target" / "release" / "samyama"
+BINARY = DEFAULT_BINARY
 
 
 def free_port() -> int:
@@ -234,10 +241,16 @@ def main() -> int:
     # "every time" than 100 deep ones.
     ap.add_argument("--min-delay", type=float, default=0.05)
     ap.add_argument("--max-delay", type=float, default=0.8)
+    ap.add_argument("--binary", type=str,
+                    help="server binary to run; pin a copy for a long sweep so "
+                         "a rebuild cannot change the engine under it")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--json", type=str)
     a = ap.parse_args()
 
+    global BINARY
+    if a.binary:
+        BINARY = Path(a.binary).resolve()
     if not BINARY.exists():
         print(f"{BINARY} does not exist; cargo build --release --bin samyama",
               file=sys.stderr)
@@ -261,6 +274,7 @@ def main() -> int:
     ]
 
     doc = {
+        "binary": str(BINARY),
         "mode": a.mode,
         "kill_delay_range_s": [a.min_delay, a.max_delay],
         "cycles_requested": a.cycles,
