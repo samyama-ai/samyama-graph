@@ -209,6 +209,31 @@ impl Node {
     /// export wrote `NaN`, and the comparator died on it without anyone
     /// noticing for weeks (#1313).
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
+        self.inline_property(key)
+    }
+
+    /// The property as held in this node's **inline map**, and nothing else.
+    ///
+    /// The honest name for what [`Node::get_property`] does. A `Node` is a
+    /// detached value with no handle on the store, so it cannot consult the
+    /// columnar side (ADR-021) where the Cypher write path puts properties --
+    /// this method can only read half the store, and a name that says
+    /// `get_property` invites a caller to believe otherwise (#1313).
+    ///
+    /// `None` here means "not in the inline map", which is a different fact
+    /// from "this node has no such property". For the second question use
+    /// [`GraphStore::node_property`], which reads both sides.
+    ///
+    /// Concretely, after `CREATE (:Item {cost: 7.0})`:
+    ///
+    /// ```text
+    /// node.inline_property("cost")      => None
+    /// store.node_property(id, "cost")   => Some(Float(7.0))
+    /// ```
+    ///
+    /// Both are correct answers to different questions. The trap is that only
+    /// one of them looks like the question a caller meant to ask.
+    pub fn inline_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
     }
 
