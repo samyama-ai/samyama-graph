@@ -1,0 +1,12 @@
+{
+  "commit": "2e3ff44",
+  "dirty": true,
+  "host": "hier-bench",
+  "cpu": "AMD EPYC-Rome Processor",
+  "cores": 16,
+  "load_average_1m": "0.31",
+  "reps": 20,
+  "corpus": "benchmarks/hier/queries.json",
+  "queries": 112,
+  "agreed": 106
+}
