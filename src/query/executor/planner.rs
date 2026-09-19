@@ -3379,6 +3379,40 @@ impl QueryPlanner {
             Ok(Box::new(ShowPropertyKeysOperator::new()))
         } else if call_clause.procedure_name == "db.schema.visualization" {
             Ok(Box::new(SchemaVisualizationOperator::new()))
+        } else if call_clause.procedure_name == "db.schema.forLLM"
+            || call_clause.procedure_name == "db.schema.forllm"
+        {
+            use crate::query::executor::operator::SchemaForLlmOperator;
+            // The budget is optional and, when given, must be an integer
+            // literal. A budget silently ignored would return a default-sized
+            // answer under a call that asked for a different size -- the
+            // failure #1316 catalogued across the config surface, and the one
+            // a caller sizing a prompt would discover as an overflow.
+            let token_budget = match call_clause.arguments.first() {
+                None => SchemaForLlmOperator::DEFAULT_BUDGET,
+                Some(Expression::Literal(PropertyValue::Integer(n))) if *n > 0 => *n as usize,
+                Some(other) => {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "db.schema.forLLM takes an optional positive integer \
+                         token budget; got `{other:?}`"
+                    )))
+                }
+            };
+            if token_budget < SchemaForLlmOperator::MIN_BUDGET {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "db.schema.forLLM: a budget of {token_budget} tokens leaves \
+                     no room for a schema; the minimum is {}",
+                    SchemaForLlmOperator::MIN_BUDGET
+                )));
+            }
+            if call_clause.arguments.len() > 1 {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "db.schema.forLLM takes one optional argument, the token \
+                     budget; got {}",
+                    call_clause.arguments.len()
+                )));
+            }
+            Ok(Box::new(SchemaForLlmOperator::new(token_budget)))
         } else if let Some((mode, bare)) =
             AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
         {
