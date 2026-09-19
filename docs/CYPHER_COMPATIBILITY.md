@@ -155,6 +155,9 @@ One thing, verified:
 | | `algo.cdlp` / `algo.lcc` | ✅ | |
 | | `algo.bfs` / `algo.dijkstra` | ❌ | Not registered. The error now redirects to `algo.shortestPath` / `algo.weightedPath` and lists every procedure with its argument shape |
 | | `algo.or.solve` | ✅ | Requires write access |
+| **Introspection** | `db.labels` / `db.relationshipTypes` / `db.propertyKeys` | ✅ | Names only, no counts |
+| | `db.schema.visualization` | ✅ | Distinct `(:Src)-[:T]->(:Tgt)` triples. Walked only the first 1000 edges of each type until #1348 — the answer was a sample presented as the schema |
+| | `db.schema.forLLM(token_budget)` | ✅ | Not openCypher. One call: label counts, property types with null fraction, distinct count and sample values, relationship triples with counts, one example query. Budget defaults to 2000 tokens (estimated at 4 bytes each); a truncated answer says so in the text and in the `complete` column |
 
 ## Known inconsistency
 
