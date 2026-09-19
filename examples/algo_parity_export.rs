@@ -220,7 +220,9 @@ fn main() {
             .collect();
         let dij_costs: Vec<(String, Option<f64>)> = targets
             .iter()
-            .map(|t| ((*t).to_string(), dijkstra(&view, 0, *t as NodeId).map(|p| p.cost)))
+            .map(|t| ((*t).to_string(), dijkstra(&view, 0, *t as NodeId)
+                .expect("the parity graphs are built with non-negative weights")
+                .map(|p| p.cost)))
             .collect();
 
         let flow = edmonds_karp(&view, 0, (r.n - 1) as NodeId).map(|f| f.max_flow);
@@ -320,7 +322,9 @@ fn main() {
                 // A* with a zero heuristic is Dijkstra, which is what the
                 // reference runs. A heuristic of our own would make this a
                 // test of the heuristic rather than of the search.
-                if let Some((_, cost)) = a_star(&view, sv, tv, &zero) {
+                if let Some((_, cost)) = a_star(&view, sv, tv, &zero)
+                    .expect("the parity graphs are built with non-negative weights")
+                {
                     wdist.insert(key, cost);
                 }
             }
@@ -345,7 +349,9 @@ fn main() {
             let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
             simple.insert(
                 far.clone(),
-                yens_k_shortest(&view, sv, tv, 5).into_iter().map(|(_, c)| c).collect(),
+                yens_k_shortest(&view, sv, tv, 5)
+                    .expect("the parity graphs are built with non-negative weights")
+                    .into_iter().map(|(_, c)| c).collect(),
             );
         }
 

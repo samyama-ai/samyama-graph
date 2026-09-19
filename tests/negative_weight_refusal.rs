@@ -86,23 +86,44 @@ fn the_same_calls_still_answer_when_every_weight_is_positive() {
 
 /// What the refusal is protecting against, stated as a fact about the graph.
 ///
-/// Without a guard the Cypher call answers, and answers 3.0 — the direct hop —
-/// because the cheap route's `-4` edge was skipped. The right answer over the
-/// graph as built is 1.0. This asserts the skip is still there in the
-/// algorithm, so the test above is measuring the guard rather than a change of
-/// behaviour somewhere underneath it.
+/// `dijkstra` used to skip the `-4` edge and return 3.0 -- the direct hop --
+/// with full confidence, when the cost over the graph as built is 1.0. It now
+/// refuses, so the Cypher guard above is belt and braces rather than the only
+/// thing standing there (#1303).
+///
+/// The error carries the offending weight and names `bellmanFord`, because a
+/// refusal that does not say what to do instead is a dead end.
 #[test]
-fn the_algorithm_itself_still_skips_the_negative_edge() {
+fn the_algorithm_itself_refuses_rather_than_skipping() {
     let (store, a, c) = store_with_a_negative_edge();
     let view = samyama::algo::build_view(&store, None, None, Some("w"));
     assert_eq!(view.first_negative_weight(), Some(-4.0), "the fixture has one");
 
-    let path = samyama::algo::dijkstra(&view, a, c).expect("a path exists");
-    assert_eq!(
-        path.cost, 3.0,
-        "dijkstra skips the -4 edge and reports the expensive route as shortest; \
-         1.0 is the cost over the graph as built"
-    );
+    let err = samyama::algo::dijkstra(&view, a, c)
+        .expect_err("a negative-weight graph is refused, not answered");
+    assert_eq!(err.weight, -4.0);
+    let msg = err.to_string();
+    assert!(msg.contains("bellmanFord"), "the refusal must name the way out: {msg}");
+}
+
+/// The same shape without the negative edge still answers, so the refusal is a
+/// property of the weights rather than of the fixture.
+#[test]
+fn the_algorithm_answers_once_the_negative_edge_is_gone() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("N");
+    let b = store.create_node("N");
+    let c = store.create_node("N");
+    let t = EdgeType::new("LINK");
+    for (from, to, w) in [(a, b, 5.0f64), (b, c, 4.0), (a, c, 3.0)] {
+        let e = store.create_edge(from, to, t.clone()).unwrap();
+        store.set_edge_property_sparse(e, "w", PropertyValue::Float(w));
+    }
+    let view = samyama::algo::build_view(&store, None, None, Some("w"));
+    let path = samyama::algo::dijkstra(&view, a.as_u64(), c.as_u64())
+        .expect("no negative weights")
+        .expect("a path exists");
+    assert_eq!(path.cost, 3.0, "the direct hop is genuinely cheapest here");
 }
 
 /// Hop counting does not read weights, so it is not refused. Without this the
