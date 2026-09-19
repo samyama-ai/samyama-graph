@@ -13199,7 +13199,11 @@ impl PhysicalOperator for ShowPropertyKeysOperator {
             }
             for edge_type in store.all_edge_types() {
                 let edges = store.get_edges_by_type(edge_type);
-                for edge in edges.iter().take(1000) {
+                // Every edge of the type, not the first 1000. The cap made this
+                // a sample of the graph rather than its property keys: a key
+                // set only on edges past the cap was absent from the answer,
+                // with nothing saying the answer was partial.
+                for edge in edges.iter() {
                     for key in edge.properties.keys() {
                         keys.insert(key.clone());
                     }
@@ -13247,7 +13251,10 @@ impl PhysicalOperator for SchemaVisualizationOperator {
             let mut records = Vec::new();
             for edge_type in store.all_edge_types() {
                 let edges = store.get_edges_by_type(edge_type);
-                for edge in edges.iter().take(1000) {
+                // Every edge of the type, not the first 1000. This is the schema
+                // an LLM is handed, so a (Label)-[T]->(Label) triple dropped by
+                // the cap is a relationship the model is told does not exist.
+                for edge in edges.iter() {
                     if let (Some(src_node), Some(tgt_node)) = (store.get_node(edge.source), store.get_node(edge.target)) {
                         for src_label in &src_node.labels {
                             for tgt_label in &tgt_node.labels {
@@ -13277,6 +13284,274 @@ impl PhysicalOperator for SchemaVisualizationOperator {
         OperatorDescription {
             name: "SchemaVisualization".to_string(),
             details: String::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// `CALL db.schema.forLLM(token_budget)` -- the whole schema in one call, in
+/// the shape a model can plan against (AI-05).
+///
+/// What existed before was four procedures (`db.labels`, `db.relationshipTypes`,
+/// `db.propertyKeys`, `db.schema.visualization`) that between them gave a list
+/// of names and a list of triples: no counts, no property types, no sample
+/// values, no indication of which of the 40 labels is the one with 9 million
+/// nodes in it. A caller wanting a usable description made one call per label
+/// per property and assembled it, and a model given the names alone guesses.
+///
+/// Three things this does that a plain dump does not:
+///
+/// * **It is ordered by size.** A budget spends itself on the labels and
+///   relationships the graph is mostly made of, because those are the ones a
+///   question is most likely to be about.
+/// * **It carries distributions, not just names.** `null_fraction` and the
+///   most-common values come from the planner's own statistics, so a model can
+///   see that `Person.email` is set on 3% of nodes before writing a query that
+///   filters on it.
+/// * **A truncated answer says so.** The `complete` column is false and the
+///   text carries a line naming what was dropped and why. Silent truncation is
+///   the defect this whole surface had: `db.schema.visualization` walked the
+///   first 1000 edges of each type and presented the result as the schema.
+///
+/// Yields `schema`, `estimated_tokens`, `complete`.
+pub struct SchemaForLlmOperator {
+    token_budget: usize,
+    emitted: bool,
+}
+
+impl SchemaForLlmOperator {
+    /// Default budget when the call gives none. Big enough for a few dozen
+    /// labels with their properties, small enough to paste into a prompt
+    /// beside an actual question.
+    pub const DEFAULT_BUDGET: usize = 2000;
+
+    /// Below this there is no room for a schema at all, and returning a header
+    /// with everything omitted is worse than saying so.
+    pub const MIN_BUDGET: usize = 50;
+
+    pub fn new(token_budget: usize) -> Self {
+        Self { token_budget, emitted: false }
+    }
+
+    /// Tokens, approximated as bytes / 4.
+    ///
+    /// Deliberately a documented approximation rather than a tokenizer: the
+    /// answer must not depend on which model is being talked to, and four
+    /// bytes per token is the conventional English estimate. The column is
+    /// named `estimated_tokens` for the same reason -- a caller sizing a
+    /// prompt exactly should count with their own tokenizer.
+    fn tokens(s: &str) -> usize {
+        s.len().div_ceil(4)
+    }
+
+    /// Distinct `(source label, type, target label)` triples with their edge
+    /// counts, over every edge -- not a sample.
+    fn triples(store: &GraphStore) -> Vec<((String, String, String), usize)> {
+        let mut counts: std::collections::HashMap<(String, String, String), usize> =
+            std::collections::HashMap::new();
+        for edge_type in store.all_edge_types() {
+            for edge in store.get_edges_by_type(edge_type).iter() {
+                let (Some(src), Some(tgt)) = (store.get_node(edge.source), store.get_node(edge.target))
+                else {
+                    continue;
+                };
+                for sl in &src.labels {
+                    for tl in &tgt.labels {
+                        *counts
+                            .entry((
+                                sl.as_str().to_string(),
+                                edge_type.as_str().to_string(),
+                                tl.as_str().to_string(),
+                            ))
+                            .or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        // By count, then by name, so the same graph always produces the same
+        // text: a schema that reorders between calls invalidates any cache
+        // keyed on it and makes two runs impossible to diff.
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    }
+
+    fn type_name(v: &PropertyValue) -> &'static str {
+        match v {
+            PropertyValue::String(_) => "String",
+            PropertyValue::Integer(_) => "Integer",
+            PropertyValue::Float(_) => "Float",
+            PropertyValue::Boolean(_) => "Boolean",
+            PropertyValue::DateTime(_) => "DateTime",
+            PropertyValue::Date(_) => "Date",
+            PropertyValue::LocalTime(_) => "LocalTime",
+            PropertyValue::Time { .. } => "Time",
+            PropertyValue::LocalDateTime { .. } => "LocalDateTime",
+            PropertyValue::ZonedDateTime { .. } => "ZonedDateTime",
+            PropertyValue::Duration { .. } => "Duration",
+            PropertyValue::Array(_) => "Array",
+            PropertyValue::Vector(_) => "Vector",
+            PropertyValue::Map(_) => "Map",
+            PropertyValue::Null => "Null",
+        }
+    }
+
+    fn sample(v: &PropertyValue) -> String {
+        let s = match v {
+            PropertyValue::String(s) => format!("\"{s}\""),
+            other => format!("{other}"),
+        };
+        // One long value must not eat the budget the rest of the schema needs.
+        if s.len() > 32 {
+            format!("{}…", &s[..31])
+        } else {
+            s
+        }
+    }
+
+    /// The schema text, and whether it is the whole schema.
+    fn render(&self, store: &GraphStore) -> (String, bool) {
+        let stats = store.statistics();
+        let mut out = String::new();
+        out.push_str(&format!(
+            "graph: {} nodes, {} edges, {} labels, {} relationship types\n",
+            stats.total_nodes,
+            stats.total_edges,
+            stats.label_counts.len(),
+            stats.edge_type_counts.len(),
+        ));
+
+        // Budget accounting reserves room for the omission notice up front, so
+        // the notice can always be written. A truncation that truncates the
+        // line saying it truncated is the failure this guards.
+        const NOTICE_RESERVE: usize = 40;
+        let budget = self.token_budget.saturating_sub(NOTICE_RESERVE);
+
+        let mut labels: Vec<_> = stats.label_counts.iter().collect();
+        labels.sort_by(|a, b| b.1.cmp(a.1).then(a.0.as_str().cmp(b.0.as_str())));
+        let n_labels = labels.len();
+
+        let triples = Self::triples(store);
+        let n_triples = triples.len();
+
+        let mut labels_written = 0usize;
+        let mut props_written = 0usize;
+        let mut props_total = 0usize;
+        let mut truncated = false;
+
+        let mut section = String::from("\nlabels (count, then properties as name:Type null=fraction distinct=n samples):\n");
+        for (label, count) in &labels {
+            let mut block = format!("  (:{}) {}\n", label.as_str(), count);
+            let mut props: Vec<_> = stats
+                .property_stats
+                .iter()
+                .filter(|((l, _), _)| l == *label)
+                .collect();
+            props.sort_by(|a, b| a.0 .1.cmp(&b.0 .1));
+            props_total += props.len();
+            for ((_, name), ps) in &props {
+                let ty = ps
+                    .most_common
+                    .first()
+                    .map(|(v, _)| Self::type_name(v))
+                    .unwrap_or("Unknown");
+                let samples: Vec<String> =
+                    ps.most_common.iter().take(2).map(|(v, _)| Self::sample(v)).collect();
+                block.push_str(&format!(
+                    "    {name}:{ty} null={:.2} distinct={}{}\n",
+                    ps.null_fraction,
+                    ps.distinct_count,
+                    if samples.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" e.g. {}", samples.join(", "))
+                    }
+                ));
+            }
+            if Self::tokens(&out) + Self::tokens(&section) + Self::tokens(&block) > budget {
+                truncated = true;
+                break;
+            }
+            labels_written += 1;
+            props_written += props.len();
+            section.push_str(&block);
+        }
+        out.push_str(&section);
+
+        let mut rel_section = String::from("\nrelationships (count):\n");
+        let mut triples_written = 0usize;
+        for ((s, t, d), c) in &triples {
+            let line = format!("  (:{s})-[:{t}]->(:{d}) {c}\n");
+            if Self::tokens(&out) + Self::tokens(&rel_section) + Self::tokens(&line) > budget {
+                truncated = true;
+                break;
+            }
+            triples_written += 1;
+            rel_section.push_str(&line);
+        }
+        out.push_str(&rel_section);
+
+        // One worked query, built from the largest triple, so a model has a
+        // syntactically valid example against *this* graph rather than a
+        // remembered one from some other dialect.
+        if let Some(((s, t, d), _)) = triples.first() {
+            let example = format!("\nexample:\n  MATCH (a:{s})-[:{t}]->(b:{d}) RETURN a, b LIMIT 10\n");
+            if Self::tokens(&out) + Self::tokens(&example) <= budget {
+                out.push_str(&example);
+            } else {
+                truncated = true;
+            }
+        }
+
+        if truncated {
+            out.push_str(&format!(
+                "\n-- truncated to fit a {}-token budget: {} of {} labels, \
+                 {} of {} property lines, {} of {} relationship shapes. \
+                 Ask again with a larger budget for the rest.\n",
+                self.token_budget,
+                labels_written,
+                n_labels,
+                props_written,
+                props_total,
+                triples_written,
+                n_triples,
+            ));
+        }
+        (out, !truncated)
+    }
+}
+
+impl PhysicalOperator for SchemaForLlmOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.emitted {
+            return Ok(None);
+        }
+        self.emitted = true;
+        let (text, complete) = self.render(store);
+        let mut record = Record::new();
+        record.bind(
+            "schema".to_string(),
+            Value::Property(PropertyValue::String(text.clone())),
+        );
+        record.bind(
+            "estimated_tokens".to_string(),
+            Value::Property(PropertyValue::Integer(Self::tokens(&text) as i64)),
+        );
+        record.bind(
+            "complete".to_string(),
+            Value::Property(PropertyValue::Boolean(complete)),
+        );
+        Ok(Some(record))
+    }
+
+    fn reset(&mut self) {
+        self.emitted = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "SchemaForLlm".to_string(),
+            details: format!("token_budget={}", self.token_budget),
             children: Vec::new(),
         }
     }

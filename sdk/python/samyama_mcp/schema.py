@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 
 from samyama_mcp.escape import validate_identifier
 
+#: How many nodes of a label are read when working out which properties it has.
+#: A property graph lets two nodes of the same label carry different keys, so
+#: this is a sample and `NodeType.properties_sampled_from` reports its size.
+PROPERTY_SAMPLE = 1000
+
 
 @dataclass
 class PropertyInfo:
@@ -24,6 +29,9 @@ class NodeType:
     label: str
     count: int
     properties: list[PropertyInfo] = field(default_factory=list)
+    #: How many nodes were read to find `properties`. Less than `count` means
+    #: the property list is a sample: a key set on no sampled node is missing.
+    properties_sampled_from: int = 0
 
 
 @dataclass
@@ -66,6 +74,7 @@ class GraphSchema:
                 {
                     "label": nt.label,
                     "count": nt.count,
+                    "properties_sampled_from": nt.properties_sampled_from,
                     "properties": [
                         {"name": p.name, "type": p.type, "indexed": p.indexed}
                         for p in nt.properties
@@ -96,6 +105,7 @@ class CypherSchemaDiscovery:
     def __init__(self, client, graph: str = "default"):
         self.client = client
         self.graph = graph
+        self._distinct_nodes = 0
 
     def discover(self) -> GraphSchema:
         schema = GraphSchema()
@@ -116,31 +126,69 @@ class CypherSchemaDiscovery:
             "MATCH (n) RETURN DISTINCT labels(n) AS label, count(n) AS cnt",
             self.graph,
         )
+        # A node carries a *set* of labels, and this row is one such set. Taking
+        # `labels(n)[0]` reported `:Person:Employee` as `Person` and left
+        # `Employee` out of the schema entirely -- so no tool was generated for
+        # it and a model was told the label does not exist. Every label in the
+        # set is a node type, and a node counts towards each of them.
+        counts: dict[str, int] = {}
+        distinct_nodes = 0
         for row in result.records:
             raw_label = row[0]
-            label = raw_label[0] if isinstance(raw_label, list) else raw_label
-            label = str(label)
+            labels = raw_label if isinstance(raw_label, list) else [raw_label]
             count = int(row[1])
-            try:
-                validate_identifier(label)
-            except ValueError:
-                continue  # skip labels that aren't safe identifiers
-            props = self._discover_node_properties(label)
+            distinct_nodes += count
+            for label in labels:
+                label = str(label)
+                try:
+                    validate_identifier(label)
+                except ValueError:
+                    continue  # skip labels that aren't safe identifiers
+                counts[label] = counts.get(label, 0) + count
+        for label, count in counts.items():
+            props, sampled = self._discover_node_properties(label)
             schema.node_types.append(
-                NodeType(label=label, count=count, properties=props)
+                NodeType(
+                    label=label,
+                    count=count,
+                    properties=props,
+                    properties_sampled_from=sampled,
+                )
             )
+        # Held separately because a node with two labels counts towards both
+        # node types: summing `NodeType.count` would report more nodes than the
+        # graph has.
+        self._distinct_nodes = distinct_nodes
 
-    def _discover_node_properties(self, label: str) -> list[PropertyInfo]:
+    def _discover_node_properties(self, label: str) -> tuple[list[PropertyInfo], int]:
+        # The union over a sample of nodes, not the keys of one node. A property
+        # graph does not require every node of a label to carry the same keys,
+        # so `LIMIT 1` returned whichever node came first and any property that
+        # node happened not to set was absent from the schema.
+        #
+        # It is still a sample -- `PROPERTY_SAMPLE` nodes, not all of them --
+        # and `NodeType.properties_sampled_from` says how many were read so a
+        # caller can tell an exhaustive answer from a partial one.
         result = self.client.query_readonly(
-            f"MATCH (n:{label}) RETURN keys(n) LIMIT 1",
+            f"MATCH (n:{label}) RETURN keys(n) LIMIT {PROPERTY_SAMPLE}",
             self.graph,
         )
         if not result.records:
-            return []
+            return [], 0
 
-        keys = result.records[0][0]
-        if not isinstance(keys, list):
-            return []
+        sampled = len(result.records)
+        keys: list = []
+        seen: set = set()
+        for row in result.records:
+            row_keys = row[0]
+            if not isinstance(row_keys, list):
+                continue
+            for key in row_keys:
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        if not keys:
+            return [], sampled
 
         props: list[PropertyInfo] = []
         for key in keys:
@@ -156,7 +204,7 @@ class CypherSchemaDiscovery:
             samples = [r[0] for r in sample_result.records]
             prop_type = _infer_type(samples)
             props.append(PropertyInfo(name=key, type=prop_type, samples=samples))
-        return props
+        return props, sampled
 
     def _discover_edge_types(self, schema: GraphSchema) -> None:
         result = self.client.query_readonly(
@@ -173,8 +221,11 @@ class CypherSchemaDiscovery:
             tgt = row[2]
             cnt = int(row[3])
 
-            src_label = src[0] if isinstance(src, list) else str(src)
-            tgt_label = tgt[0] if isinstance(tgt, list) else str(tgt)
+            # Endpoints carry label sets too; `[0]` dropped the rest, so an
+            # edge from a `:Person:Employee` was recorded as coming only from
+            # `Person`.
+            src_labels = src if isinstance(src, list) else [str(src)]
+            tgt_labels = tgt if isinstance(tgt, list) else [str(tgt)]
 
             try:
                 validate_identifier(etype)
@@ -186,10 +237,14 @@ class CypherSchemaDiscovery:
 
             et = edge_map[etype]
             et.count += cnt
-            if src_label not in et.source_labels:
-                et.source_labels.append(src_label)
-            if tgt_label not in et.target_labels:
-                et.target_labels.append(tgt_label)
+            for src_label in src_labels:
+                src_label = str(src_label)
+                if src_label not in et.source_labels:
+                    et.source_labels.append(src_label)
+            for tgt_label in tgt_labels:
+                tgt_label = str(tgt_label)
+                if tgt_label not in et.target_labels:
+                    et.target_labels.append(tgt_label)
 
         schema.edge_types = list(edge_map.values())
 
@@ -231,7 +286,7 @@ class CypherSchemaDiscovery:
                         )
 
     def _compute_totals(self, schema: GraphSchema) -> None:
-        schema.total_nodes = sum(nt.count for nt in schema.node_types)
+        schema.total_nodes = getattr(self, "_distinct_nodes", 0)
         schema.total_edges = sum(et.count for et in schema.edge_types)
 
 
