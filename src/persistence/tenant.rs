@@ -671,8 +671,27 @@ mod tests {
     #[test]
     fn test_cannot_delete_default() {
         let manager = TenantManager::new();
-        let result = manager.delete_tenant("default");
-        assert!(result.is_err());
+        let err = manager
+            .delete_tenant("default")
+            .expect_err("the default tenant cannot be deleted");
+
+        // `is_err()` alone would pass if the call failed because the tenant did
+        // not exist, which is the opposite of what this guards (#1311).
+        // The wrong reason is available and plausible: `delete_tenant` returns
+        // `NotFound` for a tenant that is absent, and `is_err()` could not tell
+        // "you may not delete this" from "there was nothing to delete".
+        assert!(
+            matches!(err, TenantError::PermissionDenied(_)),
+            "refused for the wrong reason: {err:?}"
+        );
+        assert!(
+            err.to_string().to_lowercase().contains("default"),
+            "the refusal must name what it protected: {err}"
+        );
+        assert!(
+            manager.get_tenant("default").is_ok(),
+            "the default tenant must still be there after a refused delete"
+        );
     }
 
     #[test]
@@ -993,8 +1012,25 @@ mod tests {
             manager.increment_usage("t1", "edges", 1).unwrap();
         }
 
-        let result = manager.check_quota("t1", "edges");
-        assert!(result.is_err());
+        let err = manager
+            .check_quota("t1", "edges")
+            .expect_err("the sixth edge is over the quota of five");
+        assert!(
+            matches!(err, TenantError::QuotaExceeded { .. }),
+            "refused for the wrong reason: {err:?}"
+        );
+        // The resource field is `edges (5/5)`: it names what ran out *and* how
+        // much there was. Asserted on both, because the count is the half an
+        // operator acts on and nothing else was checking it was there.
+        assert!(
+            matches!(&err, TenantError::QuotaExceeded { resource, .. }
+                     if resource.starts_with("edges")),
+            "the refusal must name the resource that ran out: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("5/5"),
+            "and the limit they hit, not just that they hit one: {err}"
+        );
     }
 
     #[test]
@@ -1011,8 +1047,13 @@ mod tests {
         manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
 
         manager.increment_usage("t1", "memory", 1024).unwrap();
-        let result = manager.check_quota("t1", "memory");
-        assert!(result.is_err());
+        let err = manager
+            .check_quota("t1", "memory")
+            .expect_err("the quota is exactly used up, so the next request is over");
+        assert!(
+            matches!(err, TenantError::QuotaExceeded { .. }),
+            "refused for the wrong reason: {err:?}"
+        );
     }
 
     #[test]
