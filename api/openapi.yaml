@@ -371,6 +371,132 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /:
+    get:
+      operationId: getIndex
+      summary: Bundled visualizer
+      description: >
+        The bundled single-page visualizer. Deprecated in favour of the hosted
+        Studio; documented because it is served, and an undocumented served
+        endpoint is an undocumented surface.
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+  /optimize/algorithms:
+    get:
+      operationId: listOptimizationAlgorithms
+      summary: Optimization algorithms this build can run
+      responses:
+        '200':
+          description: Algorithm catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /optimize/benchmarks:
+    get:
+      operationId: listOptimizationBenchmarks
+      summary: Benchmark problems this build ships
+      responses:
+        '200':
+          description: Benchmark catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /optimize/solve:
+    post:
+      operationId: startSolve
+      summary: Start a solver run
+      description: >
+        Starts a run and returns its id. The run is asynchronous; follow it on
+        `/optimize/solve/{id}/stream`.
+      responses:
+        '200':
+          description: The run's id
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Unknown algorithm or benchmark
+  /optimize/solve/{id}/stream:
+    get:
+      operationId: streamSolve
+      summary: Follow a solver run
+      description: >
+        Server-sent events for a run in progress. The one streaming route in the
+        server; `/api/query` buffers its whole result (API-07).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: An SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: No such run
+  /optimize/solve/{id}/cancel:
+    post:
+      operationId: cancelSolve
+      summary: Cancel a solver run
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cancellation accepted
+  /api/memory:
+    get:
+      operationId: getMemory
+      summary: Where the memory goes
+      description: >
+        Resident bytes attributed to the graph, broken down by component, with a
+        row per property index (COST-06). Every figure is an estimate from a walk
+        of the structures rather than a reading of the allocator: allocator slack,
+        hash-map load factor and the Arc-held vector and hierarchy indexes are not
+        counted, so these are floors. `bytes_per_edge` is null on a graph with no
+        edges, because zero would be a claim and a false one.
+      responses:
+        '200':
+          description: Memory attribution
+          content:
+            application/json:
+              schema:
+                type: object
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: >
+        Gauges in the Prometheus text exposition format (REL-10). Gauges only:
+        nothing in the engine keeps a monotonic request count, and a counter that
+        resets when it is read is worse than an absent one, because Prometheus
+        reads a reset as a restart.
+      responses:
+        '200':
+          description: Metrics in text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
   /api/status:
     get:
       operationId: getStatus

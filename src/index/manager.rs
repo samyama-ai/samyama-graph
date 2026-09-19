@@ -14,6 +14,20 @@ pub struct PropertyIndexKey {
     pub property: String,
 }
 
+/// What one index costs.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexMemory {
+    /// `index` or `unique_constraint`.
+    pub kind: &'static str,
+    pub label: String,
+    pub property: String,
+    /// Resident bytes, estimated from the structures walked. A floor: the
+    /// allocator's own overhead is not visible from here.
+    pub bytes: usize,
+    /// Indexed node references, counting a node once per value it holds.
+    pub entries: usize,
+}
+
 /// Manager for all property indices
 #[derive(Debug)]
 pub struct IndexManager {
@@ -94,6 +108,34 @@ impl IndexManager {
         self.indices.read().unwrap().keys()
             .map(|k| (k.label.clone(), k.property.clone()))
             .collect()
+    }
+
+    /// Per-index memory, one row per index (COST-06).
+    ///
+    /// The index managers sit behind `Arc` and `GraphStore::memory_report`
+    /// does not walk them, which it says about itself. This is the walk: a
+    /// customer attributing cost needs to know that one index on a
+    /// high-cardinality property is most of the bill.
+    pub fn index_memory(&self) -> Vec<IndexMemory> {
+        let mut out = Vec::new();
+        for (kind, map) in [
+            ("index", &self.indices),
+            ("unique_constraint", &self.unique_constraints),
+        ] {
+            for (key, idx) in map.read().unwrap().iter() {
+                let (bytes, entries) = idx.read().unwrap().heap_bytes();
+                out.push(IndexMemory {
+                    kind,
+                    label: key.label.as_str().to_string(),
+                    property: key.property.clone(),
+                    bytes,
+                    entries,
+                });
+            }
+        }
+        // Largest first: the question this answers is "what is costing me".
+        out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.label.cmp(&b.label)));
+        out
     }
 
     /// Create a unique constraint (also creates an index)

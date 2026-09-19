@@ -19,6 +19,26 @@ impl PropertyIndex {
         }
     }
 
+    /// Resident bytes held by this index, and the entries it holds.
+    ///
+    /// An estimate from the structures walked, not a measurement of the
+    /// allocator: `BTreeMap` node overhead and `HashSet` load factor are not
+    /// visible from here. It is a floor, and COST-06 is about a customer
+    /// attributing cost, so a floor labelled as one is worth more than nothing
+    /// reported at all.
+    pub fn heap_bytes(&self) -> (usize, usize) {
+        let mut bytes = 0usize;
+        let mut entries = 0usize;
+        for (value, nodes) in &self.index {
+            bytes += std::mem::size_of::<PropertyValue>()
+                + value.approx_heap_bytes()
+                + std::mem::size_of::<HashSet<NodeId>>()
+                + nodes.capacity() * (std::mem::size_of::<NodeId>() + 1);
+            entries += nodes.len();
+        }
+        (bytes, entries)
+    }
+
     pub fn insert(&mut self, value: PropertyValue, node_id: NodeId) {
         self.index.entry(value).or_default().insert(node_id);
     }

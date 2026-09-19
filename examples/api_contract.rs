@@ -96,14 +96,31 @@ fn served_paths(src: &Path) -> BTreeSet<String> {
                 // `:` and `{}` belong in the character set: the server
                 // registers path parameters as `/api/tenants/:id`, and leaving
                 // `:` out makes every parameterised route look unserved.
+                // Every `route("/...")`, not only the ones under `/api/`.
+                // Scanning for the `/api/` prefix made any route outside it
+                // invisible in both directions: `/metrics` read as documented
+                // but not served, and an *undocumented* route outside `/api/`
+                // would never have been reported at all. The check is about
+                // the surface, and the surface is not defined by a prefix.
                 let mut rest = text.as_str();
-                while let Some(i) = rest.find("\"/api/") {
-                    rest = &rest[i + 1..];
-                    let end = rest.find('"').unwrap_or(0);
-                    let candidate = &rest[..end];
-                    if candidate
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || "/_-:{}".contains(c))
+                while let Some(i) = rest.find("route(") {
+                    rest = &rest[i + "route(".len()..];
+                    // The path may sit on the next line: `rustfmt` wraps
+                    // `.route(\n    "/api/tenants/:id",\n    ...)`. Looking for
+                    // `route("` on one span missed exactly that one, and it is
+                    // the only parameterised route in the server.
+                    let head = &rest[..rest.len().min(120)];
+                    let Some(q) = head.find('"') else { continue };
+                    if head[..q].chars().any(|c| !c.is_whitespace()) {
+                        continue; // something other than the path came first
+                    }
+                    let after = &rest[q + 1..];
+                    let end = after.find('"').unwrap_or(0);
+                    let candidate = &after[..end];
+                    if candidate.starts_with('/')
+                        && candidate
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || "/_-:{}.".contains(c))
                     {
                         out.insert(candidate.to_string());
                     }
