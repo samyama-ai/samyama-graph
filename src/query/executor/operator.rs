@@ -2577,12 +2577,13 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "duration", "duration.between", "duration.indays", "duration.inmonths",
     "duration.inseconds", "duration_between", "e", "eccentricity", "eigenvector",
     "eigenvectorcentrality", "elementid", "endnode", "exists", "exp", "false", "findcycle",
-    "floor", "harmonic", "harmoniccentrality", "haslabels", "haversin", "head",
+    "distance", "floor", "harmonic", "harmoniccentrality", "haslabels", "haversin", "head",
     "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan", "jaccard", "kcore",
     "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
     "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
     "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
-    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "prank",
+    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "point",
+    "point.distance", "point.withinbbox", "prank",
     "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
     "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
     "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
@@ -2615,6 +2616,93 @@ pub fn is_known_function(name: &str) -> bool {
 
 
 /// Shared function evaluation for scalar functions (not aggregates)
+/// A point, as the geospatial functions see one (NDS-04).
+#[derive(Debug, Clone, Copy)]
+struct Point {
+    x: f64,
+    y: f64,
+    /// True for WGS-84, where `x`/`y` are degrees of longitude/latitude and
+    /// distance is measured along the surface of the earth.
+    geographic: bool,
+}
+
+/// Read a point out of a value.
+///
+/// Accepts what `point()` produces, and also a bare map carrying
+/// `latitude`/`longitude` or `x`/`y`, because a point read back from a node is
+/// the map that was stored and there is no separate type to check against.
+fn as_point(v: &Value, who: &str) -> ExecutionResult<Point> {
+    let m = match v {
+        Value::Property(PropertyValue::Map(m)) => m,
+        _ => return Err(ExecutionError::TypeError(format!(
+            "`{who}` takes points; got a value that is not one"))),
+    };
+    let num = |k: &str| -> Option<f64> {
+        m.get(k).and_then(|v| match v {
+            PropertyValue::Float(f) => Some(*f),
+            PropertyValue::Integer(i) => Some(*i as f64),
+            _ => None,
+        })
+    };
+    // `crs`/`srid` decide, when they are there. A map that carries
+    // latitude/longitude and nothing else is geographic by its key names --
+    // which is the only signal available once the point has been stored and
+    // read back.
+    let geographic = match m.get("crs") {
+        Some(PropertyValue::String(c)) => c.starts_with("wgs-84"),
+        _ => match m.get("srid") {
+            Some(PropertyValue::Integer(4326)) | Some(PropertyValue::Integer(4979)) => true,
+            Some(PropertyValue::Integer(_)) => false,
+            _ => num("latitude").is_some() && num("longitude").is_some(),
+        },
+    };
+    let (x, y) = if geographic {
+        match (num("longitude").or_else(|| num("x")), num("latitude").or_else(|| num("y"))) {
+            (Some(x), Some(y)) => (x, y),
+            _ => return Err(ExecutionError::TypeError(format!(
+                "`{who}`: a geographic point needs `latitude` and `longitude`"))),
+        }
+    } else {
+        match (num("x"), num("y")) {
+            (Some(x), Some(y)) => (x, y),
+            _ => return Err(ExecutionError::TypeError(format!(
+                "`{who}`: a cartesian point needs `x` and `y`"))),
+        }
+    };
+    Ok(Point { x, y, geographic })
+}
+
+/// Mean earth radius, metres. The value WGS-84 uses for a spherical
+/// approximation.
+const EARTH_RADIUS_M: f64 = 6_371_008.8;
+
+/// Distance between two points.
+///
+/// Haversine on a sphere for geographic points, in **metres**; Euclidean for
+/// cartesian ones, in whatever unit the coordinates were. Mixing the two is an
+/// error rather than a number: the answer would be in no unit at all.
+///
+/// Haversine and not Vincenty: the earth is an ellipsoid and this treats it as
+/// a sphere, which is wrong by up to ~0.5%. That is stated here rather than
+/// implied to be exact, and it is the same approximation Neo4j's `distance`
+/// documents for geographic points.
+fn point_distance(a: &Point, b: &Point) -> ExecutionResult<f64> {
+    if a.geographic != b.geographic {
+        return Err(ExecutionError::TypeError(
+            "`point.distance` needs both points in the same coordinate system; \
+             one is geographic and the other cartesian".to_string()));
+    }
+    if !a.geographic {
+        return Ok(((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt());
+    }
+    let (lat1, lat2) = (a.y.to_radians(), b.y.to_radians());
+    let dlat = (b.y - a.y).to_radians();
+    let dlon = (b.x - a.x).to_radians();
+    let h = (dlat / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    Ok(2.0 * EARTH_RADIUS_M * h.sqrt().asin())
+}
+
 pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
     let lowered = name.to_lowercase();
 
@@ -4020,6 +4108,96 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "radians" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.to_radians()))) }
         "pi" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::PI))),
         "haversin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float((1.0 - v.cos()) / 2.0))) }
+
+        // --- Geospatial (NDS-04) ---------------------------------------
+        //
+        // A point is a `Map` with `x`, `y`, an optional `z`, `srid` and `crs`,
+        // and -- for a geographic point -- `latitude`/`longitude` as aliases of
+        // `y`/`x`. Deliberately not a new `PropertyValue` variant: every match
+        // over that enum would have to grow an arm, snapshots and the columnar
+        // store would need a new encoding, and none of it changes what a query
+        // can express. A point written to a node round-trips today because a
+        // map already does.
+        //
+        // The cost of that choice is honest and worth stating: a point is not
+        // distinguishable from any other map with these keys, so there is no
+        // type error waiting for someone who passes the wrong map, and no
+        // spatial index (`CREATE POINT INDEX` is still refused).
+        "point" => {
+            let m = match &args[0] {
+                Value::Property(PropertyValue::Map(m)) => m,
+                _ => return Err(ExecutionError::TypeError(
+                    "`point()` takes a map: point({latitude: 12.9, longitude: 77.6}) \
+                     or point({x: 1.0, y: 2.0})".to_string())),
+            };
+            let num = |k: &str| -> Option<f64> {
+                m.get(k).and_then(|v| match v {
+                    PropertyValue::Float(f) => Some(*f),
+                    PropertyValue::Integer(i) => Some(*i as f64),
+                    _ => None,
+                })
+            };
+            let (x, y, geographic) = match (num("longitude"), num("latitude")) {
+                (Some(lon), Some(lat)) => {
+                    if !(-180.0..=180.0).contains(&lon) {
+                        return Err(ExecutionError::TypeError(format!(
+                            "`longitude` must be between -180 and 180; got {lon}")));
+                    }
+                    if !(-90.0..=90.0).contains(&lat) {
+                        return Err(ExecutionError::TypeError(format!(
+                            "`latitude` must be between -90 and 90; got {lat}")));
+                    }
+                    (lon, lat, true)
+                }
+                _ => match (num("x"), num("y")) {
+                    (Some(x), Some(y)) => (x, y, false),
+                    // Refused rather than defaulted. A point silently at the
+                    // origin is a wrong answer that looks like a right one.
+                    _ => return Err(ExecutionError::TypeError(
+                        "`point()` needs either `latitude` and `longitude`, or `x` \
+                         and `y`".to_string())),
+                },
+            };
+            let mut out = std::collections::HashMap::new();
+            out.insert("x".to_string(), PropertyValue::Float(x));
+            out.insert("y".to_string(), PropertyValue::Float(y));
+            if let Some(z) = num("z").or_else(|| num("height")) {
+                out.insert("z".to_string(), PropertyValue::Float(z));
+            }
+            if geographic {
+                out.insert("longitude".to_string(), PropertyValue::Float(x));
+                out.insert("latitude".to_string(), PropertyValue::Float(y));
+                let three_d = out.contains_key("z");
+                out.insert("srid".to_string(),
+                           PropertyValue::Integer(if three_d { 4979 } else { 4326 }));
+                out.insert("crs".to_string(), PropertyValue::String(
+                    if three_d { "wgs-84-3d" } else { "wgs-84" }.to_string()));
+            } else {
+                let three_d = out.contains_key("z");
+                out.insert("srid".to_string(),
+                           PropertyValue::Integer(if three_d { 9157 } else { 7203 }));
+                out.insert("crs".to_string(), PropertyValue::String(
+                    if three_d { "cartesian-3d" } else { "cartesian" }.to_string()));
+            }
+            Ok(Value::Property(PropertyValue::Map(out)))
+        }
+        "point.distance" | "distance" => {
+            let a = as_point(&args[0], "point.distance")?;
+            let b = as_point(&args[1], "point.distance")?;
+            Ok(Value::Property(PropertyValue::Float(point_distance(&a, &b)?)))
+        }
+        "point.withinbbox" => {
+            let p = as_point(&args[0], "point.withinBBox")?;
+            let ll = as_point(&args[1], "point.withinBBox")?;
+            let ur = as_point(&args[2], "point.withinBBox")?;
+            if p.geographic != ll.geographic || p.geographic != ur.geographic {
+                return Err(ExecutionError::TypeError(
+                    "`point.withinBBox` needs three points in the same coordinate \
+                     system".to_string()));
+            }
+            let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
+            Ok(Value::Property(PropertyValue::Boolean(inside)))
+        }
         // CY-22: Math constants & minor functions
         "e" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::E))),
         "log10" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.log10()))) }
