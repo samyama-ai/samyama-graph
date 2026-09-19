@@ -27,6 +27,15 @@ gzip( header\n node\n node\n ... edge\n edge\n ... )
 
 Format version is currently **v2** (see [[storage-snapshot-format.md]] §How it works for v1 → v2 migration history). The header carries: `format`, `version`, `tenant`, counts, label/edge-type lists, ISO timestamp, samyama version.
 
+**The header carries a loss report** (`dropped`, added 2026-09-20 for INT-06).
+One row per thing this export did not carry, with a count and what it means for
+the restored graph — index and constraint declarations, with the DDL that
+restores them; vector-index declarations, noting that the embeddings themselves
+survive as node properties; and edge creation timestamps. A row appears only
+when there was something to lose, so an empty graph produces an empty list: a
+standing list of everything the format *could* drop is a disclaimer, and nobody
+reads those. The field is additive and the format version does not move.
+
 Properties are encoded as JSON values. Edge records ("stub edges") carry only `id, src, tgt, type, props` — endpoint/type metadata, no creation timestamps in v2.
 
 ## Consequences
