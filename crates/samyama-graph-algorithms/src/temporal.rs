@@ -56,6 +56,12 @@ pub enum TemporalError {
     Misaligned { edges: usize, times: usize },
     /// A node index that the view does not contain.
     NoSuchNode(usize),
+    /// A pair named an edge the view does not have.
+    NoSuchEdge { from: usize, to: usize },
+    /// The view has an edge no pair gave a time for.
+    UntimedEdge { from: usize, to: usize },
+    /// More times were given for `from -> to` than the view has such edges.
+    TooManyTimes { from: usize, to: usize, have: usize },
 }
 
 impl std::fmt::Display for TemporalError {
@@ -67,6 +73,20 @@ impl std::fmt::Display for TemporalError {
                  the view has {edges} and {times} times were given"
             ),
             TemporalError::NoSuchNode(i) => write!(f, "node index {i} is not in this graph"),
+            TemporalError::NoSuchEdge { from, to } => write!(
+                f,
+                "no edge {from} -> {to} in this graph, so there is nothing to time"
+            ),
+            TemporalError::UntimedEdge { from, to } => write!(
+                f,
+                "edge {from} -> {to} was given no time; every edge needs one, \
+                    because an untimed edge silently becomes untraversable"
+            ),
+            TemporalError::TooManyTimes { from, to, have } => write!(
+                f,
+                "more times given for {from} -> {to} than the {have} such edge(s) \
+                    the graph has"
+            ),
         }
     }
 }
@@ -94,6 +114,84 @@ impl TemporalEdges {
             });
         }
         Ok(Self { times })
+    }
+
+    /// Build from `(from, to, time)` triples, placing each time in the slot the
+    /// view keeps that edge in.
+    ///
+    /// This is the constructor for a caller who has times but not the view's
+    /// edge ordering -- which is every caller who did not build the CSR. It is
+    /// what [`TemporalEdges::new`] cannot be: `new` takes the ordering on
+    /// trust, and an array that is rotated or shifted has the right length,
+    /// pairs every edge with another edge's timestamp, changes every answer and
+    /// produces no symptom (samyama-graph#1304).
+    ///
+    /// Here the caller names the edge and the constructor finds the slot, so
+    /// the ordering is not something they can get wrong. The mistakes that
+    /// remain are ones that *say* something false -- a pair naming an edge that
+    /// does not exist, or an edge left untimed -- and each is refused.
+    ///
+    /// An untimed edge is an error rather than a default, because a default of
+    /// 0 makes the edge traversable at the beginning of time and a default of
+    /// `i64::MAX` makes it untraversable; both are answers, and neither is the
+    /// caller's.
+    ///
+    /// Parallel edges (`from -> to` more than once) take their times in the
+    /// order given, which is the only ordering available when the endpoints do
+    /// not distinguish them.
+    pub fn from_pairs(
+        view: &GraphView,
+        pairs: impl IntoIterator<Item = (usize, usize, i64)>,
+    ) -> Result<Self, TemporalError> {
+        let slots = view.out_targets.len();
+        let mut times: Vec<Option<i64>> = vec![None; slots];
+        // Next unfilled slot for each (from, to), so parallel edges consume
+        // slots in the order the caller gives them.
+        let mut cursor: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+
+        for (from, to, t) in pairs {
+            if from >= view.node_count {
+                return Err(TemporalError::NoSuchNode(from));
+            }
+            if to >= view.node_count {
+                return Err(TemporalError::NoSuchNode(to));
+            }
+            let lo = view.out_offsets[from];
+            let hi = view.out_offsets[from + 1];
+            let matching: Vec<usize> = (lo..hi).filter(|&k| view.out_targets[k] == to).collect();
+            if matching.is_empty() {
+                return Err(TemporalError::NoSuchEdge { from, to });
+            }
+            let n = cursor.entry((from, to)).or_insert(0);
+            let Some(&slot) = matching.get(*n) else {
+                return Err(TemporalError::TooManyTimes {
+                    from,
+                    to,
+                    have: matching.len(),
+                });
+            };
+            *n += 1;
+            times[slot] = Some(t);
+        }
+
+        // Every edge must have been named. Report the first that was not, by
+        // its endpoints rather than its slot, because a slot number means
+        // nothing to a caller who never saw the ordering.
+        for (from, w) in view.out_offsets.windows(2).enumerate() {
+            for slot in w[0]..w[1] {
+                if times[slot].is_none() {
+                    return Err(TemporalError::UntimedEdge {
+                        from,
+                        to: view.out_targets[slot],
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            times: times.into_iter().map(|t| t.unwrap()).collect(),
+        })
     }
 
     /// The timestamp of the `k`-th out-edge, in the view's own ordering.
@@ -202,7 +300,10 @@ pub fn earliest_arrival(
         }
     }
 
-    Ok(ArrivalTimes { arrival, parent_edge })
+    Ok(ArrivalTimes {
+        arrival,
+        parent_edge,
+    })
 }
 
 /// Which nodes a source can reach in time, and when (ALGO-15).
@@ -495,14 +596,20 @@ mod tests {
         // causally chainable. `>` rather than `>=` here would silently drop
         // every simultaneous hop, which is the common case in a trace.
         let (v, t) = view(3, &[(0, 1, 7), (1, 2, 7)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 7).unwrap(), vec![(1, 7), (2, 7)]);
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 7).unwrap(),
+            vec![(1, 7), (2, 7)]
+        );
     }
 
     #[test]
     fn a_start_time_after_the_edge_blocks_it() {
         let (v, t) = view(2, &[(0, 1, 5)]);
         assert!(temporal_reachability(&v, &t, &[0], 6).unwrap().is_empty());
-        assert_eq!(temporal_reachability(&v, &t, &[0], 5).unwrap(), vec![(1, 5)]);
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 5).unwrap(),
+            vec![(1, 5)]
+        );
     }
 
     #[test]
@@ -604,7 +711,10 @@ mod tests {
     #[test]
     fn a_node_index_outside_the_graph_is_refused() {
         let (v, t) = view(2, &[(0, 1, 5)]);
-        assert_eq!(earliest_arrival(&v, &t, &[7], 0).unwrap_err(), TemporalError::NoSuchNode(7));
+        assert_eq!(
+            earliest_arrival(&v, &t, &[7], 0).unwrap_err(),
+            TemporalError::NoSuchNode(7)
+        );
         assert!(temporal_shortest_path(&v, &t, 0, 9, 0).is_err());
         assert!(symptom_explanation(&v, &t, &[(9, 1)]).is_err());
     }
@@ -623,7 +733,100 @@ mod tests {
         // Two edges 0->1, at 2 and at 8. From start=5 only the later one is
         // available, so the arrival is 8 rather than unreachable.
         let (v, t) = view(2, &[(0, 1, 2), (0, 1, 8)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 5).unwrap(), vec![(1, 8)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 0).unwrap(), vec![(1, 2)]);
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 5).unwrap(),
+            vec![(1, 8)]
+        );
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 0).unwrap(),
+            vec![(1, 2)]
+        );
+    }
+
+    /// A rotated times array is exactly what `new` cannot see, and exactly what
+    /// `from_pairs` makes impossible to express.
+    ///
+    /// The point is not that rotation is a likely typo. It is that `new`'s
+    /// contract is "the caller got the ordering right", the only evidence it
+    /// asks for is a length, and a wrong ordering changes every answer while
+    /// producing a well-formed result (samyama-graph#1304).
+    #[test]
+    fn a_rotated_times_array_passes_the_length_check() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+        let right = vec![1i64, 2, 3];
+        let rotated = vec![3i64, 1, 2];
+
+        // Both accepted: same length, and that is all `new` asks.
+        let a = TemporalEdges::new(&v, right.clone()).unwrap();
+        let b = TemporalEdges::new(&v, rotated.clone()).unwrap();
+        assert_eq!(a.len(), b.len());
+
+        // And they are different graphs in time. If this ever stops differing,
+        // the fixture has stopped exercising the thing.
+        let reach_a = temporal_reachability(&v, &a, &[0], 0).unwrap();
+        let reach_b = temporal_reachability(&v, &b, &[0], 0).unwrap();
+        assert_ne!(
+            reach_a, reach_b,
+            "the rotation must change the answer, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn from_pairs_places_times_by_endpoint() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+        // Deliberately given out of CSR order: the constructor places them.
+        let t = TemporalEdges::from_pairs(&v, [(2usize, 3usize, 3i64), (0, 1, 1), (1, 2, 2)])
+            .expect("every edge named once");
+        let direct = TemporalEdges::new(&v, vec![1, 2, 3]).unwrap();
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 0),
+            temporal_reachability(&v, &direct, &[0], 0),
+            "naming edges by endpoint must agree with the correctly ordered array"
+        );
+    }
+
+    #[test]
+    fn from_pairs_refuses_what_it_cannot_place() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+
+        // An edge the graph does not have.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 1i64), (0, 3, 9)]).unwrap_err(),
+            TemporalError::NoSuchEdge { from: 0, to: 3 }
+        );
+
+        // A node the graph does not have.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(9usize, 1usize, 1i64)]).unwrap_err(),
+            TemporalError::NoSuchNode(9)
+        );
+
+        // An edge left untimed. Not defaulted: 0 makes it traversable from the
+        // beginning of time and i64::MAX makes it untraversable, and both are
+        // answers the caller did not give.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 1i64), (1, 2, 2)]).unwrap_err(),
+            TemporalError::UntimedEdge { from: 2, to: 3 }
+        );
+    }
+
+    #[test]
+    fn from_pairs_gives_parallel_edges_their_times_in_order() {
+        // Two 0 -> 1 edges. The endpoints cannot tell them apart, so the times
+        // are taken in the order given -- and a third time for the same pair is
+        // refused rather than silently dropped.
+        let (v, _) = view(2, &[(0, 1, 5), (0, 1, 9)]);
+        let t = TemporalEdges::from_pairs(&v, [(0usize, 1usize, 5i64), (0, 1, 9)]).unwrap();
+        assert_eq!((t.at(0), t.at(1)), (5, 9));
+
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 5i64), (0, 1, 9), (0, 1, 11)])
+                .unwrap_err(),
+            TemporalError::TooManyTimes {
+                from: 0,
+                to: 1,
+                have: 2
+            }
+        );
     }
 }
