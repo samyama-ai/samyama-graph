@@ -10,9 +10,15 @@
 //! panicked — 67 of them at zero arguments, plus `atan2` and `hasLabels` at
 //! one. Fixing `toUpper` would have left sixty-eight.
 //!
-//! So the test is the sweep. A function added later that indexes its arguments
-//! without a row in `MIN_ARITY` fails here rather than in production, which is
-//! the only way this stays fixed.
+//! So the test is the sweep, over argument **count and type**. Passing `1`
+//! everywhere reported `left` and `right` as safe at one argument: `left(1)` is
+//! refused on the type before anything reaches `args[1]`, while `left('a')`
+//! gets that far and aborts. Two more crashes, found only because the fuzz
+//! varied what it passed.
+//!
+//! A function added later that indexes its arguments without a row in
+//! `MIN_ARITY` fails here rather than in production, which is the only way this
+//! stays fixed.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -54,11 +60,18 @@ fn no_known_function_panics_on_any_argument_count() {
             None => format!("{}{}", name[..1].to_uppercase(), &name[1..]),
         };
         for spelling in [name.to_string(), upper] {
-            for argc in 0..=3usize {
-                let args = vec!["1"; argc].join(", ");
-                let query = format!("RETURN {spelling}({args})");
-                if panicked(&query) {
-                    offenders.push(format!("{spelling}/{argc}"));
+            // Argument *type* as well as count. A sweep that passed `1`
+            // everywhere reported `left` and `right` as safe at one argument:
+            // `left(1)` is refused on the type before anything indexes
+            // `args[1]`, while `left('a')` gets that far and aborts. Two
+            // functions, found only because the fuzz varied what it passed.
+            for value in ["1", "'a'", "true", "null", "[1]", "{a: 1}", "1.5", "-1"] {
+                for argc in 0..=3usize {
+                    let args = vec![value; argc].join(", ");
+                    let query = format!("RETURN {spelling}({args})");
+                    if panicked(&query) {
+                        offenders.push(format!("{spelling}({args})"));
+                    }
                 }
             }
         }
