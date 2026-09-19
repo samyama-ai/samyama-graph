@@ -3,7 +3,7 @@
 What happens when something goes wrong, what the data guarantee is afterwards,
 and what the operator should do.
 
-**29 of the 31 rows name the test that observed the behaviour.** A row without a
+**31 of the 32 rows name the test that observed the behaviour.** A row without a
 test is a guess about the most important moment in a database's life, so the
 gaps are listed at the bottom as gaps rather than filled in with what ought to
 happen.
@@ -49,6 +49,8 @@ row below that says "survives a restart" means a clean restart, not a power cut.
 | 13 | A snapshot catalog in an unrecognised format | Refused, with a message containing "refusing to guess" | An unknown format is never interpreted | Supply a supported catalog | `an_unknown_catalog_format_is_refused` (`tests/snapshot_verify.rs`) |
 | 14 | A dangling edge arriving through the recovery path | `insert_recovered_edge` refuses an edge whose target does not exist | Recovery cannot introduce corruption | Check the WAL/snapshot source | `a_dangling_edge_cannot_be_created_through_a_public_api` (`tests/db_check_integrity.rs`) |
 
+| 32 | **A WAL whose last record is torn** (killed between writing a length prefix and the bytes it promised) | Replay stops at the torn record and keeps every complete record before it. A short length prefix and a short record body now behave the same way; the second used to fail the whole replay | Records acknowledged before the crash survive; the unfinished one does not. A failed **checksum** still errors, because a record written in full and then damaged is a different fact from a write that did not finish | None; the log is replayable | `a_record_cut_in_its_body_does_not_discard_the_records_before_it`, `a_record_cut_in_its_length_prefix_also_replays_the_rest` (`tests/wal_torn_tail.rs`) |
+
 ## Transactions
 
 | # | Failure | Observed behaviour | Data guarantee | Operator action | Test |
@@ -59,7 +61,7 @@ row below that says "survives a restart" means a clean restart, not a power cut.
 | 18 | A constraint refuses a commit part-way | Commit errors, the transaction's node is gone, an unrelated write in the same transaction is gone, the pre-existing value is intact, status `Aborted` | Refusal is all-or-nothing | Fix the data and retry | `a_commit_refused_by_a_constraint_changes_nothing` (`tests/mvcc_isolation_anomalies.rs`) |
 | 19 | A query or rollback on a finished transaction | HTTP 404 for an unknown id, for a query in a finished transaction, and for rolling back a committed one | A finished transaction cannot be operated on | Begin a new transaction | `an_unknown_or_finished_transaction_is_refused` (`src/http/transactions.rs`) |
 | 20 | **A single statement fails part-way** | The rows written before the failure stay, in memory **and on disk** — the test asserts the two agree | There is no statement rollback (LANG-07). The guarantee is that disk matches memory, not that the statement was atomic | Check what the statement wrote before retrying | `a_partial_failure_leaves_disk_agreeing_with_memory` (`tests/write_durability.rs`) |
-| 21 | **A session transaction outlives its timeout** | **Not tested — see the gaps below** | `SAMYAMA_TX_TIMEOUT_SECS` (default 30 s) is read on both protocols and `timed_out` is set; nothing asserts the effect | Do not rely on the timeout to free the writer lock | — |
+| 21 | **A session transaction outlives its timeout** | Rolled back at the deadline: the write is gone, the store has no transaction open, and a later COMMIT is told *the transaction was open longer than Ns and was rolled back* rather than that none is open | `SAMYAMA_TX_TIMEOUT_SECS` (default 30 s) frees the writer lock, and the client learns its transaction was taken away rather than that it never had one | None; shorten the variable if 30 s is too long to hold the lock | `a_transaction_left_open_past_its_deadline_is_rolled_back` (`src/protocol/server.rs`) |
 
 ## Limits and hostile input
 
@@ -86,9 +88,8 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 |---|---|
 | **Disk full, or any IO error on a write path** | Nothing injects `ENOSPC`, a read-only directory or an `io::Error`. The commit-refused tests (rows 16) reach that code through a *quota* refusal, so they cannot stand in for it |
 | **Process killed mid-write (SIGKILL)** | No test spawns and kills a process. Rows 7 and 20 are the nearest proxies and neither is a real crash |
-| **WAL replay after a crash** | Every WAL test replays a WAL the same process just wrote and flushed |
-| **Corrupt or truncated WAL** | `src/persistence/wal.rs` handles `UnexpectedEof` during replay and nothing ever produces one. Snapshot truncation *is* covered (rows 9-10); the WAL is not |
-| **Transaction or query timeout** | The plumbing exists on both protocols and nothing trips it (row 21) |
+| **WAL replay after a crash** | Every WAL test replays a WAL the same process just wrote and flushed. Row 32 truncates one deliberately, which is not the same as replaying one a killed process left behind |
+| **A query deadline exceeded** | `with_deadline` and `check_deadline` exist and nothing drives a query past one. The *transaction* timeout is row 21; the query deadline is still untested |
 | **Out of memory** | The memory quota checks a bookkeeping counter, not process memory, and no test exercises an allocation failure |
 | **Replica lag, or a node losing leadership** | Neither exists to test: `RaftNode::write` applies locally and `initialize` makes the node leader unconditionally (#1309) |
 
