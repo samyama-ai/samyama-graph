@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
 use samyama_sdk::{
-    EmbeddedClient, RemoteClient, SamyamaClient as SamyamaClientTrait,
+    ConnectionConfig, EmbeddedClient, RemoteClient, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
     AlgorithmClient, PageRankConfig, PcaConfig,
     VectorClient, DistanceMetric, NodeId,
@@ -181,11 +181,49 @@ impl SamyamaClient {
         })
     }
 
-    /// Connect to a running Samyama server via HTTP
+    /// Connect to a running Samyama server via HTTP.
+    ///
+    /// `timeout_seconds` bounds a whole request and `connect_timeout_seconds`
+    /// just the TCP connect; `max_retries` retries a timeout or connection
+    /// failure with exponential backoff starting at `retry_base_delay_ms`.
+    ///
+    /// The defaults are the point of the arguments existing. This used to build
+    /// a client with no request timeout, so a server that accepted the
+    /// connection and then stopped talking hung the caller until the process
+    /// was killed -- with no way for a notebook, a web request or an agent loop
+    /// to recover (samyama-graph#1326). Pass `timeout_seconds=None` to restore
+    /// the old behaviour deliberately.
     #[staticmethod]
-    fn connect(url: &str) -> PyResult<Self> {
+    #[pyo3(signature = (url, timeout_seconds=30.0, connect_timeout_seconds=5.0,
+                        max_retries=2, retry_base_delay_ms=100))]
+    fn connect(
+        url: &str,
+        timeout_seconds: Option<f64>,
+        connect_timeout_seconds: Option<f64>,
+        max_retries: u32,
+        retry_base_delay_ms: u64,
+    ) -> PyResult<Self> {
+        let secs = |v: Option<f64>| -> PyResult<Option<std::time::Duration>> {
+            match v {
+                None => Ok(None),
+                Some(s) if s > 0.0 && s.is_finite() => {
+                    Ok(Some(std::time::Duration::from_secs_f64(s)))
+                }
+                Some(s) => Err(PyRuntimeError::new_err(format!(
+                    "timeout must be a positive number of seconds, or None for no \
+                     timeout; got {s}"
+                ))),
+            }
+        };
+        let config = ConnectionConfig {
+            timeout: secs(timeout_seconds)?,
+            connect_timeout: secs(connect_timeout_seconds)?,
+            max_retries,
+            retry_base_delay: std::time::Duration::from_millis(retry_base_delay_ms),
+            ..Default::default()
+        };
         Ok(SamyamaClient {
-            inner: Arc::new(ClientInner::Remote(RemoteClient::new(url))),
+            inner: Arc::new(ClientInner::Remote(RemoteClient::with_config(url, config))),
         })
     }
 

@@ -40,7 +40,11 @@ export class SamyamaClient {
 
   constructor(options?: ClientOptions) {
     const url = options?.url ?? DEFAULT_URL;
-    this.http = new HttpTransport(url);
+    this.http = new HttpTransport(url, {
+      timeoutMs: options?.timeoutMs,
+      maxRetries: options?.maxRetries,
+      retryBaseDelayMs: options?.retryBaseDelayMs,
+    });
   }
 
   /**
@@ -136,6 +140,17 @@ export class SamyamaClient {
     nodes: Record<string, unknown>[],
   ): Promise<JsonImportResult> {
     return this.http.importJson(label, nodes);
+  }
+
+  /**
+   * Does the server answer, and does it call itself healthy?
+   *
+   * Returns false rather than throwing: "is it up" is a question whose negative
+   * answer is not exceptional, and `ping()` below throws, which makes it
+   * awkward inside a readiness loop.
+   */
+  async healthy(): Promise<boolean> {
+    return this.http.healthy();
   }
 
   /** Ping the server */
