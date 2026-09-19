@@ -26,4 +26,4 @@ samyama-mcp-serve = "samyama_mcp.cli:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-python-packages = ["samyama_mcp"]
+python-packages = ["samyama_mcp", "samyama-stubs"]
