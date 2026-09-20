@@ -138,11 +138,63 @@ struct Tarjan {
     is_root: Vec<bool>,
 }
 
-/// Every undirected neighbour of `i`, both directions.
+/// Every undirected neighbour of `i`, with the right multiplicity.
+///
+/// This used to be `successors ++ predecessors`, which puts a neighbour in the
+/// list twice for **two different reasons** and cannot tell them apart
+/// (samyama-graph#1308):
+///
+/// - two parallel `a -> b` edges — genuinely two undirected edges;
+/// - a reciprocal `a -> b`, `b -> a` pair — **one** undirected edge, drawn as
+///   one and understood as one by everybody who wrote the data.
+///
+/// The convention this takes, now written down in
+/// `docs/ALGORITHM-CONVENTIONS.md`: **a reciprocal pair is one undirected
+/// edge.** So the multiplicity between `i` and `w` is `max(forward, reverse)` —
+/// reciprocals pair off and whatever is left over stands on its own:
+///
+/// | forward | reverse | undirected |
+/// |---|---|---|
+/// | 1 | 0 | 1 |
+/// | 1 | 1 | 1 (one reciprocal pair) |
+/// | 2 | 0 | 2 (parallel) |
+/// | 2 | 1 | 2 (one pair, one leftover) |
+///
+/// That choice is the conservative one: it is what the traversal already did
+/// for reciprocal pairs, so `x <-> y` stays a bridge and no other algorithm's
+/// answers move. The alternative — a reciprocal pair counting as two, which is
+/// Neo4j GDS's undirected projection — would stop `x <-> y` being a bridge and
+/// change every algorithm that symmetrises. That is a product decision and a
+/// larger one; it is recorded in the conventions document as the road not
+/// taken rather than left implicit.
+///
+/// Emitted in first-seen order so the traversal is deterministic.
 fn undirected_neighbours(view: &GraphView, i: usize) -> Vec<usize> {
-    let mut v: Vec<usize> = view.successors(i).to_vec();
-    v.extend_from_slice(view.predecessors(i));
-    v
+    let mut order: Vec<usize> = Vec::new();
+    let mut counts: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    for &w in view.successors(i) {
+        let e = counts.entry(w).or_insert_with(|| {
+            order.push(w);
+            (0, 0)
+        });
+        e.0 += 1;
+    }
+    for &w in view.predecessors(i) {
+        let e = counts.entry(w).or_insert_with(|| {
+            order.push(w);
+            (0, 0)
+        });
+        e.1 += 1;
+    }
+    let mut out = Vec::new();
+    for w in order {
+        let (f, r) = counts[&w];
+        for _ in 0..f.max(r) {
+            out.push(w);
+        }
+    }
+    out
 }
 
 fn tarjan(view: &GraphView) -> Tarjan {
@@ -160,19 +212,20 @@ fn tarjan(view: &GraphView) -> Tarjan {
         if t.disc[root] != usize::MAX {
             continue;
         }
-        // (node, parent, index into its neighbour list, children counted)
-        let mut stack: Vec<(usize, usize, usize, usize)> = Vec::new();
+        // (node, parent, index into its neighbour list, children counted,
+        //  whether the edge back to the parent has been skipped yet)
+        let mut stack: Vec<(usize, usize, usize, usize, bool)> = Vec::new();
         t.disc[root] = t.timer;
         t.low[root] = t.timer;
         t.timer += 1;
         t.is_root[root] = true;
-        stack.push((root, usize::MAX, 0, 0));
+        stack.push((root, usize::MAX, 0, 0, false));
 
-        while let Some((v, parent, i, children)) = stack.pop() {
+        while let Some((v, parent, i, children, parent_skipped)) = stack.pop() {
             let nb = undirected_neighbours(view, v);
             if i < nb.len() {
                 let w = nb[i];
-                stack.push((v, parent, i + 1, children));
+                stack.push((v, parent, i + 1, children, parent_skipped));
                 if w == v {
                     continue; // a self-loop is neither a bridge nor a cut
                 }
@@ -184,24 +237,29 @@ fn tarjan(view: &GraphView) -> Tarjan {
                     if let Some(last) = stack.last_mut() {
                         last.3 += 1;
                     }
-                    stack.push((w, v, 0, 0));
-                } else if w != parent {
-                    // A back edge -- and this compares on node *identity*, so
-                    // every edge back to the parent is skipped, not just the
-                    // one the search arrived on.
+                    stack.push((w, v, 0, 0, false));
+                } else if w == parent && !parent_skipped {
+                    // The edge the search arrived on, skipped **once**.
                     //
-                    // With genuine parallel edges that is wrong: two `a -> b`
-                    // edges mean removing either leaves the graph connected, so
-                    // the pair is not a bridge, and this reports one. Measured:
-                    // `a = b` plus `b -> c` yields bridges [(a,b), (b,c)].
+                    // It used to be skipped on node identity, so *every* edge
+                    // back to the parent was ignored. With parallel edges that
+                    // is wrong: two `a -> b` edges mean removing either leaves
+                    // the graph connected, so the pair is not a bridge, and it
+                    // was reported as one -- `a = b` plus `b -> c` gave
+                    // bridges [(a,b), (b,c)] (samyama-graph#1308).
                     //
-                    // Skipping the parent exactly once -- the textbook fix --
-                    // would break the commoner case instead. A reciprocal pair
-                    // `a -> b`, `b -> a` is *one* undirected edge and also puts
-                    // the parent in the list twice, and it genuinely is a
-                    // bridge. The symmetrised neighbour list carries no edge
-                    // identity, so nothing here can tell the two apart:
-                    // samyama-graph#1308 needs the convention decided first.
+                    // Skipping once is only correct because
+                    // `undirected_neighbours` now lists the parent once per
+                    // *undirected* edge. A reciprocal pair appears once and is
+                    // consumed here, so `x <-> y` stays a bridge; a parallel
+                    // pair appears twice and the second occurrence falls
+                    // through to the back-edge arm below, which is what makes
+                    // it not a bridge.
+                    if let Some(last) = stack.last_mut() {
+                        last.4 = true;
+                    }
+                } else {
+                    // A back edge.
                     t.low[v] = t.low[v].min(t.disc[w]);
                 }
             } else {
@@ -235,8 +293,6 @@ fn tarjan(view: &GraphView) -> Tarjan {
 /// the DFS's parent/child orientation — but the list is **sorted** before it is
 /// returned, not left in DFS discovery order as this said.
 ///
-/// Parallel edges are reported as a bridge and should not be
-/// (samyama-graph#1308).
 pub fn bridges(view: &GraphView) -> Vec<(NodeId, NodeId)> {
     let mut b = tarjan(view).bridges;
     b.sort();
