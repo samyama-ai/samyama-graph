@@ -91,6 +91,9 @@ the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 | Bridges | bridges | Symmetrises itself; a reciprocal pair is **one** undirected edge, parallel edges are **many** (see below) | Ignored | Skipped explicitly | Every component gets its own search | All bridges returned, sorted | None |
 | Articulation points | articulationPoints | As bridges: the same traversal and the same multiplicity rule | Ignored | Skipped explicitly | A root is judged per component | Ascending node index | None |
 
+| Biconnected components | biconnected, biconnectedComponents | Follows `bidirectional` | Ignored | Removed from the neighbour set | Every component searched; isolated nodes produce none | Each component sorted, then the list sorted and deduplicated | None |
+
+
 ### What "symmetrises itself" counts as one edge
 
 The column above had no room for this and the question had not been asked, so
@@ -118,7 +121,6 @@ would change every algorithm that symmetrises: `bridges`,
 `articulationPoints`, `countTriangles` and everything reached through
 `neighbours()`. That is a larger product decision; it is recorded here as the
 road not taken rather than left implicit.
-| Biconnected components | biconnected, biconnectedComponents | Follows `bidirectional` | Ignored | Removed from the neighbour set | Every component searched; isolated nodes produce none | Each component sorted, then the list sorted and deduplicated | None |
 
 ## Shape, similarity and link prediction
 
