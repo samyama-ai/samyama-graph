@@ -602,6 +602,8 @@ samyama
 | LDBC Results | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | Algorithm Conventions | [docs/ALGORITHM-CONVENTIONS.md](docs/ALGORITHM-CONVENTIONS.md) — directedness, weights, self-loops, disconnected components, tie-breaking and normalisation, per algorithm |
 | Failure Modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) — what happens when something goes wrong, each row naming the test that observed it |
+| Migrating from Neo4j | [docs/MIGRATING-FROM-NEO4J.md](docs/MIGRATING-FROM-NEO4J.md) — point `compatibility_report` at your queries, then what each refusal means |
+| Leaving Samyama | [docs/LEAVING-SAMYAMA.md](docs/LEAVING-SAMYAMA.md) — every export route and what it costs |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
 | API Spec | [api/openapi.yaml](api/openapi.yaml) |
 | Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
