@@ -603,6 +603,7 @@ samyama
 | Algorithm Conventions | [docs/ALGORITHM-CONVENTIONS.md](docs/ALGORITHM-CONVENTIONS.md) — directedness, weights, self-loops, disconnected components, tie-breaking and normalisation, per algorithm |
 | Failure Modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) — what happens when something goes wrong, each row naming the test that observed it |
 | Data Handling | [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) — there is no telemetry; the three features that can send data to a third party, what each sends, and how to switch them off |
+| Grafana dashboard | [ops/grafana/](ops/grafana/) — query latency percentiles, band occupancy and the slow-query counter, over metrics the engine actually exports |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
 | API Spec | [api/openapi.yaml](api/openapi.yaml) |
 | Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |

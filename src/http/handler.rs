@@ -657,6 +657,11 @@ pub async fn metrics_handler(
         ));
     }
 
+    // Query latency last, because it is the part an operator opens this page
+    // for. Everything above describes the graph; this describes what asking it
+    // questions costs (REL-10).
+    out.push_str(&crate::query::metrics::render());
+
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         out,
