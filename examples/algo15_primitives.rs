@@ -76,19 +76,28 @@ fn main() {
     // wrong here would report a shipped primitive as missing, and a wrong YIELD
     // name fails only when the query *succeeds* -- no rows means nothing reads
     // the binding.
+    //
+    // Each asks for `path` explicitly. A probe that measures whether a
+    // primitive returns a supporting path and never requests one measures
+    // nothing: three of these bound no `path` column and the YIELD did not ask
+    // for it either, so the 1-of-4 was consistent for two reasons at once. If a
+    // primitive stops providing the column, the query fails on the unknown
+    // YIELD item and the row is reported as not shipped, which is louder than
+    // a silently absent column.
     let cases: Vec<(&str, String)> = vec![
         ("temporalReachability",
-         format!("CALL algo.temporalReachability({a}, {cfg}) YIELD node, time \
-                  RETURN node, time")),
+         format!("CALL algo.temporalReachability({a}, {cfg}) YIELD node, time, path, times \
+                  RETURN node, time, path, times")),
         ("temporalShortestPath",
          format!("CALL algo.temporalShortestPath({a}, {b}, {cfg}) \
                   YIELD path, times, arrival RETURN path, times, arrival")),
         ("propagationRanking",
-         format!("CALL algo.propagationRanking({a}, {cfg}) YIELD node, time, rank \
-                  RETURN node, time, rank")),
+         format!("CALL algo.propagationRanking({a}, {cfg}) YIELD node, time, rank, path, times \
+                  RETURN node, time, rank, path, times")),
         ("symptomExplanation",
          format!("CALL algo.symptomExplanation([[{b}, 30], [{c}, 30]], {cfg}) \
-                  YIELD node, explains, onset RETURN node, explains, onset")),
+                  YIELD node, explains, onset, path, times \
+                  RETURN node, explains, onset, path, times")),
     ];
 
     let mut rows = Vec::new();
