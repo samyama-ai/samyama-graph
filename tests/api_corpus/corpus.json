@@ -1962,9 +1962,23 @@
       "query": "RETURN date('2024-01-15').year AS y"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.TypeError] Type error: cannot index Date: it is not a list or a map"
+      "cached": false,
+      "columns": [
+        "y"
+      ],
+      "edges": [],
+      "engine_version": "<version>",
+      "nodes": [],
+      "notifications": [],
+      "plan_hash": "<hex>",
+      "records": [
+        [
+          2024
+        ]
+      ],
+      "snapshot_version": 1
     },
-    "status": 400
+    "status": 200
   },
   {
     "method": "POST",
