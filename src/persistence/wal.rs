@@ -184,14 +184,39 @@ impl Wal {
             path,
             current_file: None,
             sequence,
-            sync_mode: false, // Default to async for performance
+            sync_mode: Self::sync_mode_from_env(),
         })
     }
 
-    /// Set sync mode
+    /// Whether an acknowledged write has been forced to the platter.
+    ///
+    /// `SAMYAMA_FSYNC=1` turns it on. **Off by default**, which is what the
+    /// engine has always done, and the default is the honest one to keep: this
+    /// is a change of what users can choose, not a change of what they get
+    /// without asking. `docs/ACID_GUARANTEES.md` §4 states both costs.
+    ///
+    /// Read once, at construction. A durability level that could change under
+    /// a running process would make "was this write durable?" unanswerable for
+    /// any particular write.
+    fn sync_mode_from_env() -> bool {
+        matches!(
+            std::env::var("SAMYAMA_FSYNC").unwrap_or_default().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }
+
+    /// Set sync mode.
+    ///
+    /// Exists so a caller can override the environment — the benchmark that
+    /// measures what fsync costs needs both modes in one process.
     pub fn set_sync_mode(&mut self, sync: bool) {
         self.sync_mode = sync;
         debug!("WAL sync mode: {}", sync);
+    }
+
+    /// Is an acknowledged write forced to the platter?
+    pub fn sync_mode(&self) -> bool {
+        self.sync_mode
     }
 
     /// Get current sequence number
@@ -228,9 +253,18 @@ impl Wal {
             // Write data
             file.write_all(&data)?;
 
-            // Flush if in sync mode
+            // Sync if asked. `flush()` alone moves bytes out of the `BufWriter`
+            // into the OS page cache and is **not** a durability barrier — a
+            // host crash or power loss still loses them. `sync_data()` is the
+            // barrier, and it is what "durable" has to mean for a write that
+            // has been acknowledged (#1309).
+            //
+            // `sync_data` rather than `sync_all`: the file's length and
+            // contents are what a replay needs, and skipping the metadata
+            // flush is the cheaper of the two barriers.
             if self.sync_mode {
                 file.flush()?;
+                file.get_ref().sync_data()?;
             }
         }
 

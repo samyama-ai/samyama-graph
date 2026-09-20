@@ -105,6 +105,21 @@ impl PersistenceManager {
         })
     }
 
+    /// Force the WAL's sync mode, overriding `SAMYAMA_FSYNC`.
+    ///
+    /// The benchmark that measures what fsync costs needs both modes in one
+    /// process, on one host, alternated — two processes would be two hosts'
+    /// worth of noise in a ratio between two numbers.
+    ///
+    /// Note this moves the **WAL** only. RocksDB's `WriteOptions` are fixed at
+    /// open, so a measurement taken through this sees the WAL barrier and not
+    /// the store's; that is stated in the example rather than hidden, because a
+    /// cost that measures half the path is a cost that understates.
+    #[doc(hidden)]
+    pub fn set_wal_sync_for_test(&self, sync: bool) {
+        self.wal.lock().unwrap().set_sync_mode(sync);
+    }
+
     /// Make the next [`Self::apply_mutations`] fail, once.
     ///
     /// Tests only, and `pub` because the durability tests are integration
