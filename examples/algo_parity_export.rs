@@ -492,10 +492,17 @@ fn main() {
             match samyama_graph_algorithms::temporal::TemporalEdges::new(&view, edge_times.clone()) {
                 Ok(te) => {
                     let sources = [0usize];
+                    // `[id, arrival]`, as before. The walk now comes back too
+                    // (ALGO-15) and is deliberately **not** exported: the
+                    // recorded answers are what the reference implementations
+                    // also produce, and neither NetworkX nor igraph returns a
+                    // time-respecting walk, so adding it here would put a
+                    // column in the parity corpus that nothing can be compared
+                    // against.
                     let reach = temporal_reachability(&view, &te, &sources, 0)
-                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
                     let prop = propagation_ranking(&view, &te, &sources, 0)
-                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
                     let tsp = temporal_shortest_path(&view, &te, 0, r.n - 1, 0).map(|p| {
                         p.map(|p| serde_json::json!({
                             "nodes": p.nodes,
