@@ -19,7 +19,7 @@ it out.
 | **Cypher script** | nodes, labels, properties, relationships, relationship properties | Neo4j, Memgraph, FalkorDB, another Samyama |
 | **`.sgsnap` snapshot** | the above, plus node creation timestamps and hierarchy-index declarations | another Samyama |
 | **Parquet / Arrow** | one *result set* | a warehouse, pandas, DuckDB |
-| **RDF / Turtle** | — | **nothing: not implemented, see below** |
+| **RDF / Turtle** | nodes, labels, properties, relationships, relationship properties (reified), IRIs | a triple store, SPARQL tooling |
 
 Nothing here needs a licence key, a support ticket, or a running network
 connection to us.
@@ -124,17 +124,46 @@ job the Cypher script above is less work and loses less.
 
 ---
 
-## 4. RDF — not implemented
+## 4. RDF — a round trip, with three named losses
 
-`src/rdf/mapping.rs` exists and every mapping function returns
-`NotImplemented`. There is a triple store and Turtle, N-Triples, RDF/XML and
-JSON-LD serialisers, but **nothing maps a property graph into triples**, so
-there is no RDF export path today.
+`GraphToRdfMapper::sync_to_rdf` writes the graph into an `RdfStore`, which the
+existing Turtle, N-Triples, RDF/XML and JSON-LD serialisers can write out.
+`RdfToGraphMapper::map_to_graph` reads it back. The mapping:
 
-Spec requirement INT-07 asks for tested steps to Neo4j *and* RDF. Half of that
-is here; the RDF half is not, and this page says so rather than describing a
-route that ends in an error. Tracked as
-[#1362](https://github.com/samyama-ai/samyama-graph/issues/1362).
+| Property graph | RDF |
+|---|---|
+| node | a subject IRI |
+| label | `rdf:type {base}class/{Label}` |
+| node property | `{base}prop/{key}` → a **typed** literal |
+| relationship | `{source} {base}rel/{TYPE} {target}` |
+| relationship property | an `rdf:Statement` reifying the triple |
+
+Literals are typed, so an integer comes back an integer rather than `"30"`.
+An imported resource keeps its original IRI in a `__rdf_iri` property and
+export prefers it, so re-exporting an imported graph reproduces the IRIs that
+came in rather than inventing new ones.
+
+**What it costs, in the three places it costs something:**
+
+- **Parallel relationships collapse.** RDF has no parallel edges, so two plain
+  `KNOWS` between the same pair are one triple and come back as one
+  relationship. `sync_to_rdf` returns a `SyncReport` whose
+  `duplicates_collapsed` counts them — the loss is reported, not discovered.
+- **Node ids change.** Identity crosses as the IRI, not the integer id, which
+  is the same trade the Cypher route makes with `_sgid`.
+- **Arrays, maps, vectors and temporals** cross as a JSON literal typed
+  `https://samyama.ai/rdf/PropertyValue`, not as RDF lists or `xsd:dateTime`.
+  They round-trip through Samyama exactly; another triple store will see a
+  string.
+
+Verified by running it rather than by reading it:
+`cargo run --release --example rdf_round_trip` exports, imports, exports again
+and exits non-zero if the nodes, relationships, property types or IRIs did not
+survive. `tests/rdf_round_trip.rs` pins the same ground, including the
+collapse above so it stays a documented loss.
+
+Spec requirement INT-07 asks for tested steps to Neo4j *and* RDF; both halves
+are now here. Closed [#1362](https://github.com/samyama-ai/samyama-graph/issues/1362).
 
 ---
 

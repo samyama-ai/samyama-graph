@@ -346,6 +346,19 @@ pub async fn query_handler(
     let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
     let mut served_from_cache = false;
 
+    // A write refused because an earlier one did not reach disk (#1274). Asked
+    // before the write rather than after, so the client gets 503 and the store
+    // does not move further ahead of the disk.
+    if is_write {
+        if let Some(refusal) = state.writes_refused() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": refusal })),
+            )
+                .into_response();
+        }
+    }
+
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
@@ -643,6 +656,11 @@ pub async fn metrics_handler(
             i.label.replace('"', ""), i.property.replace('"', ""), i.kind, i.bytes
         ));
     }
+
+    // Query latency last, because it is the part an operator opens this page
+    // for. Everything above describes the graph; this describes what asking it
+    // questions costs (REL-10).
+    out.push_str(&crate::query::metrics::render());
 
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],

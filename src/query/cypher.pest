@@ -214,7 +214,7 @@ shortest_path_call = { (^"allShortestPaths" | ^"shortestPath") ~ "(" ~ path ~ ")
 // Node pattern: (n:Person {name: "Alice"})
 node = { "(" ~ variable? ~ labels? ~ properties? ~ ")" }
 labels = { (":" ~ label)+ }
-label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+label = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Edge pattern: -[:KNOWS]-> or <-[:KNOWS]- or -[:KNOWS]-
 //
@@ -239,7 +239,7 @@ edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ 
 // spelling openCypher's own scenarios use. Only `:A|B` and `:A:B` parsed, so
 // the query failed outright rather than matching either type (#909).
 edge_types = { ":" ~ edge_type ~ (("|" ~ ":"? | ":") ~ edge_type)* }
-edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+edge_type = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Variable length: *1..5 or * or *3..
 length_pattern = { "*" ~ (range_pattern | integer)? }

@@ -91,30 +91,32 @@ impl GraphToRdfMapper {
         Self { config }
     }
 
-    /// Map a node to RDF triples
+    /// A node's labels and properties as triples.
     ///
-    /// TODO: Full implementation
-    /// - Convert node ID to IRI
-    /// - Add rdf:type triples for labels
-    /// - Add property triples
-    pub fn map_node(&self, _node: &Node) -> MappingResult<Vec<Triple>> {
-        Err(MappingError::NotImplemented("map_node"))
+    /// See `mapping_impl` for what each part maps to and what does not survive.
+    pub fn map_node(&self, graph: &GraphStore, node: &Node) -> MappingResult<Vec<Triple>> {
+        super::mapping_impl::map_node(&self.config, graph, node)
     }
 
-    /// Map an edge to RDF triples
+    /// An edge as a triple, plus reification when it carries properties.
     ///
-    /// TODO: Full implementation
-    /// - Create triple for edge relationship
-    /// - Optionally reify edge properties
-    pub fn map_edge(&self, _edge: &Edge) -> MappingResult<Vec<Triple>> {
-        Err(MappingError::NotImplemented("map_edge"))
+    /// Takes the graph because an edge names its endpoints by id and a triple
+    /// names them by IRI, which only the store can resolve — and an endpoint
+    /// that is missing is an error rather than an invented IRI.
+    pub fn map_edge(&self, graph: &GraphStore, edge: &Edge) -> MappingResult<Vec<Triple>> {
+        super::mapping_impl::map_edge(&self.config, graph, edge)
     }
 
-    /// Synchronize property graph to RDF store
+    /// Write the whole graph into an RDF store.
     ///
-    /// TODO: Full implementation
-    pub fn sync_to_rdf(&self, _graph: &GraphStore, _rdf: &mut RdfStore) -> MappingResult<()> {
-        Err(MappingError::NotImplemented("sync_to_rdf"))
+    /// Returns what was written and what collapsed — RDF has no parallel
+    /// edges, so a graph that says the same thing twice says it once here.
+    pub fn sync_to_rdf(
+        &self,
+        graph: &GraphStore,
+        rdf: &mut RdfStore,
+    ) -> MappingResult<super::mapping_impl::SyncReport> {
+        super::mapping_impl::sync_to_rdf(&self.config, graph, rdf)
     }
 }
 
@@ -131,11 +133,12 @@ impl RdfToGraphMapper {
         }
     }
 
-    /// Map RDF triples to property graph
+    /// Read an RDF store into a property graph.
     ///
-    /// TODO: Full implementation
-    pub fn map_to_graph(&self, _rdf: &RdfStore, _graph: &mut GraphStore) -> MappingResult<()> {
-        Err(MappingError::NotImplemented("map_to_graph"))
+    /// Each subject IRI becomes a node and is kept in `IRI_PROPERTY`, so
+    /// exporting the result reproduces the IRIs that came in.
+    pub fn map_to_graph(&self, rdf: &RdfStore, graph: &mut GraphStore) -> MappingResult<()> {
+        super::mapping_impl::map_to_graph(&self.config, rdf, graph)
     }
 }
 
@@ -149,24 +152,33 @@ mod tests {
         assert_eq!(mapper.config.base_iri, "http://example.org/");
     }
 
-    /// The previous version of this test asserted `triples.is_empty()` -- it
-    /// encoded the defect, so implementing the mapping correctly would have
-    /// broken it and the failure would have looked like a regression. It now
-    /// asserts the refusal, which is the behaviour we actually want today, and
-    /// it will fail when the mapping is implemented, which is the right moment
-    /// to be told.
+    /// This test has been through all three states the mapping has had, and
+    /// the history is the point.
+    ///
+    /// It first asserted `triples.is_empty()` — encoding the defect, so
+    /// implementing the mapping would have looked like a regression. It then
+    /// asserted the `NotImplemented` refusal, which was correct at the time and
+    /// said it would fail when the mapping was written. It has, and this is
+    /// that moment: the mapping now produces triples, and the assertion is that
+    /// it produces the right ones.
+    ///
+    /// Round-trip behaviour lives in `tests/rdf_round_trip.rs`; this is the
+    /// unit-level check that one node becomes its label and its properties.
     #[test]
-    fn mapping_refuses_rather_than_silently_returning_nothing() {
+    fn a_node_maps_to_its_type_and_its_properties() {
         let mapper = GraphToRdfMapper::new("http://example.org/");
         let mut graph = GraphStore::new();
         let node_id = graph.create_node("Person");
-        let node = graph.get_node(node_id).expect("the node just created");
+        graph.set_node_property("default", node_id, "name", "Ada").unwrap();
+        let node = graph.get_node(node_id).expect("the node just created").clone();
 
-        let err = mapper.map_node(node).expect_err(
-            "an unimplemented mapping must not report success: a caller cannot \
-             tell an empty result from a no-op",
+        let triples = mapper.map_node(&graph, &node).expect("map_node");
+        let text: Vec<String> = triples.iter().map(|t| t.to_string()).collect();
+        assert_eq!(triples.len(), 2, "one rdf:type and one property: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("rdf-syntax-ns#type") && t.contains("class/Person")),
+            "{text:?}"
         );
-        assert!(matches!(err, MappingError::NotImplemented("map_node")), "{err}");
-        assert!(err.to_string().contains("not implemented"), "{err}");
+        assert!(text.iter().any(|t| t.contains("prop/name") && t.contains("Ada")), "{text:?}");
     }
 }
