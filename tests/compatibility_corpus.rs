@@ -46,17 +46,19 @@ const KNOWN_REFUSALS: &[(&str, &str)] = &[
         "a backticked variable — samyama-graph#1373, the half not yet done",
     ),
     (
-        "MATCH (:`Research Paper`)",
-        "a backticked label — samyama-graph#1373; fixed on a branch, so this may already be accepted",
-    ),
-    (
         "MATCH (p:Person) USING INDEX",
         "a query hint — LANG-13, not implemented",
     ),
 ];
 
 /// How many of the corpus the engine accepted when this was last recorded.
-const ACCEPTED_FLOOR: usize = 53;
+///
+/// Raised from 53 when backticked labels landed (#1376), and the entry for
+/// ``MATCH (:`Research Paper`)`` was removed from the list above at the same
+/// time. That is the whole maintenance routine: when a refusal is fixed, raise
+/// the floor and delete its line. A list that only grows stops describing
+/// which gaps are known.
+const ACCEPTED_FLOOR: usize = 54;
 
 fn corpus() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

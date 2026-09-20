@@ -18,8 +18,8 @@ You get a count and, more usefully, the refusals **grouped by cause**:
 
 ```
   queries read   59
-  accepted       53  (89.8%)
-  refused        6
+  accepted       54  (91.5%)
+  refused        5
 
   Refusals by cause, commonest first:
        1x  NotFound  Unknown procedure: apoc.periodic.iterate
