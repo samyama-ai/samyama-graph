@@ -119,7 +119,17 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "criticality_ranking",
         group: "dependency",
-        cypher: "CALL algo.pageRank({edgeType: \"CALLS\"}) YIELD node, score \
+        // `edgeType` is **positional** for `algo.pageRank`, not a config key:
+        // the signature is `(label?, edge_type?, config?)`. Written as a config
+        // key it was silently ignored, so this tool ranked over *every* edge
+        // type while asking for `CALLS` — a different ranking, not a slower one.
+        // On a three-node fixture the two orders differ at the top.
+        //
+        // The engine started refusing unknown config keys (#1316), which is how
+        // this surfaced: 40 scenarios' worth of `query_errors` in a suite that
+        // had not run in 20 days. The refusal found a caller that had been
+        // relying on being ignored.
+        cypher: "CALL algo.pageRank(null, \"CALLS\") YIELD node, score \
                  RETURN node.name AS entity, score ORDER BY score DESC LIMIT 20",
         needs: None,
     },
