@@ -209,6 +209,65 @@ pub enum LLMProvider {
     Mock,
 }
 
+impl LLMProvider {
+    /// Every accepted spelling, for an error message that says what to write.
+    pub const NAMES: &'static [&'static str] = &[
+        "openai",
+        "ollama",
+        "gemini",
+        "azure",
+        "azureopenai",
+        "anthropic",
+        "claudecode",
+        "mock",
+    ];
+
+    /// Parse a provider name, refusing anything not on the list.
+    ///
+    /// **An unknown name is an error, not OpenAI.** Both callers of this used
+    /// to end `_ => LLMProvider::OpenAI`, so `NLQ_PROVIDER=claudecode` — a
+    /// spelling neither of them listed — sent the prompt to a third party
+    /// instead of the local CLI the operator asked for, and so did a typo.
+    /// Choosing where a graph's content is sent is not a defaultable decision:
+    /// the failure is silent, the data is already gone, and the operator's
+    /// evidence that they picked a local provider is the env var they set.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        Self::parse_named("NLQ_PROVIDER", name)
+    }
+
+    /// As [`Self::parse`], naming the variable the value came from.
+    ///
+    /// `EMBED_PROVIDER` has the same shape and the same failure, and an error
+    /// that names the wrong variable sends the reader to the wrong line of
+    /// their config.
+    pub fn parse_named(var: &str, name: &str) -> Result<Self, String> {
+        let given = name.trim();
+        match given.to_lowercase().as_str() {
+            "openai" => Ok(LLMProvider::OpenAI),
+            "ollama" => Ok(LLMProvider::Ollama),
+            "gemini" => Ok(LLMProvider::Gemini),
+            "azure" | "azureopenai" => Ok(LLMProvider::AzureOpenAI),
+            "anthropic" => Ok(LLMProvider::Anthropic),
+            "claudecode" => Ok(LLMProvider::ClaudeCode),
+            "mock" => Ok(LLMProvider::Mock),
+            "" => Err(format!(
+                "{var} is not set. Set it to one of: {}. \
+                 It has no default: openai, gemini and azure send your data to a third \
+                 party, and that is not something to fall into.",
+                Self::NAMES.join(", ")
+            )),
+            // Quoted exactly as it was set, not lowercased: the operator is
+            // looking for their own typo and a normalised echo hides half of it.
+            _ => Err(format!(
+                "unknown {var} {given:?}. Expected one of: {}. \
+                 Refused rather than defaulted: an unrecognised name used to mean openai, \
+                 so a typo sent the prompt to a third party.",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+}
+
 /// Tool definition for agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {

@@ -36,6 +36,7 @@
 //! startup, any WAL entries written after the last checkpoint are replayed to bring the
 //! in-memory graph state up to date.
 
+pub mod health;
 pub mod storage;
 pub mod tenant;
 pub mod wal;
@@ -63,6 +64,8 @@ pub struct PersistenceManager {
     wal: Arc<std::sync::Mutex<Wal>>,
     /// Tenant manager
     tenants: Arc<TenantManager>,
+    /// Make the next `apply_mutations` fail. See that method.
+    fail_next_apply: std::sync::atomic::AtomicBool,
 }
 
 impl PersistenceManager {
@@ -98,7 +101,20 @@ impl PersistenceManager {
             storage: Arc::new(storage),
             wal: Arc::new(std::sync::Mutex::new(wal)),
             tenants: Arc::new(tenants),
+            fail_next_apply: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Make the next [`Self::apply_mutations`] fail, once.
+    ///
+    /// Tests only, and `pub` because the durability tests are integration
+    /// tests. Not settable from the environment on purpose: a switch that
+    /// turns off durability should not be reachable by a stray variable on a
+    /// production host.
+    #[doc(hidden)]
+    pub fn fail_next_apply_for_test(&self) {
+        self.fail_next_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get tenant manager
@@ -304,6 +320,18 @@ impl PersistenceManager {
     ) -> Result<usize, PersistenceError> {
         use crate::graph::event::Mutation;
         use std::collections::HashMap;
+
+        // A test hook, and deliberately not an environment variable: a switch
+        // that turns off durability must not be reachable by a stray variable
+        // in production. The durability path cannot be tested without a way to
+        // make a write fail, and a read-only directory does not do it --
+        // RocksDB buffers, so the failure surfaces somewhere else or not at
+        // all. One relaxed load per persist, next to a RocksDB write.
+        if self.fail_next_apply.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(PersistenceError::Io(std::io::Error::other(
+                "injected failure (fail_next_apply_for_test)",
+            )));
+        }
 
         // Last operation wins, in order of first appearance. Order matters only for
         // reading a WAL by eye; correctness comes from each entry carrying final state.

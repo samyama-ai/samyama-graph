@@ -3669,21 +3669,50 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
     }
 
     /// Get NodeIds for a label without resolving each `&Node`. Optionally takes
-    /// only the first `limit` ids (`None` = all). No sort is applied — order
-    /// is HashMap-iteration order, which is stable within a process but
-    /// otherwise unspecified.
+    /// only the first `limit` ids (`None` = all).
     ///
-    /// Used by `NodeScanOperator` for the streaming LIMIT pushdown path:
-    /// when downstream has `LIMIT k` and there's no `ORDER BY`, the planner
-    /// can request only `k` ids rather than the full label set.
+    /// **Ascending node id, with or without a limit.** `NodeScanOperator` sorts
+    /// the unlimited result anyway, so a limited scan returning an arbitrary
+    /// subset made `LIMIT k` a different k from the first k of the same query
+    /// without it — and `SKIP`/`LIMIT` paging without `ORDER BY` could skip a
+    /// row or return one twice, because page 2 came from a different ordering
+    /// than page 1 (#1364). Cypher promises no order without `ORDER BY`, so
+    /// that was legal and still wrong to ship: a query ported from an engine
+    /// with a stable scan starts dropping rows here with nothing looking amiss.
+    ///
+    /// The limited path reads the **bitset**, not a sort of the hash set. Bits
+    /// are already in ascending id order, so the scan stops at the `n`th set
+    /// bit and never touches the rest of the label — which is the whole point
+    /// of the pushdown, and what sorting the full set would have thrown away.
     pub fn node_ids_by_label(&self, label: &Label, limit: Option<usize>) -> Vec<NodeId> {
-        match self.label_index.get(label) {
-            None => Vec::new(),
-            Some(set) => match limit {
-                Some(n) => set.iter().copied().take(n).collect(),
-                None => set.iter().copied().collect(),
-            },
+        let Some(set) = self.label_index.get(label) else {
+            return Vec::new();
+        };
+        let Some(n) = limit else {
+            return set.iter().copied().collect();
+        };
+        if n == 0 {
+            return Vec::new();
         }
+        // No bitset means no node carries the label; `label_bitset` builds one
+        // otherwise, and it is the same structure the expand's membership test
+        // uses, so this shares that cost rather than adding one.
+        let Some(bits) = self.label_bitset(label) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(n.min(set.len()));
+        for (w, word) in bits.iter().enumerate() {
+            let mut word = *word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                out.push(NodeId::new((w * 64 + bit) as u64));
+                if out.len() == n {
+                    return out;
+                }
+            }
+        }
+        out
     }
 
     /// Get all edges of a specific type
