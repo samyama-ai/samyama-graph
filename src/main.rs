@@ -775,13 +775,19 @@ async fn start_server() {
 
     let global_embed_pipeline: Option<Arc<EmbedPipeline>> =
         if std::env::var("EMBED_ENABLED").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
-            let provider = match std::env::var("EMBED_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
-                "ollama"      => LLMProvider::Ollama,
-                "gemini"      => LLMProvider::Gemini,
-                "azureopenai" => LLMProvider::AzureOpenAI,
-                "anthropic"   => LLMProvider::Anthropic,
-                "claudecode"  => LLMProvider::ClaudeCode,
-                _             => LLMProvider::OpenAI,
+            // Refused, not defaulted — and this is the path that matters most,
+            // because embedding sends the property **value**, not the schema.
+            // The old arm list did not even carry `azure`, so that spelling
+            // meant OpenAI, and so did every typo.
+            let provider = match LLMProvider::parse_named(
+                "EMBED_PROVIDER",
+                &std::env::var("EMBED_PROVIDER").unwrap_or_default(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("EMBED_ENABLED is true but the provider is unusable: {e}");
+                    std::process::exit(2);
+                }
             };
             let model     = std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
             let api_key   = std::env::var("EMBED_API_KEY").ok();
