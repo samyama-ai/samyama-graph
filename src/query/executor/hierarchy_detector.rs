@@ -558,20 +558,32 @@ fn match_pattern(query: &Query, store: &GraphStore) -> Option<HierarchyPattern> 
     let (index_name, measure, poset_has_root) = {
         let g = entry.read().unwrap();
         let root = resolve_pinned_node(store, root_pattern)?;
-        let has = g
-            .index
-            .as_ref()
-            .is_some_and(|i| i.poset().idx(root).is_some());
+        // Both halves of "this index can answer this query": the root is in the
+        // hierarchy, and the subtree under it has one path per node.
+        //
+        // The second is #1343. `-[:T*0..]->` is defined over paths and this
+        // index is defined over sets, so on a subtree where a node is reachable
+        // two ways the rewrite returns a different number from the traversal it
+        // replaces. Declining is the only one of the two readings that is
+        // always right: the query as written asks the path question, and
+        // `subsumes()` is the spelling for the set one.
+        let has = g.index.as_ref().is_some_and(|i| {
+            i.poset()
+                .idx(root)
+                .is_some_and(|dense| i.subtree_has_one_path_per_node(dense))
+        });
         (
             g.spec.name.clone(),
             g.spec.measure.as_ref().map(|m| m.property.clone()),
             (root, has),
         )
     };
-    let (root, in_poset) = poset_has_root;
-    if !in_poset {
-        // The pinned node is not part of this hierarchy — the index cannot answer, and
-        // pretending its subtree is empty would be wrong.
+    let (root, usable) = poset_has_root;
+    if !usable {
+        // Either the pinned node is not part of this hierarchy — the index cannot answer,
+        // and pretending its subtree is empty would be wrong — or its subtree is not a
+        // tree, where the index's set answer and the pattern's path answer differ (#1343).
+        // Both are "use the standard plan", which is always correct and never an error.
         return None;
     }
 
