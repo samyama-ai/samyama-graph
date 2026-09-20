@@ -527,6 +527,8 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// the file cannot make — and guessing it here would produce an importer whose
 /// meaning depends on which exporter wrote the file. `LOAD PARQUET` (#1098) is
 /// where that belongs, with the mapping written in the query.
+pub mod graphml;
+
 pub mod import {
     use std::collections::HashMap;
 

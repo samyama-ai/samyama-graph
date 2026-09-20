@@ -160,6 +160,9 @@ tempfile = "3.8"
 criterion = "0.5"
 samyama-sdk = { path = "crates/samyama-sdk", version = "1.8.0" }
 http-body-util = "0.1"
+# Reads the GraphML we write back, so the tests check the file against an XML
+# parser rather than against the writer that produced it.
+quick-xml = "0.37"
 
 # These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
 # `test = false`, so without this the tests inside them compile and never run —
