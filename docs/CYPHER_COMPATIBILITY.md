@@ -142,7 +142,7 @@ One thing, verified:
 | **Type Handling** | Integer/Float coercion | ✅ | |
 | | Null propagation — comparison | ✅ | `1 > null` → `null` |
 | | Null propagation — arithmetic | ✅ | `1 + null` → `null`; `p.a + p.missing` nulls only its own row. Fixed in #457 |
-| | Temporal types | ✅ | `date()`, component access, arithmetic. No temporal index |
+| | Temporal types | ✅ | `date()`, component access on a variable **and directly on an expression** (`date('2024-05-06').year`, fixed for LANG-16), arithmetic. No temporal index |
 | | Duration arithmetic | ✅ | |
 | **Geospatial** | `point({latitude, longitude})` / `point({x, y})` | ✅ | Returns a map with `x`/`y`, the `latitude`/`longitude` aliases, `srid` and `crs`. Not a distinct type: a point is a map, so it round-trips through property storage and there is no type error for a map that merely looks like one |
 | | `point.distance(a, b)` / `distance(a, b)` | ✅ | Metres for WGS-84, haversine on a sphere (~0.5% off an ellipsoid); Euclidean for cartesian. Mixing the two is an error, not a number |

@@ -933,6 +933,20 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
                 type_name_of(&index)
             )))
         }
+        // `date('2024-05-06').year` -- component access on the result of an
+        // expression rather than on a bound variable. Property access on a
+        // variable already answered this; an expression came here instead and
+        // was refused as "not a list or a map" (LANG-16). Routed to the same
+        // function, so the two spellings cannot drift apart.
+        (Value::Property(p), Value::Property(PropertyValue::String(component))) => {
+            match crate::query::executor::record::temporal_property(p, component) {
+                Some(v) => Ok(Value::Property(v)),
+                None => Err(ExecutionError::TypeError(format!(
+                    "cannot index {}: it is not a list or a map",
+                    type_name_of(&collection)
+                ))),
+            }
+        }
         _ => Err(ExecutionError::TypeError(format!(
             "cannot index {}: it is not a list or a map",
             type_name_of(&collection)

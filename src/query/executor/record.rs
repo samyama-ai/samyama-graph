@@ -1432,6 +1432,43 @@ impl PropertyCursor {
 ///
 /// Absent components are `Null`, which is Cypher's answer — `date.hour` has no
 /// meaning and is null rather than zero. Returning zero would read as midnight.
+/// Component access on any temporal value, wherever the value came from.
+///
+/// `date('2024-05-06').year` and `WITH date('2024-05-06') AS d RETURN d.year`
+/// are the same question and used to take different paths: property access on
+/// a *bound* value reached `temporal_component` below, while access on an
+/// expression went through the executor's index operator, which knows about
+/// lists and maps and refused a `Date` with "cannot index Date: it is not a
+/// list or a map" (LANG-16).
+///
+/// One function, called from both, so the two spellings cannot drift apart.
+///
+/// `Some` for a temporal value, `None` for anything else, so the caller can
+/// keep its own error for a value that genuinely has no components.
+pub(crate) fn temporal_property(v: &PropertyValue, property: &str) -> Option<PropertyValue> {
+    match v {
+        PropertyValue::Date(_)
+        | PropertyValue::LocalTime(_)
+        | PropertyValue::Time { .. }
+        | PropertyValue::LocalDateTime { .. }
+        | PropertyValue::ZonedDateTime { .. } => Some(temporal_component(v, property)),
+        // The legacy millisecond timestamp, read as the UTC zoned datetime it
+        // is -- lossless, because milliseconds fit exactly -- rather than
+        // given a second implementation of `.year` that could disagree with
+        // the first.
+        PropertyValue::DateTime(millis) => Some(temporal_component(
+            &PropertyValue::ZonedDateTime {
+                secs: millis.div_euclid(1000),
+                nanos: (millis.rem_euclid(1000) * 1_000_000) as u32,
+                offset_seconds: 0,
+                zone: None,
+            },
+            property,
+        )),
+        _ => None,
+    }
+}
+
 fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
     use chrono::{Datelike, Timelike};
     const DAY_NS: i64 = 86_400 * 1_000_000_000;
