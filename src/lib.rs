@@ -121,6 +121,7 @@ pub mod query;
 pub mod protocol;
 pub mod persistence;
 pub mod raft;
+pub mod compat;
 pub mod rdf;
 pub mod sparql;
 pub mod vector;

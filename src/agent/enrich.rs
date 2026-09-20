@@ -479,14 +479,9 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
 /// Build an [`EnrichmentWorker`] from environment config (same knobs as `/api/nlq`).
 pub fn worker_from_env() -> Result<EnrichmentWorker, String> {
     use crate::persistence::tenant::{LLMProvider, NLQConfig};
-    let provider = match std::env::var("NLQ_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
-        "ollama" => LLMProvider::Ollama,
-        "gemini" => LLMProvider::Gemini,
-        "anthropic" => LLMProvider::Anthropic,
-        "azure" | "azureopenai" => LLMProvider::AzureOpenAI,
-        "mock" => LLMProvider::Mock,
-        _ => LLMProvider::OpenAI,
-    };
+    // Same refusal as `/api/nlq`, and it matters more here: enrichment sends the
+    // gap node's actual property **values**, not just schema metadata.
+    let provider = LLMProvider::parse(&std::env::var("NLQ_PROVIDER").unwrap_or_default())?;
     let model = std::env::var("NLQ_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
     let config = NLQConfig {
         enabled: true,
