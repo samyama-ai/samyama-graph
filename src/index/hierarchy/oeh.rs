@@ -423,6 +423,39 @@ impl OehIndex {
         self.width
     }
 
+    /// Is every node under `root` reachable from it by exactly one path?
+    ///
+    /// This is the question that decides whether a `-[:T*0..]->` rewrite is
+    /// answer-preserving (#1343). A variable-length pattern yields one row per
+    /// **path**; this index answers a set question and cannot tell the two
+    /// apart. Where a node under `root` has two parents that are themselves
+    /// under `root`, it contributes twice to the traversal and once to the
+    /// index, and the rewrite would silently change the number.
+    ///
+    /// Asked per pinned root rather than per index, on purpose. A near-tree
+    /// with three exception edges among 100,000 nodes is still a tree almost
+    /// everywhere, and testing `poset.is_tree()` would have switched the
+    /// rewrite off for every real ontology to protect the handful of subtrees
+    /// that need it — the index would have been correct and useless.
+    ///
+    /// Costs one subsumption probe per parent of each multi-parent node, so
+    /// nothing at all on a tree.
+    pub fn subtree_has_one_path_per_node(&self, root: u32) -> bool {
+        self.poset.multi_parent_nodes().into_iter().all(|m| {
+            if m == root || !self.subsumes(m, root) {
+                // Outside the pinned subtree: its extra parents cannot produce
+                // an extra path to this root.
+                return true;
+            }
+            self.poset
+                .parents_of(m)
+                .iter()
+                .filter(|&&p| self.subsumes(p, root))
+                .count()
+                <= 1
+        })
+    }
+
     // ---- subsumption -------------------------------------------------------
 
     /// `x ⊑ y`? Dense indices. Reflexive.
