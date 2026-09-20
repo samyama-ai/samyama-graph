@@ -11,7 +11,7 @@ Samyama provides ACID guarantees for both single-statement Cypher and multi-stat
 | **Atomicity** | ✅ | RocksDB `WriteBatch` + WAL — see ADR-023 |
 | **Consistency** | ✅ | Schema-flexible with internal-identifier integrity. Single node only — the distributed claim is withdrawn, see §2 |
 | **Isolation** | ✅ | Session transactions (RESP, HTTP) hold the writer lock: serializable in effect. The Rust store API offers snapshot isolation with first-committer-wins. Anomaly table in §3 |
-| **Durability** | ⚠️ | Written, not **synced**: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. See §4 |
+| **Durability** | ⚠️ | Written, not **synced**: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. A write that fails to reach disk at all is now reported and stops further writes (#1274). See §4 |
 
 ---
 
@@ -90,6 +90,23 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
   - **What may not:** power loss, a kernel panic, a hard host reset, or a container host failure. A write acknowledged seconds earlier can be gone.
   - Choosing a durability level is #1309.
 - **Write order**: the log is appended after the memory mutation, not before (§1).
+- **A write that does not reach disk is now reported as a failure**, and the
+  process stops accepting writes (#1274). It used to be a `warn!` line and a
+  success reply, so the client was told the write landed, the store kept it,
+  the disk did not, and a restart threw it away.
+  - A **transaction** is persisted *before* it commits in memory, so a
+    persistence failure rolls it back and repairs the disk: memory and disk
+    still agree afterwards.
+  - A **single statement** has no rollback — the engine has no statement-level
+    undo (LANG-07) — so its rows stay in memory and the disk does not have
+    them. The client gets an error saying exactly that, and every later write
+    is refused, because once the store is ahead of the disk each further write
+    widens the gap and a restart replays a prefix that does not include the
+    first failure. Reads continue; the in-memory graph is still the most
+    complete thing anyone has.
+  - Clearing it takes a restart, which reloads from disk and discards what
+    never landed. There is deliberately no "resume" command: nothing in the
+    process knows what was lost, so carrying on would be guessing.
 - The current WAL "checksum" is XOR-of-bytes; the CRC32C upgrade and segment-rotation work are still open (see ADR-023 "Partially Shipped" status).
 - **Snapshots**: portable `.sgsnap` format (ADR-022) — gzip-framed, importable via `import_tenant_with_dedup` (ADR-019) for cross-KG entity dedup at load time.
 - **Distributed durability: none.** See §2 — the replication this claimed does not run.

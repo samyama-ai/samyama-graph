@@ -39,6 +39,7 @@
 mod types;
 mod store;
 mod mapping;
+mod mapping_impl;
 mod namespace;
 mod serialization;
 mod schema;
@@ -58,6 +59,8 @@ pub use mapping::{
     GraphToRdfMapper, RdfToGraphMapper,
     MappingConfig, MappingError, MappingResult,
 };
+
+pub use mapping_impl::{SyncReport, IRI_PROPERTY};
 
 pub use namespace::{
     NamespaceManager, Namespace,

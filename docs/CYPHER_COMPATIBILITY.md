@@ -165,15 +165,22 @@ One thing, verified:
 
 ## Known inconsistency
 
-**Row order without `ORDER BY` is not stable between runs.** Cypher promises
-nothing about it and this engine delivers exactly nothing: a label scan
-iterates a hash set, so `MATCH (c:Company) RETURN c.name` came back as
-`Acme, Globex` on one call and `Globex, Acme` on the next, on the same graph in
-the same process. The consequence worth spelling out is that **`SKIP`/`LIMIT`
-paging without `ORDER BY` can skip a row or return one twice** — page 2 may be
-drawn from a different ordering than page 1. Neo4j has the same freedom and a
-far more stable scan order in practice, so a query ported from it can start
-dropping rows here with nothing looking wrong ([#1364](https://github.com/samyama-ai/samyama-graph/issues/1364)).
+**A label scan yields ascending node id, with or without a `LIMIT`.** Cypher
+promises nothing about row order and you should still write `ORDER BY` when the
+order matters — but paging is not really a question about order. It used to be
+that the unlimited scan sorted its ids while the limited one took an arbitrary
+subset of a hash set, so `MATCH (c:Company) RETURN c.name LIMIT 4` was not the
+first four rows of the same query without the `LIMIT`, and **`SKIP`/`LIMIT`
+paging without `ORDER BY` could skip a row or return one twice** — page 2 came
+from a different ordering than page 1. Neo4j has the same freedom and a far more
+stable scan in practice, so a query ported from it started dropping rows here
+with nothing looking wrong ([#1364](https://github.com/samyama-ai/samyama-graph/issues/1364)).
+
+Fixed by walking the label bitset, whose bits are in id order, so a limited scan
+is a prefix of the unlimited one. What is still **not** guaranteed: anything
+about the order of rows after an expand, a join, or an aggregation — only the
+label scan at the bottom of the plan. Write `ORDER BY` when the answer depends
+on it.
 
 
 Algorithm procedures do not share a calling convention. `algo.pageRank` and `algo.or.solve` take a config map; `algo.shortestPath`, `algo.weightedPath`, `algo.maxFlow`, `algo.mst`, `algo.cdlp` and `algo.lcc` take **positional** arguments. This is still inconsistent, but an unknown or misused name now reports the full list with each procedure's argument shape, so it costs one failed attempt rather than three.

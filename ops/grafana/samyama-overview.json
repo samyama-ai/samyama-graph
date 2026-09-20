@@ -1,0 +1,143 @@
+{
+  "title": "Samyama Graph — overview",
+  "uid": "samyama-overview",
+  "schemaVersion": 39,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["samyama", "graph"],
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(samyama_nodes, job)",
+        "refresh": 1,
+        "includeAll": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "What this shows, and what it does not",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Every panel reads a metric `/metrics` actually exports — there is no panel here for a metric that does not exist, because a dashboard with empty panels teaches an operator to ignore it.\n\n**Not here, because it is not exported:** per-query-shape latency, rows scanned, plan choice. To find *which* query is slow, read the slow-query log (`SLOW_QUERY_MS`), which carries the query text; the `samyama_slow_queries_total` panel below tells you when to go and look. Tracing is not shipped."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Query latency percentiles",
+      "description": "From the latency histogram. A mean would hide exactly the case that matters: one query in twenty over budget moves a mean by nothing.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(samyama_query_duration_seconds_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(samyama_query_duration_seconds_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(samyama_query_duration_seconds_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queries per second, and how many failed",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(samyama_queries_total{job=\"$job\"}[5m])",
+          "legendFormat": "executed"
+        },
+        {
+          "expr": "rate(samyama_queries_failed_total{job=\"$job\"}[5m])",
+          "legendFormat": "failed"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Slow queries — go and read the log",
+      "description": "Past SLOW_QUERY_MS, the same threshold the slow-query log uses, so this panel and that log never disagree about what counts as slow.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "rate(samyama_slow_queries_total{job=\"$job\"}[5m])",
+          "legendFormat": "slow/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency band occupancy",
+      "description": "Where queries land, as a share. A shift from the sub-millisecond bands into the 100 ms band is visible here before any percentile crosses an alert threshold.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(samyama_query_duration_seconds_bucket{job=\"$job\"}[5m]))",
+          "legendFormat": "<= {{le}}s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Graph size",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "samyama_nodes{job=\"$job\"}", "legendFormat": "nodes" },
+        { "expr": "samyama_edges{job=\"$job\"}", "legendFormat": "edges" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory attributed",
+      "description": "samyama_memory_attributed_bytes is what the engine can account for, not RSS. A gap between the two is unattributed memory and is worth an issue.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "expr": "samyama_memory_attributed_bytes{job=\"$job\"}", "legendFormat": "attributed" },
+        { "expr": "samyama_index_memory_bytes{job=\"$job\"}", "legendFormat": "indexes" },
+        { "expr": "sum by (label, property) (samyama_index_bytes{job=\"$job\"})", "legendFormat": "{{label}}.{{property}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AST cache hit ratio",
+      "description": "A ratio, not two counters: the absolute numbers grow without bound and say nothing on their own.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(samyama_query_cache_hits{job=\"$job\"}[5m]) / clamp_min(rate(samyama_query_cache_hits{job=\"$job\"}[5m]) + rate(samyama_query_cache_misses{job=\"$job\"}[5m]), 1)",
+          "legendFormat": "hit ratio"
+        }
+      ]
+    }
+  ],
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus"
+    }
+  ]
+}

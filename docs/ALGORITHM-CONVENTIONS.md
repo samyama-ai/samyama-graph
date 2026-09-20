@@ -151,12 +151,28 @@ These four walk edge timestamps, so reachability is not transitive: an edge that
 fired before you arrived is not traversable. Times come from an edge property,
 falling back to the edge's own `created_at`.
 
+### Which walk each one shows you
+
+All four yield `path` and `times`, and the choice of *which* walk is part of the
+answer rather than an implementation detail (ALGO-15):
+
+| Algorithm | The walk it returns |
+|---|---|
+| `temporalReachability`, `propagationRanking` | The walk that produced the **earliest arrival** at that node. Not a walk that exists — the one the traversal took to get there first, so the last edge time equals the reported arrival. |
+| `temporalShortestPath` | The same walk, to one named target. |
+| `symptomExplanation` | The walk to the symptom whose constraint set `onset`. A candidate may explain five symptoms by five walks and a row can show one; showing the **binding** one keeps the path and the onset describing the same journey, and it is the walk that explains why the fit is no tighter than it is. |
+
+`times[i]` is the moment the edge between `path[i]` and `path[i+1]` fired, so it
+is one shorter than `path`, and the sequence never decreases. The times are
+returned beside the path because otherwise the path is a claim the caller has to
+take on trust; with them it can be checked against their own edges.
+
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | Temporal reachability | temporalReachability | Out-edges, forward in time | Ignored: timestamps are used instead | Traversed, but can never lower an arrival time | Unreachable nodes are omitted, and so are the sources | Arrival time ascending, then node id ascending | None: raw timestamps |
 | Temporal shortest path | temporalShortestPath | Out-edges, forward in time | Ignored: timestamps are used instead | Never becomes a parent edge | No time-respecting path: nothing comes back. Target equal to source gives a one-node path | The edge that last improved the arrival time, in slot order | None: "shortest" is earliest arrival, not hops or duration |
 | Propagation ranking | propagationRanking | As temporal reachability, which it delegates to | Ignored | As temporal reachability | As temporal reachability | Arrival time ascending, then node id ascending | None |
-| Symptom explanation | symptomExplanation | In-edges, backward in time | Ignored: timestamps are used instead | Only the symptom under consideration is skipped | Nodes explaining nothing are omitted | Symptoms explained descending, then latest onset descending, then node id ascending | None: a count and a timestamp |
+| Symptom explanation | symptomExplanation | In-edges, backward in time | Ignored: timestamps are used instead | Only the symptom under consideration is skipped | Nodes explaining nothing are omitted | Symptoms explained descending, then latest onset descending, then node id ascending | None: a count, a timestamp and the binding walk |
 
 ## Not a graph algorithm
 

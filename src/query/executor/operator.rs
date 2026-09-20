@@ -6037,14 +6037,20 @@ impl NodeScanOperator {
         // strictly more rows than asked for, from a query that reported
         // success, so the filter failed open.
         //
-        // Sort behavior is conditional:
-        //   - With early_limit (LIMIT pushdown): skip sort — only `limit`
-        //     ids returned, sort cost is wasted, fast-termination matters more.
-        //   - Without early_limit (full scan): KEEP sort. Sorted NodeIds give
+        // Both paths end up in ascending node id, by different means:
+        //   - With early_limit (LIMIT pushdown): the store walks the label
+        //     bitset and stops at the nth set bit, so the ids arrive sorted
+        //     without a sort and without touching the rest of the label.
+        //   - Without early_limit (full scan): sort here. Sorted NodeIds give
         //     sequential memory access during downstream Expand, which improves
         //     cache locality and dominates the sort cost on full scans.
         //     Empirically: removing the sort unconditionally regressed
         //     full-scan aggregations by 10-30%.
+        //
+        // It has to be the *same* order both ways. When the limited path took
+        // an arbitrary subset, `LIMIT k` returned a different k from the first
+        // k of the unlimited query, and `SKIP`/`LIMIT` paging could skip or
+        // repeat a row (#1364).
         if self.labels.is_empty() {
             self.node_ids = store.all_nodes().into_iter().map(|n| n.id).collect();
         } else if self.labels.len() == 1 {
@@ -6065,6 +6071,14 @@ impl NodeScanOperator {
                 .collect();
             sets.sort_unstable_by_key(|v| v.len());
             let (smallest, rest) = sets.split_first().expect("labels.len() > 1");
+            // The driving set is whichever label is smallest, and with no limit
+            // the final sort below fixes the order anyway. With one, the prefix
+            // taken here is the answer, so it has to be a prefix of the same
+            // ascending order the unlimited scan produces (#1364).
+            let mut smallest = smallest.clone();
+            if self.early_limit.is_some() {
+                smallest.sort_unstable_by_key(|id| id.as_u64());
+            }
             let rest: Vec<HashSet<NodeId>> =
                 rest.iter().map(|v| v.iter().copied().collect()).collect();
             let cap = self.early_limit.unwrap_or(usize::MAX);
@@ -15072,14 +15086,22 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         )
         .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
 
-        for (rank, (node_id, at)) in reached.into_iter().enumerate() {
+        for (rank, r) in reached.into_iter().enumerate() {
             let mut record = Record::new();
-            let nid = NodeId::new(node_id);
+            let nid = NodeId::new(r.node);
             match store.get_node(nid) {
                 Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
                 None => record.bind("node".to_string(), Value::NodeRef(nid)),
             }
-            record.bind("time".to_string(), Value::Property(PropertyValue::Integer(at)));
+            record.bind("time".to_string(), Value::Property(PropertyValue::Integer(r.arrival)));
+            // The walk that got there that early. `node` and `time` say a
+            // service broke and when; `path` is the only column that says why,
+            // which is what ALGO-15 asks of a causal primitive.
+            record.bind("path".to_string(), temporal_path_value(&r.path));
+            // The times alongside, as `temporalShortestPath` already yields
+            // them. Without these the path is a claim a caller has to take on
+            // trust; with them they can check it against their own edges.
+            record.bind("times".to_string(), temporal_times_value(&r.path));
             if ranked {
                 record.bind(
                     "rank".to_string(),
@@ -15092,6 +15114,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     /// `algo.temporalShortestPath(source, target, {..})` -- earliest arrival.
+    //
+    // (`temporal_path_value` lives at module scope, below the operator.)
     fn execute_temporal_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let (view, times) = self.temporal_setup(store)?;
         let source = self.temporal_node_arg(&view, 0, "a source")?;
@@ -15180,6 +15204,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "onset".to_string(),
                 Value::Property(PropertyValue::Integer(e.latest_onset)),
             );
+            // The walk to the symptom whose constraint set that onset. A
+            // candidate may explain five symptoms by five walks; this is the
+            // binding one, so the path and the onset describe the same
+            // journey rather than two different ones.
+            match &e.supporting_path {
+                Some(p) => {
+                    record.bind("path".to_string(), temporal_path_value(p));
+                    record.bind("times".to_string(), temporal_times_value(p));
+                }
+                None => {
+                    record.bind("path".to_string(), Value::Property(PropertyValue::Null));
+                    record.bind("times".to_string(), Value::Property(PropertyValue::Null));
+                }
+            }
             self.results.push(record);
         }
         Ok(())
@@ -17556,6 +17594,31 @@ impl PhysicalOperator for DeleteOperator {
 /// `=` replaces -- every property not in the incoming map goes away -- and `+=`
 /// merges. Removing the leftovers first keeps the two spellings from differing
 /// only in what they forgot to clear.
+/// A time-respecting walk as a Cypher value.
+///
+/// A list of node ids, matching what `algo.temporalShortestPath` already
+/// yields in its `path` column. The same shape in every temporal primitive,
+/// so a caller that can read one can read all four — three of them had no
+/// path column at all until ALGO-15.
+/// The time each edge of a walk fired, one shorter than the node list.
+fn temporal_times_value(path: &samyama_graph_algorithms::temporal::TemporalPath) -> Value {
+    Value::Property(PropertyValue::Array(
+        path.edge_times
+            .iter()
+            .map(|t| PropertyValue::Integer(*t))
+            .collect(),
+    ))
+}
+
+fn temporal_path_value(path: &samyama_graph_algorithms::temporal::TemporalPath) -> Value {
+    Value::Property(PropertyValue::Array(
+        path.nodes
+            .iter()
+            .map(|n| PropertyValue::Integer(*n as i64))
+            .collect(),
+    ))
+}
+
 fn apply_entity_assignment(
     target: &Value,
     value: &Value,
