@@ -6037,14 +6037,20 @@ impl NodeScanOperator {
         // strictly more rows than asked for, from a query that reported
         // success, so the filter failed open.
         //
-        // Sort behavior is conditional:
-        //   - With early_limit (LIMIT pushdown): skip sort — only `limit`
-        //     ids returned, sort cost is wasted, fast-termination matters more.
-        //   - Without early_limit (full scan): KEEP sort. Sorted NodeIds give
+        // Both paths end up in ascending node id, by different means:
+        //   - With early_limit (LIMIT pushdown): the store walks the label
+        //     bitset and stops at the nth set bit, so the ids arrive sorted
+        //     without a sort and without touching the rest of the label.
+        //   - Without early_limit (full scan): sort here. Sorted NodeIds give
         //     sequential memory access during downstream Expand, which improves
         //     cache locality and dominates the sort cost on full scans.
         //     Empirically: removing the sort unconditionally regressed
         //     full-scan aggregations by 10-30%.
+        //
+        // It has to be the *same* order both ways. When the limited path took
+        // an arbitrary subset, `LIMIT k` returned a different k from the first
+        // k of the unlimited query, and `SKIP`/`LIMIT` paging could skip or
+        // repeat a row (#1364).
         if self.labels.is_empty() {
             self.node_ids = store.all_nodes().into_iter().map(|n| n.id).collect();
         } else if self.labels.len() == 1 {
@@ -6065,6 +6071,14 @@ impl NodeScanOperator {
                 .collect();
             sets.sort_unstable_by_key(|v| v.len());
             let (smallest, rest) = sets.split_first().expect("labels.len() > 1");
+            // The driving set is whichever label is smallest, and with no limit
+            // the final sort below fixes the order anyway. With one, the prefix
+            // taken here is the answer, so it has to be a prefix of the same
+            // ascending order the unlimited scan produces (#1364).
+            let mut smallest = smallest.clone();
+            if self.early_limit.is_some() {
+                smallest.sort_unstable_by_key(|id| id.as_u64());
+            }
             let rest: Vec<HashSet<NodeId>> =
                 rest.iter().map(|v| v.iter().copied().collect()).collect();
             let cap = self.early_limit.unwrap_or(usize::MAX);
