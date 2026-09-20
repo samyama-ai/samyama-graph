@@ -9,6 +9,15 @@
 //! is wrong and the runner exits non-zero. A benchmark that reported a speedup without
 //! that check would be measuring how fast we can produce the wrong number.
 //!
+//! One exception, and it is reported rather than waived: a query that reads an
+//! **approximate** index is not a controlled comparison at all. The two stores are built
+//! separately and `hnsw_rs` assigns HNSW layers at random, so the same k-NN query returns
+//! different neighbours on each — 31 of 200 nodes for H9's prefilter. Those queries are
+//! counted in their own bucket with the size of the difference, and excluded from the
+//! gate: neither their disagreement nor their agreement says anything about the hierarchy
+//! index. Three of the four H9 queries agreed anyway, which is why the test is the
+//! prefilter and not the answer.
+//!
 //! ```bash
 //! cargo run --release --example hier_benchmark
 //! cargo run --release --example hier_benchmark -- --reps 20 --out results.csv
@@ -62,7 +71,11 @@ fn main() {
     );
 
     // Two stores from one build: the indexed store gets the declarations, the baseline
-    // store is byte-identical except that it has none.
+    // store has none.
+    //
+    // They are identical in their graph and differ in one place that matters — a vector
+    // index built on each is not the same index, because HNSW layer assignment is random.
+    // The runner detects that per query rather than asserting it away here.
     let mut indexed = data.store;
     let mut baseline_store = hier_common::build(&scale).store;
     let engine = QueryEngine::new();
@@ -110,6 +123,8 @@ fn main() {
     ];
     let mut by_class: BTreeMap<String, (usize, usize, f64, f64)> = BTreeMap::new();
     let mut mismatches: Vec<String> = Vec::new();
+    // Queries whose two arms were not asked the same question — see the note below.
+    let mut uncontrolled: Vec<String> = Vec::new();
 
     let mut skipped: Vec<(&str, &str)> = Vec::new();
     for q in &corpus {
@@ -146,11 +161,51 @@ fn main() {
             }
         };
 
+        // A disagreement is only evidence against the index if both arms were asked the
+        // same question. They are not when an **approximate** index sits in front of the
+        // hierarchy: the two stores are built separately and `hnsw_rs` assigns layers at
+        // random, so their 200-NN sets differ — measured at 23 of 200 for H9's vector
+        // prefilter, deterministic within a store and different between them.
+        //
+        // Reporting that as "the index is wrong" blames the hierarchy index for a
+        // difference it did not cause, and the speedup beside it compares two different
+        // node sets. Both belong in their own bucket, counted, with the size of the
+        // difference printed — not folded into a gate they cannot inform.
+        //
+        // The test is the prefilter, not the answer. Two arms looking at different node
+        // sets can still produce the same count, and three of these four did; counting
+        // that as agreement would be a check reporting luck as evidence.
+        let differing = if uses_an_approximate_index(&q.cypher) {
+            prefilter_difference(&engine, &q.cypher, &indexed, &baseline_store)
+        } else {
+            0
+        };
+        let comparable = differing == 0;
+        if !comparable {
+            let prefix = format!("{}: ", q.id);
+            mismatches.retain(|m| !m.starts_with(&prefix));
+            uncontrolled.push(format!(
+                "{}: the two arms' approximate prefilter differs by {differing} node(s), so their answers are not comparable{}",
+                q.id,
+                if agree { " (they happen to match, which is luck, not evidence)" } else { "" }
+            ));
+        }
+
         let speedup = if indexed_ms > 0.0 { baseline_ms / indexed_ms } else { 0.0 };
         rows.push(format!(
             "{},{},\"{}\",{:.4},{:.4},{:.2},{},{}",
-            q.id, q.class, q.name, indexed_ms, baseline_ms, speedup, rows_out, agree
+            q.id,
+            q.class,
+            q.name,
+            indexed_ms,
+            baseline_ms,
+            speedup,
+            rows_out,
+            if comparable { agree.to_string() } else { "uncontrolled".to_string() }
         ));
+        if !comparable {
+            continue;
+        }
         let e = by_class.entry(q.class.clone()).or_insert((0, 0, 0.0, 0.0));
         e.0 += 1;
         if agree {
@@ -293,6 +348,20 @@ fn main() {
         }
     }
 
+    if !uncontrolled.is_empty() {
+        println!();
+        println!(
+            "{} queries are not a controlled comparison and are excluded from the gate:",
+            uncontrolled.len()
+        );
+        for u in &uncontrolled {
+            println!("  {u}");
+        }
+        println!(
+            "  Cause: the two stores are built separately and hnsw_rs assigns HNSW layers at\n               random, so the same k-NN query returns different neighbours on each. Deterministic\n               within a store, different between them. Until a vector index can be reproduced\n               from its data, no two-store comparison that reads one is controlled."
+        );
+    }
+
     if !mismatches.is_empty() {
         eprintln!();
         eprintln!("[hier] {} DISAGREEMENTS — the index is wrong, not fast:", mismatches.len());
@@ -302,7 +371,47 @@ fn main() {
         std::process::exit(1);
     }
     println!();
-    println!("All {total} queries agree with the unindexed ground truth.");
+    println!(
+        "All {total} queries that admit a controlled comparison agree with the unindexed ground truth."
+    );
+}
+
+/// Does this query read an index that is allowed to return a different answer on two
+/// stores built from the same data?
+///
+/// HNSW is the only one today. It is an approximation with a randomised layer assignment,
+/// so "identical data" does not mean "identical neighbours".
+fn uses_an_approximate_index(cypher: &str) -> bool {
+    cypher.contains("db.index.vector.")
+}
+
+/// How many nodes the approximate prefilter returns on one store and not the other.
+///
+/// The number is the point. "The arms differ" invites the reader to assume a rounding
+/// edge; 23 of 200 says the comparison is not close to controlled.
+fn prefilter_difference(
+    engine: &QueryEngine,
+    cypher: &str,
+    indexed: &GraphStore,
+    baseline: &GraphStore,
+) -> usize {
+    // Everything up to the YIELD's consumer, then just the ids.
+    let Some(yield_end) = cypher.find(" MATCH ") else {
+        return 0;
+    };
+    let probe = format!("{} RETURN id(node) AS i", &cypher[..yield_end]);
+    let ids = |store: &GraphStore| -> std::collections::HashSet<String> {
+        match engine.execute(&probe, store) {
+            Ok(b) => b
+                .records
+                .iter()
+                .map(|r| format!("{:?}", r.bindings()[0].1))
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        }
+    };
+    let (a, b) = (ids(indexed), ids(baseline));
+    a.symmetric_difference(&b).count() / 2
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {

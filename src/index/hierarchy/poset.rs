@@ -386,6 +386,27 @@ impl Poset {
         self.parents.iter().map(|p| p.len().saturating_sub(1)).sum()
     }
 
+    /// Dense indices carrying more than one parent, ascending.
+    ///
+    /// These are the only nodes that can be reached by two different paths, so
+    /// they are the only ones a path-semantics question has to look at. On a
+    /// tree the list is empty and the caller's check costs one allocation of
+    /// nothing; on a near-tree it is bounded by [`Self::extra_parent_count`],
+    /// which the probe already caps at 5% of the poset.
+    pub fn multi_parent_nodes(&self) -> Vec<u32> {
+        self.parents
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.len() > 1)
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+
+    /// Direct parents of `i`.
+    pub fn parents_of(&self, i: u32) -> &[u32] {
+        &self.parents[i as usize]
+    }
+
     /// The structural probe's first question: does every node have at most one parent?
     ///
     /// A tree (or forest) admits the nested-set encoding, which is both smaller and
