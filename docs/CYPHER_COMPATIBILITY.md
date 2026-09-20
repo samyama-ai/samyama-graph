@@ -148,7 +148,8 @@ One thing, verified:
 | | `point.distance(a, b)` / `distance(a, b)` | ✅ | Metres for WGS-84, haversine on a sphere (~0.5% off an ellipsoid); Euclidean for cartesian. Mixing the two is an error, not a number |
 | | `point.withinBBox(p, lowerLeft, upperRight)` | ✅ | Closed on the boundary |
 | | `CREATE POINT INDEX` | ❌ | No spatial index. A `point.distance` or `withinBBox` predicate is evaluated per row |
-| **Extensions** | `CREATE VECTOR INDEX` | ✅ | |
+| **Extensions** | `CREATE VECTOR INDEX` | ✅ | Both spellings: Neo4j 5's `FOR (n:L) ON (n.prop)` and the `ON :L(prop)` form every other index DDL here uses. `OPTIONS {dimensions, similarity}`; any other option is an error, not a default |
+| | `SHOW INDEXES` | ✅ | Lists property (`BTREE`) and `VECTOR` indexes. Hierarchy indexes have their own `SHOW HIERARCHY INDEXES` |
 | | `CALL db.index.vector.queryNodes` | ✅ | |
 | | `algo.pageRank` | ✅ | Config map: `algo.pageRank({iterations: 2})` |
 | | `algo.wcc` / `algo.scc` | ✅ | |
