@@ -88,9 +88,39 @@ the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 | Cycle detection | cycleDetection, findCycle | Out-edges | Ignored | Detected: a self-loop is a one-node cycle | The search restarts from every unvisited node | The first back edge, from the lowest start index | None |
 | Max flow | maxFlow | Out-edges; each arc gets a reverse arc at capacity 0 | Used as capacity, 1.0 when absent; parallel edges sum | Inert | An unreachable sink is a flow of 0. A node that is not in the graph, and a source equal to the sink, are refused | The augmenting path comes from a hash-ordered scan, so **which** path is chosen varies; the flow value does not **(differs)** | None: the raw flow |
 | MST | mst | Undirected: grows over both directions | Used, 1.0 when absent | Never added | **Only the component holding index 0 is returned**, silently **(differs)** | Equal weights are resolved by heap order, not by node id **(differs)** | None: the raw total |
-| Bridges | bridges | Symmetrises itself | Ignored | Skipped explicitly | Every component gets its own search | All bridges returned, sorted | None |
-| Articulation points | articulationPoints | Symmetrises itself | Ignored | Skipped explicitly | A root is judged per component | Ascending node index | None |
+| Bridges | bridges | Symmetrises itself; a reciprocal pair is **one** undirected edge, parallel edges are **many** (see below) | Ignored | Skipped explicitly | Every component gets its own search | All bridges returned, sorted | None |
+| Articulation points | articulationPoints | As bridges: the same traversal and the same multiplicity rule | Ignored | Skipped explicitly | A root is judged per component | Ascending node index | None |
+
 | Biconnected components | biconnected, biconnectedComponents | Follows `bidirectional` | Ignored | Removed from the neighbour set | Every component searched; isolated nodes produce none | Each component sorted, then the list sorted and deduplicated | None |
+
+
+### What "symmetrises itself" counts as one edge
+
+The column above had no room for this and the question had not been asked, so
+`bridges` reported two parallel `a -> b` edges as a bridge: removing either
+leaves the graph connected, so it is not one (samyama-graph#1308).
+
+The multiplicity between two nodes under an undirected reading is
+**`max(forward, reverse)`**:
+
+| forward | reverse | undirected | why |
+|---|---|---|---|
+| 1 | 0 | 1 | a plain edge |
+| 1 | 1 | 1 | a reciprocal pair is **one** undirected edge |
+| 2 | 0 | 2 | genuinely parallel |
+| 2 | 1 | 2 | one pair collapses; the leftover stands on its own |
+
+**A reciprocal pair is one edge** because that is how the graph is drawn and how
+the data was written: `x -> y` with `y -> x` is a single connection, and cutting
+it disconnects the graph, so `x <-> y` is a bridge. It is also what the
+traversal already did, so adopting it moves no answer except the defect.
+
+The alternative — a reciprocal pair counting as **two**, which is what Neo4j
+GDS's undirected projection does — would stop `x <-> y` being a bridge and
+would change every algorithm that symmetrises: `bridges`,
+`articulationPoints`, `countTriangles` and everything reached through
+`neighbours()`. That is a larger product decision; it is recorded here as the
+road not taken rather than left implicit.
 
 ## Shape, similarity and link prediction
 

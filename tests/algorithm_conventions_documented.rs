@@ -57,7 +57,35 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
     let mut cols: Vec<(String, usize)> = Vec::new();
     let mut name_col = None;
     let mut header_cells = 0usize;
-    for line in doc.lines().map(str::trim).filter(|l| l.starts_with('|')) {
+    // Indexed, so a row can look at the line after it. A markdown header is
+    // only a header because a `|---|---|` separator follows it, and that is
+    // what distinguishes "the start of a different table" from "a malformed
+    // row of this one".
+    let pipe_lines: Vec<&str> = doc
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('|'))
+        .collect();
+    for (idx, line) in pipe_lines.iter().enumerate() {
+        let line = *line;
+        let followed_by_separator = pipe_lines
+            .get(idx + 1)
+            .map(|next| {
+                next.trim_matches('|')
+                    .chars()
+                    .all(|c| c == '-' || c == ':' || c == ' ' || c == '|')
+            })
+            .unwrap_or(false);
+        // A header for some other table ends the algorithm table. Without
+        // this, any second table in the document was read as a run of
+        // malformed algorithm rows: the undirected-multiplicity table added
+        // for samyama-graph#1308 has four columns against the algorithm
+        // header's eight, and the shift check -- correctly, for what it
+        // thought it was reading -- called it a broken row.
+        if followed_by_separator && !line.to_lowercase().contains("cypher name") {
+            name_col = None;
+            continue;
+        }
         // `\|` is a literal pipe inside a cell, not a cell boundary -- the
         // similarity rows carry `sqrt(\|A\|\|B\|)`. Splitting on every pipe
         // reads those rows with their columns shifted.
@@ -77,10 +105,10 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
                 .collect();
             continue;
         }
-        let Some(nc) = name_col else { continue };
         if cells[0].chars().all(|c| c == '-' || c == ':' || c == ' ') {
             continue; // the |---|---| separator
         }
+        let Some(nc) = name_col else { continue };
         // A row with a different number of cells from its header is a row whose
         // columns have shifted, and every axis in it is then read from the wrong
         // place. Three rows did exactly that: an unescaped `|` inside
