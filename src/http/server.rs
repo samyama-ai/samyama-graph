@@ -158,6 +158,19 @@ impl AppState {
     ///
     /// `GraphStore` is passed by `&mut` rather than the guard so that a body cannot
     /// hold the lock past the persist.
+    /// Has a write failed to reach disk? A handler that is about to write
+    /// should ask before it does.
+    ///
+    /// Exposed here rather than left to each handler to remember, because the
+    /// failure mode of forgetting is silent.
+    pub fn writes_refused(&self) -> Option<String> {
+        if self.persistence.is_some() && crate::persistence::health::is_degraded() {
+            Some(crate::persistence::health::refusal())
+        } else {
+            None
+        }
+    }
+
     pub async fn mutate<T>(
         &self,
         graph: &str,
@@ -172,7 +185,15 @@ impl AppState {
             let mutations = store.take_write_log();
             match pm.apply_mutations(graph, &store, &mutations) {
                 Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
-                Err(e) => tracing::warn!("failed to persist {} mutations: {e}", mutations.len()),
+                Err(e) => {
+                    // `mutate` returns the body's own value and has no channel
+                    // for an error, so the handler cannot be told here. What it
+                    // can do is refuse the *next* write, which is what
+                    // `is_degraded` below is for — and the handler that calls
+                    // this checks it before running (#1274).
+                    tracing::warn!("failed to persist {} mutations: {e}", mutations.len());
+                    crate::persistence::health::mark_degraded(e.to_string());
+                }
             }
         }
         out
