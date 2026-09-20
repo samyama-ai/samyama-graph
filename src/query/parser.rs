@@ -630,7 +630,7 @@ fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Q
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::label => label = Some(Label::new(unescape_name(inner.as_str()))),
             Rule::property_key => properties.push(unescape_name(inner.as_str())),
             _ => {}
         }
@@ -686,7 +686,7 @@ fn parse_create_hierarchy_index_statement(
                 let parts: Vec<_> = inner.into_inner().collect();
                 for part in &parts {
                     match part.as_rule() {
-                        Rule::label => measure_label = Some(part.as_str().to_string()),
+                        Rule::label => measure_label = Some(unescape_name(part.as_str())),
                         Rule::property_key => measure_property = Some(unescape_name(part.as_str())),
                         _ => {}
                     }
@@ -724,7 +724,7 @@ fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Que
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::label => label = Some(Label::new(unescape_name(inner.as_str()))),
             Rule::property_key => property = Some(unescape_name(inner.as_str())),
             _ => {}
         }
@@ -763,7 +763,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
                     variable = Some(inner.as_str().to_string());
                 }
             }
-            Rule::label => label = Some(Label::new(inner.as_str())),
+            Rule::label => label = Some(Label::new(unescape_name(inner.as_str()))),
             Rule::property_access => {
                 // Extract property from property_access (variable.property)
                 for pa in inner.into_inner() {
@@ -800,7 +800,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 index_name = Some(inner.as_str().to_string());
             }
             Rule::label => {
-                label = Some(Label::new(inner.as_str()));
+                label = Some(Label::new(unescape_name(inner.as_str())));
             }
             Rule::property_key => {
                 property_key = Some(unescape_name(inner.as_str()));
@@ -1391,7 +1391,7 @@ fn parse_set_label_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetLab
     for sl in pair.into_inner() {
         match sl.as_rule() {
             Rule::variable => variable = sl.as_str().to_string(),
-            Rule::label => labels.push(Label::new(sl.as_str())),
+            Rule::label => labels.push(Label::new(unescape_name(sl.as_str()))),
             _ => {}
         }
     }
@@ -1474,7 +1474,7 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 for child in children {
                     match child.as_rule() {
                         Rule::variable => variable = child.as_str().to_string(),
-                        Rule::label => labels.push(child.as_str().to_string()),
+                        Rule::label => labels.push(unescape_name(child.as_str())),
                         _ => {}
                     }
                 }
@@ -1875,7 +1875,7 @@ fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
             Rule::labels => {
                 for label_pair in inner.into_inner() {
                     if label_pair.as_rule() == Rule::label {
-                        labels.push(Label::new(label_pair.as_str()));
+                        labels.push(Label::new(unescape_name(label_pair.as_str())));
                     }
                 }
             }
@@ -1928,7 +1928,7 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
                     Rule::edge_types => {
                         for type_pair in detail.into_inner() {
                             if type_pair.as_rule() == Rule::edge_type {
-                                types.push(EdgeType::new(type_pair.as_str()));
+                                types.push(EdgeType::new(unescape_name(type_pair.as_str())));
                             }
                         }
                     }
@@ -2530,7 +2530,7 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                         }
                     })
                     .filter(|p| p.as_rule() == Rule::label)
-                    .map(|p| PropertyValue::String(p.as_str().to_string()))
+                    .map(|p| PropertyValue::String(unescape_name(p.as_str())))
                     .collect();
                 if !labels.is_empty() {
                     expr = Expression::Function {
