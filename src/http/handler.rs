@@ -346,6 +346,19 @@ pub async fn query_handler(
     let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
     let mut served_from_cache = false;
 
+    // A write refused because an earlier one did not reach disk (#1274). Asked
+    // before the write rather than after, so the client gets 503 and the store
+    // does not move further ahead of the disk.
+    if is_write {
+        if let Some(refusal) = state.writes_refused() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": refusal })),
+            )
+                .into_response();
+        }
+    }
+
     let snapshot_version: u64;
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
@@ -1454,7 +1467,8 @@ pub struct NlqRequest {
 /// schema-grounded NLQ pipeline, and return it. Execution is left to the caller (`/api/query`)
 /// so this stays a thin, side-effect-free translation endpoint.
 ///
-/// LLM config is read from the environment: `NLQ_PROVIDER` (default `openai`), `NLQ_MODEL`
+/// LLM config is read from the environment: `NLQ_PROVIDER` (**no default** — an unset or
+/// unrecognised value is refused rather than sent to OpenAI), `NLQ_MODEL`
 /// (default `gpt-4o`), `OPENAI_API_KEY`, optional `NLQ_API_BASE_URL`. `text_to_cypher`
 /// already rejects any generated query that contains write operations.
 pub async fn nlq_handler(
@@ -1464,17 +1478,14 @@ pub async fn nlq_handler(
     use crate::nlq::NLQPipeline;
     use crate::persistence::tenant::{NLQConfig, LLMProvider};
 
-    let provider = match std::env::var("NLQ_PROVIDER")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "ollama" => LLMProvider::Ollama,
-        "gemini" => LLMProvider::Gemini,
-        "anthropic" => LLMProvider::Anthropic,
-        "azure" | "azureopenai" => LLMProvider::AzureOpenAI,
-        "mock" => LLMProvider::Mock,
-        _ => LLMProvider::OpenAI,
+    // Refused, not defaulted. `NLQ_PROVIDER=claudecode` was not on the old list
+    // and fell through to OpenAI, so an operator asking for the local CLI sent
+    // the question and the schema summary to a third party instead.
+    let provider = match LLMProvider::parse(&std::env::var("NLQ_PROVIDER").unwrap_or_default()) {
+        Ok(p) => p,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+        }
     };
     let config = NLQConfig {
         enabled: true,
