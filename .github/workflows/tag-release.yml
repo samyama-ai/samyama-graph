@@ -87,8 +87,19 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          if ! git fetch origin release-gate --depth=1 2>/dev/null; then
-            echo "::error::no release-gate branch — the nightly has never published a verdict"
+          # Do not discard git's stderr. The previous form sent it to
+          # /dev/null and then asserted one explanation -- "the nightly has
+          # never published a verdict" -- for every possible failure. On
+          # 2026-09-21 that message blocked v1.9.0 while the branch existed and
+          # carried a green verdict, and the same command succeeded from a
+          # workstation under every refspec and depth tried. The real reason
+          # was thrown away before anyone could read it.
+          if ! err=$(git fetch origin release-gate --depth=1 2>&1); then
+            if git ls-remote --exit-code --heads origin release-gate >/dev/null 2>&1; then
+              echo "::error::the release-gate branch exists but could not be fetched: $err"
+            else
+              echo "::error::no release-gate branch — the nightly has never published a verdict"
+            fi
             exit 1
           fi
           git show FETCH_HEAD:RELEASE-GATE.json > RELEASE-GATE.json
