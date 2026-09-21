@@ -375,6 +375,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Compile the binding. `sdk/python` is `exclude`d from the workspace, so
+      # `cargo check --workspace` cannot reach it, and the tests below are
+      # pure-Python. Nothing on a pull request built this crate, and nothing in
+      # the nightly did either -- the first thing to compile it was the publish
+      # workflow, on the tag.
+      #
+      # v1.9.0 is what that cost: #1333 changed the SDK's `dijkstra` to return
+      # `Result<Option<PathResult>, NegativeWeight>`, every workspace caller was
+      # updated, and this one was not. All five wheels failed on the same two
+      # E0308s and PyPI got nothing, while crates.io and npm published fine.
+      #
+      # `cargo check`, not a maturin build: it catches a signature drift like
+      # that one in a couple of minutes and needs no Python toolchain, which is
+      # what kept the full build out of the pull-request lane.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile the extension crate
+        working-directory: sdk/python
+        run: cargo check --all-targets
+
       - name: Install test dependencies
         run: pip install pytest fastmcp
       - name: Tests
