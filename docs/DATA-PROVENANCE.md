@@ -116,14 +116,61 @@ Three things it deliberately does:
 
 ---
 
+## The other provenance: what a model wrote (`_generated`)
+
+The keys above say where data came *from*. They say nothing about whether a
+human or a language model put it there, and until #1413 nothing did: a value
+promoted out of enrichment quarantine was written onto the real property with no
+marker at all, and an edge materialized from a model's list of targets carried
+nothing whatsoever.
+
+`_generated` is the reserved key for that question. It is a map, so **one**
+predicate answers it for every shape:
+
+```cypher
+MATCH (n)               WHERE n._generated IS NULL RETURN n   -- no model wrote this node's data
+MATCH (a)-[r]->(b)      WHERE r._generated IS NULL RETURN r   -- no model drew this edge
+```
+
+| field | meaning |
+|---|---|
+| `created` | the node or edge itself was produced by a model |
+| `properties` | the properties whose *current* value was produced by a model |
+
+Three rules decide where it goes.
+
+- **Written at promotion, not at quarantine.** A quarantined answer is not in
+  the graph. Marking it would mark a value the engine has not believed.
+- **On the artifact the model made, and no further.** A node the model drew an
+  edge *from* is not marked: its own data is ingested. Tainting it would make
+  the exclusion predicate hide real rows and make a retraction look like a
+  delete.
+- **Off again on retraction.** `agent::enrich::retract` removes promoted
+  properties, deletes materialized edges, and deletes target nodes the model
+  created once nothing else points at them — a node the model merely *named*
+  stays. The quarantine entry survives with its status back at
+  `pending_verification`: retraction withdraws the belief, not the evidence.
+
+`retract` is a compensating pass, not a transaction. The engine has no
+statement-level rollback (LANG-07), so a failure part-way through leaves a
+partly-retracted graph.
+
+Not done: no HTTP endpoint exposes `retract` (`/api/enrich` and `/api/verify`
+exist), the confidence written into quarantine is the constant
+`LLM_DEFAULT_CONFIDENCE = 0.4` for every answer rather than anything the model
+reports, and `examples/agentic_enrichment_demo.rs` bypasses this path entirely
+(#1413).
+
+---
+
 ## What this does not do yet
 
 - **Nothing enforces the keys.** `__license: 42` is accepted, as any property
   is. The reader coerces a string `"false"` to `false` because CSV, JSON and RDF
   imports all deliver booleans as text, but there is no schema and no validation.
-- **Relationships carry no provenance.** The model is node-level. An edge
-  asserting a relationship between two differently-licensed sources has no
-  licence of its own.
+- **Relationships carry no source provenance.** This model is node-level. An
+  edge asserting a relationship between two differently-licensed sources has no
+  licence of its own. The one exception is an edge a *model* drew: see below.
 - **No export applies a policy by default.** `screen()` is available to every
   export path and `count-only` is the default everywhere, so nothing changes
   until a caller asks. Wiring `require-permission` into the snapshot and RDF
