@@ -156,6 +156,12 @@ fn extract_agg_inner(
                 "collect" => Some(AggregateType::Collect),
                 "percentilecont" => Some(AggregateType::PercentileCont),
                 "percentiledisc" => Some(AggregateType::PercentileDisc),
+                // Namespaced, so they cannot collide with a user function
+                // called `countdistinct`, and so it is visible at the call
+                // site that the answer is approximate. samyama-graph#1386
+                // made a multi-segment function name reach the planner.
+                "approx.countdistinct" => Some(AggregateType::ApproxCountDistinct),
+                "approx.percentile" => Some(AggregateType::ApproxPercentile),
                 "stdev" => Some(AggregateType::StDev),
                 "stdevp" => Some(AggregateType::StDevP),
                 _ => None,
@@ -178,7 +184,9 @@ fn extract_agg_inner(
                 // percentile call returned the median (#871).
                 let percentile = if matches!(
                     func,
-                    AggregateType::PercentileCont | AggregateType::PercentileDisc
+                    AggregateType::PercentileCont
+                        | AggregateType::PercentileDisc
+                        | AggregateType::ApproxPercentile
                 ) {
                     args.get(1).cloned()
                 } else {
