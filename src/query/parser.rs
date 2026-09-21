@@ -523,13 +523,13 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 query.drop_hierarchy_index = inner
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::variable)
-                    .map(|p| p.as_str().to_string());
+                    .map(|p| unescape_name(p.as_str()));
             }
             Rule::rebuild_hierarchy_index_stmt => {
                 query.rebuild_hierarchy_index = inner
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::variable)
-                    .map(|p| p.as_str().to_string());
+                    .map(|p| unescape_name(p.as_str()));
             }
             Rule::show_constraints_stmt => {
                 query.show_constraints = true;
@@ -711,7 +711,7 @@ fn parse_create_hierarchy_index_statement(
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => name = Some(inner.as_str().to_string()),
+            Rule::variable => name = Some(unescape_name(inner.as_str())),
             Rule::hier_relationship => {
                 for rel in inner.into_inner() {
                     reverse = rel.as_rule() == Rule::hier_rel_reverse;
@@ -804,7 +804,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
         match inner.as_rule() {
             Rule::variable => {
                 if variable.is_none() {
-                    variable = Some(inner.as_str().to_string());
+                    variable = Some(unescape_name(inner.as_str()));
                 }
             }
             Rule::label => label = Some(Label::new(unescape_name(inner.as_str()))),
@@ -1229,7 +1229,7 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                             let vars: Vec<String> = part
                                 .into_inner()
                                 .filter(|v| v.as_rule() == Rule::variable)
-                                .map(|v| v.as_str().to_string())
+                                .map(|v| unescape_name(v.as_str()))
                                 .collect();
                             // `WITH *` has no variables: it imports everything.
                             imports = if vars.is_empty() { None } else { Some(vars) };
@@ -1409,7 +1409,7 @@ fn parse_set_entity_item(
     let mut value = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::variable if variable.is_empty() => variable = part.as_str().to_string(),
+            Rule::variable if variable.is_empty() => variable = unescape_name(part.as_str()),
             Rule::set_entity_op => merge = part.as_str().trim() == "+=",
             Rule::expression => value = Some(parse_expression(part)?),
             _ => {}
@@ -1434,7 +1434,7 @@ fn parse_set_label_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetLab
     let mut labels = Vec::new();
     for sl in pair.into_inner() {
         match sl.as_rule() {
-            Rule::variable => variable = sl.as_str().to_string(),
+            Rule::variable => variable = unescape_name(sl.as_str()),
             Rule::label => labels.push(Label::new(unescape_name(sl.as_str()))),
             _ => {}
         }
@@ -1469,7 +1469,7 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
                     Rule::property_access => {
                         for pa in si.into_inner() {
                             match pa.as_rule() {
-                                Rule::variable => variable = pa.as_str().to_string(),
+                                Rule::variable => variable = unescape_name(pa.as_str()),
                                 Rule::property_key => property = unescape_name(pa.as_str()),
                                 _ => {}
                             }
@@ -1504,7 +1504,7 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 let mut property = String::new();
                 for pa in children[0].clone().into_inner() {
                     match pa.as_rule() {
-                        Rule::variable => variable = pa.as_str().to_string(),
+                        Rule::variable => variable = unescape_name(pa.as_str()),
                         Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
@@ -1517,7 +1517,7 @@ fn parse_remove_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<RemoveC
                 let mut labels = Vec::new();
                 for child in children {
                     match child.as_rule() {
-                        Rule::variable => variable = child.as_str().to_string(),
+                        Rule::variable => variable = unescape_name(child.as_str()),
                         Rule::label => labels.push(unescape_name(child.as_str())),
                         _ => {}
                     }
@@ -1542,7 +1542,7 @@ fn parse_unwind_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<UnwindC
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::expression => expression = Some(parse_expression(inner)?),
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             _ => {}
         }
     }
@@ -1566,7 +1566,7 @@ fn parse_load_csv_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<LoadC
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::expression => source = Some(parse_expression(inner)?),
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             Rule::string => {
                 let raw = inner.as_str();
                 let unquoted = &raw[1..raw.len().saturating_sub(1)];
@@ -1726,7 +1726,7 @@ fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
             Rule::property_access => {
                 for pa in inner.into_inner() {
                     match pa.as_rule() {
-                        Rule::variable => variable = pa.as_str().to_string(),
+                        Rule::variable => variable = unescape_name(pa.as_str()),
                         Rule::property_key => property = unescape_name(pa.as_str()),
                         _ => {}
                     }
@@ -1790,7 +1790,7 @@ fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPatter
         match inner.as_rule() {
             Rule::variable => {
                 if path_variable.is_none() {
-                    path_variable = Some(inner.as_str().to_string());
+                    path_variable = Some(unescape_name(inner.as_str()));
                 }
             }
             Rule::path_modes => {
@@ -1914,7 +1914,7 @@ fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::variable => {
-                variable = Some(inner.as_str().to_string());
+                variable = Some(unescape_name(inner.as_str()));
             }
             Rule::labels => {
                 for label_pair in inner.into_inner() {
@@ -1967,7 +1967,7 @@ fn parse_edge(pair: pest::iterators::Pair<Rule>) -> ParseResult<EdgePattern> {
             for detail in inner.into_inner() {
                 match detail.as_rule() {
                     Rule::variable => {
-                        variable = Some(detail.as_str().to_string());
+                        variable = Some(unescape_name(detail.as_str()));
                     }
                     Rule::edge_types => {
                         for type_pair in detail.into_inner() {
@@ -2263,7 +2263,7 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
                 expression = Some(parse_expression(inner)?);
             }
             Rule::variable => {
-                alias = Some(inner.as_str().to_string());
+                alias = Some(unescape_name(inner.as_str()));
             }
             _ => {}
         }
@@ -2628,7 +2628,7 @@ fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResul
     let mut keys: Vec<String> = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             Rule::property_key => keys.push(unescape_name(inner.as_str())),
             _ => {}
         }
@@ -2732,7 +2732,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::Parameter(name));
             }
             Rule::variable => {
-                return Ok(Expression::Variable(inner.as_str().to_string()));
+                return Ok(Expression::Variable(unescape_name(inner.as_str())));
             }
             Rule::value => {
                 let val = parse_value(inner)?;
@@ -2788,7 +2788,7 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                             }
                         }
                         Rule::variable => {
-                            let name = part.as_str().to_string();
+                            let name = unescape_name(part.as_str());
                             entries.push((name.clone(), Expression::Variable(name)));
                         }
                         _ => {}
@@ -2940,7 +2940,7 @@ fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
     let mut seen_pipe = false;
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             Rule::in_op => {} // skip the IN keyword
             Rule::where_kw => seen_where = true,
             Rule::pipe_op => seen_pipe = true,
@@ -2984,7 +2984,7 @@ fn parse_predicate_function(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::predicate_function_name => name = inner.as_str().to_lowercase(),
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             Rule::in_op => {}
             Rule::expression => expressions.push(parse_expression(inner)?),
             _ => {}
@@ -3017,7 +3017,7 @@ fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult
         match inner.as_rule() {
             // The only bare `variable` in this rule is the `p =` prefix; the
             // pattern's own variables are inside `path`.
-            Rule::variable => path_variable = Some(inner.as_str().to_string()),
+            Rule::variable => path_variable = Some(unescape_name(inner.as_str())),
             Rule::path => pattern_path = Some(parse_path(inner)?),
             Rule::where_clause => {
                 let wc = parse_where_clause(inner)?;
@@ -3049,7 +3049,7 @@ fn parse_reduce_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Exp
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => variables.push(inner.as_str().to_string()),
+            Rule::variable => variables.push(unescape_name(inner.as_str())),
             Rule::in_op => {}
             Rule::expression => expressions.push(parse_expression(inner)?),
             _ => {}
@@ -3080,7 +3080,7 @@ fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<Foreac
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable => variable = Some(inner.as_str().to_string()),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
             Rule::in_op => {} // skip
             Rule::expression => expression = Some(parse_expression(inner)?),
             Rule::set_clause => body.push(ForeachBody::Set(parse_set_clause(inner)?)),
@@ -3122,12 +3122,15 @@ fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
         return Err(ParseError::SemanticError("Invalid property access".to_string()));
     }
 
-    let variable = parts[0].as_str().to_string();
-    // The fifteenth read site, and the one a grep for `Rule::property_key`
-    // does not find: this one indexes positionally. Without the unescape,
-    // `map.`name`` parsed to `Property { property: "`name`" }` and looked up a
-    // key with backticks in its name -- null, from a query that had just been
-    // taught to parse (#847).
+    // Both halves index **positionally**, so neither is found by a grep for
+    // `Rule::property_key` or `Rule::variable`. Both have now cost the same
+    // bug. The property half was #847: without the unescape, ``map.`name` ``
+    // parsed to `Property { property: "`name`" }` and looked up a key with
+    // backticks in its name -- null, from a query that had just been taught
+    // to parse. The variable half was #1373, and it is worse, because the
+    // binding check rejects the query outright: ``MATCH (`my node`) RETURN
+    // `my node`.name `` bound `my node` and then asked for `` `my node` ``.
+    let variable = unescape_name(parts[0].as_str());
     let property = unescape_name(parts[1].as_str());
 
     Ok(Expression::Property { variable, property })
