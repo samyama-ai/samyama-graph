@@ -125,10 +125,6 @@ curl -X POST http://localhost:8080/api/query \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
 
-> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
-> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
-> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
-
 **Step 7 — Samyama Visualizer**
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
@@ -465,31 +461,34 @@ one; the geometric mean of the per-query ratios is 88×. Both are recomputed fro
 committed per-query timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no
 longer exists.
 
-**The index does not pay for itself over the whole corpus, and the headline
-cannot see that.** 94× and 88× are computed over the 58 queries *expressible on
-both engines* — classes H1, H2, H3, H5 and H10. The three classes where the
-index is a net cost are not expressible on Neo4j and so are absent from that
-comparison by construction: H7 lowest common ancestor, H4 cross-hierarchy
-conjunction, H6 anti-subsumption. That is what "expressible on both" means, and
-a reader is still entitled to know that the excluded classes are the losing
-ones.
+**The 58 queries behind that figure are the classes the index wins.** 94× and
+88× are computed over the queries *expressible on both engines* — H1, H2, H3,
+H5 and H10. The three classes where our index-written form is a net cost are
+not expressible on Neo4j and so are absent by construction: H7 lowest common
+ancestor, H4 cross-hierarchy conjunction, H6 anti-subsumption. That is what
+"expressible on both" means, and a reader is entitled to know which classes the
+comparison could not include.
 
-Over the full 108-query corpus on current code and documented hardware, three
-statistics disagree and all three are true:
+**The local corpus answers two different questions and the column headings did
+not say so.** Of its 112 queries, 27 run the *same query text* twice with the
+index toggled; the other 85 carry a separate hand-written `baseline` query.
+Split:
 
-| Statistic | Index on vs off |
-|---|---:|
-| ratio of medians (what is published above) | 2.56× faster |
-| per-query geometric mean | 1.88× faster |
-| **total time** | **0.45× — the corpus takes 2.2× longer** |
+| Comparison | n | Total time |
+|---|---:|---:|
+| **same text, index on vs off** — what the index does | 27 | **35.3× faster** |
+| index-written query vs a hand-written alternative | 81 | 0.43× |
 
-34 of the 108 queries are slower with the index than without it, and three
-classes are slower by close to an order of magnitude (H7 0.09×, H4 0.21×,
-H6 0.49×). A ratio of medians is blind to a tail by construction, which is why
-the number that gets quoted is the one that looks best.
+Only the first row is a statement about the index, and there it is a large win
+(2 of the 27 are slower). The second is a statement about how the two queries
+were written — and on H7 the index-written form calls `hierarchy_lca(a, b)`
+inside a `WHERE` evaluated once per `:Term`, while the hand-written arm is a
+single path join. H6's alternative is `NOT (d.code STARTS WITH "T")`, a
+string-prefix test that works only because this synthetic corpus encodes
+ancestry in the code and would not exist on a real ontology.
 
-Both figures are now measured by `CH-BENCH-HIER` rather than stated here, and
-the whole-corpus one is reported every run.
+Both figures are measured by `CH-BENCH-HIER` every run, as
+`index_on_same_query_total_time` and `index_written_vs_hand_written_total_time`.
 
 One more caveat on the 94× itself: it predates
 [#1343](https://github.com/samyama-ai/samyama-graph/issues/1343), which found
