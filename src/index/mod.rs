@@ -4,6 +4,7 @@
 
 pub mod property_index;
 pub mod manager;
+pub mod fulltext;
 pub mod hierarchy;
 
 pub use property_index::PropertyIndex;

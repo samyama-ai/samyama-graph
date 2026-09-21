@@ -12979,6 +12979,163 @@ impl PhysicalOperator for CreateVectorIndexOperator {
     }
 }
 
+/// `CREATE FULLTEXT INDEX <name> FOR (n:L) ON (n.prop)` (NDS-06).
+pub struct CreateFullTextIndexOperator {
+    name: String,
+    label: Label,
+    property_keys: Vec<String>,
+    executed: bool,
+}
+
+impl CreateFullTextIndexOperator {
+    pub fn new(name: String, label: Label, property_keys: Vec<String>) -> Self {
+        Self { name, label, property_keys, executed: false }
+    }
+}
+
+impl PhysicalOperator for CreateFullTextIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "CREATE FULLTEXT INDEX is a write; it needs next_mut".to_string(),
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+        // One index per property, named `<name>` for the first and
+        // `<name>.<property>` for the rest. Neo4j's `ON EACH [a, b]` is one
+        // index over two fields; this is two indexes queried under one name,
+        // which differs in how scores combine across fields -- and refusing
+        // the syntax would be worse than supporting it with the difference
+        // written down (see docs/FULL-TEXT-SEARCH.md).
+        for (i, key) in self.property_keys.iter().enumerate() {
+            let name = if i == 0 {
+                self.name.clone()
+            } else {
+                format!("{}.{}", self.name, key)
+            };
+            store.create_fulltext_index(&name, self.label.as_str(), key);
+        }
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) { self.executed = false; }
+    fn is_mutating(&self) -> bool { true }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CreateFullTextIndex".to_string(),
+            details: format!("{} ON :{}({})", self.name, self.label.as_str(),
+                             self.property_keys.join(", ")),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// `DROP FULLTEXT INDEX <name>`.
+pub struct DropFullTextIndexOperator {
+    name: String,
+    executed: bool,
+}
+
+impl DropFullTextIndexOperator {
+    pub fn new(name: String) -> Self {
+        Self { name, executed: false }
+    }
+}
+
+impl PhysicalOperator for DropFullTextIndexOperator {
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "DROP FULLTEXT INDEX is a write; it needs next_mut".to_string(),
+        ))
+    }
+
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        if self.executed {
+            return Ok(None);
+        }
+        // Dropping an index that is not there is an error, not a no-op: the
+        // commonest cause is a typo in the name, and silently succeeding
+        // leaves the real index in place and the caller believing otherwise.
+        if !store.drop_fulltext_index(&self.name) {
+            let known = store.fulltext.names();
+            return Err(ExecutionError::RuntimeError(format!(
+                "no full-text index named '{}'. {}",
+                self.name,
+                if known.is_empty() {
+                    "None exists.".to_string()
+                } else {
+                    format!("Known: {}", known.join(", "))
+                }
+            )));
+        }
+        self.executed = true;
+        Ok(Some(Record::new()))
+    }
+
+    fn reset(&mut self) { self.executed = false; }
+    fn is_mutating(&self) -> bool { true }
+}
+
+/// `CALL db.index.fulltext.queryNodes(name, query)` YIELD node, score.
+pub struct FullTextSearchOperator {
+    index_name: String,
+    query: String,
+    limit: usize,
+    node_alias: String,
+    score_alias: String,
+    results: Option<std::vec::IntoIter<crate::index::fulltext::Hit>>,
+}
+
+impl FullTextSearchOperator {
+    pub fn new(index_name: String, query: String, limit: usize,
+               node_alias: String, score_alias: String) -> Self {
+        Self { index_name, query, limit, node_alias, score_alias, results: None }
+    }
+}
+
+impl PhysicalOperator for FullTextSearchOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.results.is_none() {
+            let hits = store.fulltext.search(&self.index_name, &self.query, self.limit)
+                .ok_or_else(|| {
+                    let known = store.fulltext.names();
+                    ExecutionError::RuntimeError(format!(
+                        "no full-text index named '{}'. {}",
+                        self.index_name,
+                        if known.is_empty() {
+                            "None has been created; CREATE FULLTEXT INDEX <name> FOR \
+                             (n:Label) ON (n.property) makes one.".to_string()
+                        } else {
+                            format!("Known: {}", known.join(", "))
+                        }
+                    ))
+                })?;
+            self.results = Some(hits.into_iter());
+        }
+        Ok(self.results.as_mut().unwrap().next().map(|hit| {
+            let mut r = Record::new();
+            r.bind(self.node_alias.clone(), Value::NodeRef(hit.node));
+            r.bind(self.score_alias.clone(), Value::Property(PropertyValue::Float(hit.score)));
+            r
+        }))
+    }
+
+    fn reset(&mut self) { self.results = None; }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "FullTextSearch".to_string(),
+            details: format!("{} ~ {:?}", self.index_name, self.query),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// Composite create index operator: CREATE INDEX ON :Label(prop1, prop2, ...)
 pub struct CompositeCreateIndexOperator {
     label: Label,
