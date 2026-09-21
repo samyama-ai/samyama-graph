@@ -36,8 +36,17 @@ return_stmt = { return_clause ~ order_by_clause? ~ skip_clause? ~ limit_clause? 
 // The optional index name must not swallow `FOR`. `variable?` matched it, and the rule
 // then failed at the "(" -- so the unnamed form was rejected outright. Same trap as
 // the optional constraint name.
-index_name = @{ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
-create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
+index_name = @{ !((^"FOR" | ^"ON") ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// Two spellings of the same statement. The `FOR (n:L) ON (n.prop)` form is the
+// one Neo4j 5 documents for vector indexes; the `ON :L(prop)` form is the one
+// every other index DDL here uses, including `CREATE INDEX` below. Accepting
+// only the first made the vector index the odd one out for no reason a caller
+// could see -- a uniformity gap, not a missing capability, so it is a grammar
+// alternative and not a feature. Both build the same index: the builder
+// dispatches on `label`/`property_key` and ignores the pattern variable.
+create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
+vector_index_for = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" }
+vector_index_on = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
 create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
