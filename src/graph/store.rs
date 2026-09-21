@@ -2145,6 +2145,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // But to keep history, we should NOT remove from the Vec.
         
         // Remove from label indices and update catalog
+        // A deleted node must leave the full-text index too. Without this the
+        // index keeps its terms and a search returns a node that no longer
+        // exists -- and the caller cannot tell that from a correct hit, which
+        // is the whole failure mode a stale inverted index has. Not routed
+        // through `on_property_removed` per label, because by the time a
+        // reader asks, the labels are what is being torn down.
+        self.fulltext.on_node_deleted(id);
+
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         for label in &latest_node.labels {

@@ -228,6 +228,42 @@ fn a_node_created_after_the_ddl_is_indexed() {
 }
 
 #[test]
+fn a_deleted_node_stops_matching() {
+    // Found by re-reading the write paths rather than by a failing test:
+    // `on_node_deleted` existed and nothing called it, so a deleted node kept
+    // its terms and a search returned a node that was gone. A caller cannot
+    // tell that from a correct hit.
+    let mut g = corpus();
+    write(&mut g, "CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)");
+    assert_eq!(
+        count(
+            &g,
+            "CALL db.index.fulltext.queryNodes('docs', 'graph') YIELD node RETURN count(node)"
+        ),
+        2
+    );
+
+    write(&mut g, "MATCH (d:Doc {title: 'a'}) DELETE d");
+    assert_eq!(
+        count(
+            &g,
+            "CALL db.index.fulltext.queryNodes('docs', 'databases') \
+             YIELD node RETURN count(node)"
+        ),
+        0,
+        "the deleted node is still in the index"
+    );
+    assert_eq!(
+        count(
+            &g,
+            "CALL db.index.fulltext.queryNodes('docs', 'graph') YIELD node RETURN count(node)"
+        ),
+        1,
+        "the surviving match must still be found"
+    );
+}
+
+#[test]
 fn a_phrase_query_requires_adjacency() {
     let mut g = GraphStore::new();
     write(

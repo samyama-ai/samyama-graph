@@ -96,6 +96,9 @@ indexes (`GraphStore::apply_property_set`), so:
   and nothing about the result would say so.
 - A property that stops being a string is removed from the index rather than
   left behind.
+- **A deleted node leaves the index.** Without that its terms survive and a
+  search returns a node that is gone — which a caller cannot distinguish from
+  a correct hit.
 
 ## What this does not do
 
