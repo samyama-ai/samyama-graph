@@ -26,6 +26,10 @@ jobs:
 
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      # Consumed by mirror-to-ecr: the digest makes the copy exact, and the
+      # tag list keeps the two registries carrying the same set.
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +94,111 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: sbom-image.spdx.json
           push-to-registry: true
+
+  # Mirror the published image to ECR Public.
+  #
+  # Until now nothing did: the registry holds 1.1.0, 1.7.0 and 1.7.1, pushed by
+  # hand, and v1.8.0 is simply absent because nobody ran the manual step. The
+  # tags that were pushed went unused — every reference across the KG repos and
+  # samyama-cloud still names 1.1.0 — so the manual step was both unreliable and
+  # invisible when it was skipped.
+  #
+  # Three properties this job is built for:
+  #
+  # 1. **It cannot break the GHCR publish.** It is a separate job that runs
+  #    after the image is out and smoke-tested, so an AWS outage or an expired
+  #    role costs the mirror, not the release.
+  # 2. **It copies, it does not rebuild.** `imagetools create` re-points tags at
+  #    an existing multi-arch manifest by digest, so ECR gets the exact bytes
+  #    GHCR has and the same digest. A second `build-push-action` would produce
+  #    a second image that merely ought to be identical.
+  # 3. **It waits for the smoke test.** #1327 was an arm64 image that had never
+  #    been started reaching the registry. Mirroring an image that has not run
+  #    would reintroduce that, one registry over.
+  #
+  # Inert until configured: with neither variable set the `if` is false and the
+  # job is skipped, so merging this changes nothing until the IAM role exists.
+  mirror-to-ecr:
+    needs: [build-and-push, smoke-test]
+    if: vars.AWS_ECR_ROLE_ARN != '' && vars.ECR_PUBLIC_REGISTRY != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC, for the same reason publish-crate.yml uses it: no long-lived AWS
+      # key in repository secrets to rotate, leak or quietly expire.
+      id-token: write
+
+    steps:
+      - name: Assume the publishing role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          # ECR Public's API lives in us-east-1 regardless of where the
+          # images are served from. A different region here fails to
+          # authenticate rather than publishing somewhere unexpected.
+          aws-region: us-east-1
+
+      - name: Login to ECR Public
+        run: |
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
+
+      # Every tag the GHCR step produced, pointed at the same digest.
+      # Derived from the metadata job's output rather than re-listed here, so
+      # the two registries cannot drift apart in which tags they carry.
+      # Unverified until this runs with real credentials: the GHCR index holds
+      # two platform manifests *and* two attestation manifests
+      # (unknown/unknown, vnd.docker.reference.*), and ECR Public's support for
+      # those is not something this repository can test without the role. If
+      # the push is rejected on them, copy the two platform manifests
+      # explicitly instead:
+      #
+      #   docker buildx imagetools create --tag "$DEST:$tag" \
+      #     ghcr.io/samyama-ai/samyama-graph@<amd64-digest> \
+      #     ghcr.io/samyama-ai/samyama-graph@<arm64-digest>
+      #
+      # That loses the attestations on the ECR copy and keeps them on GHCR,
+      # which is the right way round: GHCR is where the README sends people.
+      - name: Mirror every tag by digest
+        env:
+          SRC: ghcr.io/samyama-ai/samyama-graph@${{ needs.build-and-push.outputs.digest }}
+          DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
+          TAGS: ${{ needs.build-and-push.outputs.tags }}
+        run: |
+          set -euo pipefail
+          echo "source: $SRC"
+          count=0
+          # metadata-action emits one fully-qualified reference per line.
+          while read -r ref; do
+            [ -n "$ref" ] || continue
+            tag="${ref##*:}"
+            echo "--> $DEST:$tag"
+            docker buildx imagetools create --tag "$DEST:$tag" "$SRC"
+            count=$((count + 1))
+          done <<< "$TAGS"
+          # A mirror that copied nothing would otherwise report success.
+          [ "$count" -gt 0 ] || { echo "::error::no tags to mirror"; exit 1; }
+          echo "mirrored $count tag(s)"
+
+      # Verify against the registry rather than trusting the push: the
+      # manifest ECR serves must be the digest GHCR serves, and it must still
+      # list both architectures. A mirror that silently flattened to one
+      # platform is exactly the #1327 shape.
+      - name: Verify what ECR now serves
+        env:
+          DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
+          VERSION: ${{ needs.build-and-push.outputs.version }}
+          EXPECTED: ${{ needs.build-and-push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          got=$(docker buildx imagetools inspect "$DEST:$VERSION" --format '{{.Manifest.Digest}}')
+          echo "expected $EXPECTED"
+          echo "got      $got"
+          [ "$got" = "$EXPECTED" ] || { echo "::error::ECR serves a different digest"; exit 1; }
+          platforms=$(docker buildx imagetools inspect "$DEST:$VERSION" --raw \
+            | python3 -c "import json,sys; m=json.load(sys.stdin).get('manifests',[]); print(' '.join(sorted(f\"{x['platform']['os']}/{x['platform']['architecture']}\" for x in m if x.get('platform',{}).get('architecture') != 'unknown')))")
+          echo "platforms: $platforms"
+          [ "$platforms" = "linux/amd64 linux/arm64" ] || { echo "::error::expected both architectures, got: $platforms"; exit 1; }
 
   # Run on both architectures the image is built for.
   #
