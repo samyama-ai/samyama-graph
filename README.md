@@ -5,7 +5,7 @@
     <strong>99.9% of the openCypher TCK's evaluated scenarios pass · SNB Interactive 21/21 and SNB BI 20/20, no timeouts · 1B edges on one machine</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.8.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.9.0-blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml"><img src="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
@@ -31,7 +31,7 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 **Step 1 — Prerequisites**
 
 - ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.8.0` for a reproducible setup)
+- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.9.0` for a reproducible setup)
 
 **Step 2 — Pull the Docker image**
 
