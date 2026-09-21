@@ -20,6 +20,7 @@ it out.
 | **`.sgsnap` snapshot** | the above, plus node creation timestamps and hierarchy-index declarations | another Samyama |
 | **Parquet / Arrow** | one *result set* | a warehouse, pandas, DuckDB |
 | **RDF / Turtle** | nodes, labels, properties, relationships, relationship properties (reified), IRIs | a triple store, SPARQL tooling |
+| **GraphML** | nodes, labels, relationships, relationship types, scalar properties; lists and temporals as text | Gephi, yEd, Cytoscape, NetworkX |
 
 Nothing here needs a licence key, a support ticket, or a running network
 connection to us.
@@ -164,6 +165,50 @@ collapse above so it stays a documented loss.
 
 Spec requirement INT-07 asks for tested steps to Neo4j *and* RDF; both halves
 are now here. Closed [#1362](https://github.com/samyama-ai/samyama-graph/issues/1362).
+
+---
+
+## 5. GraphML — for the tools that draw graphs
+
+```bash
+cargo run --release --example graphml_export -- --snapshot graph.sgsnap --out graph.graphml
+```
+
+Gephi, yEd, Cytoscape and NetworkX all read GraphML. It carries the topology
+faithfully and is the narrowest of these routes on **types**, for one reason
+worth understanding before you rely on it: GraphML declares each attribute once,
+up front, with a single type.
+
+```xml
+<key id="nd1" for="node" attr.name="age" attr.type="long"/>
+```
+
+A property graph does not promise that. If `age` is a number on one node and
+the string `"unknown"` on another — and nothing here rejected that on the way
+in — the declaration has to widen to `string`, and every `age` in the file
+stops being a number to any reader. The export **names** the attributes this
+happened to rather than letting you find out in Gephi:
+
+```
+  What GraphML could not carry:
+  - 1 attribute(s) had values of more than one type, so the declaration widened
+    to `string`: node.age
+  - 1 list/map/vector value(s) written as JSON inside a string attribute.
+```
+
+The full list of narrowings:
+
+| In the graph | In the file |
+|---|---|
+| mixed-type attribute | one `string` declaration; values written as text, named in the report |
+| list, map, vector | JSON text inside a `string` attribute — content kept, structure invisible to a reader that does not parse it |
+| date, time, datetime, duration | ISO-8601 text. Lossless as text, not as a type |
+| labels | a `labels` attribute, space-separated — the convention every tool here follows, and ambiguous for a label containing a space, which is reported |
+| relationship type | a `label` attribute on the edge |
+
+`--json report.json` writes the same report machine-readably. The output is
+byte-identical across runs of the same graph, so it can be diffed and
+checksummed.
 
 ---
 

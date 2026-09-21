@@ -992,6 +992,11 @@ pub struct GraphStore {
 
     /// Vector indices manager
     pub vector_index: Arc<VectorIndexManager>,
+    /// Named full-text indexes (NDS-06). Not behind an `Arc` like the vector
+    /// manager: maintenance happens on the `&mut self` write paths, so the
+    /// interior mutability the vector index needs for concurrent search has no
+    /// counterpart here.
+    pub fulltext: crate::index::fulltext::FullTextIndexes,
 
     /// Property indices manager
     pub property_index: Arc<IndexManager>,
@@ -1099,6 +1104,7 @@ impl GraphStore {
             label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
             vector_index: Arc::new(VectorIndexManager::new()),
+            fulltext: Default::default(),
             property_index: Arc::new(IndexManager::new()),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             node_columns: ColumnStore::new(),
@@ -2139,6 +2145,14 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         // But to keep history, we should NOT remove from the Vec.
         
         // Remove from label indices and update catalog
+        // A deleted node must leave the full-text index too. Without this the
+        // index keeps its terms and a search returns a node that no longer
+        // exists -- and the caller cannot tell that from a correct hit, which
+        // is the whole failure mode a stale inverted index has. Not routed
+        // through `on_property_removed` per label, because by the time a
+        // reader asks, the labels are what is being torn down.
+        self.fulltext.on_node_deleted(id);
+
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         for label in &latest_node.labels {
@@ -5139,6 +5153,62 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
             }
         }
+        // Full-text maintenance on the same choke point as the property and
+        // vector indexes. A full-text index maintained from the callers of
+        // this function instead would go stale at whichever caller was
+        // forgotten, and a stale inverted index does not report anything --
+        // it returns a document that no longer holds the word.
+        if !self.fulltext.is_empty() {
+            match new_value {
+                PropertyValue::String(text) => {
+                    for label in labels {
+                        self.fulltext.on_property_set(label.as_str(), key, id, text);
+                    }
+                }
+                // A property that stops being a string stops being indexable,
+                // and leaving the old text in is the same silent staleness.
+                _ => {
+                    for label in labels {
+                        self.fulltext.on_property_removed(label.as_str(), key, id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Create a named full-text index and fill it from the nodes already
+    /// present (NDS-06).
+    ///
+    /// Backfilled, not registered-and-left-empty. The normal order for a bulk
+    /// load is data first, DDL second, and an index that registers without
+    /// populating returns nothing for every search with no error to say why --
+    /// the bug the vector index had (`create_vector_index_backfills_existing_embeddings`).
+    pub fn create_fulltext_index(&mut self, name: &str, label: &str, property: &str) -> usize {
+        // Creating the index changes what `db.index.fulltext.queryNodes`
+        // returns -- from an error to rows -- so a result cache keyed on the
+        // epoch would serve the old answer. Caught by
+        // `every_mutator_bumps_the_epoch_or_is_listed`, which is the kind of
+        // guard that pays for itself on exactly this sort of addition.
+        self.bump_epoch();
+        self.fulltext.create(name, label, property);
+        let docs: Vec<(NodeId, String)> = self
+            .node_ids_by_label(&Label::new(label), None)
+            .into_iter()
+            .filter_map(|id| match self.node_properties_merged(id).get(property) {
+                // The merged view: a property written through Cypher lands on
+                // the columnar side and `node.properties` does not see it
+                // (#554). Reading the row map here would index a bulk load and
+                // miss everything written by a query.
+                Some(PropertyValue::String(s)) => Some((id, s.clone())),
+                _ => None,
+            })
+            .collect();
+        self.fulltext.rebuild(name, docs)
+    }
+
+    pub fn drop_fulltext_index(&mut self, name: &str) -> bool {
+        self.bump_epoch();
+        self.fulltext.drop_index(name)
     }
 
     pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent, _tenant_manager: Option<Arc<crate::persistence::TenantManager>>) {
