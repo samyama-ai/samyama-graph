@@ -50,12 +50,42 @@ a declared index, a registered procedure — may not be one for you.
 
 ## 3. Moving the data
 
-There is no Neo4j dump importer yet
-([#1362 is RDF](https://github.com/samyama-ai/samyama-graph/issues/1362); a dump
-reader is INT-02 and not built). Two routes that do work:
+**`apoc.export.json`, read directly.** On the Neo4j side:
+
+```cypher
+CALL apoc.export.json.all('graph.json', {})
+```
+
+then here:
+
+```bash
+cargo run --release --example neo4j_import -- --file graph.json --json report.json
+```
+
+Both APOC shapes are read: the default JSON Lines and the single object written
+by `{jsonFormat:'JSON'}`. Relationships are buffered and resolved at the end, so
+a file that writes a relationship before its endpoints imports correctly — APOC
+does not promise nodes come first.
+
+Read the report, not just the exit code. Three things do not survive a JSON
+round trip, and the importer counts each rather than papering over it:
+
+| In the report | What it means |
+|---|---|
+| `dangling_edges`, `missing_endpoints` | A relationship whose endpoints were not in the export. A subgraph export produces these by construction; the ids are named so you can widen the export query. |
+| `values_that_look_temporal`, `values_that_look_spatial` | JSON has no date and no point, so APOC writes them as strings and maps, and that is how they arrive. **They are not converted.** A converter cannot tell your version string `"1.8.0"` from a date, and silently turning one into the other is invisible until a comparison behaves oddly. Convert deliberately: `MATCH (n:Label) SET n.when = datetime(n.when)`. |
+| `null_properties_dropped` | Neo4j cannot store a null, so a null in the file came from the exporter. The property is left absent, which is what the source graph had. |
+
+`--require-lossless` turns any of those into a non-zero exit, which is the form
+to use in a script. Node ids are **not** preserved: Neo4j ids are not stable
+across databases and treating them as keys is the migration mistake that
+outlives the migration. Use a property you control.
+
+Two other routes:
 
 - **Cypher script.** `apoc.export.cypher.all` on the Neo4j side, then replay it
-  here. Slow for large graphs and the most faithful for small ones.
+  here. Slower, and the most faithful for small graphs, because it carries
+  types the JSON form cannot.
 - **CSV.** `LOAD CSV WITH HEADERS FROM 'file:///…'` is supported. `http` and
   `https` are deliberately not — a server that fetches arbitrary URLs on a
   client's behalf is an SSRF primitive — so stage the file locally.
