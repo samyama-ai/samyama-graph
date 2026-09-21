@@ -1,5 +1,5 @@
 name,encoding,nodes,bytes,structural_bytes,rollup_bytes,structural_bytes_per_node,build_ms
 cal,nested-set,2824,603376,33888,569488,12.00,0.75
-geo,nested-set,1784,312112,21408,290704,12.00,0.48
-onto,nested-set,9331,2358436,111972,2246464,12.00,2.74
-threat,chain,36,6064,1072,4992,29.78,0.03
+geo,nested-set,1784,312112,21408,290704,12.00,0.46
+onto,nested-set,9331,2358436,111972,2246464,12.00,2.69
+threat,chain,36,5944,1048,4896,29.11,0.03
