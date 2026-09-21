@@ -9535,6 +9535,10 @@ pub enum AggregateType {
     PercentileDisc,
     StDev,
     StDevP,
+    /// `approx.countDistinct(x)` -- HyperLogLog (NDS-10).
+    ApproxCountDistinct,
+    /// `approx.percentile(x, q)` -- t-digest (NDS-10).
+    ApproxPercentile,
 }
 
 /// Aggregation function definition
@@ -9581,6 +9585,13 @@ enum AggregatorState {
     Collect(Vec<Value>),
     CollectDistinct(BTreeSet<PropertyValue>),
     Percentile { values: Vec<f64>, pct: f64, cont: bool },
+    /// Bounded-memory distinct count. The register array is the whole state,
+    /// which is what makes it mergeable.
+    ApproxDistinct(crate::index::sketch::HyperLogLog),
+    /// Bounded-memory quantiles. `pct` is set from the call's second argument
+    /// by the same path `percentileCont` uses -- one place that can drop it is
+    /// enough (#871).
+    ApproxPercentile { digest: crate::index::sketch::TDigest, pct: f64 },
     StDev { values: Vec<f64>, population: bool },
 }
 
@@ -9686,6 +9697,10 @@ impl AggregatorState {
             (AggregateType::Collect, false) => AggregatorState::Collect(Vec::new()),
             (AggregateType::PercentileCont, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: true },
             (AggregateType::PercentileDisc, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: false },
+            (AggregateType::ApproxCountDistinct, _) =>
+                AggregatorState::ApproxDistinct(Default::default()),
+            (AggregateType::ApproxPercentile, _) =>
+                AggregatorState::ApproxPercentile { digest: Default::default(), pct: 0.5 },
             (AggregateType::StDev, _) => AggregatorState::StDev { values: Vec::new(), population: false },
             (AggregateType::StDevP, _) => AggregatorState::StDev { values: Vec::new(), population: true },
         }
@@ -9697,8 +9712,15 @@ impl AggregatorState {
     /// to clamp the index with `.min(n - 1)` instead, so an out-of-range
     /// percentile quietly returned the last element (#871).
     fn set_percentile(&mut self, value: &Value) -> ExecutionResult<()> {
-        let AggregatorState::Percentile { pct, .. } = self else {
-            return Ok(());
+        // Both percentile aggregates, through one path. Two copies of this
+        // validation is how `percentileCont` came to ignore its second
+        // argument and return the median for every call (#871); the
+        // approximate form would have inherited the same bug from a second
+        // copy written beside it.
+        let pct: &mut f64 = match self {
+            AggregatorState::Percentile { pct, .. } => pct,
+            AggregatorState::ApproxPercentile { pct, .. } => pct,
+            _ => return Ok(()),
         };
         let p = match value.as_property() {
             Some(PropertyValue::Float(f)) => *f,
@@ -9858,6 +9880,17 @@ impl AggregatorState {
                     else if let Some(i) = prop.as_integer() { values.push(i as f64); }
                 }
             }
+            AggregatorState::ApproxDistinct(hll) => {
+                if let Some(prop) = value.as_property() {
+                    hll.add(prop);
+                }
+            }
+            AggregatorState::ApproxPercentile { digest, .. } => {
+                if let Some(prop) = value.as_property() {
+                    if let Some(f) = prop.as_float() { digest.add(f); }
+                    else if let Some(i) = prop.as_integer() { digest.add(i as f64); }
+                }
+            }
         }
     }
 
@@ -9926,6 +9959,25 @@ impl AggregatorState {
                 values.extend(b)
             }
             // Both sides are built from the same `AggregateFunction`, so a
+            (AggregatorState::ApproxDistinct(a), AggregatorState::ApproxDistinct(b)) => {
+                // Exact: two HyperLogLogs over the same hash merge by taking
+                // the per-register maximum, losing nothing. That property is
+                // the reason the register array is the whole state.
+                a.merge(&b);
+            }
+            (
+                AggregatorState::ApproxPercentile { digest: a, pct },
+                AggregatorState::ApproxPercentile { digest: b, pct: bp },
+            ) => {
+                a.merge(&b);
+                // The percentile argument is set per partial aggregate; taking
+                // the other's when this one is still at its default keeps a
+                // group whose first partial never saw the argument from
+                // silently answering the median.
+                if *pct == 0.5 {
+                    *pct = bp;
+                }
+            }
             // mismatch is a construction bug rather than bad input.
             (a, b) => debug_assert!(false, "cannot merge {a:?} with {b:?}"),
         }
@@ -9948,6 +10000,23 @@ impl AggregatorState {
             }
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
+            AggregatorState::ApproxDistinct(hll) =>
+                Value::Property(PropertyValue::Integer(hll.estimate() as i64)),
+            AggregatorState::ApproxPercentile { digest, pct } => {
+                // `result` takes `&self`, and computing a quantile has to fold
+                // the pending buffer into the centroids. Cloning the digest
+                // keeps that mutation out of a method whose whole contract is
+                // that reading a result does not change it -- a `RefCell` here
+                // would make two reads of one aggregate return different
+                // numbers on a structure that is supposed to be settled.
+                let mut d = digest.clone();
+                match d.quantile(*pct) {
+                    Some(v) => Value::Property(PropertyValue::Float(v)),
+                    // No rows is not a percentile of zero. Zero is a value the
+                    // data might have had.
+                    None => Value::Null,
+                }
+            }
             AggregatorState::Collect(items) => {
                 // A list of scalars stays a `PropertyValue::Array`, exactly as
                 // before, so every existing consumer of that shape is
