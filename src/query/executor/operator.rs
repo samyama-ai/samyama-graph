@@ -19829,6 +19829,17 @@ impl WithBarrierOperator {
                     });
 
                     for (i, agg) in self.aggregates.iter().enumerate() {
+                        // The percentile argument, which this loop did not
+                        // read. `percentileCont(x, 0.9)` inside a WITH
+                        // therefore used the state's initial 0.5 and returned
+                        // the **median**, whatever was asked for -- #871 in
+                        // the one aggregation path that fix did not reach.
+                        // AggregateOperator has four such loops and all four
+                        // call this.
+                        if let Some(p) = &agg.percentile {
+                            states[i]
+                                .set_percentile(&Self::evaluate_expression(p, &record, store)?)?;
+                        }
                         let val = Self::evaluate_expression(&agg.expr, &record, store)?;
                         states[i].update(&val);
                     }
