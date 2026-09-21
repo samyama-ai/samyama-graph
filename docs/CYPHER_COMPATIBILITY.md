@@ -148,7 +148,8 @@ One thing, verified:
 | | `point.distance(a, b)` / `distance(a, b)` | ✅ | Metres for WGS-84, haversine on a sphere (~0.5% off an ellipsoid); Euclidean for cartesian. Mixing the two is an error, not a number |
 | | `point.withinBBox(p, lowerLeft, upperRight)` | ✅ | Closed on the boundary |
 | | `CREATE POINT INDEX` | ❌ | No spatial index. A `point.distance` or `withinBBox` predicate is evaluated per row |
-| **Extensions** | `CREATE VECTOR INDEX` | ✅ | |
+| **Extensions** | `CREATE VECTOR INDEX` | ✅ | Both spellings: Neo4j 5's `FOR (n:L) ON (n.prop)` and the `ON :L(prop)` form every other index DDL here uses. `OPTIONS {dimensions, similarity}`; any other option is an error, not a default |
+| | `SHOW INDEXES` | ✅ | Lists property (`BTREE`) and `VECTOR` indexes. Hierarchy indexes have their own `SHOW HIERARCHY INDEXES` |
 | | `CALL db.index.vector.queryNodes` | ✅ | |
 | | `approx.countDistinct(x)` | ✅ | HyperLogLog, p=14 (16 KB). ~0.81% standard error. Not a bound: the figure describes the spread of estimates, not any one of them. Nulls are not counted, and `1` and `1.0` are one value, so it agrees with `count(DISTINCT x)` |
 | | `approx.percentile(x, q)` | ✅ | t-digest, compression 100. Accurate at the tails by construction and approximate near the median — the opposite of a uniform sample, and the right way round for a p99. `null` for no rows, because zero is a value the data might have had |

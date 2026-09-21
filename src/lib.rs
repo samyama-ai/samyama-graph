@@ -133,6 +133,7 @@ pub mod embed;
 pub mod export;
 pub mod nlq;
 pub mod agent;
+pub mod migrate;
 pub mod snapshot;
 pub mod optimization;
 

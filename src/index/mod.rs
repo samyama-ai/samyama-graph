@@ -8,6 +8,7 @@ pub mod property_index;
 // change is about.
 pub mod sketch;
 pub mod manager;
+pub mod fulltext;
 pub mod hierarchy;
 
 pub use property_index::PropertyIndex;

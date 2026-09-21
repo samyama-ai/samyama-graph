@@ -59,6 +59,7 @@
 //! (`execute_cached`, #1153), which returns the rows and never reaches the
 //! planner at all: 14.8x on that same selective read.
 
+use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator};
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
@@ -1323,6 +1324,27 @@ impl QueryPlanner {
             });
         }
 
+        // Handle CREATE FULLTEXT INDEX (NDS-06)
+        if let Some(clause) = &query.create_fulltext_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(CreateFullTextIndexOperator::new(
+                    clause.index_name.clone(),
+                    clause.label.clone(),
+                    clause.property_keys.clone(),
+                )),
+                output_columns: vec![],
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(clause) = &query.drop_fulltext_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(DropFullTextIndexOperator::new(clause.index_name.clone())),
+                output_columns: vec![],
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
         // Handle CREATE VECTOR INDEX
         if let Some(clause) = &query.create_vector_index_clause {
             return Ok(ExecutionPlan {
@@ -2069,7 +2091,7 @@ impl QueryPlanner {
         // the query is written against, so it goes at the bottom of the pipeline, the
         // same place a leading UNWIND goes.
         if let Some(load) = &query.load_csv_clause {
-            use crate::query::executor::operator::{LoadCsvOperator, SingleRowOperator};
+            use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, LoadCsvOperator, SingleRowOperator};
             let base: OperatorBox = match operator.take() {
                 Some(op) => op,
                 None => Box::new(SingleRowOperator::new()),
@@ -3286,6 +3308,79 @@ impl QueryPlanner {
     }
 
     fn plan_call(&self, call_clause: &CallClause, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        if call_clause.procedure_name == "db.index.fulltext.queryNodes" {
+            // Neo4j's signature: (indexName, queryString) with an optional
+            // options map. The limit is ours -- Neo4j pages with LIMIT on the
+            // outer query, and returning every match by default on a corpus of
+            // any size is the wrong default for a ranked search, so it takes a
+            // third positional argument and defaults to 100.
+            let args = &call_clause.arguments;
+            if args.len() < 2 || args.len() > 3 {
+                return Err(ExecutionError::PlanningError(
+                    "db.index.fulltext.queryNodes takes (indexName, query) or \
+                     (indexName, query, limit)".to_string(),
+                ));
+            }
+            let literal_string = |e: &Expression, what: &str| -> ExecutionResult<String> {
+                match e {
+                    Expression::Literal(PropertyValue::String(s)) => Ok(s.clone()),
+                    _ => Err(ExecutionError::PlanningError(format!(
+                        "db.index.fulltext.queryNodes: {what} must be a string literal"
+                    ))),
+                }
+            };
+            let index_name = literal_string(&args[0], "the index name")?;
+            let query_text = literal_string(&args[1], "the query")?;
+            let limit = match args.get(2) {
+                None => 100,
+                Some(Expression::Literal(PropertyValue::Integer(n))) if *n > 0 => *n as usize,
+                Some(_) => {
+                    return Err(ExecutionError::PlanningError(
+                        "db.index.fulltext.queryNodes: the limit must be a positive integer"
+                            .to_string(),
+                    ))
+                }
+            };
+
+            // Fail at planning time when the index does not exist, rather than
+            // returning no rows at run time. An empty result and a misspelt
+            // index name look identical to a caller, and the second is far
+            // commoner.
+            if store.fulltext.covers(&index_name).is_none() {
+                let known = store.fulltext.names();
+                return Err(ExecutionError::PlanningError(format!(
+                    "no full-text index named '{index_name}'. {}",
+                    if known.is_empty() {
+                        "None has been created; CREATE FULLTEXT INDEX <name> FOR (n:Label) \
+                         ON (n.property) makes one.".to_string()
+                    } else {
+                        format!("Known index names: {}", known.join(", "))
+                    }
+                )));
+            }
+
+            // `YIELD node, score` may rename either. Defaulting both to
+            // their own names means a bare CALL still binds something a
+            // following MATCH can use, which is what NDS-07 composes.
+            let mut node_alias = "node".to_string();
+            let mut score_alias = "score".to_string();
+            for item in &call_clause.yield_items {
+                let bound = item.alias.clone().unwrap_or_else(|| item.name.clone());
+                match item.name.as_str() {
+                    "node" => node_alias = bound,
+                    "score" => score_alias = bound,
+                    other => {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "db.index.fulltext.queryNodes yields `node` and `score`, not `{other}`"
+                        )))
+                    }
+                }
+            }
+            return Ok(Box::new(FullTextSearchOperator::new(
+                index_name, query_text, limit, node_alias, score_alias,
+            )));
+        }
+
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
             // Two spellings of the same call, because the name is Neo4j's (#1041):
             //
@@ -9038,6 +9133,8 @@ mod tests {
             remove_clauses: vec![],
             with_clause: None,
             create_vector_index_clause: None,
+            create_fulltext_index_clause: None,
+            drop_fulltext_index_clause: None,
             create_index_clause: None,
             drop_index_clause: None,
             create_constraint_clause: None,
