@@ -543,6 +543,50 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::create_vector_index_stmt => {
                 parse_create_vector_index_statement(inner, query)?;
             }
+            Rule::create_fulltext_index_stmt => {
+                // `index_name` is required here, unlike the vector form: the
+                // procedure addresses a full-text index *by name*, so an
+                // unnamed one could be created and never queried.
+                let mut name = None;
+                let mut label = None;
+                let mut keys: Vec<String> = Vec::new();
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::index_name => name = Some(part.as_str().to_string()),
+                        Rule::label => label = Some(Label::new(unescape_name(part.as_str()))),
+                        Rule::property_key => keys.push(unescape_name(part.as_str())),
+                        _ => {}
+                    }
+                }
+                let (Some(index_name), Some(label)) = (name, label) else {
+                    return Err(ParseError::SemanticError(
+                        "CREATE FULLTEXT INDEX needs a name and a label: \
+                         CREATE FULLTEXT INDEX <name> FOR (n:Label) ON (n.property)".to_string(),
+                    ));
+                };
+                if keys.is_empty() {
+                    return Err(ParseError::SemanticError(
+                        "CREATE FULLTEXT INDEX names no property".to_string(),
+                    ));
+                }
+                query.create_fulltext_index_clause = Some(CreateFullTextIndexClause {
+                    index_name,
+                    label,
+                    property_keys: keys,
+                });
+            }
+            Rule::drop_fulltext_index_stmt => {
+                let name = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::index_name)
+                    .map(|p| p.as_str().to_string());
+                let Some(index_name) = name else {
+                    return Err(ParseError::SemanticError(
+                        "DROP FULLTEXT INDEX needs a name".to_string(),
+                    ));
+                };
+                query.drop_fulltext_index_clause = Some(DropFullTextIndexClause { index_name });
+            }
             Rule::create_index_stmt => {
                 parse_create_index_statement(inner, query)?;
             }

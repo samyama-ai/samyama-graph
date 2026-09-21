@@ -1,10 +1,10 @@
 {
-  "commit": "a3cfaf7",
+  "commit": "cc5fbcd",
   "dirty": true,
   "host": "vm-1",
   "cpu": "13th Gen Intel(R) Core(TM) i7-13620H",
   "cores": 16,
-  "load_average_1m": "2.36",
+  "load_average_1m": "1.32",
   "reps": 5,
   "corpus": "benchmarks/hier/queries.json",
   "queries": 108,
