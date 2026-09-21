@@ -2,9 +2,9 @@
   "suite": "CH-REGRESS",
   "status": "pass",
   "envelope_status": "partial",
-  "measured_at": "2026-09-17T20:21:25Z",
-  "run_id": "2026-09-17T20:21:25Z-92cf07d",
+  "measured_at": "2026-09-21T14:45:38Z",
+  "run_id": "2026-09-21T14:45:38Z-cd98e10",
   "host": "vultr-voc-m-16c-128gb",
-  "engine_commit": "92cf07d",
+  "engine_commit": "cd98e10",
   "note": "Compares against a stored baseline on the same host; refuses to compare across hosts."
 }
