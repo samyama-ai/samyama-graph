@@ -38,13 +38,6 @@ return_stmt = { return_clause ~ order_by_clause? ~ skip_clause? ~ limit_clause? 
 // the optional constraint name.
 index_name = @{ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
-// CREATE FULLTEXT INDEX (NDS-06). Neo4j's form is `FOR (n:L) ON EACH [n.a, n.b]`;
-// the single-property `ON (n.a)` spelling is accepted too, because that is what
-// every other index DDL here looks like and the difference carries no meaning.
-create_fulltext_index_stmt = { ^"CREATE" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one) }
-fulltext_each = _{ ^"EACH" ~ "[" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ "]" }
-fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
-drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
 create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
@@ -62,6 +55,15 @@ hier_types = { label ~ ("|" ~ ":"? ~ label)* }
 hier_measure = { ^"MEASURE" ~ (label ~ ".")? ~ property_key }
 hier_aggregates = { ^"AGGREGATE" ~ property_key ~ ("," ~ property_key)* }
 drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
+
+// CREATE FULLTEXT INDEX (NDS-06). Neo4j's form is `FOR (n:L) ON EACH [n.a, n.b]`;
+// the single-property `ON (n.a)` spelling is accepted too, because that is what
+// every other index DDL here looks like and the difference carries no meaning.
+create_fulltext_index_stmt = { ^"CREATE" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one) }
+fulltext_each = _{ ^"EACH" ~ "[" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ "]" }
+fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
+drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
+
 show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
 create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
