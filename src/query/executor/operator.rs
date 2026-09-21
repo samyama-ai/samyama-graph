@@ -13440,13 +13440,35 @@ impl ShowIndexesOperator {
 impl PhysicalOperator for ShowIndexesOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
-            let indexes = store.property_index.list_indexes();
+            // Every index a caller can create with DDL, not just the property
+            // ones. A vector index built by `CREATE VECTOR INDEX` was absent
+            // from the one statement that says what exists, so the only way to
+            // find out whether it had been created was to search it and read
+            // an empty result -- which is what a correct index over no matching
+            // data also returns.
+            let mut rows: Vec<(String, String, String)> = store
+                .property_index
+                .list_indexes()
+                .into_iter()
+                .map(|(label, property)| (label.as_str().to_string(), property, "BTREE".to_string()))
+                .collect();
+            rows.extend(
+                store
+                    .vector_index
+                    .list_indices()
+                    .into_iter()
+                    .map(|k| (k.label, k.property_key, "VECTOR".to_string())),
+            );
+            // Both registries are hash maps, so the listing order is otherwise
+            // arbitrary and differs run to run.
+            rows.sort();
+
             let mut records = Vec::new();
-            for (label, property) in indexes {
+            for (label, property, kind) in rows {
                 let mut record = Record::new();
-                record.bind("label".to_string(), Value::Property(PropertyValue::String(label.as_str().to_string())));
+                record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
                 record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
-                record.bind("type".to_string(), Value::Property(PropertyValue::String("BTREE".to_string())));
+                record.bind("type".to_string(), Value::Property(PropertyValue::String(kind)));
                 records.push(record);
             }
             self.results = Some(records.into_iter());
