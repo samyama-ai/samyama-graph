@@ -105,8 +105,16 @@ const PROBES: &[(&str, &str, &str)] = &[
     // NDS-09 — multiple named vectors per node, quantized.
     ("NDS-09", "two named vector properties on one node",
      "CREATE (v:V {title_vec: [1.0, 2.0], body_vec: [3.0, 4.0]}) RETURN v.title_vec AS a, v.body_vec AS b"),
+    // One probe used to carry both of these under the name "declare a vector
+    // dimension in DDL", and the query it ran asked for quantization too. It
+    // failed on the quantization, and the scorecard therefore reported that a
+    // dimension cannot be declared in DDL — which is false, and is the kind of
+    // wrong that sends someone to fix a thing that works. Two capabilities,
+    // two probes.
     ("NDS-09", "declare a vector dimension in DDL",
-     "CREATE VECTOR INDEX tvec FOR (n:V) ON (n.title_vec) OPTIONS {dimensions: 2, quantization: \"fp16\"}"),
+     "CREATE VECTOR INDEX tvec FOR (n:V) ON (n.title_vec) OPTIONS {dimensions: 2}"),
+    ("NDS-09", "declare fp16 quantization in DDL",
+     "CREATE VECTOR INDEX tvecq FOR (n:V) ON (n.title_vec) OPTIONS {dimensions: 2, quantization: \"fp16\"}"),
 
     // NDS-10 — sketches: HLL, t-digest, Bloom.
     ("NDS-10", "count(DISTINCT) — the exact form HLL would approximate",
