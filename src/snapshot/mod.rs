@@ -13,6 +13,8 @@ pub mod verify;
 pub mod publish_gate;
 
 use std::collections::{HashMap, HashSet};
+
+use crate::graph::Label;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use flate2::read::GzDecoder;
@@ -539,20 +541,22 @@ fn import_tenant_inner(
             // Parse as node
             let snap_node: SnapshotNode = serde_json::from_str(&line)?;
 
-            let first_label = snap_node
-                .labels
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "".to_string());
+            // A node with no labels is legal -- Neo4j allows it, `CREATE (n)`
+            // makes one, and `create_node_with_labels` takes an empty
+            // iterator. Defaulting to `""` and creating the node *with* that
+            // label is how a snapshot round trip turned an unlabelled node
+            // into one labelled with the empty string: before the trip
+            // `MATCH (n) WHERE size(labels(n)) = 0` counted it, and after the
+            // trip it did not.
+            let first_label = snap_node.labels.first().cloned();
 
             // --- Entity dedup: check if this node already exists (only if dedup requested) ---
             // Try every label the incoming node carries, for the same reason the index
             // holds every label: a match on any shared label is a match.
-            let snap_labels: Vec<String> = if snap_node.labels.is_empty() {
-                vec![String::new()]
-            } else {
-                snap_node.labels.clone()
-            };
+            // An unlabelled node has no label to match on. The empty string
+            // is not a label it carries, and using it as one would let two
+            // unrelated unlabelled nodes dedup against each other.
+            let snap_labels: Vec<String> = snap_node.labels.clone();
             let mut existing_id: Option<NodeId> = None;
             'dedup: for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
@@ -611,11 +615,10 @@ fn import_tenant_inner(
                     }
                 }
 
-                // Add any new labels
-                if let Some(node) = store.get_node_mut(eid) {
-                    for label in &snap_node.labels {
-                        node.add_label(label.as_str());
-                    }
+                // Same reason as above: through the store, so `label_index`
+                // learns about a label a deduped node did not already carry.
+                for label in &snap_node.labels {
+                    let _ = store.add_label_to_node("default", eid, Label::new(label.as_str()));
                 }
 
                 // Track labels
@@ -628,23 +631,30 @@ fn import_tenant_inner(
             // --- Create new node ---
             if use_stubs {
                 // v2: use lightweight stubs + column properties
-                let new_id = store.create_node_stub(first_label.as_str());
+                // Every label at once, through the store, because
+                // `Node::add_label` writes to the struct and not to
+                // `label_index`. Adding the second and later labels that way
+                // left them on the node and invisible to `MATCH (n:Label)`:
+                // after a round trip a `:Person:Employee` node was findable
+                // by exactly one of its labels, and **which one was
+                // arbitrary** -- the snapshot's label order comes from a
+                // HashSet. `create_node_with_labels` indexes all of them.
+                let new_id = store.create_node_with_labels(
+                    snap_node.labels.iter().map(|l| Label::new(l.as_str())),
+                );
                 created_nodes.push(new_id);
-                // Add remaining labels
                 if let Some(node) = store.get_node_mut(new_id) {
-                    for label in snap_node.labels.iter().skip(1) {
-                        node.add_label(label.as_str());
-                    }
-                    // Restore the timestamps the snapshot carries (#1124). Zero
-                    // means the snapshot predates the fields, and writing it back
-                    // would stamp every node of an old file with a false creation
-                    // time, so the node keeps whatever it has in that case.
-                    if snap_node.created_at != 0 {
-                        node.created_at = snap_node.created_at;
-                    }
-                    if snap_node.updated_at != 0 {
-                        node.updated_at = snap_node.updated_at;
-                    }
+                    // Restore the timestamps the snapshot carries (#1124).
+                    //
+                    // Zero means the snapshot predates the fields. `create_node_stub`
+                    // left the node at zero too, so "keep whatever it has" was the
+                    // same thing as "zero"; `create_node_with_labels` stamps `now`,
+                    // so the node has to be zeroed explicitly or an old file's nodes
+                    // come back claiming to have been created at import time.
+                    // `a_snapshot_without_the_fields_still_imports` caught exactly
+                    // that.
+                    node.created_at = snap_node.created_at;
+                    node.updated_at = snap_node.updated_at;
                 }
                 // Every property reaches the ColumnStore, whatever its type.
                 //
@@ -695,12 +705,11 @@ fn import_tenant_inner(
                 id_remap.insert(snap_node.id, new_id);
             } else {
                 // v1: use full create_node with HashMap properties
-                let new_id = store.create_node(first_label.as_str());
+                let new_id = store.create_node_with_labels(
+                    snap_node.labels.iter().map(|l| Label::new(l.as_str())),
+                );
                 created_nodes.push(new_id);
                 if let Some(node) = store.get_node_mut(new_id) {
-                    for label in snap_node.labels.iter().skip(1) {
-                        node.add_label(label.as_str());
-                    }
                     for (key, json_val) in &snap_node.props {
                         node.set_property(key.clone(), json_to_property(json_val));
                     }
