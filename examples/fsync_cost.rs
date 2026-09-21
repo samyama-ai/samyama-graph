@@ -29,6 +29,21 @@
 //! — gives the cost of both barriers together. Both numbers are worth having,
 //! and reporting the smaller one alone would understate what durability costs.
 //!
+//! # `--from-env` is one arm, and a caller comparing two of them must interleave
+//!
+//! The in-process comparison alternates its arms deliberately: a background
+//! process arriving halfway through then lands on both, not on one. `--from-env`
+//! cannot do that — the whole point is that RocksDB's mode is fixed at open —
+//! so each invocation measures one arm, and **two invocations run back to back
+//! put every between-process change entirely into the ratio**. A caller wanting
+//! both barriers must run the two modes alternately, several times, and look at
+//! the spread of the per-pair ratios rather than at one pair.
+//!
+//! The output carries `samples` for exactly that reason. It used to print only
+//! the median; a median with no spread beside it is a bare ratio, and the one
+//! this mode produces is noisier than it looks — five rounds on an idle host
+//! spanned 342k–457k writes/s, 1.34x, in a single process.
+//!
 //! It is **not** a claim about surviving a power cut. `sync_data` returns when
 //! the kernel says the device has the bytes; whether the device lied is a
 //! property of the device. REL-04's kill-point testing covers process death,
@@ -56,13 +71,31 @@ fn main() {
     // with RocksDB in whatever mode the environment set. Running this mode twice,
     // once per process, is the only way to see both barriers.
     if args.iter().any(|a| a == "--from-env") {
-        let rates: Vec<f64> = (0..ROUNDS).map(|_| one_run_env()).collect();
+        let rounds = args
+            .iter()
+            .position(|a| a == "--rounds")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(ROUNDS)
+            .max(1);
+        let rates: Vec<f64> = (0..rounds).map(|_| one_run_env()).collect();
         let mut v = rates.clone();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // The samples, not only their median. This mode used to print the
+        // median alone, and a caller dividing one process's median by
+        // another's got a ratio with no spread attached -- which is the bare
+        // ratio the conformance harness exists to refuse. Two runs of that
+        // ratio on the same quiet host, hours apart, read 420x and 219x while
+        // every other arm of the same suite reproduced to within 2%. Nothing
+        // in the output could show that, because the five rounds behind each
+        // median were thrown away.
         println!(
-            "{{\"fsync\": {}, \"writes_per_second\": {:.1}}}",
+            "{{\"fsync\": {}, \"writes_per_second\": {:.1}, \"rounds\": {}, \"batch\": {}, \"samples\": {:?}}}",
             samyama::persistence::storage::fsync_enabled(),
-            v[v.len() / 2]
+            v[v.len() / 2],
+            rounds,
+            BATCH,
+            rates
         );
         return;
     }
