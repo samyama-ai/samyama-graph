@@ -122,6 +122,10 @@ pub mod protocol;
 pub mod persistence;
 pub mod raft;
 pub mod compat;
+// Not beside `snapshot`: samyama-graph#1392 adds `pub mod migrate;` at that
+// anchor, and two insertions at one line conflict for no reason either change
+// is about.
+pub mod provenance;
 pub mod rdf;
 pub mod sparql;
 pub mod vector;
@@ -133,7 +137,6 @@ pub mod embed;
 pub mod export;
 pub mod nlq;
 pub mod agent;
-pub mod provenance;
 pub mod snapshot;
 pub mod optimization;
 
