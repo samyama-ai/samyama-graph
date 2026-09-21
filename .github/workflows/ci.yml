@@ -391,3 +391,76 @@ jobs:
             tests/test_mcp_generators.py \
             tests/test_mcp_escape.py \
             tests/test_mcp_server.py
+
+  # HW-07 and KG-11 ask that a `.sgsnap` written on one tier loads on another
+  # with the same results. Nothing had ever checked it, because checking it
+  # needs two machines — and this workflow has had two all along, x86-64 and
+  # aarch64, which never exchanged a file.
+  #
+  # Both directions, because portability is not symmetric by assumption: a
+  # writer that emits native-endian bytes and a reader that assumes its own
+  # would agree with itself and fail the other way round.
+  #
+  # The comparison is a fingerprint of the graph *a query sees* — counts, the
+  # label and edge-type census, and an order-independent digest over each
+  # node's and edge's properties — not the file's bytes, which may legitimately
+  # differ between two exports of one graph.
+  snapshot-portability:
+    name: snapshot written on ${{ matrix.writer }}
+    needs: test
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - writer: ubuntu-latest
+            reader: ubuntu-24.04-arm
+          - writer: ubuntu-24.04-arm
+            reader: ubuntu-latest
+    runs-on: ${{ matrix.writer }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+      - name: Write the snapshot
+        run: |
+          set -euo pipefail
+          cargo run --release --example snapshot_portability -- \
+            --write snap.sgsnap --json wrote.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sgsnap-from-${{ matrix.writer }}
+          path: |
+            snap.sgsnap
+            wrote.json
+          retention-days: 1
+
+  snapshot-portability-read:
+    name: read on ${{ matrix.reader }}
+    needs: snapshot-portability
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - writer: ubuntu-latest
+            reader: ubuntu-24.04-arm
+          - writer: ubuntu-24.04-arm
+            reader: ubuntu-latest
+    runs-on: ${{ matrix.reader }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+      - uses: actions/download-artifact@v4
+        with:
+          name: sgsnap-from-${{ matrix.writer }}
+      - name: Load it and compare what a query sees
+        run: |
+          set -euo pipefail
+          cargo run --release --example snapshot_portability -- \
+            --verify snap.sgsnap --against wrote.json
