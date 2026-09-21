@@ -77,6 +77,7 @@ pub mod validate;
 pub mod executor;
 pub mod csv_source;
 pub mod span;
+pub mod metrics;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -250,12 +251,29 @@ impl QueryEngine {
     /// log that says "a query took 4.2 s" tells an operator that something is
     /// wrong and nothing about what; the text is the only part they can act on
     /// without us (REL-10).
-    fn log_if_slow(&self, query_str: &str, elapsed: std::time::Duration, rows: usize) {
-        if self.slow_query_ms == 0 {
-            return;
-        }
+    /// Record one executed query: the metric always, the log if it was slow.
+    ///
+    /// Both from one place, because a metric and a log that count different
+    /// things are two numbers an operator trusts neither of. `slow` here is
+    /// whatever `SLOW_QUERY_MS` decided, so tuning that threshold moves the
+    /// log and the dashboard together.
+    fn log_if_slow(
+        &self,
+        query_str: &str,
+        elapsed: std::time::Duration,
+        rows: usize,
+        succeeded: bool,
+    ) {
         let ms = elapsed.as_millis() as u64;
-        if ms < self.slow_query_ms {
+        let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
+
+        // Unconditional, and before the early return below. The latency of
+        // every query was already measured and thrown away unless it crossed
+        // the threshold, so `/metrics` could say how large the graph was and
+        // not whether anything had got slower (REL-10).
+        crate::query::metrics::record_query(elapsed, slow, !succeeded);
+
+        if !slow {
             return;
         }
         // Truncated: a generated query can be megabytes, and a log line that
@@ -395,6 +413,7 @@ impl QueryEngine {
             query_str,
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+            outcome.is_ok(),
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
@@ -552,6 +571,7 @@ impl QueryEngine {
             query_str,
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+            outcome.is_ok(),
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 

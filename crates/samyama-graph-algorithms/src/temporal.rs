@@ -236,6 +236,48 @@ impl ArrivalTimes {
             .filter(|(i, a)| a.is_some() && !sources.contains(i))
             .count()
     }
+
+    /// The walk that produced the earliest arrival at `node`.
+    ///
+    /// This is the *why* behind a reachability answer: not a walk that happens
+    /// to exist, but the one the traversal actually took to get there first.
+    /// `parent_edge` has recorded it all along and only
+    /// [`temporal_shortest_path`] read it, so three of the four primitives
+    /// could say when a fault arrived and not how (ALGO-15).
+    ///
+    /// `None` when the node was never reached. A source returns a one-node
+    /// path with no edges, which is the honest answer to "how did the fault
+    /// get to its own origin".
+    pub fn path_to(
+        &self,
+        view: &GraphView,
+        times: &TemporalEdges,
+        node: usize,
+    ) -> Option<TemporalPath> {
+        let arrival = (*self.arrival.get(node)?)?;
+        let mut nodes = vec![node];
+        let mut edge_times = Vec::new();
+        let mut cur = node;
+        // Bounded by the node count: a time-respecting walk cannot revisit a
+        // node, because arrival times never decrease and the relaxation is
+        // strict. The bound is here anyway — a corrupt `parent_edge` should
+        // produce a wrong answer, not a hang.
+        for _ in 0..view.node_count {
+            let Some((prev, slot)) = self.parent_edge[cur] else {
+                break;
+            };
+            edge_times.push(times.at(slot));
+            nodes.push(prev);
+            cur = prev;
+        }
+        nodes.reverse();
+        edge_times.reverse();
+        Some(TemporalPath {
+            nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
+            edge_times,
+            arrival,
+        })
+    }
 }
 
 /// The earliest time each node is reachable from `sources`, starting no
@@ -306,19 +348,39 @@ pub fn earliest_arrival(
     })
 }
 
-/// Which nodes a source can reach in time, and when (ALGO-15).
+/// One node a fault reaches, when it gets there, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reached {
+    /// The node reached.
+    pub node: NodeId,
+    /// The earliest time it can be reached.
+    pub arrival: i64,
+    /// The walk that got there that early — the *why* behind the row.
+    ///
+    /// Not optional: every node in this list was reached, so every one has a
+    /// walk. A `None` here would be a bug rather than a state.
+    pub path: TemporalPath,
+}
+
+/// Which nodes a source can reach in time, when, and by what walk (ALGO-15).
 ///
-/// Returns `(node_id, arrival)` pairs in increasing arrival order, excluding
-/// the sources. Sorted because the order *is* the answer: it is the sequence a
-/// fault would propagate in.
+/// Returns rows in increasing arrival order, excluding the sources. Sorted
+/// because the order *is* the answer: it is the sequence a fault would
+/// propagate in.
+///
+/// The walk is carried because "service X broke at 12:04" is an observation
+/// and "it broke at 12:04 because A reached B reached X" is a finding. ALGO-15
+/// asks for the second, and this returned the first until the path came with
+/// it — the reconstruction was already there in `parent_edge`, read only by
+/// `temporal_shortest_path`.
 pub fn temporal_reachability(
     view: &GraphView,
     times: &TemporalEdges,
     sources: &[usize],
     start: i64,
-) -> Result<Vec<(NodeId, i64)>, TemporalError> {
+) -> Result<Vec<Reached>, TemporalError> {
     let arrivals = earliest_arrival(view, times, sources, start)?;
-    let mut out: Vec<(NodeId, i64)> = arrivals
+    let mut out: Vec<Reached> = arrivals
         .arrival
         .iter()
         .enumerate()
@@ -326,13 +388,19 @@ pub fn temporal_reachability(
             if sources.contains(&i) {
                 return None;
             }
-            a.map(|t| (view.index_to_node[i], t))
+            let arrival = (*a)?;
+            let path = arrivals.path_to(view, times, i)?;
+            Some(Reached {
+                node: view.index_to_node[i],
+                arrival,
+                path,
+            })
         })
         .collect();
     // By time, then by node id, so two runs over the same data agree. An
     // unstable order here would surface as a flapping test and, worse, as a
     // different "first affected service" on each run.
-    out.sort_by_key(|&(id, t)| (t, id));
+    out.sort_by_key(|r| (r.arrival, r.node));
     Ok(out)
 }
 
@@ -365,35 +433,10 @@ pub fn temporal_shortest_path(
         return Err(TemporalError::NoSuchNode(target));
     }
     let a = earliest_arrival(view, times, &[source], start)?;
-    let Some(arrival) = a.arrival[target] else {
-        return Ok(None);
-    };
-    if target == source {
-        return Ok(Some(TemporalPath {
-            nodes: vec![view.index_to_node[source]],
-            edge_times: Vec::new(),
-            arrival,
-        }));
-    }
-
-    let mut nodes = vec![target];
-    let mut edge_times = Vec::new();
-    let mut cur = target;
-    while let Some((prev, slot)) = a.parent_edge[cur] {
-        edge_times.push(times.at(slot));
-        nodes.push(prev);
-        cur = prev;
-        if cur == source {
-            break;
-        }
-    }
-    nodes.reverse();
-    edge_times.reverse();
-    Ok(Some(TemporalPath {
-        nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
-        edge_times,
-        arrival,
-    }))
+    // One reconstruction, shared with the reachability primitives. Two copies
+    // of this loop would be two chances for the path and the arrival time to
+    // disagree about the same walk.
+    Ok(a.path_to(view, times, target))
 }
 
 /// What a fault at `source` reaches, ranked by how soon (ALGO-15).
@@ -407,7 +450,7 @@ pub fn propagation_ranking(
     times: &TemporalEdges,
     sources: &[usize],
     start: i64,
-) -> Result<Vec<(NodeId, i64)>, TemporalError> {
+) -> Result<Vec<Reached>, TemporalError> {
     temporal_reachability(view, times, sources, start)
 }
 
@@ -422,6 +465,17 @@ pub struct Explanation {
     /// fired long before the first symptom explains less well than one that
     /// fired just before it.
     pub latest_onset: i64,
+    /// The walk to the symptom whose constraint set `latest_onset`.
+    ///
+    /// A candidate may explain five symptoms by five different walks, and a
+    /// row can show one. It shows the **binding** one: the symptom that forced
+    /// the onset earliest is the reason the fit is no tighter than it is, so
+    /// it is the walk an operator should look at first. Showing an arbitrary
+    /// one would make the path and the onset describe different journeys
+    /// (ALGO-15).
+    ///
+    /// `None` only if reconstruction failed, which would be a bug.
+    pub supporting_path: Option<TemporalPath>,
 }
 
 /// Rank candidate causes for a set of observed symptoms (ALGO-15).
@@ -458,9 +512,15 @@ pub fn symptom_explanation(
     // max-heap and the guard is `t <= current`.
     let mut explained: Vec<usize> = vec![0; n];
     let mut onset: Vec<i64> = vec![i64::MAX; n];
+    let mut binding: Vec<Option<TemporalPath>> = vec![None; n];
 
     for &(sym, seen_at) in symptoms {
         let mut latest: Vec<Option<i64>> = vec![None; n];
+        // `next_hop[v]` = the edge out of `v` this walk would take toward the
+        // symptom, and the node it lands on. The forward mirror of
+        // `parent_edge`: this search runs backwards, so the pointer has to as
+        // well, and reconstruction reads it in the direction a fault travels.
+        let mut next_hop: Vec<Option<(usize, usize)>> = vec![None; n];
         let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
         latest[sym] = Some(seen_at);
         heap.push((seen_at, sym));
@@ -489,6 +549,7 @@ pub fn symptom_explanation(
                     }
                     if latest[u].is_none_or(|l| t > l) {
                         latest[u] = Some(t);
+                        next_hop[u] = Some((v, slot));
                         heap.push((t, u));
                     }
                 }
@@ -504,7 +565,10 @@ pub fn symptom_explanation(
                 // The binding constraint across symptoms: a cause must have
                 // started early enough for *every* symptom it explains, so the
                 // tightest (smallest) latest-departure wins.
-                onset[i] = onset[i].min(*t);
+                if *t < onset[i] {
+                    onset[i] = *t;
+                    binding[i] = walk_forward(view, times, &next_hop, i, *t);
+                }
             }
         }
     }
@@ -515,6 +579,7 @@ pub fn symptom_explanation(
             node: view.index_to_node[i],
             symptoms_explained: explained[i],
             latest_onset: onset[i],
+            supporting_path: binding[i].clone(),
         })
         .collect();
     // Most symptoms first; then the tightest fit; then node id, so the order
@@ -528,6 +593,44 @@ pub fn symptom_explanation(
     Ok(out)
 }
 
+/// Follow `next_hop` from `from` to the symptom it leads to.
+///
+/// The backward search records where each node would go *next*; this reads
+/// that in the direction the fault would actually travel, so the path a reader
+/// sees runs cause-first like every other path here.
+fn walk_forward(
+    view: &GraphView,
+    times: &TemporalEdges,
+    next_hop: &[Option<(usize, usize)>],
+    from: usize,
+    departure: i64,
+) -> Option<TemporalPath> {
+    let mut nodes = vec![from];
+    let mut edge_times = Vec::new();
+    let mut cur = from;
+    // Bounded by the node count for the same reason as `path_to`: a
+    // time-respecting walk cannot revisit a node, and a corrupt pointer should
+    // give a wrong answer rather than a hang.
+    for _ in 0..view.node_count {
+        let Some((next, slot)) = next_hop[cur] else {
+            break;
+        };
+        edge_times.push(times.at(slot));
+        nodes.push(next);
+        cur = next;
+    }
+    if nodes.len() < 2 {
+        // A candidate with no hop to the symptom did not explain it.
+        return None;
+    }
+    let arrival = *edge_times.last().unwrap_or(&departure);
+    Some(TemporalPath {
+        nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
+        edge_times,
+        arrival,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +640,106 @@ mod tests {
     /// `(from, to, time)` and inserted in that order, so the times array is
     /// built the same way the view is and the alignment is real rather than
     /// assumed.
+    /// Every path a reachability answer carries must explain its own row.
+    ///
+    /// Three properties, and the third is the one that catches a walk
+    /// belonging to a different journey: the times must never decrease (that
+    /// is what time-respecting means), the walk must end at the node the row
+    /// is about, and its **last edge time must equal the arrival the row
+    /// reports**. A path that merely exists is not evidence.
+    #[test]
+    fn every_reachability_path_explains_its_own_row() {
+        // Two routes to 3, arriving at different times, so "which walk" has a
+        // checkable answer rather than a single possibility.
+        let (v, t) = view(
+            5,
+            &[(0, 1, 10), (0, 2, 20), (1, 3, 30), (2, 3, 40), (3, 4, 5)],
+        );
+        let reached = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        assert!(!reached.is_empty());
+        for r in &reached {
+            assert!(
+                r.path.edge_times.windows(2).all(|w| w[0] <= w[1]),
+                "a walk whose times go backwards is not time-respecting: {r:?}"
+            );
+            assert_eq!(
+                r.path.nodes.first().copied(),
+                Some(v.index_to_node[0]),
+                "the walk must start at the source: {r:?}"
+            );
+            assert_eq!(
+                r.path.nodes.last().copied(),
+                Some(r.node),
+                "the walk must end at the node it is about: {r:?}"
+            );
+            assert_eq!(
+                r.path.edge_times.last().copied(),
+                Some(r.arrival),
+                "the last edge is what set the arrival; a different value means \
+                 the path and the time describe different journeys: {r:?}"
+            );
+        }
+        // And specifically: 3 is reached at 30 by 0 -> 1 -> 3, not by the
+        // route through 2 that arrives at 40.
+        let to_three = reached
+            .iter()
+            .find(|r| r.node == v.index_to_node[3])
+            .expect("3 is reachable");
+        assert_eq!(to_three.arrival, 30);
+        assert_eq!(
+            to_three.path.nodes,
+            vec![v.index_to_node[0], v.index_to_node[1], v.index_to_node[3]]
+        );
+    }
+
+    #[test]
+    fn a_symptoms_supporting_walk_reaches_it_by_its_observed_time() {
+        let (v, t) = view(4, &[(0, 1, 10), (1, 2, 30), (0, 3, 50)]);
+        let ranked = symptom_explanation(&v, &t, &[(2, 35)]).unwrap();
+        assert!(!ranked.is_empty());
+        for e in &ranked {
+            let path = e
+                .supporting_path
+                .as_ref()
+                .unwrap_or_else(|| panic!("an explanation with no walk: {e:?}"));
+            assert_eq!(
+                path.nodes.first().copied(),
+                Some(e.node),
+                "the walk must start at the candidate cause: {e:?}"
+            );
+            assert_eq!(
+                path.nodes.last().copied(),
+                Some(v.index_to_node[2]),
+                "the walk must end at the symptom: {e:?}"
+            );
+            assert!(
+                path.edge_times.windows(2).all(|w| w[0] <= w[1]),
+                "not time-respecting: {e:?}"
+            );
+            assert!(
+                path.edge_times.last().is_none_or(|&last| last <= 35),
+                "a walk arriving after the symptom was seen explains nothing: {e:?}"
+            );
+        }
+    }
+
+    /// `temporal_reachability` as the `(node, arrival)` pairs these tests were
+    /// written against, dropping the path. The path has its own tests below;
+    /// rewriting thirty assertions to carry one would have hidden what each
+    /// was checking.
+    fn reach(
+        v: &GraphView,
+        t: &TemporalEdges,
+        sources: &[usize],
+        start: i64,
+    ) -> Vec<(NodeId, i64)> {
+        temporal_reachability(v, t, sources, start)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.node, r.arrival))
+            .collect()
+    }
+
     fn view(n: usize, edges: &[(usize, usize, i64)]) -> (GraphView, TemporalEdges) {
         let mut out: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n];
         let mut inc: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -578,7 +781,7 @@ mod tests {
         // is the whole difference between these algorithms and a BFS, so it
         // is the first thing asserted.
         let (v, t) = view(3, &[(0, 1, 10), (1, 2, 5)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 10)], "c must not be reachable: {r:?}");
     }
 
@@ -586,7 +789,7 @@ mod tests {
     fn the_same_edges_in_a_workable_order_do_reach() {
         // The control for the test above: identical topology, times swapped.
         let (v, t) = view(3, &[(0, 1, 5), (1, 2, 10)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 5), (2, 10)]);
     }
 
@@ -597,7 +800,7 @@ mod tests {
         // every simultaneous hop, which is the common case in a trace.
         let (v, t) = view(3, &[(0, 1, 7), (1, 2, 7)]);
         assert_eq!(
-            temporal_reachability(&v, &t, &[0], 7).unwrap(),
+            reach(&v, &t, &[0], 7),
             vec![(1, 7), (2, 7)]
         );
     }
@@ -605,9 +808,9 @@ mod tests {
     #[test]
     fn a_start_time_after_the_edge_blocks_it() {
         let (v, t) = view(2, &[(0, 1, 5)]);
-        assert!(temporal_reachability(&v, &t, &[0], 6).unwrap().is_empty());
+        assert!(reach(&v, &t, &[0], 6).is_empty());
         assert_eq!(
-            temporal_reachability(&v, &t, &[0], 5).unwrap(),
+            reach(&v, &t, &[0], 5),
             vec![(1, 5)]
         );
     }
@@ -643,7 +846,7 @@ mod tests {
         // assertion that matters is that a repeated source does not double up
         // or corrupt the arrival.
         let (v, t) = view(3, &[(0, 1, 1), (1, 2, 4)]);
-        let r = temporal_reachability(&v, &t, &[0, 1, 0], 0).unwrap();
+        let r = reach(&v, &t, &[0, 1, 0], 0);
         assert_eq!(r, vec![(2, 4)]);
     }
 
@@ -651,7 +854,7 @@ mod tests {
     fn propagation_is_ranked_by_when_not_by_distance() {
         // 3 is two hops away but arrives before 1's other neighbour.
         let (v, t) = view(4, &[(0, 1, 1), (1, 3, 2), (0, 2, 9)]);
-        let r = propagation_ranking(&v, &t, &[0], 0).unwrap();
+        let r = propagation_ranking(&v, &t, &[0], 0).unwrap().into_iter().map(|r| (r.node, r.arrival)).collect::<Vec<_>>();
         assert_eq!(r, vec![(1, 1), (3, 2), (2, 9)]);
     }
 
@@ -724,7 +927,7 @@ mod tests {
         // Time makes cycles finite: once you leave a node at its earliest
         // arrival, coming back later can never improve it.
         let (v, t) = view(3, &[(0, 1, 1), (1, 2, 2), (2, 0, 3), (0, 1, 4)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 1), (2, 2)]);
     }
 
@@ -734,11 +937,11 @@ mod tests {
         // available, so the arrival is 8 rather than unreachable.
         let (v, t) = view(2, &[(0, 1, 2), (0, 1, 8)]);
         assert_eq!(
-            temporal_reachability(&v, &t, &[0], 5).unwrap(),
+            reach(&v, &t, &[0], 5),
             vec![(1, 8)]
         );
         assert_eq!(
-            temporal_reachability(&v, &t, &[0], 0).unwrap(),
+            reach(&v, &t, &[0], 0),
             vec![(1, 2)]
         );
     }

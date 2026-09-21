@@ -214,7 +214,7 @@ shortest_path_call = { (^"allShortestPaths" | ^"shortestPath") ~ "(" ~ path ~ ")
 // Node pattern: (n:Person {name: "Alice"})
 node = { "(" ~ variable? ~ labels? ~ properties? ~ ")" }
 labels = { (":" ~ label)+ }
-label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+label = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Edge pattern: -[:KNOWS]-> or <-[:KNOWS]- or -[:KNOWS]-
 //
@@ -239,7 +239,7 @@ edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ 
 // spelling openCypher's own scenarios use. Only `:A|B` and `:A:B` parsed, so
 // the query failed outright rather than matching either type (#909).
 edge_types = { ":" ~ edge_type ~ (("|" ~ ":"? | ":") ~ edge_type)* }
-edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+edge_type = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Variable length: *1..5 or * or *3..
 length_pattern = { "*" ~ (range_pattern | integer)? }
@@ -424,9 +424,16 @@ function_call = { function_name ~ "(" ~ distinct? ~ (expression ~ ("," ~ express
 // after the name, so `n.name` fails the rule and the PEG backtracks to
 // `property_access` as before -- and `function_call` is already tried first in
 // `primary`, so the ordering does not change either (#769).
+// One segment was `?`, so `apoc.text.join(...)` -- two segments, and the
+// commonest shape in a Neo4j corpus -- was a **parse error** whose message
+// read "expected EOI, union_clause, order_by_clause, ...". A migrating user
+// learned nothing from that; with `*` it reaches the evaluator and comes back
+// as "Unknown function 'apoc.text.join'", which names the thing they have to
+// replace. Accepting a name is not implementing it, and the refusal is the
+// point: it is a better refusal.
 function_name = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    ~ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*)?
+    ~ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*)*
 }
 
 // Operators
