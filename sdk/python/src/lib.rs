@@ -420,13 +420,19 @@ impl SamyamaClient {
         let rt = get_runtime();
         let result = rt.block_on(client.dijkstra(source, target, label, edge_type, weight_property));
         match result {
-            Some(path) => {
+            Ok(Some(path)) => {
                 let dict = PyDict::new_bound(py);
                 dict.set_item("path", path.path.to_object(py))?;
                 dict.set_item("cost", path.cost)?;
                 Ok(dict.to_object(py))
             }
-            None => Ok(py.None()),
+            Ok(None) => Ok(py.None()),
+            // A refusal is not "no path". #1303 was exactly this conflation on
+            // the Rust side: a graph holding a cheap negative-weight route was
+            // reported as having no route at all, and the caller could not
+            // tell. Mapping Err to None here would reintroduce that bug for
+            // every Python caller, and silently.
+            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
         }
     }
 
