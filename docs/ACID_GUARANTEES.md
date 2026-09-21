@@ -95,18 +95,30 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     RocksDB is opened with `WriteOptions::set_sync(true)`. Both halves move
     together: an fsynced WAL entry describing a write still sitting in the
     store's page cache is not more durable than neither.
-  - **What it costs, measured** (`cargo run --release --example fsync_cost`,
-    vm-1, medians of 5 alternated rounds):
+  - **What it costs, measured** (`cargo run --release --example fsync_cost`;
+    medians of 5 runs per configuration, on two hosts):
 
-    | | writes/s | |
-    |---|---:|---|
-    | default, nothing synced | 455,086 | |
-    | `SAMYAMA_FSYNC=1`, both barriers | 987 | **461× slower** |
-    | WAL barrier alone, store unsynced | 1,993 | 217× slower |
+    | host | unsynced | both barriers | WAL only |
+    |---|---:|---:|---:|
+    | vm-1 (i7-13620H, local NVMe) | 419,199 /s | **420×** | 208× |
+    | Vultr `voc-c-8c` (8 dedicated vCPU, virtio disk) | 174,757 /s | **120×** | 66× |
 
-    Those are the numbers, not an argument about them. A two-order-of-magnitude
-    cost is why the default does not move, and an operator who needs the
-    guarantee now has it available rather than described.
+    **The ratio is a property of the device as much as the engine**, and a
+    3.5× spread between two ordinary hosts is the evidence. Quote it with its
+    host or it is a number about a disk. The synced arm is the stable half —
+    1,410–1,465 writes/s across five runs on the Vultr box, ±2% — and almost
+    all of the spread in the ratio comes from how fast the *unsynced* path is,
+    which is what a faster disk buys.
+
+    What does not move: the cost is two orders of magnitude on both. That is
+    why the default does not change, and an operator who needs the guarantee
+    now has it available rather than described.
+
+    Both figures are ingested by `CH-RECOVER`, which refuses to give the local
+    run a verdict when the host's load average is above 2.0 — vm-1 is shared,
+    and three runs there under load gave 210×, 171× and 276× for one arm. The
+    quiet-host reference is committed at
+    `benchmarks/durability/fsync-quiet-host.json` in the benchmarks repo.
   - It is a request, not a proof: `sync_data` returns when the kernel says the
     device has the bytes, and whether the device lied is a property of the
     device.
