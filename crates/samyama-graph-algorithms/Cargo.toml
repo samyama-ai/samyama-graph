@@ -17,7 +17,7 @@ ndarray = "0.15"
 rand = "0.8"
 rayon = "1.10"
 # GPU backend (optional; enabled via this crate's `gpu` feature)
-samyama-gpu = { path = "../samyama-gpu", version = "1.8.0", optional = true }
+samyama-gpu = { path = "../samyama-gpu", version = "1.9.0", optional = true }
 # Fallback logging for the GPU dispatch gates (gpu-gated, so default builds stay dep-free)
 tracing = { version = "0.1", optional = true }
 

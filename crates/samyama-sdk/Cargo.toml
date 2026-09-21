@@ -26,13 +26,13 @@ thiserror = "1.0"
 
 # Core graph database (for EmbeddedClient)
 # No default features: a library must not bring the server's allocator (ADR-038).
-samyama = { path = "../..", version = "1.8.0", default-features = false }
+samyama = { path = "../..", version = "1.9.0", default-features = false }
 
 # Graph algorithms (for AlgorithmClient)
-samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "1.8.0" }
+samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "1.9.0" }
 
 # Optimization engine (re-exported for examples)
-samyama-optimization = { path = "../samyama-optimization", version = "1.8.0" }
+samyama-optimization = { path = "../samyama-optimization", version = "1.9.0" }
 
 # Numeric arrays (re-exported for optimization problems)
 ndarray = "0.15"
