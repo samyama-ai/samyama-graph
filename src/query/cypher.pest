@@ -519,4 +519,9 @@ map_projection_all = { "." ~ "*" }
 map_projection_property = { "." ~ property_key }
 
 // Variable names
-variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// `escaped_name` first: a backtick cannot begin an undelimited name, so the
+// ordered choice is unambiguous. Atomic, like `label` and `property_key`, so
+// `as_str()` returns the delimiters too and every read site must strip them
+// with `unescape_name` -- a site that forgets binds the variable under a name
+// carrying backticks and every later reference silently misses it (#1373).
+variable = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
