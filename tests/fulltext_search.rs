@@ -264,6 +264,39 @@ fn a_deleted_node_stops_matching() {
 }
 
 #[test]
+fn the_index_backfills_from_a_snapshot_imported_graph() {
+    // The documented migration path: nothing is persisted, so the DDL is
+    // re-run after loading a snapshot. A snapshot import writes properties to
+    // the columnar side and `node.properties` does not see them (#554), so a
+    // backfill reading the row map would index a Cypher-built graph and find
+    // nothing in an imported one -- which is the graph anyone actually has.
+    let mut src = GraphStore::new();
+    write(
+        &mut src,
+        "CREATE (:Doc {body: 'graph databases store relationships'})",
+    );
+    let mut buf: Vec<u8> = Vec::new();
+    samyama::snapshot::export_tenant(&src, &mut buf).expect("export");
+
+    let mut dst = GraphStore::new();
+    samyama::snapshot::import_tenant(&mut dst, &buf[..]).expect("import");
+    assert_eq!(dst.node_count(), 1, "the snapshot round trip itself failed");
+
+    write(
+        &mut dst,
+        "CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)",
+    );
+    assert_eq!(
+        count(
+            &dst,
+            "CALL db.index.fulltext.queryNodes('docs', 'graph') YIELD node RETURN count(node)"
+        ),
+        1,
+        "the backfill read the row map instead of the merged view"
+    );
+}
+
+#[test]
 fn a_phrase_query_requires_adjacency() {
     let mut g = GraphStore::new();
     write(
