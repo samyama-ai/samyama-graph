@@ -11982,10 +11982,38 @@ pub struct IndexScanOperator {
     value: PropertyValue,
     node_ids: Vec<NodeId>,
     current: usize,
+    /// The predicate this scan has already answered, when it has answered one
+    /// exactly (#1380).
+    ///
+    /// `MATCH (p:Person) WHERE p.age = 30` planned `Filter(p.age = 30)` over
+    /// `IndexScan(Person.age = 30)`: the index emits only rows where the
+    /// predicate holds, and every one of them then paid a property read and a
+    /// comparison that could not change the outcome. The inline spelling
+    /// `(p:Person {age: 30})` did not, because that path removes the conjunct
+    /// it consumes -- so the two spellings of one question planned
+    /// differently, which is how this was found.
+    ///
+    /// **Only `=`.** A range scan (`>`, `<=`) narrows the rows but does not
+    /// decide them for every comparison the planner might have folded in, and
+    /// dropping a filter the scan has not fully answered turns a cost into a
+    /// wrong answer.
+    satisfied: Option<Expression>,
 }
 
 impl IndexScanOperator {
     pub fn new(variable: String, label: Label, property: String, op: BinaryOp, value: PropertyValue) -> Self {
+        // Built to match what the parser produces for `var.prop = literal`, so
+        // the planner's structural comparison against the WHERE conjunct finds
+        // it. The reversed spelling `30 = p.age` does not match and simply
+        // keeps its filter, which costs a comparison and is never wrong.
+        let satisfied = (op == BinaryOp::Eq).then(|| Expression::Binary {
+            left: Box::new(Expression::Property {
+                variable: variable.clone(),
+                property: property.clone(),
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expression::Literal(value.clone())),
+        });
         Self {
             variable,
             label,
@@ -11994,6 +12022,7 @@ impl IndexScanOperator {
             value,
             node_ids: Vec::new(),
             current: 0,
+            satisfied,
         }
     }
 
@@ -12033,6 +12062,12 @@ impl IndexScanOperator {
 }
 
 impl PhysicalOperator for IndexScanOperator {
+    /// What this scan has already decided, so the planner does not add a
+    /// Filter that re-checks it (#1380). `None` for anything but `=`.
+    fn filter_predicate(&self) -> Option<&Expression> {
+        self.satisfied.as_ref()
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.initialize(store);
 
