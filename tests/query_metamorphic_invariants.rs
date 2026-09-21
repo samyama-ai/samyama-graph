@@ -232,11 +232,12 @@ fn a_pattern_property_equals_the_same_predicate_in_where() {
 }
 
 #[test]
-fn the_two_spellings_really_do_plan_differently() {
+fn the_relation_compares_two_plans_and_not_one() {
     // The guard that keeps the relation above from being a check that cannot
-    // fail, and it has already done its job once: on a store with no index the
-    // two spellings plan **identically**, so the first version of this relation
-    // compared a plan with itself.
+    // fail, and it has done its job twice now.
+    //
+    // First: on a store with no index the two spellings plan **identically**,
+    // so the original version of the relation compared a plan with itself.
     let bare = build(FIXTURE);
     assert_eq!(
         plan_of("MATCH (p:Person {age: 30}) RETURN p.name AS a", &bare),
@@ -245,24 +246,54 @@ fn the_two_spellings_really_do_plan_differently() {
          has changed, this relation is stronger than its comment claims"
     );
 
+    // Second: samyama-graph#1380 made the *indexed* simple-equality pair
+    // converge too. The `WHERE` form used to keep a `Filter` re-checking the
+    // predicate its `IndexScan` had already answered; now the conjunct the
+    // index consumed is dropped, and the two spellings plan alike. That is
+    // the fix working -- and it removes the divergence this guard relied on,
+    // so the guard moves to a pair that still diverges rather than being
+    // deleted.
     let store = indexed_store();
     let inline = plan_of("MATCH (p:Person {age: 30}) RETURN p.name AS a", &store);
     let predicate = plan_of("MATCH (p:Person) WHERE p.age = 30 RETURN p.name AS a", &store);
-    assert_ne!(
+    assert_eq!(
         inline, predicate,
-        "with an index the two spellings must reach the answer by different plans, or \
-         this relation compares a plan with itself"
+        "#1380 made these converge; if they have diverged again the redundant \
+         Filter is back:\n  inline: {inline}\n  where:  {predicate}"
     );
     assert!(
         inline.contains("IndexScan") && !inline.contains("Filter"),
-        "the inline form should be a bare index lookup: {inline}"
+        "both forms should be a bare index lookup: {inline}"
     );
-    // The `WHERE` form keeps a Filter the IndexScan has already satisfied. That
-    // is redundant work rather than a wrong answer (samyama-graph#1380), and it
-    // is exactly why the two plans are worth comparing at all.
+
+    // The pair that keeps the relation honest: a predicate the index answers
+    // only in part. The scan narrows on `age` and the `city` conjunct still
+    // has to be evaluated, so the two spellings reach the answer differently
+    // and comparing their answers is comparing two things.
+    let partial_inline = plan_of(
+        "MATCH (p:Person {age: 30, city: 'Springfield'}) RETURN p.name AS a",
+        &store,
+    );
+    let partial_where = plan_of(
+        "MATCH (p:Person) WHERE p.age = 30 AND p.city = 'Springfield' RETURN p.name AS a",
+        &store,
+    );
     assert!(
-        predicate.contains("IndexScan"),
-        "the WHERE form should still reach the index: {predicate}"
+        partial_where.contains("IndexScan") && partial_where.contains("Filter"),
+        "a conjunct the index cannot answer must survive as a Filter: {partial_where}"
+    );
+    assert!(
+        !partial_where.contains("p.age ="),
+        "the conjunct the IndexScan answered is still being re-checked: {partial_where}"
+    );
+    let _ = partial_inline;
+
+    // And a range, which #1380 deliberately does not touch: a scan that
+    // narrows is not a scan that decides.
+    let ranged = plan_of("MATCH (p:Person) WHERE p.age > 20 RETURN p.name AS a", &store);
+    assert!(
+        ranged.contains("IndexScan") && ranged.contains("Filter"),
+        "a range scan must keep its filter: {ranged}"
     );
 }
 
