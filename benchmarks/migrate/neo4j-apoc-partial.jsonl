@@ -1,0 +1,4 @@
+{"type":"node","id":"10","labels":["Person"],"properties":{"name":"Carol","nickname":null}}
+{"type":"relationship","id":"5","label":"KNOWS","start":{"id":"10","labels":["Person"]},"end":{"id":"99","labels":["Person"]},"properties":{}}
+{"type":"relationship","id":"6","label":"KNOWS","start":{"id":"98","labels":["Person"]},"end":{"id":"10","labels":["Person"]},"properties":{}}
+{"type":"schema","id":"0","properties":{"indexes":["Person.name"]}}
