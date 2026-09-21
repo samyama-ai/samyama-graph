@@ -100,8 +100,18 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 
     | host | unsynced | both barriers | WAL only |
     |---|---:|---:|---:|
-    | vm-1 (i7-13620H, local NVMe) | 419,199 /s | **420×** | 208× |
+    | vm-1 (i7-13620H, local NVMe) | 419,199 /s | **420×** (404–450) | 208× |
     | Vultr `voc-c-8c` (8 dedicated vCPU, virtio disk) | 174,757 /s | **120×** | 66× |
+
+    The vm-1 both-barriers figure is the median of **five alternated pairs**,
+    and the range beside it is what those five spanned. Alternation is not a
+    refinement: RocksDB's `WriteOptions` are fixed when the database is opened,
+    so the two configurations have to be two processes, and running one after
+    the other puts every change between them into the ratio. Measured that way
+    on 2026-09-21, two runs hours apart on the same idle host read **420.8×
+    and 219.3×** — while every arm measured *inside* a single process
+    reproduced to within 2% across the same two runs. Interleaved, the five
+    pairs span 1.09×.
 
     **The ratio is a property of the device as much as the engine**, and a
     3.5× spread between two ordinary hosts is the evidence. Quote it with its
@@ -114,9 +124,14 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     why the default does not change, and an operator who needs the guarantee
     now has it available rather than described.
 
-    Both figures are ingested by `CH-RECOVER`, which refuses to give the local
-    run a verdict when the host's load average is above 2.0 — vm-1 is shared,
-    and three runs there under load gave 210×, 171× and 276× for one arm. The
+    Both figures are ingested by `CH-RECOVER`, which gives the local run a
+    verdict only when its own five ratios agree to within 1.25× *and* the
+    host's load average is below 2.0. The spread is the binding half: the load
+    average is a one-minute decayed mean sampled before the run and cannot see
+    a disturbance during it, and both of the runs that disagreed by 1.9× passed
+    it, at 1.29 and 1.89. It stays as context. Under real load — vm-1 is
+    shared — three runs gave 210×, 171× and 276× for one arm, which the load
+    average did catch. The
     quiet-host reference is committed at
     `benchmarks/durability/fsync-quiet-host.json` in the benchmarks repo.
   - It is a request, not a proof: `sync_data` returns when the kernel says the
