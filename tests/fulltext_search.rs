@@ -285,6 +285,30 @@ fn a_phrase_query_requires_adjacency() {
 }
 
 #[test]
+fn show_indexes_lists_the_fulltext_index_by_name() {
+    // Otherwise the only way to learn an index exists is to search it and
+    // read the error naming the ones that do. The name matters more here than
+    // for the other kinds: `db.index.fulltext.queryNodes` addresses an index
+    // by name, and nothing else exposes it.
+    let mut g = corpus();
+    write(&mut g, "CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)");
+
+    let listed = rows(&g, "SHOW INDEXES");
+    let text = format!("{listed:?}");
+    assert!(
+        text.contains("FULLTEXT") && text.contains("docs") && text.contains("body"),
+        "SHOW INDEXES must name the index, its label and its property: {text}"
+    );
+
+    write(&mut g, "DROP FULLTEXT INDEX docs");
+    let after = format!("{:?}", rows(&g, "SHOW INDEXES"));
+    assert!(
+        !after.contains("FULLTEXT"),
+        "a dropped index must stop being listed: {after}"
+    );
+}
+
+#[test]
 fn a_misspelt_index_name_is_an_error_not_an_empty_result() {
     // An empty result and a typo look identical to a caller, and the typo is
     // far commoner. Failing at planning time says which it was.

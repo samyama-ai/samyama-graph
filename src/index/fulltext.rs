@@ -399,6 +399,20 @@ impl FullTextIndexes {
         v
     }
 
+    /// Every index as `(name, label, property)`, sorted by name.
+    ///
+    /// Sorted because `SHOW INDEXES` sorts its rows and a hash map would make
+    /// two runs of one query disagree about the order.
+    pub fn listing(&self) -> Vec<(String, String, String)> {
+        let g = self.by_name.read().unwrap();
+        let mut v: Vec<(String, String, String)> = g
+            .iter()
+            .map(|(n, i)| (n.clone(), i.label.clone(), i.property.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_name.read().unwrap().is_empty()
     }

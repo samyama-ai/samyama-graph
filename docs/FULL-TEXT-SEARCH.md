@@ -82,6 +82,16 @@ words it was added to match, and reports nothing while doing it.
 appears everywhere a weight of zero, and removing such words outright would
 break every phrase containing one — `"shortest path to the node"` has two.
 
+## Finding out what exists
+
+```cypher
+SHOW INDEXES;
+```
+
+lists full-text indexes as `FULLTEXT[<name>]` beside the `BTREE` and `VECTOR`
+ones. The name is in the row because `db.index.fulltext.queryNodes` addresses
+an index by name and nothing else exposes it.
+
 ## Maintenance
 
 The index is maintained on the same choke point as the property and vector
@@ -114,6 +124,3 @@ indexes (`GraphStore::apply_property_set`), so:
 - **No language configuration.** The tokeniser splits on non-alphanumerics and
   the stemmer is English. CJK text tokenises into one term per run of
   characters, which is not useful.
-- **`SHOW INDEXES` does not list full-text indexes yet.** Until it does, the
-  error from searching a name that does not exist lists the names that do,
-  which is the only discovery path.

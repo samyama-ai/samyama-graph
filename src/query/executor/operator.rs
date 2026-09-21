@@ -13459,6 +13459,19 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .into_iter()
                     .map(|k| (k.label, k.property_key, "VECTOR".to_string())),
             );
+            // Full-text indexes too, or the only way to learn that one exists
+            // is to search it and read the error naming the ones that do. The
+            // name is included because `db.index.fulltext.queryNodes`
+            // addresses an index by name and nothing else exposes it.
+            rows.extend(
+                store
+                    .fulltext
+                    .listing()
+                    .into_iter()
+                    .map(|(name, label, property)| {
+                        (label, property, format!("FULLTEXT[{name}]"))
+                    }),
+            );
             // Both registries are hash maps, so the listing order is otherwise
             // arbitrary and differs run to run.
             rows.sort();
