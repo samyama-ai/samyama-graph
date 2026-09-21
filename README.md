@@ -465,6 +465,39 @@ one; the geometric mean of the per-query ratios is 88×. Both are recomputed fro
 committed per-query timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no
 longer exists.
 
+**The index does not pay for itself over the whole corpus, and the headline
+cannot see that.** 94× and 88× are computed over the 58 queries *expressible on
+both engines* — classes H1, H2, H3, H5 and H10. The three classes where the
+index is a net cost are not expressible on Neo4j and so are absent from that
+comparison by construction: H7 lowest common ancestor, H4 cross-hierarchy
+conjunction, H6 anti-subsumption. That is what "expressible on both" means, and
+a reader is still entitled to know that the excluded classes are the losing
+ones.
+
+Over the full 108-query corpus on current code and documented hardware, three
+statistics disagree and all three are true:
+
+| Statistic | Index on vs off |
+|---|---:|
+| ratio of medians (what is published above) | 2.56× faster |
+| per-query geometric mean | 1.88× faster |
+| **total time** | **0.45× — the corpus takes 2.2× longer** |
+
+34 of the 108 queries are slower with the index than without it, and three
+classes are slower by close to an order of magnitude (H7 0.09×, H4 0.21×,
+H6 0.49×). A ratio of medians is blind to a tail by construction, which is why
+the number that gets quoted is the one that looks best.
+
+Both figures are now measured by `CH-BENCH-HIER` rather than stated here, and
+the whole-corpus one is reported every run.
+
+One more caveat on the 94× itself: it predates
+[#1343](https://github.com/samyama-ai/samyama-graph/issues/1343), which found
+the index answering a roll-up with a subsumption result — set-shaped where the
+pattern is defined over paths — and narrowed where the rewrite applies. A
+speedup measured before a correctness fix in the same code path is partly a
+speedup over the wrong answer. Re-measuring needs both engines on one host.
+
 ### Scale: 74M Nodes, 1 Billion Edges
 
 | KG | Source | Nodes | Edges |
