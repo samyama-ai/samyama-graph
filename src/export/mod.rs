@@ -290,6 +290,13 @@ pub fn resolve_nodes(batch: &mut RecordBatch, store: &crate::graph::GraphStore) 
 }
 
 /// JSON for the fallback column, and for entities inside a list.
+/// A `Value` as JSON, for the exports that need one field of text where the
+/// result holds a structure. Shared so CSV and Arrow do not disagree about
+/// what a node looks like in a string column.
+pub(crate) fn value_as_json(v: &Value) -> serde_json::Value {
+    json_of(v)
+}
+
 fn json_of(v: &Value) -> serde_json::Value {
     use serde_json::json;
     match v {
@@ -527,6 +534,7 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// the file cannot make — and guessing it here would produce an importer whose
 /// meaning depends on which exporter wrote the file. `LOAD PARQUET` (#1098) is
 /// where that belongs, with the mapping written in the query.
+pub mod csv;
 pub mod graphml;
 
 pub mod import {
