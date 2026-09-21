@@ -85,10 +85,31 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 
 ### 4. Durability — "committed data survives"
 
-- **Nothing is fsynced.** A write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache. `WalWriter::sync_mode` defaults to false (`src/persistence/wal.rs:187`) and its setter has no callers anywhere in the repository, so it is false for the life of the process; even when true the call is `file.flush()` (`wal.rs:232`), which is not a durability barrier. `sync_all`/`sync_data` appear in `src/` only in the snapshot writer. RocksDB is opened without `WriteOptions::set_sync`, so its writes are unsynced too.
+- **Nothing is fsynced by default.** A write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache. `WalWriter::sync_mode` defaults to false (`src/persistence/wal.rs:187`) and its setter has no callers anywhere in the repository, so it is false for the life of the process; even when true the call is `file.flush()` (`wal.rs:232`), which is not a durability barrier. `sync_all`/`sync_data` appear in `src/` only in the snapshot writer. RocksDB is opened without `WriteOptions::set_sync`, so its writes are unsynced too.
   - **What survives:** the Samyama process being killed. The data is in the page cache and the kernel writes it out.
   - **What may not:** power loss, a kernel panic, a hard host reset, or a container host failure. A write acknowledged seconds earlier can be gone.
-  - Choosing a durability level is #1309.
+  - **`SAMYAMA_FSYNC=1` turns it on**, and it is off by default — that is
+    unchanged, and this is a change to what an operator can *choose* rather
+    than to what they get without asking. With it set, the WAL calls
+    `sync_data()` (not `flush()`, which only reaches the page cache) and
+    RocksDB is opened with `WriteOptions::set_sync(true)`. Both halves move
+    together: an fsynced WAL entry describing a write still sitting in the
+    store's page cache is not more durable than neither.
+  - **What it costs, measured** (`cargo run --release --example fsync_cost`,
+    vm-1, medians of 5 alternated rounds):
+
+    | | writes/s | |
+    |---|---:|---|
+    | default, nothing synced | 455,086 | |
+    | `SAMYAMA_FSYNC=1`, both barriers | 987 | **461× slower** |
+    | WAL barrier alone, store unsynced | 1,993 | 217× slower |
+
+    Those are the numbers, not an argument about them. A two-order-of-magnitude
+    cost is why the default does not move, and an operator who needs the
+    guarantee now has it available rather than described.
+  - It is a request, not a proof: `sync_data` returns when the kernel says the
+    device has the bytes, and whether the device lied is a property of the
+    device.
 - **Write order**: the log is appended after the memory mutation, not before (§1).
 - **A write that does not reach disk is now reported as a failure**, and the
   process stops accepting writes (#1274). It used to be a `warn!` line and a

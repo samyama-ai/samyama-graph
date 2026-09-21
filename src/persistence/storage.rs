@@ -35,7 +35,7 @@
 //! shared pointers in C++.
 
 use crate::graph::{Edge, EdgeId, Node, NodeId, PropertyMap};
-use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use rocksdb::{ColumnFamilyDescriptor, Options, WriteOptions, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -93,6 +93,26 @@ pub struct PersistentStorage {
     /// Storage path (retained for debugging and future path-based operations)
     #[allow(dead_code)]
     path: String,
+    /// Write options, carrying whether each write is synced to the platter.
+    ///
+    /// RocksDB was opened with no `WriteOptions` at all, so every write used
+    /// the default — unsynced. With the WAL also unsynced that made the whole
+    /// write path unsynced, which is what `docs/ACID_GUARANTEES.md` §4 had to
+    /// say and what #1309 is about. `SAMYAMA_FSYNC=1` turns both on together;
+    /// turning on one and not the other would be a durability level nobody
+    /// asked for.
+    write_opts: WriteOptions,
+}
+
+/// Is an acknowledged write forced to the platter?
+///
+/// Off by default, which is what the engine has always done. This is a change
+/// of what a user can *choose*, not of what they get without asking.
+pub fn fsync_enabled() -> bool {
+    matches!(
+        std::env::var("SAMYAMA_FSYNC").unwrap_or_default().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl PersistentStorage {
@@ -131,9 +151,12 @@ impl PersistentStorage {
 
         info!("Persistent storage opened successfully");
 
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(fsync_enabled());
         Ok(Self {
             db: Arc::new(db),
             path: path_str,
+            write_opts,
         })
     }
 
@@ -189,7 +212,7 @@ impl PersistentStorage {
         let key = Self::node_key(tenant, node.id.as_u64());
 
         // Write to RocksDB
-        self.db.put_cf(&cf, key, value)?;
+        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
 
         debug!("Stored node {} for tenant {}", node.id, tenant);
 
@@ -250,7 +273,7 @@ impl PersistentStorage {
         let key = Self::edge_key(tenant, edge.id.as_u64());
 
         // Write to RocksDB
-        self.db.put_cf(&cf, key, value)?;
+        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
 
         debug!("Stored edge {} for tenant {}", edge.id, tenant);
 
@@ -291,7 +314,7 @@ impl PersistentStorage {
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
         let key = Self::node_key(tenant, node_id);
-        self.db.delete_cf(&cf, key)?;
+        self.db.delete_cf_opt(&cf, key, &self.write_opts)?;
 
         debug!("Deleted node {} for tenant {}", node_id, tenant);
 
@@ -304,7 +327,7 @@ impl PersistentStorage {
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 
         let key = Self::edge_key(tenant, edge_id);
-        self.db.delete_cf(&cf, key)?;
+        self.db.delete_cf_opt(&cf, key, &self.write_opts)?;
 
         debug!("Deleted edge {} for tenant {}", edge_id, tenant);
 
