@@ -113,6 +113,8 @@ pub struct Query {
     pub with_clause: Option<WithClause>,
     /// CREATE VECTOR INDEX clause (optional)
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
+    pub create_fulltext_index_clause: Option<CreateFullTextIndexClause>,
+    pub drop_fulltext_index_clause: Option<DropFullTextIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
     /// DROP INDEX clause (optional)
@@ -215,6 +217,22 @@ pub struct Query {
     /// which is which. The predicate stays in the group's WHERE as well, so a
     /// reader that does not consult this sees the query as before.
     pub optional_where: Vec<(Pattern, Expression)>,
+}
+
+/// CREATE VECTOR INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFullTextIndexClause {
+    pub index_name: String,
+    pub label: Label,
+    /// One or more properties. Neo4j's `ON EACH [n.a, n.b]` indexes several,
+    /// and the single-property form is the same thing with one entry.
+    pub property_keys: Vec<String>,
+}
+
+/// DROP FULLTEXT INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropFullTextIndexClause {
+    pub index_name: String,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -1149,6 +1167,8 @@ impl Query {
         if self.create_index_clause.is_some()
             || self.drop_index_clause.is_some()
             || self.create_vector_index_clause.is_some()
+            || self.create_fulltext_index_clause.is_some()
+            || self.drop_fulltext_index_clause.is_some()
             || self.create_constraint_clause.is_some()
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
@@ -1181,6 +1201,8 @@ impl Query {
             remove_clauses: Vec::new(),
             with_clause: None,
             create_vector_index_clause: None,
+            create_fulltext_index_clause: None,
+            drop_fulltext_index_clause: None,
             create_index_clause: None,
             drop_index_clause: None,
             create_constraint_clause: None,
