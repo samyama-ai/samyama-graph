@@ -1,0 +1,7 @@
+{"type":"relationship","id":"0","label":"KNOWS","start":{"id":"0","labels":["Person"]},"end":{"id":"1","labels":["Person","Employee"]},"properties":{"since":2019,"weight":0.75}}
+{"type":"node","id":"0","labels":["Person"],"properties":{"name":"Alice","age":34,"active":true,"score":91.5,"tags":["a","b"],"joined":"2019-06-01T12:00:00Z","home":{"crs":"wgs-84","latitude":12.9,"longitude":77.6},"version":"1.8.0"}}
+{"type":"node","id":"1","labels":["Person","Employee"],"properties":{"name":"Bob","age":41,"shift":"09:00:00"}}
+{"type":"node","id":"2","labels":[],"properties":{"note":"a node with no labels, which Neo4j allows"}}
+{"type":"node","id":"3","labels":["Company"],"properties":{"name":"Acme","founded":1998,"sizes":[1,2,3]}}
+{"type":"relationship","id":"1","label":"WORKS_AT","start":{"id":"1","labels":["Person"]},"end":{"id":"3","labels":["Company"]},"properties":{"role":"engineer"}}
+{"type":"relationship","id":"2","label":"MENTIONS","start":{"id":"2","labels":[]},"end":{"id":"0","labels":["Person"]},"properties":{}}

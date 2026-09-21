@@ -3598,6 +3598,7 @@ dependencies = [
  "percent-encoding",
  "pest",
  "pest_derive",
+ "quick-xml 0.37.5",
  "rand 0.8.8",
  "rayon",
  "regex",

@@ -1,16 +1,16 @@
 //! HTTP handlers for the Visualizer API
 
-use axum::http::StatusCode;
-use axum::{
-    extract::{Query, State, Json, Multipart},
-    response::IntoResponse,
-};
-use crate::query::Value;
 use crate::graph::PropertyValue;
 use crate::http::server::AppState;
+use crate::query::Value;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Json, Multipart, Query, State},
+    response::IntoResponse,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Request for executing a Cypher query
 #[derive(Deserialize)]
@@ -38,7 +38,9 @@ pub struct QueryRequest {
 /// the engine, not the cache -- the failure mode is silent and would be
 /// reported as a speedup.
 fn result_cache_default() -> bool {
-    std::env::var("SAMYAMA_RESULT_CACHE").map(|v| v == "1" || v == "true").unwrap_or(false)
+    std::env::var("SAMYAMA_RESULT_CACHE")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
 }
 
 fn default_graph() -> String {
@@ -90,11 +92,13 @@ pub async fn export_handler(
     }
 
     let format = payload.format.to_lowercase();
-    if format != "arrow" && format != "parquet" {
+    if format != "arrow" && format != "parquet" && format != "csv" {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": format!("unknown format '{}'; use 'arrow' or 'parquet'", payload.format),
+                "error": format!(
+                    "unknown format '{}'; use 'arrow', 'parquet' or 'csv'", payload.format
+                ),
             })),
         )
             .into_response();
@@ -105,10 +109,13 @@ pub async fn export_handler(
     // Parquet encoding (#545).
     let batch = {
         let store_guard = state.store.read().await;
-        state.engine.execute(&payload.query, &*store_guard).map(|mut b| {
-            crate::export::resolve_nodes(&mut b, &*store_guard);
-            b
-        })
+        state
+            .engine
+            .execute(&payload.query, &*store_guard)
+            .map(|mut b| {
+                crate::export::resolve_nodes(&mut b, &*store_guard);
+                b
+            })
     };
     let batch = match batch {
         Ok(b) => b,
@@ -121,7 +128,17 @@ pub async fn export_handler(
         }
     };
 
-    let (bytes, content_type, filename) = if format == "parquet" {
+    // CSV carries a loss report, which the other two do not need: Parquet and
+    // Arrow have a null and a list type, and CSV has neither. The counts go in
+    // headers rather than the body because the body is the file the caller
+    // asked for -- a report mixed into it would corrupt the data it describes.
+    let mut csv_report: Option<crate::export::csv::CsvReport> = None;
+
+    let (bytes, content_type, filename) = if format == "csv" {
+        let (text, report) = crate::export::csv::to_csv(&batch);
+        csv_report = Some(report);
+        (text.into_bytes(), "text/csv; charset=utf-8", "result.csv")
+    } else if format == "parquet" {
         match crate::export::to_parquet(&batch) {
             Ok(b) => (b, "application/vnd.apache.parquet", "result.parquet"),
             Err(e) => {
@@ -147,13 +164,28 @@ pub async fn export_handler(
 
     (
         StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{filename}\""),
-            ),
-        ],
+        {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                content_type.parse().expect("a static content type parses"),
+            );
+            if let Ok(v) = format!("attachment; filename=\"{filename}\"").parse() {
+                headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            if let Some(r) = &csv_report {
+                // Header values are ASCII-only; the report is counts and field
+                // names from our own struct, so this parses, and a failure
+                // drops the header rather than the file the caller asked for.
+                if let Ok(v) = serde_json::to_string(r).unwrap_or_default().parse() {
+                    headers.insert(
+                        axum::http::HeaderName::from_static("x-samyama-export-report"),
+                        v,
+                    );
+                }
+            }
+            headers
+        },
         bytes,
     )
         .into_response()
@@ -232,7 +264,10 @@ pub async fn import_parquet_handler(
         })
         .await;
     match outcome {
-        Ok(stats) => (StatusCode::OK, Json(json!({ "status": "ok", "stats": stats })))
+        Ok(stats) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "stats": stats })),
+        )
             .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -339,7 +374,10 @@ pub async fn query_handler(
     // `UNWIND [1] AS x CREATE (:X)` was sent to the read-only executor and came
     // back 400 (#1111). A statement that does not parse is treated as a read and
     // fails with its parse error a beat later, which is where it failed before.
-    let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
+    let is_write = state
+        .engine
+        .statement_is_write(&payload.query)
+        .unwrap_or(false);
 
     // Writes are never served from the result cache -- `execute_mut` has no
     // cached form, so this is structural rather than a rule to remember.
@@ -365,7 +403,9 @@ pub async fn query_handler(
         // memory only, and returned 200 all the same (#1094).
         let (result, version, props) = state
             .mutate(&payload.graph, |store| {
-                let result = state.engine.execute_mut(&payload.query, store, &payload.graph);
+                let result = state
+                    .engine
+                    .execute_mut(&payload.query, store, &payload.graph);
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(b, store))
@@ -421,9 +461,14 @@ async fn query_in_transaction(
         return crate::http::transactions::not_open(tx);
     }
     let store: &mut crate::graph::GraphStore = &mut txn.guard;
-    let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
+    let is_write = state
+        .engine
+        .statement_is_write(&payload.query)
+        .unwrap_or(false);
     let result = if is_write {
-        state.engine.execute_mut(&payload.query, store, &payload.graph)
+        state
+            .engine
+            .execute_mut(&payload.query, store, &payload.graph)
     } else {
         state.engine.execute(&payload.query, store)
     };
@@ -458,7 +503,7 @@ fn render_query_result(
                 let mut row = Vec::new();
                 for col in &batch.columns {
                     let val = record.get(col).unwrap_or(&Value::Null);
-                    
+
                     // Extract graph elements for visualization
                     match val {
                         Value::Map(entries) => {
@@ -540,7 +585,10 @@ fn render_query_result(
                         Value::Property(p) => {
                             row.push(p.to_json());
                         }
-                        Value::Path { nodes: path_nodes, edges: path_edges } => {
+                        Value::Path {
+                            nodes: path_nodes,
+                            edges: path_edges,
+                        } => {
                             let path_json = json!({
                                 "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
                                 "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
@@ -576,18 +624,19 @@ fn render_query_result(
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
                 plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
-            }).into_response()
+            })
+            .into_response()
         }
-        Err(e) => {
-            (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response()
-        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// Handler for system status
-pub async fn status_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let stats = state.engine.cache_stats();
     Json(json!({
@@ -617,9 +666,7 @@ pub async fn status_handler(
 /// monotonic request count today, and a "counter" that resets whenever it is
 /// asked is worse than an absent one -- Prometheus reads a reset as a restart
 /// and produces a spike.
-pub async fn metrics_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
     let stats = state.engine.cache_stats();
@@ -627,10 +674,20 @@ pub async fn metrics_handler(
 
     let mut out = String::new();
     let mut gauge = |name: &str, help: &str, value: String| {
-        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"));
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
     };
-    gauge("samyama_nodes", "Nodes in the graph.", store_guard.node_count().to_string());
-    gauge("samyama_edges", "Edges in the graph.", store_guard.edge_count().to_string());
+    gauge(
+        "samyama_nodes",
+        "Nodes in the graph.",
+        store_guard.node_count().to_string(),
+    );
+    gauge(
+        "samyama_edges",
+        "Edges in the graph.",
+        store_guard.edge_count().to_string(),
+    );
     gauge(
         "samyama_memory_attributed_bytes",
         "Resident bytes attributed to the graph. An estimate from a walk of the          structures, and a floor: allocator slack and the Arc-held indexes are not          counted.",
@@ -641,10 +698,21 @@ pub async fn metrics_handler(
         "Resident bytes held by property indexes and unique constraints.",
         indexes.iter().map(|i| i.bytes).sum::<usize>().to_string(),
     );
-    gauge("samyama_query_cache_entries", "Parsed statements held in the AST cache.",
-          state.engine.cache_len().to_string());
-    gauge("samyama_query_cache_hits", "AST cache hits since start.", stats.hits().to_string());
-    gauge("samyama_query_cache_misses", "AST cache misses since start.", stats.misses().to_string());
+    gauge(
+        "samyama_query_cache_entries",
+        "Parsed statements held in the AST cache.",
+        state.engine.cache_len().to_string(),
+    );
+    gauge(
+        "samyama_query_cache_hits",
+        "AST cache hits since start.",
+        stats.hits().to_string(),
+    );
+    gauge(
+        "samyama_query_cache_misses",
+        "AST cache misses since start.",
+        stats.misses().to_string(),
+    );
 
     // Per-index, because "indexes cost 4 GB" and "this one index costs 4 GB"
     // lead to different actions.
@@ -653,7 +721,10 @@ pub async fn metrics_handler(
     for i in &indexes {
         out.push_str(&format!(
             "samyama_index_bytes{{label=\"{}\",property=\"{}\",kind=\"{}\"}} {}\n",
-            i.label.replace('"', ""), i.property.replace('"', ""), i.kind, i.bytes
+            i.label.replace('"', ""),
+            i.property.replace('"', ""),
+            i.kind,
+            i.bytes
         ));
     }
 
@@ -663,7 +734,10 @@ pub async fn metrics_handler(
     out.push_str(&crate::query::metrics::render());
 
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         out,
     )
 }
@@ -683,9 +757,7 @@ pub async fn metrics_handler(
 /// `attributed_bytes` is a floor on the graph's footprint, not the process's
 /// RSS, and calling it `total` would invite exactly the comparison it cannot
 /// survive.
-pub async fn memory_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
     let indexes = store_guard.property_index.index_memory();
@@ -751,9 +823,7 @@ pub fn sorted_label_strs(labels: &std::collections::HashSet<crate::graph::Label>
 
 const SCHEMA_PROPERTY_SAMPLE: usize = 1000;
 
-pub async fn schema_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn schema_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
 
     let total_nodes = store_guard.node_count();
@@ -844,14 +914,16 @@ pub async fn schema_handler(
     }
 
     let index_list = store_guard.property_index.list_indexes();
-    let indexes: Vec<_> = index_list.iter().map(|(l, p)| {
-        json!({ "label": l.as_str(), "property": p, "type": "BTREE" })
-    }).collect();
+    let indexes: Vec<_> = index_list
+        .iter()
+        .map(|(l, p)| json!({ "label": l.as_str(), "property": p, "type": "BTREE" }))
+        .collect();
 
     let constraint_list = store_guard.property_index.list_constraints();
-    let constraints: Vec<_> = constraint_list.iter().map(|(l, p)| {
-        json!({ "label": l.as_str(), "property": p, "type": "UNIQUE" })
-    }).collect();
+    let constraints: Vec<_> = constraint_list
+        .iter()
+        .map(|(l, p)| json!({ "label": l.as_str(), "property": p, "type": "UNIQUE" }))
+        .collect();
 
     let avg_out_degree = if total_nodes > 0 {
         total_edges as f64 / total_nodes as f64
@@ -886,7 +958,9 @@ pub struct SampleRequest {
     pub graph: String,
 }
 
-fn default_max_nodes() -> usize { 200 }
+fn default_max_nodes() -> usize {
+    200
+}
 
 /// Handler for subgraph sampling — returns a representative subset for visualization
 pub async fn sample_handler(
@@ -901,30 +975,46 @@ pub async fn sample_handler(
     let target_labels: Vec<&crate::graph::Label> = if payload.labels.is_empty() {
         all_labels
     } else {
-        let label_set: std::collections::HashSet<&str> = payload.labels.iter().map(|s| s.as_str()).collect();
-        all_labels.into_iter().filter(|l| label_set.contains(l.as_str())).collect()
+        let label_set: std::collections::HashSet<&str> =
+            payload.labels.iter().map(|s| s.as_str()).collect();
+        all_labels
+            .into_iter()
+            .filter(|l| label_set.contains(l.as_str()))
+            .collect()
     };
 
     // Calculate total nodes across target labels
-    let total: usize = target_labels.iter().map(|l| store_guard.label_node_count(l)).sum();
+    let total: usize = target_labels
+        .iter()
+        .map(|l| store_guard.label_node_count(l))
+        .sum();
     if total == 0 {
         return Json(json!({ "nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0 }));
     }
 
     // Proportionally sample nodes per label
-    let mut sampled_ids: std::collections::HashSet<crate::graph::NodeId> = std::collections::HashSet::new();
+    let mut sampled_ids: std::collections::HashSet<crate::graph::NodeId> =
+        std::collections::HashSet::new();
     let mut node_list = Vec::new();
 
     for label in &target_labels {
         let count = store_guard.label_node_count(label);
-        let sample_size = ((max_nodes as f64 * count as f64 / total as f64).ceil() as usize).max(1).min(count);
+        let sample_size = ((max_nodes as f64 * count as f64 / total as f64).ceil() as usize)
+            .max(1)
+            .min(count);
         let nodes = store_guard.get_nodes_by_label(label);
 
         // Sample evenly across the label's nodes using stride
-        let stride = if nodes.len() <= sample_size { 1 } else { nodes.len() / sample_size };
+        let stride = if nodes.len() <= sample_size {
+            1
+        } else {
+            nodes.len() / sample_size
+        };
         let mut taken = 0;
         for (i, node) in nodes.iter().enumerate() {
-            if taken >= sample_size { break; }
+            if taken >= sample_size {
+                break;
+            }
             if i % stride == 0 {
                 sampled_ids.insert(node.id);
 
@@ -934,14 +1024,17 @@ pub async fn sample_handler(
                 let merged = store_guard.node_properties_merged(node.id);
                 let mut props = serde_json::Map::new();
                 for (k, v) in &merged {
-                    props.insert(k.clone(), match v {
-                        PropertyValue::String(s) => json!(s),
-                        PropertyValue::Integer(i) => json!(i),
-                        PropertyValue::Float(f) => json!(f),
-                        PropertyValue::Boolean(b) => json!(b),
-                        PropertyValue::Null => json!(null),
-                        _ => json!(v.to_string()),
-                    });
+                    props.insert(
+                        k.clone(),
+                        match v {
+                            PropertyValue::String(s) => json!(s),
+                            PropertyValue::Integer(i) => json!(i),
+                            PropertyValue::Float(f) => json!(f),
+                            PropertyValue::Boolean(b) => json!(b),
+                            PropertyValue::Null => json!(null),
+                            _ => json!(v.to_string()),
+                        },
+                    );
                 }
 
                 // Determine node name (first string property, or id)
@@ -971,13 +1064,16 @@ pub async fn sample_handler(
             if sampled_ids.contains(&edge.source) && sampled_ids.contains(&edge.target) {
                 let mut props = serde_json::Map::new();
                 for (k, v) in &edge.properties {
-                    props.insert(k.clone(), match v {
-                        PropertyValue::String(s) => json!(s),
-                        PropertyValue::Integer(i) => json!(i),
-                        PropertyValue::Float(f) => json!(f),
-                        PropertyValue::Boolean(b) => json!(b),
-                        _ => json!(v.to_string()),
-                    });
+                    props.insert(
+                        k.clone(),
+                        match v {
+                            PropertyValue::String(s) => json!(s),
+                            PropertyValue::Integer(i) => json!(i),
+                            PropertyValue::Float(f) => json!(f),
+                            PropertyValue::Boolean(b) => json!(b),
+                            _ => json!(v.to_string()),
+                        },
+                    );
                 }
                 edge_list.push(json!({
                     "id": edge.id.as_u64(),
@@ -1012,17 +1108,22 @@ pub async fn import_csv_handler(
     let mut graph = "default".to_string();
 
     loop {
-        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> = multipart.next_field().await;
+        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> =
+            multipart.next_field().await;
         match field_result {
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_string();
                 match name.as_str() {
-                    "file" => {
-                        match field.text().await {
-                            Ok(text) => csv_data = Some(text),
-                            Err(e) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Failed to read file: {}", e) }))).into_response(),
+                    "file" => match field.text().await {
+                        Ok(text) => csv_data = Some(text),
+                        Err(e) => {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                Json(json!({ "error": format!("Failed to read file: {}", e) })),
+                            )
+                                .into_response()
                         }
-                    }
+                    },
                     "label" => {
                         if let Ok(text) = field.text().await {
                             label = text;
@@ -1055,11 +1156,21 @@ pub async fn import_csv_handler(
 
     let csv_text = match csv_data {
         Some(data) => data,
-        None => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "No file field in multipart request" }))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "No file field in multipart request" })),
+            )
+                .into_response()
+        }
     };
 
     if label.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing 'label' field" })),
+        )
+            .into_response();
     }
 
     // RFC 4180, not `split(delimiter)`. The hand-rolled version had no quote
@@ -1077,10 +1188,24 @@ pub async fn import_csv_handler(
 
     let headers: Vec<String> = match reader.headers() {
         Ok(h) if !h.is_empty() => h.iter().map(|h| h.trim().to_string()).collect(),
-        Ok(_) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Empty CSV file" }))).into_response(),
-        Err(e) => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Unreadable CSV header: {e}") }))).into_response(),
+        Ok(_) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Empty CSV file" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Unreadable CSV header: {e}") })),
+            )
+                .into_response()
+        }
     };
-    let id_col_idx = id_column.as_ref().and_then(|id_col| headers.iter().position(|h| h == id_col.as_str()));
+    let id_col_idx = id_column
+        .as_ref()
+        .and_then(|id_col| headers.iter().position(|h| h == id_col.as_str()));
 
     // Read and validate every record before touching the store, so a ragged row on
     // line 900 does not leave 899 nodes behind and a 400 in front of them.
@@ -1099,48 +1224,52 @@ pub async fn import_csv_handler(
     }
 
     let mut count = 0usize;
-    state.mutate(&graph, |store_guard| {
-    let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
+    state
+        .mutate(&graph, |store_guard| {
+            let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
 
-    for record in &records {
-        let node_id = store_guard.create_node(label.as_str());
+            for record in &records {
+                let node_id = store_guard.create_node(label.as_str());
 
-        if let Some(idx) = id_col_idx {
-            if let Some(val) = record.get(idx) {
-                id_map.insert(val.trim().to_string(), node_id);
-            }
-        }
-
-        if let Some(node) = store_guard.get_node_mut(node_id) {
-            for (i, header) in headers.iter().enumerate() {
-                if let Some(value) = record.get(i) {
-                    let trimmed = value.trim();
-                    // An empty field leaves the property unset rather than setting
-                    // it to null. That is not what `LOAD CSV` does in other engines
-                    // and it is kept deliberately: changing it would silently alter
-                    // the shape of every node existing callers already import.
-                    if trimmed.is_empty() { continue; }
-
-                    let prop_val = if let Ok(int_val) = trimmed.parse::<i64>() {
-                        PropertyValue::Integer(int_val)
-                    } else if let Ok(float_val) = trimmed.parse::<f64>() {
-                        PropertyValue::Float(float_val)
-                    } else if trimmed.eq_ignore_ascii_case("true") {
-                        PropertyValue::Boolean(true)
-                    } else if trimmed.eq_ignore_ascii_case("false") {
-                        PropertyValue::Boolean(false)
-                    } else {
-                        PropertyValue::String(trimmed.to_string())
-                    };
-
-                    node.set_property(header.as_str(), prop_val);
+                if let Some(idx) = id_col_idx {
+                    if let Some(val) = record.get(idx) {
+                        id_map.insert(val.trim().to_string(), node_id);
+                    }
                 }
+
+                if let Some(node) = store_guard.get_node_mut(node_id) {
+                    for (i, header) in headers.iter().enumerate() {
+                        if let Some(value) = record.get(i) {
+                            let trimmed = value.trim();
+                            // An empty field leaves the property unset rather than setting
+                            // it to null. That is not what `LOAD CSV` does in other engines
+                            // and it is kept deliberately: changing it would silently alter
+                            // the shape of every node existing callers already import.
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+
+                            let prop_val = if let Ok(int_val) = trimmed.parse::<i64>() {
+                                PropertyValue::Integer(int_val)
+                            } else if let Ok(float_val) = trimmed.parse::<f64>() {
+                                PropertyValue::Float(float_val)
+                            } else if trimmed.eq_ignore_ascii_case("true") {
+                                PropertyValue::Boolean(true)
+                            } else if trimmed.eq_ignore_ascii_case("false") {
+                                PropertyValue::Boolean(false)
+                            } else {
+                                PropertyValue::String(trimmed.to_string())
+                            };
+
+                            node.set_property(header.as_str(), prop_val);
+                        }
+                    }
+                }
+                count += 1;
             }
-        }
-        count += 1;
-    }
-    let _ = id_map;
-    }).await;
+            let _ = id_map;
+        })
+        .await;
 
     Json(json!({
         "status": "ok",
@@ -1148,7 +1277,8 @@ pub async fn import_csv_handler(
         "label": label,
         "graph": graph,
         "columns": headers,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Request for JSON import
@@ -1166,50 +1296,57 @@ pub async fn import_json_handler(
     Json(payload): Json<JsonImportRequest>,
 ) -> impl IntoResponse {
     if payload.label.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing 'label' field" }))).into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing 'label' field" })),
+        )
+            .into_response();
     }
 
     let mut count = 0usize;
-    state.mutate(&payload.graph, |store_guard| {
-    for node_json in &payload.nodes {
-        let node_id = store_guard.create_node(payload.label.as_str());
+    state
+        .mutate(&payload.graph, |store_guard| {
+            for node_json in &payload.nodes {
+                let node_id = store_guard.create_node(payload.label.as_str());
 
-        if let (Some(node), Some(obj)) = (store_guard.get_node_mut(node_id), node_json.as_object()) {
-            for (key, val) in obj {
-                let prop_val = match val {
-                    serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            PropertyValue::Integer(i)
-                        } else if let Some(f) = n.as_f64() {
-                            PropertyValue::Float(f)
-                        } else {
-                            continue;
-                        }
+                if let (Some(node), Some(obj)) =
+                    (store_guard.get_node_mut(node_id), node_json.as_object())
+                {
+                    for (key, val) in obj {
+                        let prop_val = match val {
+                            serde_json::Value::String(s) => PropertyValue::String(s.clone()),
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    PropertyValue::Integer(i)
+                                } else if let Some(f) = n.as_f64() {
+                                    PropertyValue::Float(f)
+                                } else {
+                                    continue;
+                                }
+                            }
+                            serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
+                            _ => continue,
+                        };
+                        node.set_property(key, prop_val);
                     }
-                    serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-                    _ => continue,
-                };
-                node.set_property(key, prop_val);
+                }
+                count += 1;
             }
-        }
-        count += 1;
-    }
-    }).await;
+        })
+        .await;
 
     Json(json!({
         "status": "ok",
         "nodes_created": count,
         "label": payload.label,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ==================== Snapshot Handlers ====================
 
 /// POST /api/snapshot/export — export a .sgsnap snapshot
-pub async fn export_snapshot_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
 
     let mut buf = Vec::new();
@@ -1219,15 +1356,22 @@ pub async fn export_snapshot_handler(
             // (INT-06). The body is the snapshot, so there is nowhere else to
             // put it for a client that is streaming the download to disk and
             // will not parse the gzip to find out what it did not get.
-            let losses = serde_json::to_string(&stats.dropped)
-                .unwrap_or_else(|_| "[]".to_string());
+            let losses = serde_json::to_string(&stats.dropped).unwrap_or_else(|_| "[]".to_string());
             (
                 axum::http::StatusCode::OK,
                 [
-                    (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (axum::http::header::CONTENT_DISPOSITION,
-                     "attachment; filename=\"snapshot.sgsnap\"".to_string()),
-                    (axum::http::HeaderName::from_static("x-samyama-export-dropped"), losses),
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "application/octet-stream".to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"snapshot.sgsnap\"".to_string(),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("x-samyama-export-dropped"),
+                        losses,
+                    ),
                 ],
                 buf,
             )
@@ -1303,7 +1447,12 @@ pub async fn restore_snapshot_handler(
     let cursor = std::io::Cursor::new(&data);
     let dedup_keys: Vec<String> = params
         .dedup_key
-        .map(|s| s.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let dedup_key_refs: Vec<&str> = dedup_keys.iter().map(|s| s.as_str()).collect();
 
@@ -1359,7 +1508,11 @@ pub struct EnrichRequest {
 pub async fn set_enrich_policy_handler(Json(cfg): Json<EnrichConfig>) -> impl IntoResponse {
     let declared: usize = cfg.policies.values().map(|m| m.len()).sum();
     *enrich::global_config().write().unwrap() = cfg;
-    (StatusCode::OK, Json(json!({ "status": "ok", "declared_properties": declared }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "ok", "declared_properties": declared })),
+    )
+        .into_response()
 }
 
 /// POST /api/enrich — run `query` to surface nodes, detect declared-enrichable gaps on them,
@@ -1377,7 +1530,11 @@ pub async fn enrich_handler(
         let batch = match state.engine.execute(&req.query, &*store) {
             Ok(b) => b,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("{:?}", e) }))).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("{:?}", e) })),
+                )
+                    .into_response();
             }
         };
         let nodes = enrich::collect_result_nodes(&batch);
@@ -1403,7 +1560,13 @@ pub async fn enrich_handler(
     // Fill phase: async LLM calls, no locks held.
     let worker = match enrich::worker_from_env() {
         Ok(w) => w,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
     };
     let mut outcomes = Vec::new();
     let mut declined = 0usize;
@@ -1450,7 +1613,11 @@ pub async fn verify_handler(
         let batch = match state.engine.execute(&req.query, &*store) {
             Ok(b) => b,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("{:?}", e) }))).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("{:?}", e) })),
+                )
+                    .into_response();
             }
         };
         enrich::collect_result_nodes(&batch)
@@ -1481,7 +1648,7 @@ pub async fn nlq_handler(
     Json(payload): Json<NlqRequest>,
 ) -> impl IntoResponse {
     use crate::nlq::NLQPipeline;
-    use crate::persistence::tenant::{NLQConfig, LLMProvider};
+    use crate::persistence::tenant::{LLMProvider, NLQConfig};
 
     // Refused, not defaulted. `NLQ_PROVIDER=claudecode` was not on the old list
     // and fell through to OpenAI, so an operator asking for the local CLI sent
@@ -1527,7 +1694,6 @@ pub async fn nlq_handler(
             .into_response(),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1595,7 +1761,9 @@ mod tests {
         crate::snapshot::import_tenant(&mut restored, bytes.as_slice()).expect("import");
 
         // The premise of the test: the row maps really are empty.
-        let first = restored.get_node(crate::graph::NodeId::new(1)).expect("node 1");
+        let first = restored
+            .get_node(crate::graph::NodeId::new(1))
+            .expect("node 1");
         assert!(
             first.properties.is_empty(),
             "fixture is wrong: an imported graph should keep properties in columns only"
@@ -1622,7 +1790,12 @@ mod tests {
             .with_state(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/api/schema").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1635,8 +1808,16 @@ mod tests {
             .expect("Person label in schema");
         let props = person["properties"].as_object().expect("properties object");
 
-        assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("String"), "{json}");
-        assert_eq!(props.get("age").and_then(|v| v.as_str()), Some("Integer"), "{json}");
+        assert_eq!(
+            props.get("name").and_then(|v| v.as_str()),
+            Some("String"),
+            "{json}"
+        );
+        assert_eq!(
+            props.get("age").and_then(|v| v.as_str()),
+            Some("Integer"),
+            "{json}"
+        );
     }
 
     /// #1149. The engine tells the user when a path mode it was not asked for
@@ -1690,41 +1871,77 @@ mod tests {
             r#"CREATE (a:N {name:"m"})-[:E]->(b:N {name:"n"})"#,
             r#"MATCH (a:N {name:"n"}),(b:N {name:"m"}) CREATE (a)-[:E]->(b)"#,
         ];
-        const CHAIN: &[&str] = &[
-            r#"CREATE (a:N {name:"a"})-[:E]->(b:N {name:"b"})-[:E]->(c:N {name:"c"})"#,
-        ];
+        const CHAIN: &[&str] =
+            &[r#"CREATE (a:N {name:"a"})-[:E]->(b:N {name:"b"})-[:E]->(c:N {name:"c"})"#];
         let code = crate::query::executor::operator::notifications::PATH_MODE_AFFECTS_RESULT;
 
         // The mode was not stated and it mattered: say so, and return TRAIL's rows.
-        let (rows, codes) = ask(CYCLE, r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CYCLE,
+            r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 2, "TRAIL's answer must not change");
         assert_eq!(codes, vec![code.to_string()]);
 
         // The same query with no named path takes a different route through the
         // planner. It must report the same thing, or the diagnostic is a lottery.
-        let (rows, codes) = ask(CYCLE, r#"MATCH (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CYCLE,
+            r#"MATCH (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 2);
-        assert_eq!(codes, vec![code.to_string()], "unnamed path must report too");
+        assert_eq!(
+            codes,
+            vec![code.to_string()],
+            "unnamed path must report too"
+        );
 
         // The user wrote TRAIL. They chose; telling them is noise.
-        let (rows, codes) = ask(CYCLE, r#"MATCH p=TRAIL (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CYCLE,
+            r#"MATCH p=TRAIL (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 2);
-        assert!(codes.is_empty(), "an explicit TRAIL must be silent: {codes:?}");
+        assert!(
+            codes.is_empty(),
+            "an explicit TRAIL must be silent: {codes:?}"
+        );
 
         // The user wrote WALK. They get the standard's four paths and no advice.
-        let (rows, codes) = ask(CYCLE, r#"MATCH p=WALK (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CYCLE,
+            r#"MATCH p=WALK (x:N)-[:E*1..4]->(y:N) WHERE x.name="m" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 4, "WALK's answer must not change");
-        assert!(codes.is_empty(), "an explicit WALK must be silent: {codes:?}");
+        assert!(
+            codes.is_empty(),
+            "an explicit WALK must be silent: {codes:?}"
+        );
 
         // One hop cannot reuse an edge, so the mode cannot matter.
-        let (rows, codes) = ask(CYCLE, r#"MATCH p=(x:N)-[:E*1..1]->(y:N) WHERE x.name="m" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CYCLE,
+            r#"MATCH p=(x:N)-[:E*1..1]->(y:N) WHERE x.name="m" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 1);
         assert!(codes.is_empty(), "*1..1 must be silent: {codes:?}");
 
         // No cycle, so no edge is ever reused and the two readings agree.
-        let (rows, codes) = ask(CHAIN, r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="a" RETURN x.name"#).await;
+        let (rows, codes) = ask(
+            CHAIN,
+            r#"MATCH p=(x:N)-[:E*1..4]->(y:N) WHERE x.name="a" RETURN x.name"#,
+        )
+        .await;
         assert_eq!(rows, 2);
-        assert!(codes.is_empty(), "an acyclic graph must be silent: {codes:?}");
+        assert!(
+            codes.is_empty(),
+            "an acyclic graph must be silent: {codes:?}"
+        );
     }
 
     /// The result cache is opt-in per request, and the envelope says which
@@ -1771,19 +1988,39 @@ mod tests {
         let j = ask(&app, &format!("{Q}}}")).await;
         assert_eq!(j["cached"], serde_json::json!(false), "{j}");
         let j = ask(&app, &format!("{Q}}}")).await;
-        assert_eq!(j["cached"], serde_json::json!(false), "repeat still uncached: {j}");
-        assert_eq!(engine.result_cache_len(), 0, "default path populated the cache");
+        assert_eq!(
+            j["cached"],
+            serde_json::json!(false),
+            "repeat still uncached: {j}"
+        );
+        assert_eq!(
+            engine.result_cache_len(),
+            0,
+            "default path populated the cache"
+        );
 
         // Opt in: first call computes, second is served.
         let j = ask(&app, &format!("{Q},\"cache\":true}}")).await;
-        assert_eq!(j["cached"], serde_json::json!(false), "first opt-in call: {j}");
+        assert_eq!(
+            j["cached"],
+            serde_json::json!(false),
+            "first opt-in call: {j}"
+        );
         let j = ask(&app, &format!("{Q},\"cache\":true}}")).await;
-        assert_eq!(j["cached"], serde_json::json!(true), "second opt-in call missed: {j}");
+        assert_eq!(
+            j["cached"],
+            serde_json::json!(true),
+            "second opt-in call missed: {j}"
+        );
         let rows_cached = j["records"].clone();
 
         // Bypass on a warm cache, without restarting anything.
         let j = ask(&app, &format!("{Q},\"cache\":false}}")).await;
-        assert_eq!(j["cached"], serde_json::json!(false), "bypass was ignored: {j}");
+        assert_eq!(
+            j["cached"],
+            serde_json::json!(false),
+            "bypass was ignored: {j}"
+        );
         assert_eq!(j["records"], rows_cached, "bypass returned different rows");
     }
 
@@ -1815,7 +2052,9 @@ mod tests {
             .method("POST")
             .uri("/api/query")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"query":"MATCH (n:Row) RETURN n","graph":"default"}"#))
+            .body(Body::from(
+                r#"{"query":"MATCH (n:Row) RETURN n","graph":"default"}"#,
+            ))
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1835,10 +2074,17 @@ mod tests {
         );
 
         // TRUST-06: a result names the build and the snapshot it came from.
-        assert_eq!(json["engine_version"].as_str(), Some(crate::VERSION), "{json}");
+        assert_eq!(
+            json["engine_version"].as_str(),
+            Some(crate::VERSION),
+            "{json}"
+        );
         assert!(json["snapshot_version"].is_u64(), "{json}");
         let h = json["plan_hash"].as_str().expect("plan_hash");
-        assert!(h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()), "{json}");
+        assert!(
+            h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()),
+            "{json}"
+        );
     }
 
     #[test]
@@ -1855,7 +2101,11 @@ mod tests {
         store.set_column_property(id, "k", PropertyValue::Integer(2));
 
         let merged = store.node_properties_merged(id);
-        assert_eq!(merged.get("k"), Some(&PropertyValue::Integer(2)), "column wins");
+        assert_eq!(
+            merged.get("k"),
+            Some(&PropertyValue::Integer(2)),
+            "column wins"
+        );
         assert_eq!(
             merged.get("row_only"),
             Some(&PropertyValue::Integer(9)),
@@ -1869,7 +2119,10 @@ mod tests {
         let store = imported_graph();
         let merged = store.node_properties_merged(crate::graph::NodeId::new(1));
         assert_eq!(merged.len(), 2, "{merged:?}");
-        assert_eq!(merged.get("name"), Some(&PropertyValue::String("p0".to_string())));
+        assert_eq!(
+            merged.get("name"),
+            Some(&PropertyValue::String("p0".to_string()))
+        );
         assert_eq!(merged.get("age"), Some(&PropertyValue::Integer(0)));
     }
 
@@ -1935,7 +2188,10 @@ mod tests {
         {
             let mut store = state.store.write().await;
             let alice = store.create_node("Person");
-            store.get_node_mut(alice).unwrap().set_property("name", "Alice");
+            store
+                .get_node_mut(alice)
+                .unwrap()
+                .set_property("name", "Alice");
             let bob = store.create_node("Person");
             store.get_node_mut(bob).unwrap().set_property("name", "Bob");
             store.create_edge(alice, bob, "KNOWS").unwrap();
@@ -1944,7 +2200,9 @@ mod tests {
         // Run a query through the engine to populate cache stats
         {
             let store_guard = state.store.read().await;
-            let _ = state.engine.execute("MATCH (n:Person) RETURN n", &*store_guard);
+            let _ = state
+                .engine
+                .execute("MATCH (n:Person) RETURN n", &*store_guard);
         }
 
         let (status, json) = get_status(app).await;
@@ -1963,10 +2221,7 @@ mod tests {
     async fn test_query_handler_match_empty_store() {
         let (app, _state) = test_app();
 
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "MATCH (n:Person) RETURN n"}"#,
-        ).await;
+        let (status, json) = post_query(app, r#"{"query": "MATCH (n:Person) RETURN n"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(json["nodes"].as_array().unwrap().is_empty());
@@ -1983,14 +2238,17 @@ mod tests {
         {
             let mut store = state.store.write().await;
             let alice = store.create_node("Person");
-            store.get_node_mut(alice).unwrap().set_property("name", "Alice");
-            store.get_node_mut(alice).unwrap().set_property("age", 30i64);
+            store
+                .get_node_mut(alice)
+                .unwrap()
+                .set_property("name", "Alice");
+            store
+                .get_node_mut(alice)
+                .unwrap()
+                .set_property("age", 30i64);
         }
 
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "MATCH (n:Person) RETURN n"}"#,
-        ).await;
+        let (status, json) = post_query(app, r#"{"query": "MATCH (n:Person) RETURN n"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         // Should return exactly 1 node
@@ -1999,7 +2257,10 @@ mod tests {
 
         let node = &nodes[0];
         assert!(node["id"].is_string());
-        assert!(node["labels"].as_array().unwrap().contains(&json!("Person")));
+        assert!(node["labels"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Person")));
         assert_eq!(node["properties"]["name"], "Alice");
         assert_eq!(node["properties"]["age"], 30);
 
@@ -2019,10 +2280,8 @@ mod tests {
             store.get_node_mut(n).unwrap().set_property("name", "Bob");
         }
 
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "MATCH (n:Person) RETURN n.name"}"#,
-        ).await;
+        let (status, json) =
+            post_query(app, r#"{"query": "MATCH (n:Person) RETURN n.name"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["columns"], json!(["n.name"]));
@@ -2041,7 +2300,10 @@ mod tests {
         {
             let mut store = state.store.write().await;
             let alice = store.create_node("Person");
-            store.get_node_mut(alice).unwrap().set_property("name", "Alice");
+            store
+                .get_node_mut(alice)
+                .unwrap()
+                .set_property("name", "Alice");
             let bob = store.create_node("Person");
             store.get_node_mut(bob).unwrap().set_property("name", "Bob");
             store.create_edge(alice, bob, "KNOWS").unwrap();
@@ -2050,7 +2312,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
 
@@ -2080,7 +2343,8 @@ mod tests {
         let (status, _json) = post_query(
             app,
             r#"{"query": "CREATE (n:Movie {title: \"Inception\", year: 2010})"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
 
@@ -2093,10 +2357,8 @@ mod tests {
     async fn test_query_handler_create_with_edge() {
         let (app, state) = test_app();
 
-        let (status, _json) = post_query(
-            app,
-            r#"{"query": "CREATE (a:Person {name: 'Alice'})"}"#,
-        ).await;
+        let (status, _json) =
+            post_query(app, r#"{"query": "CREATE (a:Person {name: 'Alice'})"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
 
@@ -2116,10 +2378,7 @@ mod tests {
             store.get_node_mut(n).unwrap().set_property("age", 30i64);
         }
 
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "MATCH (n:Person) RETURN n.age"}"#,
-        ).await;
+        let (status, json) = post_query(app, r#"{"query": "MATCH (n:Person) RETURN n.age"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         let records = json["records"].as_array().unwrap();
@@ -2133,10 +2392,7 @@ mod tests {
     async fn test_query_handler_parse_error() {
         let (app, _state) = test_app();
 
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "THIS IS NOT VALID CYPHER!!!"}"#,
-        ).await;
+        let (status, json) = post_query(app, r#"{"query": "THIS IS NOT VALID CYPHER!!!"}"#).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].is_string());
@@ -2190,10 +2446,7 @@ mod tests {
         }
 
         // Accessing a missing property returns null
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "MATCH (n:Person) RETURN n.age"}"#,
-        ).await;
+        let (status, json) = post_query(app, r#"{"query": "MATCH (n:Person) RETURN n.age"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         let records = json["records"].as_array().unwrap();
@@ -2219,7 +2472,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH p = (a:Person)-[:KNOWS]->(b:Person) RETURN p"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         let records = json["records"].as_array().unwrap();
@@ -2249,7 +2503,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (n:Person) RETURN n.name, n.age, n"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["columns"].as_array().unwrap().len(), 3);
@@ -2284,7 +2539,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, b"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
 
@@ -2305,10 +2561,8 @@ mod tests {
         }
 
         // PROFILE should not panic — returns plan-format RecordBatch
-        let (status, json) = post_query(
-            app,
-            r#"{"query": "PROFILE MATCH (n:Person) RETURN n"}"#,
-        ).await;
+        let (status, json) =
+            post_query(app, r#"{"query": "PROFILE MATCH (n:Person) RETURN n"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
         // Should have plan column in records
@@ -2329,7 +2583,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (n:Person) RETURN count(*) AS total"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         let records = json["records"].as_array().unwrap();
@@ -2355,7 +2610,8 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (a:Person)-[r:FRIENDS]->(b:Person) RETURN r"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
 
@@ -2372,10 +2628,7 @@ mod tests {
         // When no graph field is sent, should default to "default"
         let (app, _state) = test_app();
 
-        let (status, _json) = post_query(
-            app,
-            r#"{"query": "MATCH (n) RETURN n"}"#,
-        ).await;
+        let (status, _json) = post_query(app, r#"{"query": "MATCH (n) RETURN n"}"#).await;
 
         assert_eq!(status, StatusCode::OK);
     }
@@ -2391,12 +2644,16 @@ mod tests {
         let (status, json) = post_query(
             app,
             r#"{"query": "MATCH (n) RETURN n", "graph": "test_graph"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["graph"], "test_graph");
         assert!(
-            json["error"].as_str().unwrap_or_default().contains("single graph"),
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("single graph"),
             "error should explain why: {json:?}"
         );
     }
@@ -2408,11 +2665,11 @@ mod tests {
         let (status, _json) = post_query(
             app,
             r#"{"query": "MATCH (n) RETURN n", "graph": "default"}"#,
-        ).await;
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
     }
-
 
     /// The reproduction from #1094: writes over HTTP returned 200 and reached no
     /// storage, so a restart with `--data-path` set found an empty graph. Neither
@@ -2421,9 +2678,8 @@ mod tests {
     #[tokio::test]
     async fn http_writes_reach_storage() {
         let dir = tempfile::tempdir().unwrap();
-        let pm = std::sync::Arc::new(
-            crate::persistence::PersistenceManager::new(dir.path()).unwrap(),
-        );
+        let pm =
+            std::sync::Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
         pm.tenants()
             .create_tenant("default".to_string(), "default".to_string(), None)
             .ok();
@@ -2445,7 +2701,9 @@ mod tests {
         for name in ["ada", "grace"] {
             let (status, _) = post_query(
                 app.clone(),
-                &format!(r#"{{"query": "CREATE (p:Person {{name: \"{name}\"}})", "graph": "default"}}"#),
+                &format!(
+                    r#"{{"query": "CREATE (p:Person {{name: \"{name}\"}})", "graph": "default"}}"#
+                ),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -2459,13 +2717,11 @@ mod tests {
             .map(|n| n.properties.get("name").unwrap().to_string())
             .collect();
         names.sort();
-        assert_eq!(
-            names.len(),
-            2,
-            "two 200s and {} nodes on disk",
-            names.len()
+        assert_eq!(names.len(), 2, "two 200s and {} nodes on disk", names.len());
+        assert!(
+            names[0].contains("ada") && names[1].contains("grace"),
+            "{names:?}"
         );
-        assert!(names[0].contains("ada") && names[1].contains("grace"), "{names:?}");
     }
 
     /// Build an `AppState` backed by a real `PersistenceManager`, and hand back the
@@ -2476,9 +2732,8 @@ mod tests {
         tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let pm = std::sync::Arc::new(
-            crate::persistence::PersistenceManager::new(dir.path()).unwrap(),
-        );
+        let pm =
+            std::sync::Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
         pm.tenants()
             .create_tenant("default".to_string(), "default".to_string(), None)
             .ok();
@@ -2518,10 +2773,19 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        assert_eq!(state.store.read().await.node_count(), 2, "imported into memory");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            2,
+            "imported into memory"
+        );
         pm.checkpoint().unwrap();
         let (nodes, _) = pm.recover("default").unwrap();
-        assert_eq!(nodes.len(), 2, "the import returned ok and a restart found {} nodes", nodes.len());
+        assert_eq!(
+            nodes.len(),
+            2,
+            "the import returned ok and a restart found {} nodes",
+            nodes.len()
+        );
     }
 
     /// Post a CSV upload as multipart, the way the endpoint is actually called.
@@ -2569,7 +2833,10 @@ mod tests {
         let prop = |k: &str| node.properties.get(k).cloned();
         // Compared as values, not as rendered strings: `PropertyValue`'s `Display`
         // quotes strings, so `to_string()` would pass on a shifted column too.
-        assert_eq!(prop("name"), Some(PropertyValue::String("Doe, Jane".into())));
+        assert_eq!(
+            prop("name"),
+            Some(PropertyValue::String("Doe, Jane".into()))
+        );
         assert_eq!(prop("age"), Some(PropertyValue::Integer(42)));
         assert_eq!(prop("city"), Some(PropertyValue::String("Pune".into())));
     }
@@ -2586,7 +2853,10 @@ mod tests {
         let (status, json) =
             post_csv(app, "Note", "title,body\nfirst,\"line one\nline two\"\n").await;
         assert_eq!(status, StatusCode::OK, "{json}");
-        assert_eq!(json["nodes_created"], 1, "a quoted newline made a second node");
+        assert_eq!(
+            json["nodes_created"], 1,
+            "a quoted newline made a second node"
+        );
         assert_eq!(state.store.read().await.node_count(), 1);
     }
 
@@ -2601,8 +2871,7 @@ mod tests {
             .route("/api/import/csv", post(import_csv_handler))
             .with_state(state.clone());
 
-        let (status, json) =
-            post_csv(app, "Person", "name,age\nada,36\ngrace\nalan,41\n").await;
+        let (status, json) = post_csv(app, "Person", "name,age\nada,36\ngrace\nalan,41\n").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(
             state.store.read().await.node_count(),
@@ -2634,7 +2903,12 @@ mod tests {
             assert_eq!(state.store.read().await.node_count(), expected, "{query}");
             pm.checkpoint().unwrap();
             let (nodes, _) = pm.recover("default").unwrap();
-            assert_eq!(nodes.len(), expected, "{query} returned 200 and a restart found {} nodes", nodes.len());
+            assert_eq!(
+                nodes.len(),
+                expected,
+                "{query} returned 200 and a restart found {} nodes",
+                nodes.len()
+            );
         }
     }
 
