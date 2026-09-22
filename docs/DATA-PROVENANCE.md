@@ -157,11 +157,18 @@ Three rules decide where it goes.
 statement-level rollback (LANG-07), so a failure part-way through leaves a
 partly-retracted graph.
 
-Not done: no HTTP endpoint exposes `retract` (`/api/enrich` and `/api/verify`
-exist), the confidence written into quarantine is the constant
+`examples/agentic_enrichment_demo.rs` used to bypass this path entirely,
+asking a model for Cypher and executing the lines that began `CREATE` or
+`MATCH` (#1413). It now runs `detect_gaps → fill → quarantine → verify →
+retract` and nothing else, and `tests/gak_demo_writes_are_governed.rs` runs the
+demo binary and asserts the graph it leaves behind. The demo takes `--offline`,
+which substitutes fixed answers at the point `fill` would have returned so the
+shipped path can be checked without a model.
+
+Still not done: no HTTP endpoint exposes `retract` (`/api/enrich` and
+`/api/verify` exist), and the confidence written into quarantine is the constant
 `LLM_DEFAULT_CONFIDENCE = 0.4` for every answer rather than anything the model
-reports, and `examples/agentic_enrichment_demo.rs` bypasses this path entirely
-(#1413).
+reports.
 
 ---
 
