@@ -25,6 +25,7 @@ async fn main() {
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
         Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
         Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
+        Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
         _ => {}
     }
 
@@ -60,6 +61,53 @@ fn cmd_snapshot_key() -> i32 {
         }
         Err(e) => {
             eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `samyama auth-user <name>` — reads a password from stdin, prints a credential line.
+///
+/// Stdin and not an argument: a password on the command line is visible in
+/// `ps` to every user on the box, and lands in the shell history of the person
+/// who typed it.
+///
+/// The output is an argon2id hash. That is the slow hash, and the reason the
+/// two kinds of credential differ: against a stolen file the defence for a
+/// human-chosen password is the cost of each guess, while a 32-byte random
+/// token has nothing to guess and gets the fast one.
+fn cmd_auth_user(argv: &[String]) -> i32 {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+
+    let Some(name) = argv.get(2) else {
+        eprintln!("usage: samyama auth-user <name>   (the password is read from stdin)");
+        return 2;
+    };
+    if name.contains(':') {
+        eprintln!("a credential name cannot contain `:` -- it separates the name from the hash");
+        return 2;
+    }
+
+    let mut password = String::new();
+    if std::io::stdin().read_line(&mut password).is_err() {
+        eprintln!("could not read the password from stdin");
+        return 1;
+    }
+    let password = password.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        eprintln!("refusing to hash an empty password");
+        return 2;
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    match argon2::Argon2::default().hash_password(password.as_bytes(), &salt) {
+        Ok(h) => {
+            println!("# add this line to the file you pass to --auth-file");
+            println!("{name}:{h}");
+            0
+        }
+        Err(e) => {
+            eprintln!("hashing failed: {e}");
             1
         }
     }

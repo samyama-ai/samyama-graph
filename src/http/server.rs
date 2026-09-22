@@ -101,11 +101,29 @@ async fn allow_private_network(
 /// cleartext after start-up.
 #[derive(Clone)]
 pub struct Credential {
-    /// Who this token belongs to. Not used for authorisation -- there are no
-    /// roles yet (REL-08 asks for them and this is not that) -- but recorded so
-    /// a future audit log has a subject, and so an operator can revoke one line.
+    /// Who this credential belongs to. Not used for authorisation -- there are
+    /// no roles yet (REL-08 asks for them and this is not that) -- but it is
+    /// what the audit log records, and what an operator revokes one line of.
     pub name: String,
-    digest: [u8; 32],
+    pub secret: Secret,
+}
+
+/// What a credential line holds, and therefore how it is checked.
+///
+/// The two are told apart by the stored form, not by a flag: an argon2 PHC
+/// string starts with `$argon2`, and a token digest is 64 hex characters.
+/// Nothing in the file says which kind a line is, because the hash already
+/// does, and a flag that disagreed with the hash would be a way to check a
+/// password with a fast hash.
+#[derive(Clone)]
+pub enum Secret {
+    /// SHA-256 of a machine token. Fast is correct here: a 32-byte token from
+    /// `samyama auth-token` has nothing to guess, so the cost of a guess buys
+    /// nothing, and the check is on every request.
+    Token([u8; 32]),
+    /// An argon2 PHC string for a human-chosen password. Slow on purpose:
+    /// against a stolen file the cost of each guess *is* the defence.
+    Password(String),
 }
 
 impl Credential {
@@ -120,10 +138,24 @@ impl Credential {
             None => return Some(Err(format!("no `:` in {line:?}"))),
         };
         let hex = hex.trim();
+        let name = name.trim().to_string();
+
+        // A password. `rsplit_once(':')` above split the PHC string at its last
+        // colon, so the whole field has to be reassembled -- argon2 strings are
+        // `$argon2id$v=..$m=..,t=..,p=..$salt$hash` and contain none, but a
+        // future scheme might.
+        if line.contains("$argon2") {
+            let (name, phc) = match line.split_once(':') {
+                Some((n, p)) => (n.trim().to_string(), p.trim().to_string()),
+                None => return Some(Err(format!("no `:` in {line:?}"))),
+            };
+            return Some(Ok(Credential { name, secret: Secret::Password(phc) }));
+        }
+
         if hex.len() != 64 {
             return Some(Err(format!(
-                "expected a 64-character sha256 digest for {:?}, got {} characters",
-                name.trim(),
+                "expected a 64-character sha256 digest or an argon2 hash for {name:?}, \
+                 got {} characters",
                 hex.len()
             )));
         }
@@ -134,7 +166,7 @@ impl Credential {
                 Err(_) => return Some(Err(format!("{hex:?} is not hexadecimal"))),
             };
         }
-        Some(Ok(Credential { name: name.trim().to_string(), digest }))
+        Some(Ok(Credential { name, secret: Secret::Token(digest) }))
     }
 }
 
@@ -178,6 +210,75 @@ fn digests_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
     diff == 0
 }
 
+/// Which credential, if any, an `Authorization` header satisfies.
+///
+/// Two schemes, because the two kinds of caller are different. `Bearer` carries
+/// a machine token; `Basic` carries a human's username and password. A
+/// credential is only ever checked against the scheme that matches its stored
+/// form, so a password can never be verified with the fast hash and a token can
+/// never be dragged through argon2.
+fn authenticate(credentials: &[Credential], header: &str) -> Option<String> {
+    let (scheme, rest) = header.split_once(' ')?;
+    let rest = rest.trim();
+
+    if scheme.eq_ignore_ascii_case("bearer") {
+        use sha2::{Digest, Sha256};
+        let got: [u8; 32] = Sha256::digest(rest.as_bytes()).into();
+        // Every token credential is compared even after one matches, so the
+        // time taken does not depend on the position of the matching line.
+        return credentials.iter().fold(None, |acc, c| match &c.secret {
+            Secret::Token(d) if digests_match(d, &got) => Some(c.name.clone()),
+            _ => acc,
+        });
+    }
+
+    if scheme.eq_ignore_ascii_case("basic") {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let decoded = base64_decode(rest)?;
+        let decoded = String::from_utf8(decoded).ok()?;
+        let (user, password) = decoded.split_once(':')?;
+
+        // Only the line naming this user, and only if it holds a password.
+        // Verifying against every line would run argon2 once per credential,
+        // which turns a login into a way to load the server.
+        let c = credentials.iter().find(|c| c.name == user)?;
+        let Secret::Password(phc) = &c.secret else { return None };
+        let parsed = PasswordHash::new(phc).ok()?;
+        argon2::Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .ok()
+            .map(|()| c.name.clone())
+    } else {
+        None
+    }
+}
+
+/// Standard base64, enough for an HTTP Basic payload.
+///
+/// Written out rather than taking a dependency for sixteen lines. `base64` is
+/// in the tree transitively, but a direct dependency is a direct commitment,
+/// and this is the only place the engine decodes any.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for b in s.bytes() {
+        if b == b'=' {
+            break;
+        }
+        let v = TABLE.iter().position(|&c| c == b)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// Reject a request that carries no accepted credential (REL-08).
 ///
 /// `OPTIONS` is let through unauthenticated on purpose. A CORS preflight
@@ -201,31 +302,21 @@ async fn require_credential(
         return next.run(req).await;
     }
 
-    let presented = req
+    let header = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            let (scheme, rest) = v.split_once(' ')?;
-            scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
-        });
+        .map(str::to_string);
 
     // The name of the credential that matched, resolved before the request is
     // touched. Recorded on the accepted credential rather than on the header,
     // so an audit entry says which line of the credential file was used and
     // never echoes what was presented.
-    let matched: Option<String> = match presented {
-        Some(token) => {
-            use sha2::{Digest, Sha256};
-            let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-            // Every credential is compared even after one matches, so the time
-            // taken does not depend on the position of the matching line.
-            credentials.iter().fold(None, |acc, c| {
-                if digests_match(&c.digest, &got) { Some(c.name.clone()) } else { acc }
-            })
-        }
-        None => None,
-    };
+    //
+    // `authenticate` rather than a SHA-256 comparison inline: a credential file
+    // now holds password hashes beside machine tokens, and which hash to use is
+    // decided by the stored form rather than by the caller.
+    let matched = header.as_deref().and_then(|h| authenticate(&credentials, h));
 
     if let Some(name) = matched {
         let mut req = req;
@@ -245,7 +336,12 @@ async fn require_credential(
     // work on.
     (
         StatusCode::UNAUTHORIZED,
-        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            // Both schemes, so a client knows which it may use. `Basic` carries
+            // a realm because some clients will not prompt without one.
+            "Bearer, Basic realm=\"samyama\"",
+        )],
         "unauthorized\n",
     )
         .into_response()
