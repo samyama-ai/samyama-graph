@@ -726,6 +726,32 @@ async fn start_server() {
         }
     };
 
+    // Audit log for state-changing HTTP requests (REL-08).
+    let audit_log: Option<std::sync::Arc<samyama::http::server::AuditLog>> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--audit-log")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_AUDIT_LOG").ok());
+        match path {
+            None => None,
+            // A configured audit log that cannot be opened stops the server.
+            // Starting without it would run unaudited for an operator who
+            // asked to be audited, which is the state the flag exists to leave.
+            Some(p) => match samyama::http::server::AuditLog::open(&p) {
+                Ok(l) => {
+                    println!("HTTP API: auditing state-changing requests to {p}");
+                    Some(std::sync::Arc::new(l))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --audit-log {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
     // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
     // secret passed on the command line is visible in `ps` to every user on the
     // box, and one in the environment is inherited by every child process.
@@ -958,6 +984,7 @@ async fn start_server() {
     let http_cors_origins = cors_origins.clone();
     let http_credentials = credentials.clone();
     let http_tls = tls_pem.clone();
+    let http_audit = audit_log.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
@@ -970,6 +997,9 @@ async fn start_server() {
             .with_tenant_manager(http_tenants);
         if let Some((cert, key)) = http_tls {
             http_server = http_server.with_tls(cert, key);
+        }
+        if let Some(log) = http_audit {
+            http_server = http_server.with_audit_log(log);
         }
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);
