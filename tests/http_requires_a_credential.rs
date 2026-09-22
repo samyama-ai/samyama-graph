@@ -162,10 +162,24 @@ async fn a_refusal_says_bearer_and_nothing_about_which_half_was_wrong() {
         .await
         .expect("response");
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        res.headers().get("www-authenticate").and_then(|v| v.to_str().ok()),
-        Some("Bearer"),
-        "a 401 has to say how to authenticate"
+    let www = res
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        www.contains("Bearer"),
+        "a 401 has to say how to authenticate, got {www:?}"
+    );
+    // The body says nothing about *why*. Distinguishing a missing header from
+    // a wrong token tells an unauthenticated caller which half to work on.
+    let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("token") && !body.contains("header") && !body.contains("password"),
+        "the refusal body names the cause: {body:?}"
     );
 }
 
@@ -224,6 +238,125 @@ async fn every_route_is_covered_and_not_just_the_one_this_test_picked() {
         StatusCode::UNAUTHORIZED,
         "an unauthenticated DELETE reached the query handler"
     );
+}
+
+/// An argon2 hash of `password`, made the way `samyama auth-user` makes one.
+fn hash(password: &str) -> String {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("hash")
+        .to_string()
+}
+
+fn basic(user: &str, password: &str) -> String {
+    use std::fmt::Write;
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let raw = format!("{user}:{password}").into_bytes();
+    let mut out = String::new();
+    for chunk in raw.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let _ = write!(out, "{}", T[((n >> (18 - i * 6)) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    format!("Basic {out}")
+}
+
+fn with_header(path: &str, header: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", header)
+        .body(Body::empty())
+        .expect("request")
+}
+
+fn user_credentials(name: &str, password: &str) -> Vec<Credential> {
+    read_credentials(&creds_file(&format!("{name}:{}\n", hash(password)))).expect("parse")
+}
+
+#[tokio::test]
+async fn a_user_authenticates_with_a_password() {
+    // REL-08's credential store, and `docs/REQUIREMENTS.md`'s REQ-SEC-001:
+    // "MUST support authentication (username/password minimum)".
+    let creds = user_credentials("alice", "hunter2");
+    assert_eq!(
+        status_of(app(creds.clone()), with_header("/api/status", &basic("alice", "hunter2"))).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(app(creds.clone()), with_header("/api/status", &basic("alice", "wrong"))).await,
+        StatusCode::UNAUTHORIZED,
+        "a wrong password must not authenticate"
+    );
+    assert_eq!(
+        status_of(app(creds), with_header("/api/status", &basic("bob", "hunter2"))).await,
+        StatusCode::UNAUTHORIZED,
+        "the right password under the wrong name must not authenticate"
+    );
+}
+
+#[tokio::test]
+async fn a_password_is_never_checked_with_the_fast_hash() {
+    // The property that makes the two kinds of credential safe to keep in one
+    // file: a credential is only ever checked against the scheme its stored
+    // form belongs to. Presenting the password as a *bearer token* must fail,
+    // because that path hashes with SHA-256 -- and if it succeeded, the slow
+    // hash would be decorative.
+    let creds = user_credentials("alice", "hunter2");
+    assert_eq!(
+        status_of(app(creds.clone()), get("/api/status", Some("hunter2"))).await,
+        StatusCode::UNAUTHORIZED
+    );
+    // And the reverse: a machine token presented as a password must fail,
+    // rather than being dragged through argon2 against a token digest.
+    let tok = credentials(&[("ops", TOKEN)]);
+    assert_eq!(
+        status_of(app(tok), with_header("/api/status", &basic("ops", TOKEN))).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn tokens_and_users_live_in_one_file() {
+    // Told apart by the stored form, not by a flag: an argon2 PHC string
+    // starts with `$argon2` and a token digest is 64 hex characters.
+    let body = format!("ops:{}\nalice:{}\n", digest_of(TOKEN), hash("hunter2"));
+    let creds = read_credentials(&creds_file(&body)).expect("parse");
+    assert_eq!(creds.len(), 2);
+
+    assert_eq!(
+        status_of(app(creds.clone()), get("/api/status", Some(TOKEN))).await,
+        StatusCode::OK,
+        "the machine token still works"
+    );
+    assert_eq!(
+        status_of(app(creds), with_header("/api/status", &basic("alice", "hunter2"))).await,
+        StatusCode::OK,
+        "and so does the password"
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_offers_both_schemes() {
+    let res = app(user_credentials("alice", "hunter2"))
+        .oneshot(get("/api/status", None))
+        .await
+        .expect("response");
+    let www = res
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(www.contains("Bearer"), "got {www:?}");
+    assert!(www.contains("Basic"), "got {www:?}");
 }
 
 #[test]

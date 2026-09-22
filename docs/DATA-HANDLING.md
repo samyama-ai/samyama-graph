@@ -137,8 +137,33 @@ numbers above is that the two can be checked against each other.
   than taking one: against a stolen file, a fast hash is safe only when there
   is nothing to guess.
 
-  What this is not: there are no users, no roles and no per-graph grants — a
-  token is all-or-nothing. REL-08 asks for four things and two exist.
+- **Users with passwords**, in the same file (REL-08, REQ-SEC-001):
+
+  ```bash
+  samyama auth-user alice >> /etc/samyama/credentials   # password read from stdin
+  ```
+
+  ```text
+  ops:2b9c…                      # a machine token, SHA-256
+  alice:$argon2id$v=19$m=…       # a person's password, argon2id
+  ```
+
+  Machines send `Authorization: Bearer <token>`; people send
+  `Authorization: Basic <base64(user:password)>`. The two are told apart by the
+  **stored form**, not by a flag, and a credential is only ever checked against
+  the scheme its form belongs to — so a password is never verified with the
+  fast hash, and a token is never dragged through argon2.
+
+  Why two hashes: against a stolen file, the defence for a human-chosen
+  password is the cost of each guess, so it gets argon2id. A 32-byte token from
+  `samyama auth-token` has nothing to guess, so the cost buys nothing and the
+  check runs on every request.
+
+  What this is still not: there are **no roles** and **no per-graph grants**. A
+  credential is all-or-nothing. Per-graph grants are not merely unimplemented —
+  this build serves a single graph, so a grant could only ever say yes, and a
+  permission check that cannot refuse is worse than none. That part of REL-08
+  waits on multi-graph serving.
 
 - **Every state-changing request can be recorded** (REL-08):
 

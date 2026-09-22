@@ -78,6 +78,12 @@ chrono = "0.4"
 # identifiers in engine source is the same principle.
 chrono-tz = "0.10"
 sha2 = "0.10"
+# Password verification for REL-08's credential store. A *slow* hash, unlike the
+# SHA-256 used for machine tokens: against a stolen file the defence for a
+# human-chosen password is the cost of each guess, and for a 32-byte random
+# token there is nothing to guess. The two live in one file and are told apart
+# by the hash format.
+argon2 = "0.5"
 
 # Arrow + Parquet export (INT-05 / ML-01, #1097). Version 53 matches what
 # samyama-graph-enterprise already vets and ships, so this adds no new licence
