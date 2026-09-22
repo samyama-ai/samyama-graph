@@ -128,8 +128,10 @@ nothing whatsoever.
 predicate answers it for every shape:
 
 ```cypher
-MATCH (n)               WHERE n._generated IS NULL RETURN n   -- no model wrote this node's data
-MATCH (a)-[r]->(b)      WHERE r._generated IS NULL RETURN r   -- no model drew this edge
+// no model wrote this node's data
+MATCH (n) WHERE n._generated IS NULL RETURN n
+// no model drew this edge
+MATCH (a)-[r]->(b) WHERE r._generated IS NULL RETURN r
 ```
 
 | field | meaning |
