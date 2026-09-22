@@ -7,6 +7,7 @@
 //!
 //! On import, old node IDs are remapped to new IDs via a HashMap.
 
+pub mod encryption;
 pub mod format;
 pub mod persist;
 pub mod verify;
@@ -399,6 +400,59 @@ pub fn import_tenant(
     reader: impl Read,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     import_tenant_with_dedup(store, reader, &[])
+}
+
+/// Export encrypted at rest (REL-09).
+///
+/// The encryption wraps the ordinary snapshot stream rather than replacing it,
+/// so what is sealed is byte-for-byte what would otherwise have been written.
+pub fn export_tenant_encrypted(
+    store: &GraphStore,
+    writer: impl Write,
+    key: &[u8; encryption::KEY_BYTES],
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    let mut enc = encryption::EncryptingWriter::new(writer, key)?;
+    let stats = export_tenant(store, &mut enc)?;
+    // `finish` and not `Drop`: the terminator is what tells a reader the file
+    // is whole, and a `Drop` that failed to write it on a full disk could not
+    // say so. A snapshot without its terminator does not import.
+    enc.finish()?;
+    Ok(stats)
+}
+
+/// Import a snapshot that may or may not be encrypted.
+///
+/// The first bytes decide: an encrypted file starts with a magic string, and
+/// anything else is read exactly as before. Sniffing rather than requiring the
+/// caller to say means an operator who turns encryption on does not have to
+/// migrate the snapshots they already have.
+///
+/// A file that *is* encrypted and no key was given is an error naming that,
+/// rather than a gzip failure -- the two look identical otherwise, and the
+/// difference is what the operator needs to act on.
+pub fn import_tenant_maybe_encrypted(
+    store: &mut GraphStore,
+    mut reader: impl Read,
+    key: Option<&[u8; encryption::KEY_BYTES]>,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    let mut head = [0u8; 12];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match reader.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    let head = &head[..filled];
+
+    if !encryption::looks_encrypted(head) {
+        return import_tenant_with_dedup(store, head.chain(reader), &[]);
+    }
+    let key = key.ok_or(
+        "this snapshot is encrypted and no key was given: pass --snapshot-key",
+    )?;
+    let dec = encryption::DecryptingReader::new(reader, key, head)?;
+    import_tenant_with_dedup(store, dec, &[])
 }
 
 /// Import with entity deduplication on specified property keys.

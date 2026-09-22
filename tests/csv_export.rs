@@ -194,6 +194,7 @@ fn export_router(store: GraphStore) -> Router {
         embed_pipeline: None,
         embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         persistence: None,
+        snapshot_key: None,
         transactions: Default::default(),
     };
     Router::new()

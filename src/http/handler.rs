@@ -1350,7 +1350,14 @@ pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl Into
     let store_guard = state.store.read().await;
 
     let mut buf = Vec::new();
-    match crate::snapshot::export_tenant(&store_guard, &mut buf) {
+    // Encrypted when a key is configured (REL-09). The filename below says so
+    // too, because a `.sgsnap` an operator cannot open without a key should not
+    // be indistinguishable from one they can.
+    let exported = match &state.snapshot_key {
+        None => crate::snapshot::export_tenant(&store_guard, &mut buf),
+        Some(k) => crate::snapshot::export_tenant_encrypted(&store_guard, &mut buf, k),
+    };
+    match exported {
         Ok(stats) => {
             // The loss report rides on a header as well as inside the file
             // (INT-06). The body is the snapshot, so there is nowhere else to
@@ -1366,7 +1373,11 @@ pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl Into
                     ),
                     (
                         axum::http::header::CONTENT_DISPOSITION,
-                        "attachment; filename=\"snapshot.sgsnap\"".to_string(),
+                        if state.snapshot_key.is_some() {
+                            "attachment; filename=\"snapshot.sgsnap.enc\"".to_string()
+                        } else {
+                            "attachment; filename=\"snapshot.sgsnap\"".to_string()
+                        },
                     ),
                     (
                         axum::http::HeaderName::from_static("x-samyama-export-dropped"),
@@ -1456,7 +1467,25 @@ pub async fn restore_snapshot_handler(
         .unwrap_or_default();
     let dedup_key_refs: Vec<&str> = dedup_keys.iter().map(|s| s.as_str()).collect();
 
-    match crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs) {
+    // Sniffs the file: an encrypted snapshot needs the key, a plaintext one is
+    // read exactly as before. Dedup keys are not threaded through the encrypted
+    // path yet and are refused rather than silently ignored.
+    let imported = if crate::snapshot::encryption::looks_encrypted(&data) {
+        match state.snapshot_key.as_deref() {
+            None => Err("this snapshot is encrypted and the server has no --snapshot-key".into()),
+            Some(_) if !dedup_key_refs.is_empty() => Err(
+                "deduplication on an encrypted snapshot is not supported yet".into(),
+            ),
+            Some(k) => crate::snapshot::import_tenant_maybe_encrypted(
+                &mut store_guard,
+                cursor,
+                Some(k),
+            ),
+        }
+    } else {
+        crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs)
+    };
+    match imported {
         Ok(stats) => {
             // HA-08: Persist snapshot atomically (tmp → fsync → rename → marker)
             // so it survives server restart. Crash-before-marker = ignored on boot.
@@ -1721,6 +1750,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let app = Router::new()
@@ -1783,6 +1813,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let app = Router::new()
@@ -1837,6 +1868,7 @@ mod tests {
                 embed_pipeline: None,
                 embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 persistence: None,
+            snapshot_key: None,
                 transactions: Default::default(),
             };
             let app = Router::new()
@@ -1961,6 +1993,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let engine = state.engine.clone();
@@ -2042,6 +2075,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let app = Router::new()
@@ -2692,6 +2726,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: Some(std::sync::Arc::clone(&pm)),
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let app = Router::new()
@@ -2745,6 +2780,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             persistence: Some(std::sync::Arc::clone(&pm)),
+            snapshot_key: None,
             transactions: Default::default(),
         };
         (state, pm, dir)
