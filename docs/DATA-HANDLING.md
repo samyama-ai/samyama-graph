@@ -92,8 +92,29 @@ numbers above is that the two can be checked against each other.
 ## Related
 
 - [`SECURITY.md`](../SECURITY.md) — reporting a vulnerability.
-- The HTTP API has **no authentication** and accepts any origin
-  ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)). That is a
-  separate and more immediate exposure than anything on this page: anyone who
-  can reach the port can read the graph. Bind it to localhost or put it behind
-  something that authenticates until that is fixed.
+- The HTTP API is **unauthenticated by default**, and can be told to require a
+  credential ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)):
+
+  ```bash
+  samyama auth-token ops >> /etc/samyama/credentials   # prints the token once
+  samyama --auth-file /etc/samyama/credentials --host 0.0.0.0
+  ```
+
+  Every request then needs `Authorization: Bearer <token>` — every route, not a
+  chosen subset, with `OPTIONS` exempt because a CORS preflight carries no
+  credential. Without `--auth-file` nothing on the request path reads one, which
+  is what every deployment before v1.9.1 does: anyone who can reach the port can
+  read the graph, and `/api/query` runs arbitrary Cypher including `DELETE`.
+
+  The file holds SHA-256 digests, not tokens. That is the right hash for a
+  high-entropy token and the **wrong** one for a human-chosen password, which
+  is why `samyama auth-token` generates the token from `/dev/urandom` rather
+  than taking one: against a stolen file, a fast hash is safe only when there
+  is nothing to guess.
+
+  What this is not: there are no users, no roles and no per-graph grants — a
+  token is all-or-nothing — and no audit log. REL-08 asks for all four.
+
+  The "accepts any origin" half of #1328 was fixed earlier: CORS matches an
+  explicit allowlist and the Private Network Access header is echoed only to an
+  origin on it.
