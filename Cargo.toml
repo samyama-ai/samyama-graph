@@ -116,6 +116,11 @@ mime = "0.3"               # MIME types
 
 # Vector Search (Phase 6)
 hnsw_rs = "0.3.4"
+# Promoted from a transitive dependency for NDS-09's fp16 vector quantization.
+# `half::f16` satisfies `Hnsw`'s `Clone + Send + Sync` bound, so the index holds
+# the quantized values rather than converting at the boundary -- which is what
+# makes the memory saving real rather than a claim about the persistence copy.
+half = { version = "2", features = ["serde"] }
 rand = "0.8"
 regex = "1"
 lru = "0.18"

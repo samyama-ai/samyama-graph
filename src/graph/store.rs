@@ -5282,8 +5282,10 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         property_key: &str,
         dimensions: usize,
         metric: DistanceMetric,
+        quantization: crate::vector::index::Quantization,
     ) -> VectorResult<()> {
-        self.vector_index.create_index_named(name, label, property_key, dimensions, metric)
+        self.vector_index
+            .create_index_named(name, label, property_key, dimensions, metric, quantization)
     }
 
     /// The (label, property) a vector index name refers to, and every known name.

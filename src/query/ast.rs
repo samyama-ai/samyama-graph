@@ -243,6 +243,9 @@ pub struct CreateVectorIndexClause {
     pub property_key: String,
     pub dimensions: usize,
     pub similarity: String, // 'cosine', 'l2', etc.
+    /// How the index stores its values (NDS-09). `None` unless the caller asked
+    /// for `quantization: "fp16"`, so the default is unchanged.
+    pub quantization: crate::vector::index::Quantization,
 }
 
 /// CREATE INDEX clause

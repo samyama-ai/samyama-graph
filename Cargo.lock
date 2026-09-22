@@ -1634,6 +1634,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
+ "serde",
  "zerocopy",
 ]
 
@@ -3695,6 +3696,7 @@ dependencies = [
  "csv",
  "flate2",
  "futures",
+ "half",
  "hnsw_rs",
  "http-body-util",
  "indexmap",
