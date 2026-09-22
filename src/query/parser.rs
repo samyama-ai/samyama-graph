@@ -234,6 +234,13 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                             Rule::return_clause => {
                                 query.clauses.push(Clause::Return(parse_return_clause(c)?));
                             }
+                            // `pipeline_clause` has listed `call_clause` all
+                            // along; nothing lowered it, so `CALL … YIELD …
+                            // WITH …` fell to the catch-all below and was
+                            // refused (#1375).
+                            Rule::call_clause => {
+                                query.clauses.push(Clause::Call(parse_call_clause(c)?));
+                            }
                             Rule::order_by_clause => {
                                 query.order_by = Some(parse_order_by_clause(c)?);
                             }
