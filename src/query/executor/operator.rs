@@ -6502,6 +6502,15 @@ fn predicate_cost(expr: &Expression) -> u32 {
     }
 }
 
+/// Functions whose answer depends only on the node ids they are given and on
+/// the hierarchy index -- so a call with the same arguments has the same
+/// answer for every row of one filter.
+///
+/// Deliberately a short list rather than "anything that looks pure". `rand()`
+/// and `timestamp()` are also functions of no row, and memoising those would
+/// turn a per-row value into a constant.
+const ROW_INVARIANT_WHEN_ARGS_ARE: [&str; 1] = ["hierarchy_lca"];
+
 pub struct FilterOperator {
     /// Input operator
     input: OperatorBox,
@@ -6510,13 +6519,28 @@ pub struct FilterOperator {
     /// Whether this predicate is expensive enough per row to be worth filtering
     /// across threads. Computed once, from the expression, not from batch size.
     parallel: bool,
+    /// Last `(function, argument node ids) -> answer`, for the functions above.
+    ///
+    /// H7 of the HIER corpus is
+    /// `MATCH (a:Term {code:...}), (b:Term {code:...}), (c:Term)
+    ///  WHERE id(c) IN hierarchy_lca(a, b)`: `a` and `b` are each pinned to one
+    /// node and `c` ranges over 9,331 terms, so the same `hierarchy_lca(a, b)`
+    /// was evaluated 9,331 times. Each evaluation walked the hierarchy registry
+    /// under two `RwLock`s, cloned an `Arc`, and built two vectors -- for an
+    /// answer that had not changed. Measured at 4.26 ms against a hand-written
+    /// traversal's 0.41 ms (#1399).
+    ///
+    /// One entry, not a map: the case this exists for is an argument that does
+    /// not vary at all, and an unbounded cache keyed on row values would grow
+    /// with the scan it is trying to make cheap.
+    invariant_call: std::sync::Mutex<Option<(String, Vec<u64>, Value)>>,
 }
 
 impl FilterOperator {
     /// Create a new filter operator
     pub fn new(input: OperatorBox, predicate: Expression) -> Self {
         let parallel = Self::predicate_is_parallel(&predicate);
-        Self { input, predicate, parallel }
+        Self { input, predicate, parallel, invariant_call: std::sync::Mutex::new(None) }
     }
 
     /// Whether this predicate is worth filtering across threads.
@@ -6575,6 +6599,31 @@ impl FilterOperator {
                 let arg_vals: Vec<Value> = args.iter()
                     .map(|a| self.evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
+
+                // A hierarchy call whose arguments are the same nodes as last
+                // row has the same answer as last row (#1399). Keyed on the
+                // argument *node ids* rather than on the values: `Value` is not
+                // comparable, and what these functions read is the id.
+                //
+                // The key is only built for a function on the list, so an
+                // ordinary predicate pays nothing.
+                if ROW_INVARIANT_WHEN_ARGS_ARE.contains(&name.as_str()) {
+                    let key: Option<Vec<u64>> = arg_vals
+                        .iter()
+                        .map(|v| value_node_id(v).map(|id| id.as_u64()))
+                        .collect();
+                    if let Some(key) = key {
+                        let mut slot = self.invariant_call.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some((n, k, v)) = slot.as_ref() {
+                            if n == name && k == &key {
+                                return Ok(v.clone());
+                            }
+                        }
+                        let out = eval_function(name, &arg_vals, Some(store))?;
+                        *slot = Some((name.clone(), key, out.clone()));
+                        return Ok(out);
+                    }
+                }
                 eval_function(name, &arg_vals, Some(store))
             }
             Expression::Unary { op, expr } => {
