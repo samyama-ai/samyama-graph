@@ -1353,7 +1353,8 @@ impl QueryPlanner {
                     clause.property_key.clone(),
                     clause.dimensions,
                     clause.similarity.clone(),
-                ).with_name(clause.index_name.clone())),
+                ).with_name(clause.index_name.clone())
+                 .with_quantization(clause.quantization)),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
