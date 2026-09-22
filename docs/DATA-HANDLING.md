@@ -115,6 +115,27 @@ numbers above is that the two can be checked against each other.
   What this is not: there are no users, no roles and no per-graph grants — a
   token is all-or-nothing — and no audit log. REL-08 asks for all four.
 
+- The HTTP API can **serve TLS**, and does not by default (REL-09):
+
+  ```bash
+  samyama --tls-cert /etc/samyama/fullchain.pem --tls-key /etc/samyama/key.pem \
+          --auth-file /etc/samyama/credentials --host 0.0.0.0
+  ```
+
+  Both flags are required together; one without the other stops the server
+  rather than falling back to cleartext, because a fallback would give an
+  operator who asked for TLS a plain port and a log line they did not read.
+  There is no self-signed fallback either: a server that invents a certificate
+  teaches its clients to skip verification, and a client that skips
+  verification has the cost of TLS and none of the guarantee.
+
+  Without `--tls-cert`, queries, results and any bearer token cross the network
+  in cleartext. A non-loopback bind now warns about that separately from the
+  credential warning.
+
+  At-rest encryption for storage and snapshots is the other half of REL-09 and
+  does not exist.
+
   The "accepts any origin" half of #1328 was fixed earlier: CORS matches an
   explicit allowlist and the Private Network Access header is echoed only to an
   origin on it.

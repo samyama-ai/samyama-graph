@@ -154,6 +154,16 @@ Without `--auth-file` the API reads no credential, which is the default and
 what every release before this one did. A token is all-or-nothing: there are no
 users, roles or per-graph grants yet.
 
+To serve TLS as well:
+
+```bash
+samyama --tls-cert fullchain.pem --tls-key key.pem --auth-file credentials --host 0.0.0.0
+```
+
+Both are required together — one without the other stops the server rather
+than quietly serving cleartext — and there is no self-signed fallback. Plain
+HTTP remains the default.
+
 1. Open https://graph.samyama.cloud/ in your browser.
 2. Sign up for a new account, or sign in if you already have one.
 3. From the left sidebar, click **Home**.
