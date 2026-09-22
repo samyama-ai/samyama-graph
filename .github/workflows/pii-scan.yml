@@ -1,0 +1,84 @@
+name: PII scan of published snapshots
+
+# TRUST-10: "an automated scan of every published KG and snapshot for personal
+# data patterns before release."
+#
+# The gate is on the *published set*, not on the release job, because the
+# snapshots are uploaded to the `kg-snapshots-v1` release by hand rather than
+# by CI. A check wired into `tag-release.yml` would pass every time and never
+# see an asset: it would be measuring the wrong thing, which is the failure
+# this repository keeps finding in its own scorecard.
+#
+# So this downloads whatever is on the release right now and scans it. That
+# covers assets added outside CI, which is all of them, and it keeps covering
+# them after the release that introduced them is long past.
+#
+# Weekly rather than nightly: 780 MB of snapshots is not worth re-downloading
+# every day for a set that changes a few times a year, and `workflow_dispatch`
+# is there for the day somebody uploads one.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release whose assets to scan"
+        required: false
+        default: kg-snapshots-v1
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan every published snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pii-scan
+
+      - name: Build the scanner
+        run: cargo build --release --bin samyama
+
+      # The scanner's own cases run here too. A scanner nobody has tested is a
+      # step that turns green on an artifact it may be misreading, and the
+      # negative cases are the ones that decide whether this control survives:
+      # a scan that fires on every sixteen-digit integer gets switched off.
+      - name: Test the scanner
+        run: cargo test --release --test pii_scan
+
+      - name: Download the published snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || 'kg-snapshots-v1' }}
+        run: |
+          set -euo pipefail
+          mkdir -p snapshots
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern '*.sgsnap' \
+            --dir snapshots
+          # An empty directory must not read as a clean scan. If the release
+          # has no assets, or the pattern stopped matching because somebody
+          # renamed them, that is a failure of this check and not a pass.
+          count=$(find snapshots -name '*.sgsnap' | wc -l)
+          echo "downloaded $count snapshot(s)"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no .sgsnap assets on $TAG -- this check scanned nothing"
+            exit 1
+          fi
+          ls -la snapshots
+
+      - name: Scan
+        run: |
+          set -euo pipefail
+          # `pii-scan` exits 1 when it finds identifiers and 2 when it cannot
+          # read a file. Both fail the job: a scan that could not open the
+          # artifact must never report it clean.
+          ./target/release/samyama pii-scan snapshots/*.sgsnap

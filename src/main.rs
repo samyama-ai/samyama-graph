@@ -26,6 +26,7 @@ async fn main() {
         Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
         Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
         Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
+        Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
         _ => {}
     }
 
@@ -42,6 +43,54 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama pii-scan <snapshot.sgsnap>...`
+///
+/// Scans each snapshot for personal identifiers and exits non-zero if any are
+/// found (TRUST-10). Intended for release CI, over the artifacts about to be
+/// published.
+///
+/// Exits 2 -- not 0 -- when a file cannot be read. A scan that could not look
+/// at the artifact must not report it clean; that is how a control passes on
+/// something it never opened.
+fn cmd_pii_scan(argv: &[String]) -> i32 {
+    let paths: Vec<&String> = argv.iter().skip(2).filter(|a| !a.starts_with('-')).collect();
+    if paths.is_empty() {
+        eprintln!("usage: samyama pii-scan <snapshot.sgsnap>...");
+        return 2;
+    }
+
+    let mut worst = 0;
+    for path in paths {
+        match samyama::pii::scan_snapshot_path(std::path::Path::new(path)) {
+            Err(e) => {
+                eprintln!("ERROR {path}: {e}");
+                worst = worst.max(2);
+            }
+            Ok(report) => {
+                println!(
+                    "{path}: {} nodes, {} edges, {} values scanned",
+                    report.nodes_scanned, report.edges_scanned, report.values_scanned
+                );
+                if report.is_clean() {
+                    println!("  clean -- no identifier patterns found");
+                } else {
+                    for f in &report.findings {
+                        println!(
+                            "  {:<14} {:<40} {} distinct, e.g. {}",
+                            f.kind,
+                            f.location,
+                            f.distinct,
+                            f.samples.join(", ")
+                        );
+                    }
+                    worst = worst.max(1);
+                }
+            }
+        }
+    }
+    worst
 }
 
 /// `samyama snapshot-key`
