@@ -210,19 +210,34 @@ async fn require_credential(
             scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
         });
 
-    let ok = match presented {
+    // The name of the credential that matched, resolved before the request is
+    // touched. Recorded on the accepted credential rather than on the header,
+    // so an audit entry says which line of the credential file was used and
+    // never echoes what was presented.
+    let matched: Option<String> = match presented {
         Some(token) => {
             use sha2::{Digest, Sha256};
             let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
             // Every credential is compared even after one matches, so the time
             // taken does not depend on the position of the matching line.
-            credentials.iter().fold(false, |acc, c| digests_match(&c.digest, &got) || acc)
+            credentials.iter().fold(None, |acc, c| {
+                if digests_match(&c.digest, &got) { Some(c.name.clone()) } else { acc }
+            })
         }
-        None => false,
+        None => None,
     };
 
-    if ok {
-        return next.run(req).await;
+    if let Some(name) = matched {
+        let mut req = req;
+        req.extensions_mut().insert(Subject(name.clone()));
+        let mut res = next.run(req).await;
+        // Also on the response. The audit layer is outermost, so it sees the
+        // request *before* this one has run and can only learn the subject on
+        // the way back out -- a middleware sees the request going in and the
+        // response coming out, and an outer layer cannot read what an inner one
+        // put in the request.
+        res.extensions_mut().insert(Subject(name));
+        return res;
     }
 
     // The same answer whether the header was missing, malformed, or simply
@@ -291,6 +306,105 @@ async fn serve_tls(
                 .await;
         });
     }
+}
+
+/// The subject a request authenticated as, put in the request's extensions by
+/// `require_credential` so the audit layer can name who did something.
+///
+/// Absent when no credential file is configured -- an unauthenticated server
+/// has no subject to record, and writing "anonymous" as though it were an
+/// identity would make the log look more informative than it is.
+#[derive(Clone, Debug)]
+pub struct Subject(pub String);
+
+/// Append-only record of every request that can change state (REL-08).
+///
+/// One JSON object per line, flushed on every write. An audit log buffered in
+/// memory is the one kind of log that must not lose its tail: the entries worth
+/// having are the ones written just before something went wrong. That is the
+/// same argument `SAMYAMA_FSYNC` makes about the WAL, at a thousandth of the
+/// volume.
+pub struct AuditLog {
+    sink: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+    path: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for AuditLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditLog").field("path", &self.path).finish()
+    }
+}
+
+impl AuditLog {
+    /// Open `path` for appending, creating it if absent.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        Ok(Self { sink: std::sync::Mutex::new(std::io::BufWriter::new(file)), path })
+    }
+
+    /// Record one entry. Failures are reported and do not fail the request:
+    /// a full disk must not become a denial of service on the API, and the
+    /// warning is what says the log has a hole.
+    fn record(&self, subject: &str, method: &str, path: &str, status: u16) {
+        use std::io::Write;
+        let line = format!(
+            "{{\"at\":\"{}\",\"subject\":{},\"method\":\"{}\",\"path\":{},\"status\":{}}}\n",
+            chrono::Utc::now().to_rfc3339(),
+            serde_json::to_string(subject).unwrap_or_else(|_| "\"?\"".into()),
+            method,
+            serde_json::to_string(path).unwrap_or_else(|_| "\"?\"".into()),
+            status,
+        );
+        let mut sink = match self.sink.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        if let Err(e) = sink.write_all(line.as_bytes()).and_then(|()| sink.flush()) {
+            tracing::warn!("audit log write failed, the log now has a hole: {e}");
+        }
+    }
+}
+
+/// Record every request that can change state.
+///
+/// **Selected by method, not by a list of routes.** `POST`, `PUT`, `PATCH` and
+/// `DELETE` are recorded; `GET`, `HEAD` and `OPTIONS` are not. A list of write
+/// routes is a list somebody forgets to extend -- the same reason the
+/// credential layer exempts nothing -- and a new endpoint is audited the day it
+/// is added rather than the day someone remembers.
+///
+/// The consequence, stated rather than hidden: a **read** submitted as
+/// `POST /api/query` is recorded too. Telling it apart means parsing Cypher in
+/// a middleware, and an audit log that occasionally over-records is worth more
+/// than one that occasionally misses a write.
+///
+/// The body is never recorded. It carries the query, which carries the data.
+async fn audit(
+    log: Arc<AuditLog>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::Method;
+
+    let method = req.method().clone();
+    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let path = req.uri().path().to_string();
+
+    let res = next.run(req).await;
+    // Read off the *response*: this layer is outermost, so the credential layer
+    // has not run yet when the request passes through it on the way in.
+    // `unauthenticated` is a state, not a name -- it is what a request that
+    // presented no accepted credential gets, including the 401s.
+    let subject = res
+        .extensions()
+        .get::<Subject>()
+        .map(|s| s.0.clone())
+        .unwrap_or_else(|| "unauthenticated".to_string());
+    log.record(&subject, method.as_str(), &path, res.status().as_u16());
+    res
 }
 
 /// Is this address loopback-only?
@@ -426,6 +540,9 @@ pub struct HttpServer {
     /// PEM certificate chain and private key. `None` serves plain HTTP, which
     /// is the default and what every existing deployment does (REL-09).
     tls: Option<(String, String)>,
+    /// Where state-changing requests are recorded. `None` records nothing,
+    /// which is the default (REL-08).
+    audit: Option<Arc<AuditLog>>,
 }
 
 impl HttpServer {
@@ -447,6 +564,7 @@ impl HttpServer {
             allowed_origins: Vec::new(),
             credentials: Vec::new(),
             tls: None,
+            audit: None,
         }
     }
 
@@ -495,6 +613,16 @@ impl HttpServer {
     /// of TLS and none of the guarantee.
     pub fn with_tls(mut self, cert_pem: impl Into<String>, key_pem: impl Into<String>) -> Self {
         self.tls = Some((cert_pem.into(), key_pem.into()));
+        self
+    }
+
+    /// Record every state-changing request to this log (REL-08).
+    ///
+    /// Off by default. An audit log is only useful if somebody reads it, and
+    /// writing one nobody asked for to a path nobody chose is how a disk fills
+    /// up on a machine that was working yesterday.
+    pub fn with_audit_log(mut self, log: Arc<AuditLog>) -> Self {
+        self.audit = Some(log);
         self
     }
 
@@ -646,12 +774,34 @@ impl HttpServer {
 
         let cors = cors_layer(&self.allowed_origins);
         let origins = Arc::new(self.allowed_origins.clone());
-        app.layer(cors).layer(axum::middleware::from_fn(
+        app = app.layer(cors).layer(axum::middleware::from_fn(
             move |req, next| {
                 let origins = Arc::clone(&origins);
                 async move { allow_private_network(origins, req, next).await }
             },
-        ))
+        ));
+
+        // Added last, which makes it the **outermost** layer: layers apply
+        // outermost-last, so the most recent `.layer()` call is the one a
+        // request meets first.
+        //
+        // Outermost on purpose, and the test is what settled it. The first
+        // version added this before the credential layer on the reasoning that
+        // "first" meant "outside", which is backwards -- the credential layer
+        // ended up outside and short-circuited every 401 before the audit could
+        // see it, so refused writes were the one thing the log missed. A 401 on
+        // `/api/query` is exactly the entry an audit log exists for.
+        //
+        // The subject is still available: `require_credential` puts it in the
+        // request's extensions on the way *in*, and this layer reads it there.
+        if let Some(log) = self.audit.clone() {
+            app = app.layer(axum::middleware::from_fn(move |req, next| {
+                let log = Arc::clone(&log);
+                async move { audit(log, req, next).await }
+            }));
+        }
+
+        app
     }
 }
 

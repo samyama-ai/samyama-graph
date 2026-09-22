@@ -113,7 +113,36 @@ numbers above is that the two can be checked against each other.
   is nothing to guess.
 
   What this is not: there are no users, no roles and no per-graph grants — a
-  token is all-or-nothing — and no audit log. REL-08 asks for all four.
+  token is all-or-nothing. REL-08 asks for four things and two exist.
+
+- **Every state-changing request can be recorded** (REL-08):
+
+  ```bash
+  samyama --audit-log /var/log/samyama/audit.jsonl --auth-file /etc/samyama/credentials
+  ```
+
+  One JSON object per line, flushed on every write:
+
+  ```json
+  {"at":"2026-09-22T16:19:00+00:00","subject":"ops","method":"POST","path":"/api/query","status":200}
+  ```
+
+  Selected by **method**, not by a list of routes: `POST`, `PUT`, `PATCH` and
+  `DELETE` are recorded, `GET`, `HEAD` and `OPTIONS` are not. A list of write
+  routes is a list somebody forgets to extend, so a new endpoint is audited the
+  day it is added. The consequence, stated rather than hidden: a *read*
+  submitted as `POST /api/query` is recorded too.
+
+  Refused requests are recorded, with `subject: "unauthenticated"` — a 401 on a
+  write route is exactly the entry the log exists for.
+
+  **The request body is never recorded.** It carries the query, and the query
+  carries the data. What is recorded is who, what route, which method, what
+  status, and when. The bearer token never appears: the entry is built from the
+  credential that matched, not from the header that was presented.
+
+  Off by default. A log written to a path nobody chose is how a disk fills up
+  on a machine that was working yesterday.
 
 - The HTTP API can **serve TLS**, and does not by default (REL-09):
 
