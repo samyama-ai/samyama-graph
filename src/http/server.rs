@@ -236,6 +236,63 @@ async fn require_credential(
         .into_response()
 }
 
+/// Build a rustls acceptor from a PEM certificate chain and private key (REL-09).
+///
+/// `rustls_pki_types::PemObject` rather than `rustls-pemfile`: the latter is
+/// unmaintained (RUSTSEC-2025-0134) and `cargo deny` fails on it, which is how
+/// every pull request got stuck earlier today. The parsing is four lines either
+/// way.
+fn tls_acceptor(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<_, _>>()?;
+    if certs.is_empty() {
+        return Err("the certificate file contains no certificate".into());
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())?;
+
+    let config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Accept TLS connections and serve `app` over each.
+///
+/// A failed handshake drops that connection and nothing else: a client with
+/// the wrong certificate, or one probing the port, must not be able to stop
+/// the listener.
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    app: Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let Ok(tls) = acceptor.accept(stream).await else {
+                return; // handshake refused: their certificate, not our listener
+            };
+            let service = hyper::service::service_fn(move |req| {
+                use tower::Service;
+                app.clone().call(req)
+            });
+            let _ = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(TokioIo::new(tls), service)
+                .await;
+        });
+    }
+}
+
 /// Is this address loopback-only?
 ///
 /// Used for the warning on start-up, so it errs towards warning: anything that
@@ -366,6 +423,9 @@ pub struct HttpServer {
     /// Credentials the server accepts. Empty means the API is unauthenticated,
     /// which is the default and the state this server shipped in (#1328).
     credentials: Vec<Credential>,
+    /// PEM certificate chain and private key. `None` serves plain HTTP, which
+    /// is the default and what every existing deployment does (REL-09).
+    tls: Option<(String, String)>,
 }
 
 impl HttpServer {
@@ -386,6 +446,7 @@ impl HttpServer {
             bind_host: "127.0.0.1".to_string(),
             allowed_origins: Vec::new(),
             credentials: Vec::new(),
+            tls: None,
         }
     }
 
@@ -418,6 +479,22 @@ impl HttpServer {
     /// the release notes until their client stops working.
     pub fn with_credentials(mut self, credentials: Vec<Credential>) -> Self {
         self.credentials = credentials;
+        self
+    }
+
+    /// Serve TLS from this PEM certificate chain and private key (REL-09).
+    ///
+    /// `None` serves plain HTTP. Off by default for the same reason
+    /// authentication is: every deployment that exists today speaks HTTP to
+    /// this port, and an upgrade that started refusing them would be a worse
+    /// failure than the one it fixes.
+    ///
+    /// There is no self-signed fallback. A server that quietly invents a
+    /// certificate teaches its clients to skip verification, and a client that
+    /// skips verification has no transport security at all -- it has the cost
+    /// of TLS and none of the guarantee.
+    pub fn with_tls(mut self, cert_pem: impl Into<String>, key_pem: impl Into<String>) -> Self {
+        self.tls = Some((cert_pem.into(), key_pem.into()));
         self
     }
 
@@ -464,16 +541,34 @@ impl HttpServer {
         let addr = format!("{}:{}", self.bind_host, self.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-        info!("HTTP API on http://{addr}");
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        info!("HTTP API on {scheme}://{addr}");
         if !is_loopback(&self.bind_host) {
-            tracing::warn!(
-                "listening on {} — /api/query executes arbitrary Cypher and no \
-                 credential is read off the request (#1328)",
-                self.bind_host
-            );
+            if self.credentials.is_empty() {
+                tracing::warn!(
+                    "listening on {} — /api/query executes arbitrary Cypher and no \
+                     credential is read off the request; pass --auth-file (#1328)",
+                    self.bind_host
+                );
+            }
+            if self.tls.is_none() {
+                tracing::warn!(
+                    "listening on {} without TLS — queries, results and any \
+                     bearer token cross the network in cleartext; pass \
+                     --tls-cert and --tls-key (REL-09)",
+                    self.bind_host
+                );
+            }
         }
 
-        axum::serve(listener, app).await?;
+        match &self.tls {
+            None => axum::serve(listener, app).await?,
+            Some((cert, key)) => {
+                let acceptor = tls_acceptor(cert, key)
+                    .map_err(|e| format!("TLS certificate or key is unusable: {e}"))?;
+                serve_tls(listener, acceptor, app).await?;
+            }
+        }
 
         Ok(())
     }
