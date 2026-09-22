@@ -59,6 +59,7 @@
 
 use crate::graph::{EdgeType, Label, PropertyValue};
 use crate::query::ast::*;
+use crate::vector::index::Quantization;
 use pest::Parser;
 use pest::pratt_parser::{PrattParser, Op, Assoc};
 use pest_derive::Parser;
@@ -233,6 +234,13 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                             }
                             Rule::return_clause => {
                                 query.clauses.push(Clause::Return(parse_return_clause(c)?));
+                            }
+                            // `pipeline_clause` has listed `call_clause` all
+                            // along; nothing lowered it, so `CALL … YIELD …
+                            // WITH …` fell to the catch-all below and was
+                            // refused (#1375).
+                            Rule::call_clause => {
+                                query.clauses.push(Clause::Call(parse_call_clause(c)?));
                             }
                             Rule::order_by_clause => {
                                 query.order_by = Some(parse_order_by_clause(c)?);
@@ -834,6 +842,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
     let mut property_key = None;
     let mut dimensions = 1536; // Default
     let mut similarity = "cosine".to_string(); // Default
+    let mut quantization = Quantization::None; // NDS-09; unchanged unless asked for
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -858,7 +867,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 // 1536-dimension index, and the mismatch only surfaced later
                 // against the caller's *vector*, which is the wrong thing to
                 // blame (#474).
-                const ACCEPTED: [&str; 2] = ["dimensions", "similarity"];
+                const ACCEPTED: [&str; 3] = ["dimensions", "similarity", "quantization"];
                 let mut unknown: Vec<&String> = options_map
                     .keys()
                     .filter(|k| !ACCEPTED.contains(&k.as_str()))
@@ -872,7 +881,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                         .join(", ");
                     return Err(ParseError::SemanticError(format!(
                         "CREATE VECTOR INDEX: unknown option {listed}. Accepted options are \
-`dimensions` (integer) and `similarity` (string)."
+`dimensions` (integer), `similarity` (string) and `quantization` (string)."
                     )));
                 }
 
@@ -882,6 +891,28 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                         other => {
                             return Err(ParseError::SemanticError(format!(
                                 "CREATE VECTOR INDEX: `dimensions` must be a positive integer, got {other:?}"
+                            )))
+                        }
+                    }
+                }
+                if let Some(value) = options_map.get("quantization") {
+                    match value {
+                        // Named spellings only. An unrecognised one is refused
+                        // rather than defaulting to full precision: a caller who
+                        // asked for `fp8` and got f32 would believe their index
+                        // was a quarter of the size it is (#1385).
+                        PropertyValue::String(s) => match Quantization::parse(s) {
+                            Some(q) => quantization = q,
+                            None => {
+                                return Err(ParseError::SemanticError(format!(
+                                    "CREATE VECTOR INDEX: unknown `quantization` {s:?}. \
+Accepted values are `none` and `fp16`."
+                                )))
+                            }
+                        },
+                        other => {
+                            return Err(ParseError::SemanticError(format!(
+                                "CREATE VECTOR INDEX: `quantization` must be a string, got {other:?}"
                             )))
                         }
                     }
@@ -903,6 +934,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
 
     query.create_vector_index_clause = Some(CreateVectorIndexClause {
         index_name,
+        quantization,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
         property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
         dimensions,

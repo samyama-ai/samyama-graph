@@ -400,6 +400,15 @@ RETURN nodeId, score ORDER BY score DESC LIMIT 10
 ```cypher
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
 
+-- Half the memory, at 16-bit precision. The index holds f16 in the HNSW graph
+-- and in the copy kept for persistence, so the saving is real rather than a
+-- claim about one of the two. What it costs in recall is a property of your
+-- corpus: measured on random vectors at 64 and 384 dimensions it was
+-- indistinguishable from f32, and `tests/vector_quantization.rs` is the
+-- instrument to measure your own.
+CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding)
+  OPTIONS {dimensions: 384, similarity: 'cosine', quantization: 'fp16'}
+
 CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
 

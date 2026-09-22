@@ -45,6 +45,7 @@
 //! re-inserted. This trades load-time speed for implementation simplicity.
 
 use crate::graph::NodeId;
+use half::f16;
 use hnsw_rs::prelude::*;
 use thiserror::Error;
 
@@ -125,6 +126,79 @@ impl Distance<f32> for CosineDistance {
     }
 }
 
+/// Cosine distance over f16-quantized vectors (NDS-09).
+///
+/// The arithmetic is done in f32. f16 has a 10-bit significand and a maximum
+/// around 65504; accumulating a dot product of even a few hundred terms in f16
+/// would overflow or lose the sum long before the distance mattered. What is
+/// quantized is *storage* -- which is where the memory is -- and the comparison
+/// is computed at full precision on the way past.
+///
+/// The clamp and the floor are the same as `CosineDistance` and for the same
+/// reason: hnsw_rs panics on a negative distance, and quantization makes
+/// near-duplicate vectors *more* likely to round past 1.0, not less.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CosineDistanceF16;
+
+impl Distance<f16> for CosineDistanceF16 {
+    fn eval(&self, va: &[f16], vb: &[f16]) -> f32 {
+        let mut dot = 0.0f32;
+        let mut norm_a = 0.0f32;
+        let mut norm_b = 0.0f32;
+        for (a, b) in va.iter().zip(vb.iter()) {
+            let (a, b) = (a.to_f32(), b.to_f32());
+            dot += a * b;
+            norm_a += a * a;
+            norm_b += b * b;
+        }
+        if norm_a <= 0.0 || norm_b <= 0.0 {
+            return 1.0;
+        }
+        let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+        (1.0 - sim).max(0.0)
+    }
+}
+
+/// How vectors are stored in the index (NDS-09).
+///
+/// `Fp16` halves the bytes held per vector, in the HNSW's own copy **and** in
+/// the copy kept for persistence. It costs recall, and how much is a property
+/// of the corpus rather than a constant -- which is why
+/// `tests/vector_quantization_recall.rs` measures it against the unquantized
+/// index on the same vectors rather than asserting a figure here.
+///
+/// The on-disk format is unchanged: `dump` writes f32 whatever the index holds,
+/// so a snapshot written by a quantized index loads into an unquantized one and
+/// the reverse. Quantization is a runtime memory choice, not a file format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quantization {
+    /// 32-bit floats, as stored before this existed.
+    #[default]
+    None,
+    /// 16-bit floats. Half the memory, some recall.
+    Fp16,
+}
+
+impl Quantization {
+    /// Parse the `quantization` DDL option.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" | "f32" | "fp32" => Some(Self::None),
+            "fp16" | "f16" | "half" => Some(Self::Fp16),
+            _ => None,
+        }
+    }
+
+    /// Bytes per dimension held per vector.
+    pub fn bytes_per_value(self) -> usize {
+        match self {
+            Self::None => std::mem::size_of::<f32>(),
+            Self::Fp16 => std::mem::size_of::<f16>(),
+        }
+    }
+}
+
 /// Inner Product distance implementation for hnsw_rs
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InnerProductDistance;
@@ -147,16 +221,31 @@ pub struct StoredVector {
     pub vector: Vec<f32>,
 }
 
+/// The HNSW graph, holding whichever element type the index was built for.
+///
+/// Two variants rather than one generic index because `Hnsw` is typed on its
+/// element: an index that converted f16 to f32 at the boundary would keep the
+/// f32 copy inside the graph, and the memory saving -- the entire point of
+/// NDS-09's quantization -- would be a claim about the persistence copy only.
+enum Backend {
+    F32(Hnsw<'static, f32, CosineDistance>),
+    F16(Hnsw<'static, f16, CosineDistanceF16>),
+}
+
 /// Wrapper around HNSW index
 pub struct VectorIndex {
     /// Number of dimensions
     dimensions: usize,
     /// Distance metric
     metric: DistanceMetric,
+    /// How values are stored (NDS-09).
+    quantization: Quantization,
     /// The actual HNSW index
-    hnsw: Hnsw<'static, f32, CosineDistance>,
-    /// All inserted vectors (for persistence — HNSW doesn't expose iteration)
-    stored_vectors: Vec<StoredVector>,
+    backend: Backend,
+    /// All inserted vectors (for persistence — HNSW doesn't expose iteration),
+    /// held at the index's own precision so this copy is halved too.
+    stored_f32: Vec<StoredVector>,
+    stored_f16: Vec<(u64, Vec<f16>)>,
 }
 
 // Implement Debug manually because Hnsw doesn't implement it
@@ -165,6 +254,8 @@ impl std::fmt::Debug for VectorIndex {
         f.debug_struct("VectorIndex")
             .field("dimensions", &self.dimensions)
             .field("metric", &self.metric)
+            .field("quantization", &self.quantization)
+            .field("len", &self.len())
             .finish()
     }
 }
@@ -172,19 +263,56 @@ impl std::fmt::Debug for VectorIndex {
 impl VectorIndex {
     /// Create a new vector index
     pub fn new(dimensions: usize, metric: DistanceMetric) -> Self {
-        // HNSW parameters
-        let max_elements = 100_000;
+        Self::with_quantization(dimensions, metric, Quantization::None)
+    }
+
+    /// Create an index that stores its vectors at the given precision (NDS-09).
+    pub fn with_quantization(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+    ) -> Self {
+        Self::build(dimensions, metric, quantization, 100_000)
+    }
+
+    fn build(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        max_elements: usize,
+    ) -> Self {
         let m = 16;
         let ef_construction = 200;
-
-        let hnsw = Hnsw::new(m, max_elements, 16, ef_construction, CosineDistance);
-
+        let backend = match quantization {
+            Quantization::None => Backend::F32(Hnsw::new(
+                m, max_elements, 16, ef_construction, CosineDistance,
+            )),
+            Quantization::Fp16 => Backend::F16(Hnsw::new(
+                m, max_elements, 16, ef_construction, CosineDistanceF16,
+            )),
+        };
         Self {
             dimensions,
             metric,
-            hnsw,
-            stored_vectors: Vec::new(),
+            quantization,
+            backend,
+            stored_f32: Vec::new(),
+            stored_f16: Vec::new(),
         }
+    }
+
+    /// How this index stores its values.
+    pub fn quantization(&self) -> Quantization {
+        self.quantization
+    }
+
+    /// Bytes held for the vectors themselves, across both copies the index
+    /// keeps: the HNSW's and the one kept for persistence.
+    ///
+    /// Reported rather than asserted. A quantization that claims to halve
+    /// memory has to be able to show it.
+    pub fn vector_bytes(&self) -> usize {
+        2 * self.len() * self.dimensions * self.quantization.bytes_per_value()
     }
 
     /// Add a vector to the index
@@ -203,13 +331,24 @@ impl VectorIndex {
         // vector list that backs len(), dump() and the brute-force fallback. The
         // CosineDistance clamp keeps the metric in [0, 2], which is what the
         // search_layer assertions (hnsw.rs:937-938) actually require.
-        self.hnsw.insert((vector, node_id.0 as usize));
-
-        // Store vector for persistence
-        self.stored_vectors.push(StoredVector {
-            node_id: node_id.0,
-            vector: vector.clone(),
-        });
+        match &mut self.backend {
+            Backend::F32(h) => {
+                h.insert((vector, node_id.0 as usize));
+                self.stored_f32.push(StoredVector {
+                    node_id: node_id.0,
+                    vector: vector.clone(),
+                });
+            }
+            Backend::F16(h) => {
+                // Quantized once, here, and the graph is built on the values a
+                // search will actually compare. Inserting f32 and quantizing
+                // only the stored copy would build the graph on one set of
+                // vectors and answer from another.
+                let q: Vec<f16> = vector.iter().map(|v| f16::from_f32(*v)).collect();
+                h.insert((&q, node_id.0 as usize));
+                self.stored_f16.push((node_id.0, q));
+            }
+        }
 
         Ok(())
     }
@@ -228,7 +367,7 @@ impl VectorIndex {
         // or hnsw_rs panics in search_layer (hnsw_rs 0.2.1 hnsw.rs:938); clamp both ef
         // and k into the index size. An empty index returns no neighbours rather than
         // searching a malformed graph.
-        let n = self.stored_vectors.len();
+        let n = self.len();
         if n == 0 {
             return Ok(Vec::new());
         }
@@ -249,7 +388,16 @@ impl VectorIndex {
         // HTTP search must never be able to crash the process — contain it and
         // surface a clean error instead.
         let results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.hnsw.search(query, k.min(n), ef_search)
+            match &self.backend {
+                Backend::F32(h) => h.search(query, k.min(n), ef_search),
+                // The query is quantized to the stored precision before the
+                // search, so the graph is walked with the same arithmetic it
+                // was built with.
+                Backend::F16(h) => {
+                    let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
+                    h.search(&q, k.min(n), ef_search)
+                }
+            }
         })) {
             Ok(r) => r,
             Err(_) => {
@@ -282,16 +430,44 @@ impl VectorIndex {
         Ok(neighbors)
     }
 
+    /// Every stored vector, at f32, whichever precision the index holds.
+    /// A quantized value widens back exactly -- f16 to f32 is lossless -- so
+    /// this is the original value only when the index is unquantized, and the
+    /// rounded one otherwise. That is what was stored, and what a reload must
+    /// reproduce.
+    fn iter_stored(&self) -> impl Iterator<Item = StoredVector> + '_ {
+        self.stored_f32.iter().cloned().chain(
+            self.stored_f16.iter().map(|(id, v)| StoredVector {
+                node_id: *id,
+                vector: v.iter().map(|x| x.to_f32()).collect(),
+            }),
+        )
+    }
+
     /// Exact nearest-neighbour search by linear scan over stored vectors.
     /// Used as a fallback when the HNSW index search panics. The index uses
     /// cosine distance, so this matches it; non-finite distances are skipped.
     fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
-        let mut scored: Vec<(NodeId, f32)> = self
-            .stored_vectors
-            .iter()
-            .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
-            .filter(|(_, d)| d.is_finite())
-            .collect();
+        // The query is quantized to match what is stored, so the exact search
+        // answers the same question the graph does. Comparing a full-precision
+        // query against quantized vectors would make the fallback disagree with
+        // the index it is standing in for, which is worse than either.
+        let mut scored: Vec<(NodeId, f32)> = match self.quantization {
+            Quantization::None => self
+                .stored_f32
+                .iter()
+                .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                .collect(),
+            Quantization::Fp16 => {
+                let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
+                self.stored_f16
+                    .iter()
+                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .collect()
+            }
+        };
+        let mut scored: Vec<(NodeId, f32)> =
+            scored.drain(..).filter(|(_, d)| d.is_finite()).collect();
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         scored
@@ -309,12 +485,12 @@ impl VectorIndex {
 
     /// Get count of stored vectors
     pub fn len(&self) -> usize {
-        self.stored_vectors.len()
+        self.stored_f32.len() + self.stored_f16.len()
     }
 
     /// Check if index is empty
     pub fn is_empty(&self) -> bool {
-        self.stored_vectors.is_empty()
+        self.len() == 0
     }
 
     /// Save index to disk by serializing stored vectors via bincode.
@@ -322,7 +498,11 @@ impl VectorIndex {
     pub fn dump(&self, path: &std::path::Path) -> VectorResult<()> {
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        bincode::serialize_into(writer, &self.stored_vectors)
+        // Always f32 on disk, whatever the index holds. Quantization is a
+        // runtime memory choice, not a file format: a snapshot written by a
+        // quantized index has to load into an unquantized one and the reverse.
+        let as_f32: Vec<StoredVector> = self.iter_stored().collect();
+        bincode::serialize_into(writer, &as_f32)
             .map_err(|e| VectorError::IndexError(format!("serialization error: {}", e)))?;
         Ok(())
     }
@@ -333,8 +513,23 @@ impl VectorIndex {
         dimensions: usize,
         metric: DistanceMetric,
     ) -> VectorResult<Self> {
+        Self::load_with_quantization(path, dimensions, metric, Quantization::None)
+    }
+
+    /// Load, re-quantizing to the requested precision (NDS-09).
+    ///
+    /// The file is f32 either way, so this is the only place the choice is
+    /// made: an index reloaded as `Fp16` re-rounds on the way in, and one
+    /// reloaded as `None` from a file a quantized index wrote gets the rounded
+    /// values back at full width. Neither is a migration.
+    pub fn load_with_quantization(
+        path: &std::path::Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+    ) -> VectorResult<Self> {
         if !path.exists() {
-            return Ok(Self::new(dimensions, metric));
+            return Ok(Self::with_quantization(dimensions, metric, quantization));
         }
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
@@ -342,21 +537,11 @@ impl VectorIndex {
             .map_err(|e| VectorError::IndexError(format!("deserialization error: {}", e)))?;
 
         let max_elements = (stored_vectors.len() + 10_000).max(100_000);
-        let m = 16;
-        let ef_construction = 200;
-        let mut hnsw = Hnsw::new(m, max_elements, 16, ef_construction, CosineDistance);
-
-        // Re-insert all vectors
+        let mut index = Self::build(dimensions, metric, quantization, max_elements);
         for sv in &stored_vectors {
-            hnsw.insert((&sv.vector, sv.node_id as usize));
+            index.add(NodeId::new(sv.node_id), &sv.vector)?;
         }
-
-        Ok(Self {
-            dimensions,
-            metric,
-            hnsw,
-            stored_vectors,
-        })
+        Ok(index)
     }
 }
 
