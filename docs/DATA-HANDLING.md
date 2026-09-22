@@ -116,8 +116,18 @@ personal data. Free text carrying a home address in prose passes, and so does a
 name paired with a diagnosis, which is more sensitive than anything in the list
 above. The scan is a floor under the published set, not a judgement about it.
 
-**Current state.** Pending the first full run; this line records the result
-once the workflow has scanned the whole published set.
+**Current state, 2026-09-22.** Three of the four snapshots on
+`kg-snapshots-v1` are clean: legal-judgments, bank-model-risk and cricket,
+across 5.9 million property values.
+
+`clinical-trials.sgsnap` is **not** clean. Across 36.5 million values it
+carries contact email addresses and phone numbers in site, sponsor and trial
+description fields — most in `Site.facility`, and several in `Site.zip`, where
+a contact detail has been filed into the wrong column upstream. The data comes
+from AACT/ClinicalTrials.gov, where those contacts are themselves public, so
+this is a question about whether we re-publish them rather than a leak. It is
+tracked on the issue linked from the scan output and is not resolved by this
+page.
 
 ## What we would have to change for this page to stop being true
 

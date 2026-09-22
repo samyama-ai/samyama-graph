@@ -274,12 +274,38 @@ fn is_phone(s: &str) -> bool {
         .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '-' | '(' | ')'))
 }
 
+/// IBAN length per ISO 3166 country, for the countries that have one.
+///
+/// The country and its exact length carry most of the weight here, and the
+/// reason is arithmetic. mod-97 admits 1 in 97 candidates, and the
+/// clinical-trials snapshot has 27 million property values -- so on shape and
+/// checksum alone it reported seventeen "IBANs" in `ArmGroup.label`, which are
+/// pharmaceutical arm names. A two-letter prefix that is not an IBAN country,
+/// or a length that is not that country's, is not a near-miss: it is not an
+/// IBAN at all, and checking it removes almost every chance match.
+const IBAN_LENGTHS: &[(&str, usize)] = &[
+    ("AD", 24), ("AE", 23), ("AL", 28), ("AT", 20), ("AZ", 28), ("BA", 20),
+    ("BE", 16), ("BG", 22), ("BH", 22), ("BI", 27), ("BR", 29), ("BY", 28),
+    ("CH", 21), ("CR", 22), ("CY", 28), ("CZ", 24), ("DE", 22), ("DK", 18),
+    ("DO", 28), ("EE", 20), ("EG", 29), ("ES", 24), ("FI", 18), ("FO", 18),
+    ("FR", 27), ("GB", 22), ("GE", 22), ("GI", 23), ("GL", 18), ("GR", 27),
+    ("GT", 28), ("HR", 21), ("HU", 28), ("IE", 22), ("IL", 23), ("IQ", 23),
+    ("IS", 26), ("IT", 27), ("JO", 30), ("KW", 30), ("KZ", 20), ("LB", 28),
+    ("LC", 32), ("LI", 21), ("LT", 20), ("LU", 20), ("LV", 21), ("LY", 25),
+    ("MC", 27), ("MD", 24), ("ME", 22), ("MK", 19), ("MR", 27), ("MT", 31),
+    ("MU", 30), ("NL", 18), ("NO", 15), ("PK", 24), ("PL", 28), ("PS", 29),
+    ("PT", 25), ("QA", 29), ("RO", 24), ("RS", 22), ("SA", 24), ("SC", 31),
+    ("SD", 18), ("SE", 24), ("SI", 19), ("SK", 24), ("SM", 27), ("ST", 25),
+    ("SV", 28), ("TL", 23), ("TN", 24), ("TR", 26), ("UA", 29), ("VA", 22),
+    ("VG", 24), ("XK", 20),
+];
+
 fn is_iban(s: &str) -> bool {
     let t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if t.len() < 15 || t.len() > 34 {
+    let b = t.as_bytes();
+    if b.len() < 15 || b.len() > 34 {
         return false;
     }
-    let b = t.as_bytes();
     if !(b[0].is_ascii_uppercase() && b[1].is_ascii_uppercase()) {
         return false;
     }
@@ -289,8 +315,13 @@ fn is_iban(s: &str) -> bool {
     if !b[4..].iter().all(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
+    // The country must issue IBANs, and the length must be that country's.
+    let cc = &t[..2];
+    if !IBAN_LENGTHS.iter().any(|(c, n)| *c == cc && *n == t.len()) {
+        return false;
+    }
     // mod-97 over the rearranged string, which is the IBAN checksum.
-    let rearranged: String = format!("{}{}", &t[4..], &t[..4]);
+    let rearranged = format!("{}{}", &t[4..], &t[..4]);
     let mut rem: u32 = 0;
     for ch in rearranged.chars() {
         let v = if ch.is_ascii_digit() {
@@ -303,17 +334,44 @@ fn is_iban(s: &str) -> bool {
     rem == 1
 }
 
-/// Every detector, in the order they are tried.
-type Detector = (&'static str, fn(&str) -> bool);
+/// Every detector: name, test, and whether it may be applied to a *token*
+/// inside free text as well as to a whole property value.
+///
+/// The third field is the lesson from the first run against a real artifact.
+/// Scanning the 745 MB clinical-trials snapshot -- 36.5 million property
+/// values, so on the order of a billion tokens -- returned thirty-five
+/// findings, and most were chance checksum passes inside prose. The arithmetic
+/// says they had to be: **1 in 10** random twelve-digit numbers satisfies
+/// Verhoeff, and **1 in 97** strings of the right shape satisfy the IBAN
+/// mod-97. At a billion tokens a filter that admits one in ten admits a great
+/// many, and a report with thirty-four wrong entries is an alarm, not a scan.
+///
+/// So a detector runs inside free text only when its *shape* is improbable on
+/// its own and the checksum is confirmation rather than the whole argument:
+///
+/// - `email` -- an `@` with a hostname and a real TLD either side
+/// - `ssn` -- `NNN-NN-NNNN`, with the ranges the SSA never issued excluded
+/// - `payment_card` -- a specific length, a leading digit of 3-6, *and* Luhn
+///
+/// The rest are matched against a whole property value only. An Aadhaar alone
+/// in a field is a finding; twelve digits inside a paragraph about a dosing
+/// schedule is a coincidence that happens every tenth time.
+///
+/// `phone` is whole-value for a different reason: a written phone number
+/// contains spaces, so splitting free text on whitespace takes it apart before
+/// the detector sees it. Finding one in prose would need its own scan, and the
+/// case it exists for -- a number sitting in a field of its own, which is how
+/// the clinical-trials snapshot carries them -- is covered without it.
+type Detector = (&'static str, fn(&str) -> bool, bool);
 
 const DETECTORS: &[Detector] = &[
-    ("email", is_email),
-    ("payment_card", is_payment_card),
-    ("aadhaar", is_aadhaar),
-    ("pan", is_pan),
-    ("ssn", is_ssn),
-    ("phone", is_phone),
-    ("iban", is_iban),
+    ("email", is_email, true),
+    ("payment_card", is_payment_card, true),
+    ("ssn", is_ssn, true),
+    ("aadhaar", is_aadhaar, false),
+    ("pan", is_pan, false),
+    ("iban", is_iban, false),
+    ("phone", is_phone, false),
 ];
 
 /// The detector a single value trips, if any.
@@ -326,7 +384,7 @@ pub fn classify(value: &str) -> Option<&'static str> {
     if t.is_empty() || t.len() > 4096 {
         return None;
     }
-    if let Some(kind) = DETECTORS.iter().find(|(_, f)| f(t)).map(|(k, _)| *k) {
+    if let Some(kind) = DETECTORS.iter().find(|(_, f, _)| f(t)).map(|(k, _, _)| *k) {
         return Some(kind);
     }
     // Then each token, because an identifier inside free text is the case this
@@ -341,7 +399,11 @@ pub fn classify(value: &str) -> Option<&'static str> {
         .filter(|tok| !tok.is_empty() && tok.len() <= 128)
         .find_map(|tok| {
             let tok = tok.trim_matches(|c: char| c == '.' || c == '-');
-            DETECTORS.iter().find(|(_, f)| f(tok)).map(|(k, _)| *k)
+            DETECTORS
+                .iter()
+                .filter(|(_, _, in_free_text)| *in_free_text)
+                .find(|(_, f, _)| f(tok))
+                .map(|(k, _, _)| *k)
         })
 }
 

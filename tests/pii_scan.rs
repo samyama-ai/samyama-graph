@@ -139,6 +139,19 @@ fn an_iban_is_found_and_a_mistyped_one_is_not() {
     // One digit changed: passes every shape check, fails mod-97.
     assert_eq!(classify("DE89370400440532013001"), None);
     assert_eq!(classify("GB82WEST12345698765433"), None);
+
+    // The country and its exact length carry most of the weight, and this is
+    // why. mod-97 admits 1 in 97 candidates; on the 27-million-value
+    // clinical-trials snapshot, shape plus checksum alone reported seventeen
+    // "IBANs" in `ArmGroup.label`, which are pharmaceutical arm names.
+    //
+    // `AK` is not a country that issues IBANs, so this is not a near-miss --
+    // it is not an IBAN whatever its check digits say.
+    assert_eq!(classify("AK89370400440532013000"), None);
+    // `DE` is, but Germany's IBAN is 22 characters and this is 24.
+    assert_eq!(classify("DE8937040044053201300012"), None);
+    // `SG` and `EC` appear in the snapshot's arm labels and issue no IBAN.
+    assert_eq!(classify("SG89370400440532013000"), None);
 }
 
 #[test]
@@ -160,11 +173,50 @@ fn an_identifier_inside_free_text_is_found() {
     // token, so a note carrying an address is a finding.
     assert_eq!(classify("contact alice@example.com for access"), Some("email"));
     assert_eq!(classify("card on file: 4539578763621486 (visa)"), Some("payment_card"));
-    assert_eq!(classify("ref ABCDE1234F filed 2016"), Some("pan"));
+    assert_eq!(classify("ssn 123-45-6789 on file"), Some("ssn"));
     // And the token split does not create matches that were not there: a
     // sentence of ordinary words is still nothing.
     assert_eq!(classify("the judgment was delivered on 12 January 2016"), None);
     assert_eq!(classify("values 4539578763621487 and 1234567812345670"), None);
+}
+
+#[test]
+fn the_weak_checksum_detectors_do_not_run_inside_free_text() {
+    // Found by running the scan against the 745 MB clinical-trials snapshot:
+    // 36.5 million property values, on the order of a billion tokens, and
+    // thirty-five findings of which almost all were chance checksum passes
+    // inside prose.
+    //
+    // The arithmetic says they had to be. 1 in 10 random twelve-digit numbers
+    // satisfies Verhoeff and 1 in 97 shaped strings satisfy the IBAN mod-97,
+    // so at that many tokens both are certain to fire. Aadhaar, PAN and IBAN
+    // therefore match a whole property value only.
+    assert_eq!(classify("234567890124"), Some("aadhaar"));
+    assert_eq!(
+        classify("dose escalation cohort 234567890124 over 12 weeks"),
+        None,
+        "a twelve-digit run inside prose is a coincidence, not an Aadhaar"
+    );
+
+    assert_eq!(classify("ABCDE1234F"), Some("pan"));
+    assert_eq!(classify("ref ABCDE1234F filed 2016"), None);
+
+    assert_eq!(classify("DE89370400440532013000"), Some("iban"));
+    assert_eq!(classify("arm BI 1234567 versus DE89370400440532013000"), None);
+
+    // The four that stay on, because their shape is improbable without the
+    // checksum doing the work.
+    assert_eq!(classify("write to alice@example.com today"), Some("email"));
+    assert_eq!(classify("ssn 123-45-6789 on file"), Some("ssn"));
+    // `phone` is whole-value for a different reason from the checksum three:
+    // a written number contains spaces, so splitting free text takes it apart
+    // before the detector sees it.
+    assert_eq!(classify("+1 (415) 555-0132"), Some("phone"));
+    assert_eq!(classify("call +1 (415) 555-0132 now"), None);
+    assert_eq!(
+        classify("charged to 4539578763621486 on Tuesday"),
+        Some("payment_card")
+    );
 }
 
 // ───────────────────────────────────────────────────────────────── reporting
