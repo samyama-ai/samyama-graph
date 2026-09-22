@@ -235,12 +235,14 @@ impl SamyamaClient {
     /// argument, so datasets written under different graph names silently merged into one
     /// (#366). To keep datasets apart here, run a separate instance per dataset.
     #[pyo3(signature = (cypher, graph="default"))]
-    fn query(&self, cypher: &str, graph: &str) -> PyResult<QueryResult> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.query(graph, cypher)),
-            ClientInner::Remote(c) => rt.block_on(c.query(graph, cypher)),
-        };
+    fn query(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryResult> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.query(graph, cypher)),
+                ClientInner::Remote(c) => rt.block_on(c.query(graph, cypher)),
+            }
+        });
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
@@ -251,12 +253,14 @@ impl SamyamaClient {
     ///
     /// See `query` for what `graph` does -- and does not -- select.
     #[pyo3(signature = (cypher, graph="default"))]
-    fn query_readonly(&self, cypher: &str, graph: &str) -> PyResult<QueryResult> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.query_readonly(graph, cypher)),
-            ClientInner::Remote(c) => rt.block_on(c.query_readonly(graph, cypher)),
-        };
+    fn query_readonly(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryResult> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.query_readonly(graph, cypher)),
+                ClientInner::Remote(c) => rt.block_on(c.query_readonly(graph, cypher)),
+            }
+        });
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
@@ -264,12 +268,14 @@ impl SamyamaClient {
     }
 
     /// Get server status
-    fn status(&self) -> PyResult<ServerStatus> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.status()),
-            ClientInner::Remote(c) => rt.block_on(c.status()),
-        };
+    fn status(&self, py: Python<'_>) -> PyResult<ServerStatus> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.status()),
+                ClientInner::Remote(c) => rt.block_on(c.status()),
+            }
+        });
         match result {
             Ok(s) => Ok(ServerStatus {
                 status: s.status,
@@ -282,33 +288,39 @@ impl SamyamaClient {
     }
 
     /// Ping the server
-    fn ping(&self) -> PyResult<String> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.ping()),
-            ClientInner::Remote(c) => rt.block_on(c.ping()),
-        };
+    fn ping(&self, py: Python<'_>) -> PyResult<String> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.ping()),
+                ClientInner::Remote(c) => rt.block_on(c.ping()),
+            }
+        });
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Delete a graph
     #[pyo3(signature = (graph="default"))]
-    fn delete_graph(&self, graph: &str) -> PyResult<()> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.delete_graph(graph)),
-            ClientInner::Remote(c) => rt.block_on(c.delete_graph(graph)),
-        };
+    fn delete_graph(&self, py: Python<'_>, graph: &str) -> PyResult<()> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.delete_graph(graph)),
+                ClientInner::Remote(c) => rt.block_on(c.delete_graph(graph)),
+            }
+        });
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// List graphs
-    fn list_graphs(&self) -> PyResult<Vec<String>> {
-        let rt = get_runtime();
-        let result = match &*self.inner {
-            ClientInner::Embedded(c) => rt.block_on(c.list_graphs()),
-            ClientInner::Remote(c) => rt.block_on(c.list_graphs()),
-        };
+    fn list_graphs(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(c) => rt.block_on(c.list_graphs()),
+                ClientInner::Remote(c) => rt.block_on(c.list_graphs()),
+            }
+        });
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -336,7 +348,7 @@ impl SamyamaClient {
             tolerance,
             ..Default::default()
         };
-        let scores: HashMap<u64, f64> = rt.block_on(client.page_rank(config, label, edge_type));
+        let scores: HashMap<u64, f64> = py.detach(|| rt.block_on(client.page_rank(config, label, edge_type)));
         let dict = PyDict::new(py);
         for (k, v) in &scores {
             dict.set_item(k, v)?;
@@ -350,7 +362,7 @@ impl SamyamaClient {
     fn wcc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        let result = rt.block_on(client.weakly_connected_components(label, edge_type));
+        let result = py.detach(|| rt.block_on(client.weakly_connected_components(label, edge_type)));
         let dict = PyDict::new(py);
         let component_count = result.components.len();
         let components_dict = PyDict::new(py);
@@ -368,7 +380,7 @@ impl SamyamaClient {
     fn scc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        let result = rt.block_on(client.strongly_connected_components(label, edge_type));
+        let result = py.detach(|| rt.block_on(client.strongly_connected_components(label, edge_type)));
         let dict = PyDict::new(py);
         let component_count = result.components.len();
         let components_dict = PyDict::new(py);
@@ -393,7 +405,7 @@ impl SamyamaClient {
     ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        let result = rt.block_on(client.bfs(source, target, label, edge_type));
+        let result = py.detach(|| rt.block_on(client.bfs(source, target, label, edge_type)));
         match result {
             Some(path) => {
                 let dict = PyDict::new(py);
@@ -419,7 +431,7 @@ impl SamyamaClient {
     ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        let result = rt.block_on(client.dijkstra(source, target, label, edge_type, weight_property));
+        let result = py.detach(|| rt.block_on(client.dijkstra(source, target, label, edge_type, weight_property)));
         match result {
             Ok(Some(path)) => {
                 let dict = PyDict::new(py);
@@ -455,7 +467,7 @@ impl SamyamaClient {
             ..PcaConfig::default()
         };
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
-        let result = rt.block_on(client.pca(label, &props_refs, config));
+        let result = py.detach(|| rt.block_on(client.pca(label, &props_refs, config)));
         let dict = PyDict::new(py);
         // Convert components (Vec<Vec<f64>>) to list of lists
         let components: Vec<Vec<f64>> = result.components;
@@ -471,10 +483,15 @@ impl SamyamaClient {
 
     /// Count triangles in the graph.
     #[pyo3(signature = (label=None, edge_type=None))]
-    fn triangle_count(&self, label: Option<&str>, edge_type: Option<&str>) -> PyResult<usize> {
+    fn triangle_count(
+        &self,
+        py: Python<'_>,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> PyResult<usize> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        Ok(rt.block_on(client.count_triangles(label, edge_type)))
+        Ok(py.detach(|| rt.block_on(client.count_triangles(label, edge_type))))
     }
 
     // ========================================================================
@@ -486,6 +503,7 @@ impl SamyamaClient {
     #[pyo3(signature = (label, property, dimensions, metric="cosine"))]
     fn create_vector_index(
         &self,
+        py: Python<'_>,
         label: &str,
         property: &str,
         dimensions: usize,
@@ -498,13 +516,14 @@ impl SamyamaClient {
             "dot" | "inner_product" => DistanceMetric::InnerProduct,
             _ => DistanceMetric::Cosine,
         };
-        rt.block_on(client.create_vector_index(label, property, dimensions, dist))
+        py.detach(|| rt.block_on(client.create_vector_index(label, property, dimensions, dist)))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Add a vector for a node in a vector index.
     fn add_vector(
         &self,
+        py: Python<'_>,
         label: &str,
         property: &str,
         node_id: u64,
@@ -512,7 +531,7 @@ impl SamyamaClient {
     ) -> PyResult<()> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        rt.block_on(client.add_vector(label, property, NodeId(node_id), &vector))
+        py.detach(|| rt.block_on(client.add_vector(label, property, NodeId(node_id), &vector)))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -520,6 +539,7 @@ impl SamyamaClient {
     #[pyo3(signature = (label, property, query_vector, k=10))]
     fn vector_search(
         &self,
+        py: Python<'_>,
         label: &str,
         property: &str,
         query_vector: Vec<f32>,
@@ -527,7 +547,7 @@ impl SamyamaClient {
     ) -> PyResult<Vec<(u64, f32)>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
-        let results = rt.block_on(client.vector_search(label, property, &query_vector, k))
+        let results = py.detach(|| rt.block_on(client.vector_search(label, property, &query_vector, k)))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(results.into_iter().map(|(nid, dist)| (nid.0, dist)).collect())
     }

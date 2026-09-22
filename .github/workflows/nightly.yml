@@ -93,7 +93,7 @@ jobs:
 
       - name: Tests that need the compiled binding
         working-directory: sdk/python
-        run: .venv/bin/python -m pytest -q tests/test_embedded.py tests/test_vector.py
+        run: .venv/bin/python -m pytest -q tests/test_embedded.py tests/test_vector.py tests/test_async_client.py
 
       - name: The conversions themselves
         working-directory: sdk/python
