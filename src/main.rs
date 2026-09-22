@@ -25,6 +25,7 @@ async fn main() {
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
         Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
         Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
+        Some("schema") => std::process::exit(cmd_schema(&argv)),
         Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
         Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
         _ => {}
@@ -91,6 +92,43 @@ fn cmd_pii_scan(argv: &[String]) -> i32 {
         }
     }
     worst
+}
+
+/// `samyama schema <snapshot.sgsnap> [--markdown]`
+///
+/// Prints the schema the snapshot actually contains, as a mermaid diagram or a
+/// table (KG-02). Every relationship shown is one that occurs, with the number
+/// of times it does.
+fn cmd_schema(argv: &[String]) -> i32 {
+    let markdown = argv.iter().any(|a| a == "--markdown");
+    let Some(path) = argv.iter().skip(2).find(|a| !a.starts_with('-')) else {
+        eprintln!("usage: samyama schema <snapshot.sgsnap> [--markdown]");
+        return 2;
+    };
+    match samyama::schema_doc::derive_from_path(std::path::Path::new(path)) {
+        Ok(s) => {
+            eprintln!(
+                "{path}: {} nodes, {} edges, {} labels, {} edge types, {} distinct relationships",
+                s.nodes,
+                s.edges,
+                s.labels.len(),
+                s.edge_types.len(),
+                s.triples.len()
+            );
+            if s.dangling_edges > 0 {
+                eprintln!(
+                    "warning: {} edge(s) point at a node this snapshot does not contain",
+                    s.dangling_edges
+                );
+            }
+            print!("{}", if markdown { s.to_markdown() } else { s.to_mermaid() });
+            0
+        }
+        Err(e) => {
+            eprintln!("ERROR {path}: {e}");
+            2
+        }
+    }
 }
 
 /// `samyama snapshot-key`
