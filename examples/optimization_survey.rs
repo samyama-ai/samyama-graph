@@ -29,6 +29,7 @@ use samyama::query::QueryEngine;
 use samyama_optimization::algorithms::*;
 use samyama_optimization::benchmarks::single_objective::so_suite;
 use samyama_optimization::common::SolverConfig;
+use samyama_optimization::stats::{friedman, holm_adjust, wilcoxon_signed_rank, WilcoxonMethod};
 
 /// The names the Cypher surface is asked for. Written down rather than read
 /// from the dispatch: a list derived from what the dispatch accepts would
@@ -224,28 +225,144 @@ fn main() {
         eprintln!("  {name} done");
     }
 
-    // Friedman ranks across solvers, per function: the rank of each solver's
-    // median on each function, averaged. Reported because OPT-02 asks for a
-    // rank across algorithms; the significance test itself is not computed
-    // here and is named as absent rather than implied by the ranks.
+    // Friedman across solvers, blocked by function, and Wilcoxon signed-rank
+    // on every pair (OPT-02). This used to be ranks alone, with the tests
+    // named as absent so the ordering could not be read as a result.
+    //
+    // Two things changed besides adding the tests. Ties now share the average
+    // of the positions they span: the old code sorted and assigned
+    // `position + 1`, so two solvers that both reached the global minimum were
+    // separated by float comparison order. And the pairwise table carries a
+    // Holm-adjusted column, because 31 solvers is 465 comparisons and a raw
+    // table at 0.05 rejects about 23 of them from noise alone.
     let solvers: Vec<String> = per_solver_medians.keys().cloned().collect();
     let mut avg_rank: BTreeMap<String, f64> = BTreeMap::new();
-    if !solvers.is_empty() {
+    let mut friedman_json = serde_json::Value::Null;
+    let mut pairwise = Vec::new();
+
+    if solvers.len() >= 2 {
         let n_funcs = per_solver_medians[&solvers[0]].len();
-        for fi in 0..n_funcs {
-            let mut col: Vec<(String, f64)> = solvers
-                .iter()
-                .map(|s| (s.clone(), per_solver_medians[s][fi]))
+        // Every solver is measured on every function, so a ragged row here is
+        // a bug upstream rather than a missing datum to skip over.
+        let complete = solvers
+            .iter()
+            .all(|s| per_solver_medians[s].len() == n_funcs);
+
+        if complete && n_funcs >= 2 {
+            let blocks: Vec<Vec<f64>> = (0..n_funcs)
+                .map(|fi| solvers.iter().map(|s| per_solver_medians[s][fi]).collect())
                 .collect();
-            col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            for (rank, (s, _)) in col.iter().enumerate() {
-                *avg_rank.entry(s.clone()).or_insert(0.0) += (rank + 1) as f64;
+
+            if let Some(f) = friedman(&blocks) {
+                for (s, r) in solvers.iter().zip(&f.average_ranks) {
+                    avg_rank.insert(s.clone(), *r);
+                }
+                friedman_json = serde_json::json!({
+                    "k_solvers": f.k,
+                    "n_functions": f.n,
+                    "chi_square": f.chi_square,
+                    "chi_square_df": f.chi_square_df,
+                    "chi_square_p": f.chi_square_p,
+                    "iman_davenport_f": f.iman_davenport_f,
+                    "f_df1": f.f_df1,
+                    "f_df2": f.f_df2,
+                    "iman_davenport_p": f.iman_davenport_p,
+                    "note": "Tie-corrected chi-square with the Iman-Davenport F \
+                             beside it. Both are approximations and they disagree \
+                             at this shape, so neither is presented alone.",
+                });
+            }
+
+            // Pairwise, then Holm over the whole family at once -- adjusting
+            // within a subset would give a different answer for the same pair
+            // depending on which table it was printed in.
+            let mut raw_p = Vec::new();
+            for i in 0..solvers.len() {
+                for j in (i + 1)..solvers.len() {
+                    let a = &per_solver_medians[&solvers[i]];
+                    let b = &per_solver_medians[&solvers[j]];
+                    match wilcoxon_signed_rank(a, b) {
+                        Some(w) => {
+                            raw_p.push(w.p_two_sided);
+                            pairwise.push(serde_json::json!({
+                                "a": solvers[i], "b": solvers[j],
+                                "n": w.n,
+                                "w_plus": w.w_plus, "w_minus": w.w_minus,
+                                "statistic": w.statistic,
+                                "p_two_sided": w.p_two_sided,
+                                "method": match w.method {
+                                    WilcoxonMethod::Exact => "exact",
+                                    WilcoxonMethod::Normal => "normal_approximation",
+                                },
+                            }));
+                        }
+                        // Identical on every function. Recorded as untestable
+                        // rather than as p = 1: "no difference was detected"
+                        // and "there was nothing to test" are different facts.
+                        None => pairwise.push(serde_json::json!({
+                            "a": solvers[i], "b": solvers[j],
+                            "n": 0,
+                            "p_two_sided": serde_json::Value::Null,
+                            "method": "not_applicable",
+                            "why": "every paired difference is zero",
+                        })),
+                    }
+                }
+            }
+            let adjusted = holm_adjust(&raw_p);
+            let mut k = 0;
+            for entry in pairwise.iter_mut() {
+                if entry["method"] == "not_applicable" {
+                    entry["p_holm"] = serde_json::Value::Null;
+                } else {
+                    entry["p_holm"] = serde_json::json!(adjusted[k]);
+                    k += 1;
+                }
             }
         }
-        for v in avg_rank.values_mut() {
-            *v /= n_funcs as f64;
-        }
     }
+
+    let tests_computed = !friedman_json.is_null() && !pairwise.is_empty();
+
+    // Whether the pairwise half can reject anything *at all* on this corpus,
+    // which is a property of the sizes and not of the results.
+    //
+    // With no ties the exact two-sided Wilcoxon p-value is a count over 2^n
+    // sign assignments, so the smallest one obtainable from n functions is
+    // 2/2^n -- reached only when one solver wins on every single function.
+    // Holm's first threshold is alpha/m over m comparisons. If the smallest
+    // achievable p exceeds it, no pair can be declared different however the
+    // data comes out, and every "not significant" in the table above is a
+    // statement about the corpus rather than about the solvers.
+    let n_funcs_used = per_solver_medians
+        .values()
+        .next()
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let m = pairwise.len().max(1) as f64;
+    let smallest_achievable_p = if n_funcs_used > 0 && n_funcs_used < 63 {
+        2.0 / 2f64.powi(n_funcs_used as i32)
+    } else {
+        f64::NAN
+    };
+    let holm_first_threshold = 0.05 / m;
+    let power_json = serde_json::json!({
+        "alpha": 0.05,
+        "comparisons": pairwise.len(),
+        "functions": n_funcs_used,
+        "smallest_achievable_exact_p": smallest_achievable_p,
+        "holm_first_threshold": holm_first_threshold,
+        "pairwise_can_reject": smallest_achievable_p <= holm_first_threshold,
+        "note": "The exact two-sided Wilcoxon p-value on n blocks is a count over \
+                 2^n sign assignments, so 2/2^n is the smallest value obtainable \
+                 -- the case where one solver wins on every function. When that \
+                 exceeds Holm's first threshold the pairwise comparison cannot \
+                 reject for any data, and reporting 'no significant differences' \
+                 from it would describe the corpus while appearing to describe \
+                 the solvers. More functions is the fix; more seeds is not, \
+                 because the seeds are inside each median and n here counts \
+                 functions.",
+    });
 
     let cec_present = std::path::Path::new("data/cec/cec2017").is_dir();
 
@@ -263,7 +380,12 @@ fn main() {
         "cec_data_present": cec_present,
         "statistics": stats,
         "friedman_average_rank": avg_rank,
-        "significance_tests_computed": false,
+        "friedman_test": friedman_json,
+        "wilcoxon_pairwise": pairwise,
+        "wilcoxon_pairwise_count": pairwise.len(),
+        "multiple_comparison_correction": "holm",
+        "pairwise_power": power_json,
+        "significance_tests_computed": tests_computed,
     });
 
     if let Some(path) = json_out {
