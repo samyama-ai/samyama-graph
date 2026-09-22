@@ -82,6 +82,53 @@ key reaches Google's request logs by their design, not ours.
   fetch something (`src/query/csv_source.rs:45`).
 - **Raft and sharding** talk only to the peers you configured.
 
+## Personal identifiers in what we publish (TRUST-10)
+
+`samyama pii-scan <snapshot.sgsnap>...` scans a snapshot for personal
+identifiers and exits non-zero if it finds any. The weekly
+`.github/workflows/pii-scan.yml` runs it over every `.sgsnap` currently
+attached to the `kg-snapshots-v1` release.
+
+The gate is on the **published set**, not on the release job, because the
+snapshots are uploaded by hand rather than by CI. A check wired into the
+release workflow would pass every time without ever seeing an asset.
+
+**What it looks for.** Email addresses, international-format phone numbers,
+payment card numbers, Aadhaar, PAN, US Social Security numbers, and IBANs.
+Every pattern that has a checksum is checked against it: a sixteen-digit number
+is not a card number unless it passes Luhn, a twelve-digit number is not an
+Aadhaar unless it passes Verhoeff. Values are scanned whole and then by token,
+so an address inside free text is found.
+
+**What it does not look for, and why.**
+
+- **Names.** Several published graphs are built from public records — the
+  legal-judgments graph names judges and parties, the football graph names
+  players. A detector for names fires on every row of those, gets switched off,
+  and leaves a control that exists and does nothing.
+- **IP addresses.** Personal data under GDPR, and in an earlier draft of the
+  scanner. Removed for two reasons: the cyber KGs are *about* addresses, so it
+  fired on every row of the datasets it was added for; and a dotted quad is
+  indistinguishable from a version string — `1.0.0.0` is both.
+
+**What a clean run does not mean.** It does not mean a snapshot is free of
+personal data. Free text carrying a home address in prose passes, and so does a
+name paired with a diagnosis, which is more sensitive than anything in the list
+above. The scan is a floor under the published set, not a judgement about it.
+
+**Current state, 2026-09-22.** Three of the four snapshots on
+`kg-snapshots-v1` are clean: legal-judgments, bank-model-risk and cricket,
+across 5.9 million property values.
+
+`clinical-trials.sgsnap` is **not** clean. Across 36.5 million values it
+carries contact email addresses and phone numbers in site, sponsor and trial
+description fields — most in `Site.facility`, and several in `Site.zip`, where
+a contact detail has been filed into the wrong column upstream. The data comes
+from AACT/ClinicalTrials.gov, where those contacts are themselves public, so
+this is a question about whether we re-publish them rather than a leak. It is
+tracked on the issue linked from the scan output and is not resolved by this
+page.
+
 ## What we would have to change for this page to stop being true
 
 A new outbound call, a default provider, telemetry of any kind, or a feature
