@@ -13015,6 +13015,11 @@ pub struct CreateVectorIndexOperator {
     property_key: String,
     dimensions: usize,
     similarity: String,
+    /// How the index stores its values (NDS-09). Carried from the DDL rather
+    /// than defaulted here: an option the parser accepted and the operator
+    /// dropped would build a full-precision index for a caller who asked for
+    /// half of one and report success.
+    quantization: crate::vector::index::Quantization,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -13028,6 +13033,7 @@ impl CreateVectorIndexOperator {
             property_key,
             dimensions,
             similarity,
+            quantization: crate::vector::index::Quantization::None,
             name: None,
             executed: false,
         }
@@ -13035,6 +13041,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_name(mut self, name: Option<String>) -> Self {
         self.name = name;
+        self
+    }
+
+    pub fn with_quantization(mut self, q: crate::vector::index::Quantization) -> Self {
+        self.quantization = q;
         self
     }
 }
@@ -13058,7 +13069,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         };
 
         store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
-                                        &self.property_key, self.dimensions, metric)
+                                        &self.property_key, self.dimensions, metric,
+                                        self.quantization)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without

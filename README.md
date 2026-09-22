@@ -138,10 +138,21 @@ samyama --cors-origin https://graph.samyama.cloud
 
 or `SAMYAMA_CORS_ORIGINS=https://graph.samyama.cloud`. Without it the browser
 refuses the call. **This is deliberate** — `/api/query` runs arbitrary Cypher
-including `DELETE` and reads no credential from the request, so until v1.9 any
-web page you happened to visit could drive it
-([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)). The server
-also listens on loopback unless `--host` says otherwise.
+including `DELETE`, so until v1.9 any web page you happened to visit could
+drive it ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)).
+The server also listens on loopback unless `--host` says otherwise.
+
+To require a credential as well:
+
+```bash
+samyama auth-token ops >> credentials     # prints the token once; store the line
+samyama --auth-file credentials --host 0.0.0.0
+```
+
+Every request then needs `Authorization: Bearer <token>`, on every route.
+Without `--auth-file` the API reads no credential, which is the default and
+what every release before this one did. A token is all-or-nothing: there are no
+users, roles or per-graph grants yet.
 
 1. Open https://graph.samyama.cloud/ in your browser.
 2. Sign up for a new account, or sign in if you already have one.
@@ -388,6 +399,15 @@ RETURN nodeId, score ORDER BY score DESC LIMIT 10
 
 ```cypher
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
+
+-- Half the memory, at 16-bit precision. The index holds f16 in the HNSW graph
+-- and in the copy kept for persistence, so the saving is real rather than a
+-- claim about one of the two. What it costs in recall is a property of your
+-- corpus: measured on random vectors at 64 and 384 dimensions it was
+-- indistinguishable from f32, and `tests/vector_quantization.rs` is the
+-- instrument to measure your own.
+CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding)
+  OPTIONS {dimensions: 384, similarity: 'cosine', quantization: 'fp16'}
 
 CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
