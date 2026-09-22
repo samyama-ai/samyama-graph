@@ -7069,6 +7069,40 @@ impl QueryPlanner {
                     };
                     bound.extend(clause_vars);
                 }
+                Clause::Call(cc) => {
+                    // Same join rule as `Clause::Match` above, and for the same
+                    // reason: what a CALL binds is its YIELD names, and a clause
+                    // sharing nothing with what is already bound is a cartesian
+                    // product.
+                    //
+                    // A query that *opens* with CALL reaches here with `bound`
+                    // empty and `operator` the single empty row the pipeline
+                    // seeds with, so the product is 1 x N -- the call's own rows,
+                    // unchanged.
+                    //
+                    // This is what the by-kind path could not do. There, the CALL
+                    // is planned three hundred lines *after* the WITH barrier, so
+                    // for a leading CALL `operator` was still `None` when the
+                    // barrier block ran and `if let Some(op) = operator` skipped
+                    // it -- the WITH was dropped and the query returned the wrong
+                    // shape without erroring (#1375). Order is the whole problem,
+                    // and this loop is the thing that has it.
+                    let clause_vars: HashSet<String> = cc
+                        .yield_items
+                        .iter()
+                        .map(|i| i.alias.clone().unwrap_or_else(|| i.name.clone()))
+                        .collect();
+                    let call_op = self.plan_call(cc, store)?;
+                    let mut shared: Vec<String> =
+                        bound.intersection(&clause_vars).cloned().collect();
+                    shared.sort();
+                    operator = if shared.is_empty() {
+                        Box::new(CartesianProductOperator::new(operator, call_op)) as OperatorBox
+                    } else {
+                        Box::new(JoinOperator::new(operator, call_op, shared)) as OperatorBox
+                    };
+                    bound.extend(clause_vars);
+                }
                 Clause::Merge(mc) => {
                     let on_create: Vec<(String, String, Expression)> = mc
                         .on_create_set
@@ -7347,8 +7381,8 @@ impl QueryPlanner {
                     return Err(ExecutionError::RuntimeError(format!(
                         "`{}` is not yet supported in this clause position (query shape: {}). \
                          The parser accepts this order; the planner threads MATCH, WHERE, \
-                         UNWIND, WITH, CREATE, MERGE, SET, REMOVE, DELETE and RETURN through it \
-                         so far, and FOREACH and CALL are still to come (samyama-graph#617).",
+                         UNWIND, WITH, CREATE, MERGE, SET, REMOVE, DELETE, CALL and RETURN through it \
+                         so far, and FOREACH is still to come (samyama-graph#617).",
                         unsupported.kind(),
                         shape.join(" ")
                     )));
