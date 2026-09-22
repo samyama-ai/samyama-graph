@@ -180,59 +180,65 @@ jobs:
       # Every tag the GHCR step produced, pointed at the same digest.
       # Derived from the metadata job's output rather than re-listed here, so
       # the two registries cannot drift apart in which tags they carry.
-      # Unverified until this runs with real credentials: the GHCR index holds
-      # two platform manifests *and* two attestation manifests
-      # (unknown/unknown, vnd.docker.reference.*), and ECR Public's support for
-      # those is not something this repository can test without the role. If
-      # the push is rejected on them, copy the two platform manifests
-      # explicitly instead:
+      # Copy the two platform manifests, not the whole index.
       #
-      #   docker buildx imagetools create --tag "$DEST:$tag" \
-      #     ghcr.io/samyama-ai/samyama-graph@<amd64-digest> \
-      #     ghcr.io/samyama-ai/samyama-graph@<arm64-digest>
+      # `imagetools create ... $SRC` copies the index verbatim, attestation
+      # manifests included (unknown/unknown, vnd.docker.reference.*). ECR
+      # Public accepted that index and then could not serve one of them, so
+      # v1.9.0 pulled and ran correctly while anything walking the index --
+      # a scanner, cosign, `imagetools inspect` -- failed on a dangling
+      # reference:
       #
-      # That loses the attestations on the ECR copy and keeps them on GHCR,
-      # which is the right way round: GHCR is where the README sends people.
-      - name: Mirror every tag by digest
+      #   ERROR: failed to copy: httpReadSeeker: failed open:
+      #   content at .../manifests/sha256:5e31c2b0...
+      #
+      # Naming the platform manifests builds an index with nothing dangling.
+      # The attestations stay on GHCR, which is where the README sends people
+      # and where `gh attestation verify` looks.
+      - name: Mirror every tag, platform manifests only
         env:
           SRC: ghcr.io/samyama-ai/samyama-graph@${{ needs.build-and-push.outputs.digest }}
           DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
           TAGS: ${{ needs.build-and-push.outputs.tags }}
         run: |
           set -euo pipefail
-          echo "source: $SRC"
+          PLATFORM_FILTER='.manifests[] | select(.platform.architecture and .platform.architecture != "unknown")'
+          mapfile -t REFS < <(docker buildx imagetools inspect "$SRC" --raw | jq -r "$PLATFORM_FILTER | .digest")
+          [ "${#REFS[@]}" -eq 2 ] || { echo "::error::expected 2 platform manifests, found ${#REFS[@]}"; exit 1; }
+          SRCS=()
+          for d in "${REFS[@]}"; do SRCS+=("ghcr.io/samyama-ai/samyama-graph@$d"); done
+          echo "platform sources: ${SRCS[*]}"
           count=0
-          # metadata-action emits one fully-qualified reference per line.
           while read -r ref; do
             [ -n "$ref" ] || continue
             tag="${ref##*:}"
             echo "--> $DEST:$tag"
-            docker buildx imagetools create --tag "$DEST:$tag" "$SRC"
+            docker buildx imagetools create --tag "$DEST:$tag" "${SRCS[@]}"
             count=$((count + 1))
           done <<< "$TAGS"
-          # A mirror that copied nothing would otherwise report success.
           [ "$count" -gt 0 ] || { echo "::error::no tags to mirror"; exit 1; }
           echo "mirrored $count tag(s)"
 
-      # Verify against the registry rather than trusting the push: the
-      # manifest ECR serves must be the digest GHCR serves, and it must still
-      # list both architectures. A mirror that silently flattened to one
-      # platform is exactly the #1327 shape.
+      # Verify against the registry rather than trusting the push. The index
+      # digest is no longer comparable -- ours is a new index over the same two
+      # manifests -- so compare the platform digests, which are what decide
+      # what a user actually runs. Read raw: resolving the index is what broke.
       - name: Verify what ECR now serves
         env:
+          SRC: ghcr.io/samyama-ai/samyama-graph@${{ needs.build-and-push.outputs.digest }}
           DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
           VERSION: ${{ needs.build-and-push.outputs.version }}
-          EXPECTED: ${{ needs.build-and-push.outputs.digest }}
         run: |
           set -euo pipefail
-          got=$(docker buildx imagetools inspect "$DEST:$VERSION" --format '{{.Manifest.Digest}}')
-          echo "expected $EXPECTED"
-          echo "got      $got"
-          [ "$got" = "$EXPECTED" ] || { echo "::error::ECR serves a different digest"; exit 1; }
-          platforms=$(docker buildx imagetools inspect "$DEST:$VERSION" --raw \
-            | python3 -c "import json,sys; m=json.load(sys.stdin).get('manifests',[]); print(' '.join(sorted(f\"{x['platform']['os']}/{x['platform']['architecture']}\" for x in m if x.get('platform',{}).get('architecture') != 'unknown')))")
-          echo "platforms: $platforms"
-          [ "$platforms" = "linux/amd64 linux/arm64" ] || { echo "::error::expected both architectures, got: $platforms"; exit 1; }
+          Q='[.manifests[] | select(.platform.architecture and .platform.architecture != "unknown") | {p: (.platform.os + "/" + .platform.architecture), d: .digest}] | sort_by(.p) | map(.p + " " + .d) | .[]'
+          docker buildx imagetools inspect "$SRC" --raw | jq -r "$Q" > /tmp/want.txt
+          docker buildx imagetools inspect "$DEST:$VERSION" --raw | jq -r "$Q" > /tmp/got.txt
+          echo "--- ghcr ---"; cat /tmp/want.txt
+          echo "--- ecr  ---"; cat /tmp/got.txt
+          diff -u /tmp/want.txt /tmp/got.txt || { echo "::error::ECR serves different platform manifests"; exit 1; }
+          grep -q '^linux/amd64 ' /tmp/got.txt && grep -q '^linux/arm64 ' /tmp/got.txt \
+            || { echo "::error::expected both architectures in ECR's index"; exit 1; }
+          echo "both architectures present, digests identical to GHCR"
 
   # Run on both architectures the image is built for.
   #
