@@ -458,6 +458,9 @@ pub struct AppState {
     /// Persistence for writes made over HTTP (#1094, #1106). Without it a write
     /// lives only in memory, and every one of them returns success.
     pub persistence: Option<Arc<crate::persistence::PersistenceManager>>,
+    /// Key for encrypting snapshots at rest (REL-09). `None` exports plaintext,
+    /// which is the default; import sniffs the file either way.
+    pub snapshot_key: Option<Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>>,
     /// Open HTTP transactions, each holding the writer's lock (#1200 step 6b).
     pub transactions: super::transactions::TxnSessions,
 }
@@ -543,6 +546,8 @@ pub struct HttpServer {
     /// Where state-changing requests are recorded. `None` records nothing,
     /// which is the default (REL-08).
     audit: Option<Arc<AuditLog>>,
+    /// Key for encrypting snapshots at rest (REL-09).
+    snapshot_key: Option<Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>>,
 }
 
 impl HttpServer {
@@ -565,6 +570,7 @@ impl HttpServer {
             credentials: Vec::new(),
             tls: None,
             audit: None,
+            snapshot_key: None,
         }
     }
 
@@ -623,6 +629,19 @@ impl HttpServer {
     /// up on a machine that was working yesterday.
     pub fn with_audit_log(mut self, log: Arc<AuditLog>) -> Self {
         self.audit = Some(log);
+        self
+    }
+
+    /// Encrypt exported snapshots with this key (REL-09).
+    ///
+    /// Import is unaffected by whether this is set: an encrypted file is
+    /// recognised by its magic and a plaintext one is read as before, so
+    /// turning encryption on does not strand the snapshots already taken.
+    pub fn with_snapshot_key(
+        mut self,
+        key: Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>,
+    ) -> Self {
+        self.snapshot_key = Some(key);
         self
     }
 
@@ -713,6 +732,7 @@ impl HttpServer {
             embed_pipeline: self.embed_pipeline.clone(),
             embed_cache: Arc::clone(&embed_cache),
             persistence: self.persistence.clone(),
+            snapshot_key: self.snapshot_key.clone(),
             transactions: Default::default(),
         };
 
@@ -845,6 +865,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 
@@ -865,6 +886,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 
@@ -891,6 +913,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 
@@ -915,6 +938,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 
@@ -955,6 +979,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 
@@ -981,6 +1006,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
 

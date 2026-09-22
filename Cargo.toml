@@ -139,6 +139,11 @@ lru = "0.18"
 
 # Snapshot compression
 flate2 = "1.0"
+# At-rest encryption for snapshots (REL-09). ChaCha20-Poly1305 rather than
+# AES-GCM: no hardware dependency, so the same code path is used and tested on
+# every platform the engine ships to, and no risk of a silent fallback to a
+# constant-time-unsafe software AES on a machine without AES-NI.
+chacha20poly1305 = "0.10"
 
 # Parallel processing
 rayon = "1.10"
