@@ -108,10 +108,10 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     refinement: RocksDB's `WriteOptions` are fixed when the database is opened,
     so the two configurations have to be two processes, and running one after
     the other puts every change between them into the ratio. Measured that way
-    on 2026-09-21, two runs hours apart on the same idle host read **420.8×
-    and 219.3×** — while every arm measured *inside* a single process
-    reproduced to within 2% across the same two runs. Interleaved, the five
-    pairs span 1.09×.
+    on 2026-09-21, two runs hours apart on the same idle host disagreed by
+    almost a factor of two (superseded: 420.8× and 219.3×), while every arm
+    measured *inside* a single process reproduced across the same two runs
+    (superseded: within 2%). Interleaved, the five pairs span **1.09×**.
 
     **The ratio is a property of the device as much as the engine**, and a
     3.5× spread between two ordinary hosts is the evidence. Quote it with its
@@ -125,14 +125,15 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     now has it available rather than described.
 
     Both figures are ingested by `CH-RECOVER`, which gives the local run a
-    verdict only when its own five ratios agree to within 1.25× *and* the
-    host's load average is below 2.0. The spread is the binding half: the load
-    average is a one-minute decayed mean sampled before the run and cannot see
-    a disturbance during it, and both of the runs that disagreed by 1.9× passed
-    it, at 1.29 and 1.89. It stays as context. Under real load — vm-1 is
-    shared — three runs gave 210×, 171× and 276× for one arm, which the load
-    average did catch. The
-    quiet-host reference is committed at
+    verdict only when its own five ratios agree closely enough
+    (threshold: 1.25×) *and* the host's load average is below its own bound
+    (threshold: 2.0). The spread is the binding half: the load average is a
+    one-minute decayed mean sampled before the run and cannot see a
+    disturbance during it, and both of the runs that disagreed passed it
+    (superseded: disagreed by 1.9×, at load averages of 1.29 and 1.89). It
+    stays as context. Under real load — vm-1 is shared — three runs disagreed
+    far more widely for one arm (superseded: 210×, 171× and 276×), which the
+    load average did catch. The quiet-host reference is committed at
     `benchmarks/durability/fsync-quiet-host.json` in the benchmarks repo.
   - It is a request, not a proof: `sync_data` returns when the kernel says the
     device has the bytes, and whether the device lied is a property of the
