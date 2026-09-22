@@ -3,6 +3,7 @@
 //! Exposes SamyamaClient with both embedded and remote modes to Python.
 
 use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
 use samyama_sdk::{
@@ -45,19 +46,19 @@ impl QueryResult {
     }
 
     #[getter]
-    fn records(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn records(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_to_py(py, &serde_json::Value::Array(
             self.records_json.iter().map(|row| serde_json::Value::Array(row.clone())).collect()
         ))
     }
 
     #[getter]
-    fn nodes(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn nodes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_to_py(py, &serde_json::Value::Array(self.nodes_json.clone()))
     }
 
     #[getter]
-    fn edges(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_to_py(py, &serde_json::Value::Array(self.edges_json.clone()))
     }
 }
@@ -115,32 +116,32 @@ fn convert_query_result(result: SdkQueryResult) -> PyResult<QueryResult> {
 }
 
 /// Convert a serde_json::Value to a Python object
-fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.to_object(py)),
+        serde_json::Value::Bool(b) => b.into_py_any(py),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.to_object(py))
+                i.into_py_any(py)
             } else if let Some(f) = n.as_f64() {
-                Ok(f.to_object(py))
+                f.into_py_any(py)
             } else {
                 Ok(py.None())
             }
         }
-        serde_json::Value::String(s) => Ok(s.to_object(py)),
+        serde_json::Value::String(s) => s.into_py_any(py),
         serde_json::Value::Array(arr) => {
-            let list: Vec<PyObject> = arr.iter()
+            let list: Vec<Py<PyAny>> = arr.iter()
                 .map(|v| json_to_py(py, v))
                 .collect::<PyResult<_>>()?;
-            Ok(list.to_object(py))
+            list.into_py_any(py)
         }
         serde_json::Value::Object(map) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             for (k, v) in map {
                 dict.set_item(k, json_to_py(py, v)?)?;
             }
-            Ok(dict.to_object(py))
+            dict.into_py_any(py)
         }
     }
 }
@@ -326,7 +327,7 @@ impl SamyamaClient {
         damping: f64,
         iterations: usize,
         tolerance: f64,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let config = PageRankConfig {
@@ -336,47 +337,47 @@ impl SamyamaClient {
             ..Default::default()
         };
         let scores: HashMap<u64, f64> = rt.block_on(client.page_rank(config, label, edge_type));
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for (k, v) in &scores {
             dict.set_item(k, v)?;
         }
-        Ok(dict.to_object(py))
+        dict.into_py_any(py)
     }
 
     /// Detect weakly connected components.
     /// Returns dict with 'components' (dict of component_id -> list of node IDs) and 'component_count'.
     #[pyo3(signature = (label=None, edge_type=None))]
-    fn wcc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<PyObject> {
+    fn wcc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let result = rt.block_on(client.weakly_connected_components(label, edge_type));
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         let component_count = result.components.len();
-        let components_dict = PyDict::new_bound(py);
+        let components_dict = PyDict::new(py);
         for (k, v) in &result.components {
-            components_dict.set_item(k, v.to_object(py))?;
+            components_dict.set_item(k, v.into_py_any(py)?)?;
         }
         dict.set_item("components", components_dict)?;
         dict.set_item("component_count", component_count)?;
-        Ok(dict.to_object(py))
+        dict.into_py_any(py)
     }
 
     /// Detect strongly connected components.
     /// Returns dict with 'components' and 'component_count'.
     #[pyo3(signature = (label=None, edge_type=None))]
-    fn scc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<PyObject> {
+    fn scc(&self, py: Python<'_>, label: Option<&str>, edge_type: Option<&str>) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let result = rt.block_on(client.strongly_connected_components(label, edge_type));
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         let component_count = result.components.len();
-        let components_dict = PyDict::new_bound(py);
+        let components_dict = PyDict::new(py);
         for (k, v) in &result.components {
-            components_dict.set_item(k, v.to_object(py))?;
+            components_dict.set_item(k, v.into_py_any(py)?)?;
         }
         dict.set_item("components", components_dict)?;
         dict.set_item("component_count", component_count)?;
-        Ok(dict.to_object(py))
+        dict.into_py_any(py)
     }
 
     /// Breadth-first search from source to target.
@@ -389,16 +390,16 @@ impl SamyamaClient {
         target: u64,
         label: Option<&str>,
         edge_type: Option<&str>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let result = rt.block_on(client.bfs(source, target, label, edge_type));
         match result {
             Some(path) => {
-                let dict = PyDict::new_bound(py);
-                dict.set_item("path", path.path.to_object(py))?;
+                let dict = PyDict::new(py);
+                dict.set_item("path", path.path.into_py_any(py)?)?;
                 dict.set_item("cost", path.cost)?;
-                Ok(dict.to_object(py))
+                dict.into_py_any(py)
             }
             None => Ok(py.None()),
         }
@@ -415,16 +416,16 @@ impl SamyamaClient {
         label: Option<&str>,
         edge_type: Option<&str>,
         weight_property: Option<&str>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let result = rt.block_on(client.dijkstra(source, target, label, edge_type, weight_property));
         match result {
             Ok(Some(path)) => {
-                let dict = PyDict::new_bound(py);
-                dict.set_item("path", path.path.to_object(py))?;
+                let dict = PyDict::new(py);
+                dict.set_item("path", path.path.into_py_any(py)?)?;
                 dict.set_item("cost", path.cost)?;
-                Ok(dict.to_object(py))
+                dict.into_py_any(py)
             }
             Ok(None) => Ok(py.None()),
             // A refusal is not "no path". #1303 was exactly this conflation on
@@ -446,7 +447,7 @@ impl SamyamaClient {
         properties: Vec<String>,
         label: Option<&str>,
         n_components: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let config = PcaConfig {
@@ -455,17 +456,17 @@ impl SamyamaClient {
         };
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let result = rt.block_on(client.pca(label, &props_refs, config));
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         // Convert components (Vec<Vec<f64>>) to list of lists
         let components: Vec<Vec<f64>> = result.components;
-        dict.set_item("components", components.to_object(py))?;
-        dict.set_item("explained_variance", result.explained_variance.to_object(py))?;
-        dict.set_item("explained_variance_ratio", result.explained_variance_ratio.to_object(py))?;
-        dict.set_item("mean", result.mean.to_object(py))?;
-        dict.set_item("std_dev", result.std_dev.to_object(py))?;
+        dict.set_item("components", components.into_py_any(py)?)?;
+        dict.set_item("explained_variance", result.explained_variance.into_py_any(py)?)?;
+        dict.set_item("explained_variance_ratio", result.explained_variance_ratio.into_py_any(py)?)?;
+        dict.set_item("mean", result.mean.into_py_any(py)?)?;
+        dict.set_item("std_dev", result.std_dev.into_py_any(py)?)?;
         dict.set_item("n_samples", result.n_samples)?;
         dict.set_item("n_features", result.n_features)?;
-        Ok(dict.to_object(py))
+        dict.into_py_any(py)
     }
 
     /// Count triangles in the graph.

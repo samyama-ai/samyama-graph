@@ -230,6 +230,25 @@ fn main() {
     let mut seen = std::collections::HashSet::new();
     callable.retain(|n| seen.insert(*n));
 
+    // The same reasoning across the two lists, which is the half that was
+    // missing (#1389). `nodeSimilarity` dispatches under `{topK: 3}` and is
+    // refused with no argument, so it landed in `callable` *and* in
+    // `known_but_not_callable`. An algorithm callable under any shape is
+    // callable; probing more than one shape is the point of the list, not a
+    // reason to report the name twice with opposite verdicts.
+    //
+    // What the overlap cost: CH-ALGO-COV built its count as
+    // `distinct + len(gated)` and its names as the union, so the two
+    // disagreed by exactly one -- 67 against 66. CH-ALGO-PARITY caught it
+    // (`coverage_census_agrees` was false) and picked the names, which was
+    // right, but while the denominator was in dispute ALGO-02's to-do list
+    // could not be produced at all: a fraction whose numerator and
+    // denominator come from different censuses is not a fraction.
+    rejected.retain(|entry| {
+        let name = entry.split(':').next().unwrap_or(entry);
+        !callable.iter().any(|c| *c == name)
+    });
+
     let distinct: Vec<&&str> = callable.iter().filter(|n| !ALIASES.contains(n)).collect();
     let json = serde_json::json!({
         "target_h1": 40,

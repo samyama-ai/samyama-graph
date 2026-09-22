@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 # CPython 3.8+, instead of one wheel per (platform x Python version). Cuts the
 # release matrix from ~25 jobs to ~5 and means a new CPython release needs no
 # rebuild. Keep in step with `requires-python` in pyproject.toml.
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py38"] }
 samyama-sdk = { path = "../../crates/samyama-sdk", version = "1.9.0" }
 tokio = { version = "1.35", features = ["rt-multi-thread"] }
 serde_json = "1.0"

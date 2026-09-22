@@ -23,6 +23,7 @@ async fn main() {
         Some("verify") => std::process::exit(cmd_verify(&argv)),
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
+        Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
         _ => {}
     }
 
@@ -39,6 +40,53 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama auth-token [name]`
+///
+/// Prints a credential line for `--auth-file`, and the token itself once.
+///
+/// It generates the token rather than taking one, because a token an operator
+/// thinks of is a password, and a password is the thing a SHA-256 credential
+/// file is *not* built for: a fast hash is the right choice against a stolen
+/// file only when there is nothing to guess. 32 bytes from the OS random source
+/// leaves nothing to guess.
+///
+/// The token is printed to stdout and never stored. What goes in the file is
+/// the digest, so the file is not usable as a credential itself.
+fn cmd_auth_token(argv: &[String]) -> i32 {
+    use sha2::{Digest, Sha256};
+
+    let name = argv.get(2).cloned().unwrap_or_else(|| "operator".to_string());
+    if name.contains(':') {
+        eprintln!("a credential name cannot contain `:` -- it separates the name from the digest");
+        return 2;
+    }
+
+    // `getrandom` is already in the tree; reading /dev/urandom directly keeps
+    // this to the standard library and makes the source of the entropy the
+    // obvious thing rather than a crate feature.
+    let mut raw = [0u8; 32];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read;
+        f.read_exact(&mut raw)
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("cannot read /dev/urandom: {e}");
+            return 1;
+        }
+    }
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let digest: String =
+        Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+
+    println!("# add this line to the file you pass to --auth-file");
+    println!("{name}:{digest}");
+    println!();
+    println!("# the token itself, shown once -- the server stores only the digest above");
+    println!("{token}");
+    0
 }
 
 /// `samyama verify <snapshot.sgsnap> --queries <catalog.json>`
@@ -643,6 +691,35 @@ async fn start_server() {
         }
     }
 
+    // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
+    // secret passed on the command line is visible in `ps` to every user on the
+    // box, and one in the environment is inherited by every child process.
+    let credentials: Vec<samyama::http::server::Credential> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--auth-file")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_AUTH_FILE").ok());
+        match path {
+            None => Vec::new(),
+            // A configured file that cannot be read stops the server. Starting
+            // anyway would publish an unauthenticated API to an operator who
+            // had just asked for the opposite, and the log line saying so would
+            // scroll past.
+            Some(p) => match samyama::http::server::read_credentials(std::path::Path::new(&p)) {
+                Ok(c) => {
+                    println!("HTTP API: {} credential(s) loaded from {p}", c.len());
+                    c
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --auth-file {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
     // Parse --data-path <dir> (snapshot/RocksDB persistence dir) and --ephemeral
     // (no persistence — guarantees an empty store, no CWD-relative ./samyama_data
     // recovery). --ephemeral wins if both are given.
@@ -844,6 +921,7 @@ async fn start_server() {
     let http_persistence = persistence.clone();
     let http_bind_host = config.address.clone();
     let http_cors_origins = cors_origins.clone();
+    let http_credentials = credentials.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
@@ -852,6 +930,7 @@ async fn start_server() {
             // `--host` said one thing and half the server did another (#1328).
             .with_bind_host(http_bind_host)
             .with_allowed_origins(http_cors_origins)
+            .with_credentials(http_credentials)
             .with_tenant_manager(http_tenants);
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);
