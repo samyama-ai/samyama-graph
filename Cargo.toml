@@ -115,7 +115,7 @@ percent-encoding = "2.3"   # URL encoding
 mime = "0.3"               # MIME types
 
 # Vector Search (Phase 6)
-hnsw_rs = "0.2.1"
+hnsw_rs = "0.3.4"
 rand = "0.8"
 regex = "1"
 lru = "0.18"
