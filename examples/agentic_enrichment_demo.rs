@@ -1,345 +1,377 @@
-//! Agentic Enrichment Demo
+//! Agentic Enrichment Demo — Generation-Augmented Knowledge (GAK).
 //!
-//! Demonstrates Generation-Augmented Knowledge (GAK): the database
-//! actively uses Claude Code CLI to build its own knowledge graph.
+//! Instead of RAG (using a database to help an LLM answer a question), GAK
+//! inverts the pattern: the database notices a gap in its own knowledge, asks a
+//! model to fill it, and writes the answer back.
 //!
-//! Instead of RAG (using a database to help LLMs answer questions),
-//! GAK inverts the pattern — using LLMs to help the database build knowledge.
+//! # What changed, and why (samyama-graph#1413)
 //!
-//! This demo uses the full NLQ pipeline: TenantManager -> AgentRuntime -> NLQClient
-//! with the ClaudeCode provider (shells out to `claude -p`).
+//! This demo used to ask Claude for Cypher, filter the reply for lines starting
+//! `CREATE` or `MATCH`, and execute them. That is the whole of GAK's hard part
+//! skipped: the nodes and edges it wrote were untagged, unscored, unattributed
+//! and indistinguishable from ingested data, and there was no way back short of
+//! a hand-written `DELETE`. It was also the one path in the repository that did
+//! not use `samyama::agent::enrich`, which exists and does the right things.
 //!
-//! Requirements: `claude` CLI must be installed and authenticated.
+//! So the model no longer writes Cypher. It answers a *question* — a value, or
+//! a list of entity names — and the answer travels the governed route:
 //!
-//! Run: cargo run --release --example agentic_enrichment_demo
+//!   detect_gaps → fill → quarantine → verify (trust floor) → retract
+//!
+//! Nothing the model says reaches a real property until it clears a floor, and
+//! everything it does reach carries `_generated`, so one predicate excludes it.
+//!
+//! # Running it
+//!
+//! `cargo run --release --example agentic_enrichment_demo` needs the `claude`
+//! CLI installed and authenticated.
+//!
+//! `--offline` runs the identical pipeline over a fixed set of answers instead
+//! of calling a model. It exists so the shipped path can be asserted end to end
+//! in CI: `tests/gak_demo_writes_are_governed.rs` runs this binary and checks
+//! the graph it leaves behind. A demo whose correctness depends on a network
+//! call is a demo nothing can check.
 
-use samyama_sdk::{
-    EmbeddedClient, SamyamaClient,
-    AgentConfig, LLMProvider, NLQConfig,
+use samyama::agent::enrich::{
+    detect_gaps, quarantine, retract, verify, EnrichConfig, EnrichSource, EnrichSpec,
+    EnrichmentWorker, GapEvent, Materialize, Outcome, GENERATED_PROPERTY,
+    LLM_DEFAULT_CONFIDENCE,
 };
-use std::collections::HashMap;
+use samyama::graph::{GraphStore, Label, NodeId, PropertyValue};
+use samyama::nlq::client::NLQClient;
+use samyama::persistence::tenant::{LLMProvider, NLQConfig};
+use samyama::query::executor::{QueryExecutor, Value};
+use samyama::query::parser::parse_query;
+
+const TENANT: &str = "default";
+const DRUG: &str = "Semaglutide";
+
+/// The floors the demo runs with. `mechanism` sits above the confidence an
+/// unsourced model answer carries, so it is the case that must *not* promote.
+const FLOOR_PROMOTES: f64 = 0.3;
+const FLOOR_REFUSES: f64 = 0.9;
 
 #[tokio::main]
 async fn main() {
+    let offline = std::env::args().any(|a| a == "--offline");
+
     println!("================================================================");
     println!("  Samyama Agentic Enrichment Demo");
-    println!("  Generation-Augmented Knowledge (GAK) via NLQ Pipeline");
+    println!("  Generation-Augmented Knowledge (GAK)");
     println!("================================================================");
     println!();
-    println!("The database becomes an active participant in building its own");
-    println!("knowledge — the inverse of RAG.");
-    println!();
 
-    // Verify claude CLI is available
-    if !is_claude_available() {
+    if !offline && !is_claude_available() {
         eprintln!("Error: 'claude' CLI not found.");
         eprintln!("Install Claude Code: https://docs.anthropic.com/en/docs/claude-code");
+        eprintln!("Or run with --offline to use fixed answers instead of a model.");
         std::process::exit(1);
     }
-    println!("[ok] Claude Code CLI detected");
-    println!();
-
-    // Setup: Tenant with ClaudeCode NLQ + Agent Config
-    println!("--- Setup: Tenant with ClaudeCode NLQ + Agent Config ---");
-
-    let client = EmbeddedClient::new();
-
-    // NLQ config — translates natural language to read-only Cypher
-    let nlq_config = NLQConfig {
-        enabled: true,
-        provider: LLMProvider::ClaudeCode,
-        model: String::new(),
-        api_key: None,
-        api_base_url: None,
-        system_prompt: Some(
-            "You are a Cypher query expert for a pharmaceutical knowledge graph.".to_string(),
-        ),
-    };
-
-    // Agent config — generates enrichment CREATE statements
-    let mut policies = HashMap::new();
-    policies.insert(
-        "Drug".to_string(),
-        "When a Drug entity is missing, enrich it with indications, manufacturer, and clinical trials.".to_string(),
+    println!(
+        "  Source of answers: {}",
+        if offline {
+            "fixed fixture (--offline)"
+        } else {
+            "claude CLI, via NLQClient"
+        }
     );
-
-    let agent_config = AgentConfig {
-        enabled: true,
-        provider: LLMProvider::ClaudeCode,
-        model: String::new(),
-        api_key: None,
-        api_base_url: None,
-        system_prompt: Some(
-            "You are a pharmaceutical knowledge graph builder. Generate Cypher CREATE statements.".to_string(),
-        ),
-        tools: vec![],
-        policies,
-    };
-
-    println!("  Created client");
-    println!("  NLQ config: ClaudeCode provider (natural language -> Cypher)");
-    println!("  Agent config: ClaudeCode provider (enrichment CREATE statements)");
-    println!("  Enrichment policy: Drug -> indications, manufacturer, trials");
     println!();
 
-    // Phase 1: NLQ Translation + The Trigger
-    println!("--- Phase 1: NLQ Translation + The Trigger ---");
-    let user_query = "What are the indications and clinical trials for Semaglutide?";
-    println!("User query: \"{}\"", user_query);
+    // ── Phase 1: a graph with a hole in it ──────────────────────────────────
+    println!("--- Phase 1: the graph, and the gap ---");
+    let mut store = GraphStore::new();
+    let drug = store.create_node(Label::new("Drug"));
+    set(&mut store, drug, "name", DRUG);
+
+    // An ingested condition the model will go on to name. It is here so the
+    // retraction at the end has something it must *not* delete.
+    let ingested = store.create_node(Label::new("Condition"));
+    set(&mut store, ingested, "name", "Type 2 Diabetes");
+    set(&mut store, ingested, "source", "ingested:icd-10");
+
+    println!("  (:Drug {{name: '{DRUG}'}})  — no manufacturer, no mechanism, no conditions");
+    println!("  (:Condition {{name: 'Type 2 Diabetes'}})  — ingested, source icd-10");
     println!();
 
-    let schema_summary = "Node labels: Drug, Indication, Manufacturer, ClinicalTrial\n\
-                          Edge types: TREATS (Drug->Indication), MADE_BY (Drug->Manufacturer), STUDIED_IN (Drug->ClinicalTrial)\n\
-                          Properties: Drug(name, mechanism, drugClass, approvalYear), Indication(name), Manufacturer(name, headquarters), ClinicalTrial(name, phase, year)";
-
-    let nlq_pipeline = client.nlq_pipeline(nlq_config).unwrap();
-    println!("  NLQ pipeline: translating natural language to Cypher...");
-
-    let cypher_query = match nlq_pipeline.text_to_cypher(user_query, schema_summary).await {
-        Ok(cypher) => {
-            println!("  Generated Cypher: {}", cypher);
-            cypher
-        }
-        Err(e) => {
-            println!("  NLQ translation failed: {} — falling back to default query", e);
-            "MATCH (d:Drug) RETURN d.name".to_string()
-        }
-    };
-    println!();
-
-    // Execute the NLQ-generated Cypher
-    let result_count = match client.query_readonly("default", &cypher_query).await {
-        Ok(result) => result.len(),
-        Err(e) => {
-            println!("  Query execution error: {} — treating as empty result", e);
-            0
-        }
-    };
-
-    if result_count == 0 {
-        println!("  No results — graph has no matching data.");
-        println!("  Enrichment policy triggered: missing entity detected.");
-    } else {
-        println!("  Found {} result(s).", result_count);
+    let config = policy();
+    let surfaced = ask_nodes(&store, &format!("MATCH (d:Drug) WHERE d.name = '{DRUG}' RETURN d"));
+    let gaps = detect_gaps(&config, &store, &surfaced);
+    println!("  Gaps detected on {} surfaced node(s): {}", surfaced.len(), gaps.len());
+    for g in &gaps {
+        println!(
+            "    {}.{}{}",
+            g.label,
+            g.property,
+            match &g.materialize {
+                Some(m) => format!("  → materializes (:{})-[:{}]->", g.label, m.edge_type),
+                None => String::new(),
+            }
+        );
     }
     println!();
 
-    // Phase 2: Agentic Enrichment via NLQ Pipeline
-    println!("--- Phase 2: Agentic Enrichment via NLQ Pipeline ---");
-    println!("  Provider: ClaudeCode (claude -p CLI)");
-    println!("  Pipeline: AgentRuntime -> NLQClient -> claude CLI");
-    println!("  Waiting for Claude to generate knowledge subgraph...");
-    println!();
+    // ── Phase 2: ask the model, and keep the answer out of the graph ────────
+    println!("--- Phase 2: fill, then quarantine ---");
+    let worker = if offline { None } else { Some(online_worker()) };
+    let context = vec![("name".to_string(), DRUG.to_string())];
 
-    let runtime = client.agent_runtime(agent_config);
-
-    let enrichment_prompt = build_enrichment_prompt("Semaglutide");
-    let response = match runtime
-        .process_trigger(&enrichment_prompt, "pharma_research")
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            eprintln!("Error from AgentRuntime: {}", e);
+    let mut outcomes = Vec::new();
+    for gap in &gaps {
+        let out = match &worker {
+            Some(w) => w.fill(gap, &context).await,
+            None => fixture_answer(gap),
+        };
+        match out {
+            Some(o) => {
+                println!(
+                    "  {}.{} = {:?}  (confidence {:.2}, {})",
+                    gap.label, gap.property, o.value, o.confidence, o.method
+                );
+                outcomes.push(o);
+            }
+            // `fill` returns None when the model answers UNKNOWN. A declined
+            // answer is a result, not a failure: the alternative is a guess.
+            None => println!("  {}.{} — the model declined", gap.label, gap.property),
+        }
+    }
+    for o in &outcomes {
+        if let Err(e) = quarantine(&mut store, o) {
+            eprintln!("  quarantine failed: {e}");
             std::process::exit(1);
         }
+    }
+    println!();
+    println!("  Quarantined {} answer(s) under `_enrichment`.", outcomes.len());
+    println!("  The real properties are still empty:");
+    for o in &outcomes {
+        let present = store
+            .node_properties_merged(NodeId(o.node_id))
+            .contains_key(&o.property);
+        println!("    {}: {}", o.property, if present { "SET" } else { "absent" });
+    }
+    println!();
+
+    // ── Phase 3: promote what clears the floor ──────────────────────────────
+    println!("--- Phase 3: verify against the trust floor ---");
+    println!("  manufacturer, treats: floor {FLOOR_PROMOTES:.2}   mechanism: floor {FLOOR_REFUSES:.2}");
+    println!("  An unsourced model answer carries {LLM_DEFAULT_CONFIDENCE:.2}.");
+    let rep = verify(&config, &mut store, &surfaced);
+    println!(
+        "  promoted {}, edges materialized {}, still pending {}",
+        rep.promoted, rep.edges_materialized, rep.still_pending
+    );
+    println!();
+
+    // ── Phase 4: the state is separable ─────────────────────────────────────
+    println!("--- Phase 4: what a query can now tell apart ---");
+    let all = count(&store, "MATCH (n) RETURN n AS r");
+    let ingested_only = count(
+        &store,
+        &format!("MATCH (n) WHERE n.{GENERATED_PROPERTY} IS NULL RETURN n AS r"),
+    );
+    println!("  nodes total                       {all}");
+    println!("  nodes with `_generated` absent    {ingested_only}   ← one predicate excludes the rest");
+    let marked = generated_nodes(&store);
+    for (id, what) in &marked {
+        println!("    id {} marked: {}", id.0, what);
+    }
+    println!();
+    println!("  The marker on each, by node rather than by answer — one node can");
+    println!("  carry several generated properties, and a refused answer marks none:");
+    for (id, _) in &marked {
+        if let Some(PropertyValue::Map(m)) = store.node_properties_merged(*id).get(GENERATED_PROPERTY)
+        {
+            println!("    id {} _generated = {:?}", id.0, sorted_keys(m));
+        }
+    }
+    println!();
+
+    // ── Phase 5: and it is reversible ───────────────────────────────────────
+    println!("--- Phase 5: retract ---");
+    let touched: Vec<NodeId> = marked.iter().map(|(id, _)| *id).chain(surfaced.clone()).collect();
+    let rr = retract(&mut store, &touched);
+    println!(
+        "  properties removed {}, edges removed {}, nodes removed {}",
+        rr.properties_removed, rr.edges_removed, rr.nodes_removed
+    );
+    let after = count(&store, "MATCH (n) RETURN n AS r");
+    let ingested_survived = count(
+        &store,
+        "MATCH (c:Condition) WHERE c.name = 'Type 2 Diabetes' RETURN c AS r",
+    );
+    println!("  nodes total                       {after}");
+    println!("  the ingested condition survived   {ingested_survived}   ← retraction removes what the model made, not what it named");
+    println!();
+
+    // A machine-readable tail so a test can assert the shipped path rather than
+    // a reimplementation of it. Printed in both modes; parsed only in --offline.
+    println!("GAK-SUMMARY gaps={} filled={} promoted={} pending={} edges={} marked={} \
+              nodes_before_retract={} nodes_after_retract={} props_removed={} \
+              edges_removed={} nodes_removed={} ingested_survived={}",
+        gaps.len(), outcomes.len(), rep.promoted, rep.still_pending, rep.edges_materialized,
+        marked.len(), all, after, rr.properties_removed, rr.edges_removed, rr.nodes_removed,
+        ingested_survived);
+}
+
+/// `Label -> property -> spec`. Two scalar gaps and one relationship gap, so
+/// the demo shows a promotion, a refusal and a materialized subgraph.
+fn policy() -> EnrichConfig {
+    let mut cfg = EnrichConfig::default();
+    let drug = cfg.policies.entry("Drug".to_string()).or_default();
+    drug.insert(
+        "manufacturer".to_string(),
+        EnrichSpec {
+            sources: vec![EnrichSource::Llm],
+            trust_floor: FLOOR_PROMOTES,
+            materialize: None,
+        },
+    );
+    drug.insert(
+        "mechanism".to_string(),
+        EnrichSpec {
+            sources: vec![EnrichSource::Llm],
+            trust_floor: FLOOR_REFUSES,
+            materialize: None,
+        },
+    );
+    drug.insert(
+        "treats".to_string(),
+        EnrichSpec {
+            sources: vec![EnrichSource::Llm],
+            trust_floor: FLOOR_PROMOTES,
+            materialize: Some(Materialize {
+                edge_type: "TREATS".to_string(),
+                target_label: "Condition".to_string(),
+                target_key: "name".to_string(),
+                vocabulary: None,
+            }),
+        },
+    );
+    cfg
+}
+
+/// The worker the demo uses when a model is available.
+///
+/// Built here rather than through `enrich::worker_from_env`, which reads
+/// `NLQ_PROVIDER` from the environment; this demo is specifically the Claude
+/// Code one, and an env var silently selecting a different provider is how the
+/// wrong model ends up answering.
+fn online_worker() -> EnrichmentWorker {
+    let config = NLQConfig {
+        enabled: true,
+        provider: LLMProvider::ClaudeCode,
+        model: String::new(),
+        api_key: None,
+        api_base_url: None,
+        system_prompt: Some(
+            "You are a precise pharmacology domain expert. Answer factually and follow \
+             the requested output format exactly. Answer UNKNOWN if you are not sure."
+                .to_string(),
+        ),
     };
-
-    println!("Claude response:");
-    for line in response.lines() {
-        if !line.trim().is_empty() {
-            println!("  | {}", line);
-        }
-    }
-    println!();
-
-    // Parse Cypher statements from response
-    let cypher_statements: Vec<String> = response
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| {
-            let upper = l.to_uppercase();
-            upper.starts_with("CREATE") || upper.starts_with("MATCH")
-        })
-        .map(|l| l.to_string())
-        .collect();
-
-    if cypher_statements.is_empty() {
-        eprintln!("No Cypher statements found in Claude response");
+    let client = NLQClient::new(&config).unwrap_or_else(|e| {
+        eprintln!("Error building the NLQ client: {e}");
         std::process::exit(1);
-    }
+    });
+    EnrichmentWorker::new(client, "claude-code".to_string())
+}
 
-    println!("Parsed {} Cypher statements from response.", cypher_statements.len());
-    println!();
+/// Fixed answers for `--offline`, in the shape `fill` would have returned.
+///
+/// These stand in for the model and nothing else: they enter the same
+/// `quarantine → verify` path with the same confidence an unsourced model
+/// answer gets, so the governance the test asserts is the governance the online
+/// run uses. One of the three names a condition that is already in the graph,
+/// which is what makes the retraction case meaningful.
+fn fixture_answer(gap: &GapEvent) -> Option<Outcome> {
+    let (value, targets) = match gap.property.as_str() {
+        "manufacturer" => ("Novo Nordisk".to_string(), None),
+        "mechanism" => ("GLP-1 receptor agonist".to_string(), None),
+        "treats" => {
+            let t = vec!["Type 2 Diabetes".to_string(), "Obesity".to_string()];
+            (t.join("; "), Some(t))
+        }
+        _ => return None,
+    };
+    Some(Outcome {
+        node_id: gap.node_id,
+        property: gap.property.clone(),
+        value,
+        confidence: LLM_DEFAULT_CONFIDENCE,
+        method: "fixture:offline".to_string(),
+        prompt_hash: "offline".to_string(),
+        targets,
+        materialize: gap.materialize.clone(),
+    })
+}
 
-    // Phase 3: Knowledge Ingestion
-    println!("--- Phase 3: Knowledge Ingestion ---");
-    println!(
-        "Executing {} Cypher statements against the graph...",
-        cypher_statements.len()
-    );
-    println!();
+fn set(store: &mut GraphStore, id: NodeId, key: &str, value: &str) {
+    store
+        .set_node_property(TENANT, id, key, PropertyValue::String(value.to_string()))
+        .unwrap_or_else(|e| panic!("set {key}: {e:?}"));
+}
 
-    let mut success = 0;
-    let mut failed = 0;
+fn run(store: &GraphStore, cypher: &str) -> Vec<samyama::query::executor::Record> {
+    let q = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}\n  parse: {e:?}"));
+    QueryExecutor::new(store)
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("{cypher}\n  exec: {e:?}"))
+        .records
+}
 
-    let (creates, matches): (Vec<_>, Vec<_>) = cypher_statements
+fn ask_nodes(store: &GraphStore, cypher: &str) -> Vec<NodeId> {
+    run(store, cypher)
         .iter()
-        .partition(|s| s.to_uppercase().starts_with("CREATE"));
+        .flat_map(|rec| {
+            rec.values().filter_map(|v| match v {
+                Value::Node(id, _) | Value::NodeRef(id) => Some(*id),
+                _ => None,
+            })
+        })
+        .collect()
+}
 
-    for stmt in creates.iter().chain(matches.iter()) {
-        match client.query("default", stmt).await {
-            Ok(_) => {
-                success += 1;
-                println!("  [ok] {}", truncate(stmt, 78));
-            }
-            Err(e) => {
-                failed += 1;
-                println!("  [!!] {}", truncate(stmt, 60));
-                println!("        Error: {}", e);
-            }
+fn count(store: &GraphStore, cypher: &str) -> usize {
+    run(store, cypher).len()
+}
+
+/// Every node carrying the reserved marker, with a short description of why.
+fn generated_nodes(store: &GraphStore) -> Vec<(NodeId, String)> {
+    let mut out = Vec::new();
+    for rec in run(store, "MATCH (n) RETURN n AS r") {
+        let Some(Value::Node(id, _) | Value::NodeRef(id)) = rec.get("r") else {
+            continue;
+        };
+        if let Some(PropertyValue::Map(m)) = store.node_properties_merged(*id).get(GENERATED_PROPERTY)
+        {
+            let created = matches!(m.get("created"), Some(PropertyValue::Boolean(true)));
+            let props = match m.get("properties") {
+                Some(PropertyValue::Array(a)) => a.len(),
+                _ => 0,
+            };
+            out.push((
+                *id,
+                if created {
+                    "created whole by the model".to_string()
+                } else {
+                    format!("{props} generated property/properties")
+                },
+            ));
         }
     }
+    out
+}
 
-    println!();
-    println!(
-        "Ingestion complete: {} succeeded, {} failed",
-        success, failed
-    );
-    println!();
-
-    // Phase 4: Query the Enriched Graph
-    println!("--- Phase 4: Query the Enriched Graph ---");
-    println!();
-
-    // Show drug info
-    println!("Drug:");
-    if let Ok(result) = client.query_readonly("default",
-        "MATCH (d:Drug) RETURN d.name, d.mechanism, d.drugClass, d.approvalYear",
-    ).await {
-        for row in &result.records {
-            for (i, col) in result.columns.iter().enumerate() {
-                if let Some(val) = row.get(i) {
-                    if !val.is_null() {
-                        let label = col.split('.').last().unwrap_or(col);
-                        println!("  {}: {}", label, val);
-                    }
-                }
-            }
-        }
-    }
-    println!();
-
-    // Show indications
-    println!("Indications:");
-    if let Ok(result) = client.query_readonly("default",
-        "MATCH (d:Drug)-[:TREATS]->(i:Indication) RETURN i.name",
-    ).await {
-        if result.is_empty() {
-            println!("  (none found — edge type may differ)");
-        }
-        for row in &result.records {
-            if let Some(val) = row.first() {
-                if !val.is_null() {
-                    println!("  - {}", val);
-                }
-            }
-        }
-    }
-    println!();
-
-    // Show manufacturer
-    println!("Manufacturer:");
-    if let Ok(result) = client.query_readonly("default",
-        "MATCH (d:Drug)-[:MADE_BY]->(m:Manufacturer) RETURN m.name, m.headquarters",
-    ).await {
-        if result.is_empty() {
-            println!("  (none found — edge type may differ)");
-        }
-        for row in &result.records {
-            let name = row.first().and_then(|v| v.as_str()).unwrap_or("");
-            let hq = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            if !name.is_empty() {
-                println!("  - {} ({})", name, hq);
-            }
-        }
-    }
-    println!();
-
-    // Show clinical trials
-    println!("Clinical Trials:");
-    if let Ok(result) = client.query_readonly("default",
-        "MATCH (d:Drug)-[:STUDIED_IN]->(t:ClinicalTrial) RETURN t.name, t.phase, t.year",
-    ).await {
-        if result.is_empty() {
-            println!("  (none found — edge type may differ)");
-        }
-        for row in &result.records {
-            let name = row.first().map(|v| v.to_string()).unwrap_or("Unknown".into());
-            let phase = row.get(1).map(|v| v.to_string()).unwrap_or_default();
-            let year = row.get(2).map(|v| v.to_string()).unwrap_or_default();
-            println!("  - {} (Phase {}, {})", name, phase, year);
-        }
-    }
-    println!();
-
-    // Graph stats
-    println!("--- Graph Statistics ---");
-    let status = client.status().await.unwrap();
-    println!("  Nodes: {}", status.storage.nodes);
-    println!("  Edges: {}", status.storage.edges);
-    println!();
-
-    println!("The database actively built its own knowledge using the NLQ pipeline.");
-    println!("Provider: ClaudeCode (claude -p CLI) via AgentRuntime -> NLQClient.");
-    println!("This is Generation-Augmented Knowledge (GAK) — the inverse of RAG.");
+fn sorted_keys(m: &std::collections::HashMap<String, PropertyValue>) -> Vec<String> {
+    let mut k: Vec<String> = m.keys().cloned().collect();
+    k.sort();
+    k
 }
 
 fn is_claude_available() -> bool {
-    std::process::Command::new("which")
-        .arg("claude")
+    std::process::Command::new("claude")
+        .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-fn build_enrichment_prompt(drug_name: &str) -> String {
-    format!(
-        r#"Generate Cypher CREATE statements to build a knowledge subgraph about the drug "{drug_name}".
-
-Create these nodes and relationships:
-1. One Drug node with properties: name, mechanism, drugClass, manufacturer, approvalYear (integer)
-2. Two or three Indication nodes each with property: name
-3. One Manufacturer node with properties: name, headquarters
-4. Two ClinicalTrial nodes each with properties: name, phase (integer), year (integer)
-5. Edges: (Drug)-[:TREATS]->(Indication), (Drug)-[:MADE_BY]->(Manufacturer), (Drug)-[:STUDIED_IN]->(ClinicalTrial)
-
-CRITICAL RULES — follow these exactly:
-- Output ONLY Cypher statements, one per line
-- NO markdown fences, NO comments, NO explanations, NO blank lines
-- Use single quotes for ALL string values
-- Use integers without quotes for numeric values like approvalYear: 2017
-- First output all CREATE statements for individual nodes
-- Then output MATCH...CREATE statements for edges
-- For edges use exactly this format: MATCH (a:Label {{name: 'X'}}), (b:Label {{name: 'Y'}}) CREATE (a)-[:REL_TYPE]->(b)
-- Variable names in MATCH clauses must be single lowercase letters (a, b, c, d)
-
-Example output (for a DIFFERENT drug — do NOT copy these values):
-CREATE (d:Drug {{name: 'Aspirin', mechanism: 'COX-1 and COX-2 inhibitor', drugClass: 'NSAID', manufacturer: 'Bayer', approvalYear: 1899}})
-CREATE (i:Indication {{name: 'Pain'}})
-CREATE (m:Manufacturer {{name: 'Bayer', headquarters: 'Leverkusen'}})
-CREATE (t:ClinicalTrial {{name: 'ARRIVE', phase: 3, year: 2018}})
-MATCH (a:Drug {{name: 'Aspirin'}}), (b:Indication {{name: 'Pain'}}) CREATE (a)-[:TREATS]->(b)
-MATCH (a:Drug {{name: 'Aspirin'}}), (b:Manufacturer {{name: 'Bayer'}}) CREATE (a)-[:MADE_BY]->(b)
-MATCH (a:Drug {{name: 'Aspirin'}}), (b:ClinicalTrial {{name: 'ARRIVE'}}) CREATE (a)-[:STUDIED_IN]->(b)"#,
-        drug_name = drug_name
-    )
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
-    }
 }
