@@ -324,16 +324,23 @@ fn main() {
 
     let tests_computed = !friedman_json.is_null() && !pairwise.is_empty();
 
-    // Whether the pairwise half can reject anything *at all* on this corpus,
-    // which is a property of the sizes and not of the results.
+    // Whether the pairwise half can reject anything on this corpus, which is a
+    // property of the sizes and not of the results.
     //
     // With no ties the exact two-sided Wilcoxon p-value is a count over 2^n
     // sign assignments, so the smallest one obtainable from n functions is
     // 2/2^n -- reached only when one solver wins on every single function.
     // Holm's first threshold is alpha/m over m comparisons. If the smallest
-    // achievable p exceeds it, no pair can be declared different however the
-    // data comes out, and every "not significant" in the table above is a
+    // achievable p exceeds it, an exactly-scored pair cannot be declared
+    // different however the data comes out, and its "not significant" is a
     // statement about the corpus rather than about the solvers.
+    //
+    // The bound is on the **exact** test. A pair that falls back to the normal
+    // approximation -- because its absolute differences tie, or because n is
+    // past the enumeration cap -- is not bounded this way and can produce a
+    // smaller p. So `pairwise_can_reject: false` means "no exactly-scored pair
+    // can reject", which is the conservative reading and the one worth acting
+    // on; `exactly_scored` below says how much of the table it covers.
     let n_funcs_used = per_solver_medians
         .values()
         .next()
@@ -346,9 +353,14 @@ fn main() {
         f64::NAN
     };
     let holm_first_threshold = 0.05 / m;
+    let exactly_scored = pairwise
+        .iter()
+        .filter(|e| e["method"] == "exact")
+        .count();
     let power_json = serde_json::json!({
         "alpha": 0.05,
         "comparisons": pairwise.len(),
+        "exactly_scored": exactly_scored,
         "functions": n_funcs_used,
         "smallest_achievable_exact_p": smallest_achievable_p,
         "holm_first_threshold": holm_first_threshold,
@@ -356,12 +368,14 @@ fn main() {
         "note": "The exact two-sided Wilcoxon p-value on n blocks is a count over \
                  2^n sign assignments, so 2/2^n is the smallest value obtainable \
                  -- the case where one solver wins on every function. When that \
-                 exceeds Holm's first threshold the pairwise comparison cannot \
+                 exceeds Holm's first threshold, no exactly-scored pair can \
                  reject for any data, and reporting 'no significant differences' \
                  from it would describe the corpus while appearing to describe \
-                 the solvers. More functions is the fix; more seeds is not, \
-                 because the seeds are inside each median and n here counts \
-                 functions.",
+                 the solvers. The bound does not cover pairs that fell back to \
+                 the normal approximation; `exactly_scored` says how many of the \
+                 comparisons it does cover. More functions is the fix; more seeds \
+                 is not, because the seeds are inside each median and n here \
+                 counts functions.",
     });
 
     let cec_present = std::path::Path::new("data/cec/cec2017").is_dir();
