@@ -107,6 +107,18 @@ spargebra = "0.3"          # SPARQL 1.1 parser
 sparesults = "0.2"         # SPARQL results formats
 # HTTP server (for SPARQL endpoint and Visualizer)
 axum = { version = "0.7", features = ["multipart"] }  # HTTP framework
+# TLS on our own listener (REL-09). `rustls` and `tokio-rustls` were already in
+# the tree through `reqwest`, but that is us calling out to somebody else's
+# API -- a client speaking HTTPS is not an acceptor on our socket.
+#
+# `tokio-rustls` directly rather than `axum-server`: the latter is a smaller
+# amount of code here but depends on `rustls-pemfile`, which is unmaintained
+# (RUSTSEC-2025-0134) with no safe upgrade. Adding an advisory to fix a
+# security requirement is the wrong trade, and `cargo deny` fails the build on
+# it -- which is what jammed every pull request earlier today.
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
+hyper = "1"
 tower = { version = "0.5", features = ["util"] }  # Middleware
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 http-body-util = "0.1"     # Body utilities for HTTP testing
@@ -168,6 +180,10 @@ http-body-util = "0.1"
 # Reads the GraphML we write back, so the tests check the file against an XML
 # parser rather than against the writer that produced it.
 quick-xml = "0.37"
+# REL-09's TLS test makes its own certificate and then *verifies* it, rather
+# than telling the client to skip verification. A test that disabled
+# verification would pass against a server offering no TLS at all.
+rcgen = "0.14"
 
 # These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
 # `test = false`, so without this the tests inside them compile and never run —

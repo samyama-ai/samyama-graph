@@ -691,6 +691,41 @@ async fn start_server() {
         }
     }
 
+    // TLS for the HTTP listener (REL-09). Paths, like the credential file:
+    // a private key is a secret and belongs in a file with file permissions,
+    // not in argv where `ps` shows it to every user on the box.
+    let tls_pem: Option<(String, String)> = {
+        let args: Vec<String> = std::env::args().collect();
+        let pick = |flag: &str, env: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1).cloned())
+                .or_else(|| std::env::var(env).ok())
+        };
+        let cert = pick("--tls-cert", "SAMYAMA_TLS_CERT");
+        let key = pick("--tls-key", "SAMYAMA_TLS_KEY");
+        match (cert, key) {
+            (None, None) => None,
+            // One without the other is a misconfiguration, not a default. A
+            // server that fell back to plain HTTP here would look like it had
+            // TLS to the operator who asked for it.
+            (Some(_), None) | (None, Some(_)) => {
+                eprintln!("FATAL: --tls-cert and --tls-key must be given together");
+                std::process::exit(1);
+            }
+            (Some(c), Some(k)) => {
+                let read = |p: &str| match std::fs::read_to_string(p) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("FATAL: cannot read {p}: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                Some((read(&c), read(&k)))
+            }
+        }
+    };
+
     // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
     // secret passed on the command line is visible in `ps` to every user on the
     // box, and one in the environment is inherited by every child process.
@@ -922,6 +957,7 @@ async fn start_server() {
     let http_bind_host = config.address.clone();
     let http_cors_origins = cors_origins.clone();
     let http_credentials = credentials.clone();
+    let http_tls = tls_pem.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
@@ -932,6 +968,9 @@ async fn start_server() {
             .with_allowed_origins(http_cors_origins)
             .with_credentials(http_credentials)
             .with_tenant_manager(http_tenants);
+        if let Some((cert, key)) = http_tls {
+            http_server = http_server.with_tls(cert, key);
+        }
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);
         }
