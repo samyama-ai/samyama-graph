@@ -86,6 +86,156 @@ async fn allow_private_network(
     res
 }
 
+/// A credential the server will accept, stored as a SHA-256 digest.
+///
+/// **Tokens, not passwords.** A fast hash is the wrong choice for a
+/// human-chosen password, where the defence against an offline attack on a
+/// stolen file is the cost of each guess -- that needs argon2 or similar. It is
+/// the right choice for a high-entropy token, where there is nothing to guess.
+/// The file format therefore takes tokens, and `samyama --new-auth-token`
+/// prints one from the OS random source rather than inviting a caller to think
+/// of one.
+///
+/// The digest is what is stored, so the file does not hold anything usable
+/// against another service if it leaks, and the server never holds the token in
+/// cleartext after start-up.
+#[derive(Clone)]
+pub struct Credential {
+    /// Who this token belongs to. Not used for authorisation -- there are no
+    /// roles yet (REL-08 asks for them and this is not that) -- but recorded so
+    /// a future audit log has a subject, and so an operator can revoke one line.
+    pub name: String,
+    digest: [u8; 32],
+}
+
+impl Credential {
+    /// Parse one `name:sha256-hex` line. Blank lines and `#` comments are skipped.
+    fn parse(line: &str) -> Option<Result<Self, String>> {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (name, hex) = match line.rsplit_once(':') {
+            Some(p) => p,
+            None => return Some(Err(format!("no `:` in {line:?}"))),
+        };
+        let hex = hex.trim();
+        if hex.len() != 64 {
+            return Some(Err(format!(
+                "expected a 64-character sha256 digest for {:?}, got {} characters",
+                name.trim(),
+                hex.len()
+            )));
+        }
+        let mut digest = [0u8; 32];
+        for (i, b) in digest.iter_mut().enumerate() {
+            *b = match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+                Ok(v) => v,
+                Err(_) => return Some(Err(format!("{hex:?} is not hexadecimal"))),
+            };
+        }
+        Some(Ok(Credential { name: name.trim().to_string(), digest }))
+    }
+}
+
+/// Read a credential file: one `name:sha256-hex` per line.
+///
+/// A malformed line is an error rather than a skipped line. Skipping is how a
+/// typo in a credential file becomes a server that starts cleanly and accepts
+/// one fewer token than the operator believes it does.
+pub fn read_credentials(path: &std::path::Path) -> Result<Vec<Credential>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        match Credential::parse(line) {
+            None => continue,
+            Some(Ok(c)) => out.push(c),
+            Some(Err(e)) => return Err(format!("{}:{}: {e}", path.display(), n + 1)),
+        }
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "{} names no credentials; a file that authenticates nobody would refuse \
+             every request, which is not what an operator who configured one meant",
+            path.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// Compare two digests without letting the time taken depend on where they differ.
+///
+/// `a == b` on a slice returns as soon as a byte differs, so the time it takes
+/// leaks how long a common prefix was, and a token can be recovered one byte at
+/// a time. Writing the loop out keeps it constant-time without taking a
+/// dependency for four lines.
+fn digests_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Reject a request that carries no accepted credential (REL-08).
+///
+/// `OPTIONS` is let through unauthenticated on purpose. A CORS preflight
+/// carries no `Authorization` header -- the browser sends it *before* deciding
+/// whether the real request is allowed -- so authenticating it would make every
+/// cross-origin call fail at the preflight, and the usual repair for that is to
+/// turn authentication off. It reveals only which methods and headers the
+/// endpoint accepts, which the documentation already says.
+///
+/// Everything else is authenticated, `/metrics` and `/` included. An exemption
+/// list is the thing that quietly grows, and `/api/status` alone reports node
+/// and edge counts.
+async fn require_credential(
+    credentials: Arc<Vec<Credential>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{Method, StatusCode};
+
+    if req.method() == Method::OPTIONS {
+        return next.run(req).await;
+    }
+
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let (scheme, rest) = v.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+        });
+
+    let ok = match presented {
+        Some(token) => {
+            use sha2::{Digest, Sha256};
+            let got: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            // Every credential is compared even after one matches, so the time
+            // taken does not depend on the position of the matching line.
+            credentials.iter().fold(false, |acc, c| digests_match(&c.digest, &got) || acc)
+        }
+        None => false,
+    };
+
+    if ok {
+        return next.run(req).await;
+    }
+
+    // The same answer whether the header was missing, malformed, or simply
+    // wrong. Distinguishing them tells an unauthenticated caller which half to
+    // work on.
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        "unauthorized\n",
+    )
+        .into_response()
+}
+
 /// Is this address loopback-only?
 ///
 /// Used for the warning on start-up, so it errs towards warning: anything that
@@ -213,6 +363,9 @@ pub struct HttpServer {
     /// Origins allowed to make cross-origin calls, and the only origins the
     /// Private Network Access opt-in is echoed to. Empty by default (#1328).
     allowed_origins: Vec<String>,
+    /// Credentials the server accepts. Empty means the API is unauthenticated,
+    /// which is the default and the state this server shipped in (#1328).
+    credentials: Vec<Credential>,
 }
 
 impl HttpServer {
@@ -232,6 +385,7 @@ impl HttpServer {
             // this default exists to require (#1328).
             bind_host: "127.0.0.1".to_string(),
             allowed_origins: Vec::new(),
+            credentials: Vec::new(),
         }
     }
 
@@ -251,6 +405,19 @@ impl HttpServer {
     /// a permission granted to whoever asked (#1328).
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = origins;
+        self
+    }
+
+    /// Credentials the server will accept on the request path (REL-08).
+    ///
+    /// Empty leaves the API unauthenticated, which is what it has always been
+    /// and what the start-up warning is about. This is a change to what an
+    /// operator can choose, not to what they get without asking -- the same
+    /// shape as `SAMYAMA_FSYNC`. Turning it on by default would break every
+    /// existing deployment on upgrade, silently for anyone who does not read
+    /// the release notes until their client stops working.
+    pub fn with_credentials(mut self, credentials: Vec<Credential>) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -364,6 +531,22 @@ impl HttpServer {
 
         if let Some(tm) = self.tenants.as_ref() {
             app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
+        }
+
+        // Authentication goes on *before* CORS, which makes it the inner layer:
+        // layers apply outermost-last, so the last `.layer()` call runs first.
+        // A preflight has to reach the CORS layer to be answered, and it carries
+        // no credential; putting authentication outside CORS would reject it
+        // before CORS could reply, and every cross-origin call would fail at the
+        // preflight. `require_credential` lets `OPTIONS` through for the same
+        // reason, so the ordering and the exemption agree rather than one
+        // covering for the other.
+        if !self.credentials.is_empty() {
+            let creds = Arc::new(self.credentials.clone());
+            app = app.layer(axum::middleware::from_fn(move |req, next| {
+                let creds = Arc::clone(&creds);
+                async move { require_credential(creds, req, next).await }
+            }));
         }
 
         let cors = cors_layer(&self.allowed_origins);

@@ -138,10 +138,21 @@ samyama --cors-origin https://graph.samyama.cloud
 
 or `SAMYAMA_CORS_ORIGINS=https://graph.samyama.cloud`. Without it the browser
 refuses the call. **This is deliberate** — `/api/query` runs arbitrary Cypher
-including `DELETE` and reads no credential from the request, so until v1.9 any
-web page you happened to visit could drive it
-([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)). The server
-also listens on loopback unless `--host` says otherwise.
+including `DELETE`, so until v1.9 any web page you happened to visit could
+drive it ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)).
+The server also listens on loopback unless `--host` says otherwise.
+
+To require a credential as well:
+
+```bash
+samyama auth-token ops >> credentials     # prints the token once; store the line
+samyama --auth-file credentials --host 0.0.0.0
+```
+
+Every request then needs `Authorization: Bearer <token>`, on every route.
+Without `--auth-file` the API reads no credential, which is the default and
+what every release before this one did. A token is all-or-nothing: there are no
+users, roles or per-graph grants yet.
 
 1. Open https://graph.samyama.cloud/ in your browser.
 2. Sign up for a new account, or sign in if you already have one.
