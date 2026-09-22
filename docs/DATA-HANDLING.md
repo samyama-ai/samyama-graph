@@ -92,6 +92,31 @@ numbers above is that the two can be checked against each other.
 ## Related
 
 - [`SECURITY.md`](../SECURITY.md) — reporting a vulnerability.
+- **Snapshots can be encrypted at rest** (REL-09):
+
+  ```bash
+  samyama snapshot-key > /etc/samyama/snapshot.key   # 32 bytes, as hex
+  samyama --snapshot-key /etc/samyama/snapshot.key
+  ```
+
+  `/api/snapshot/export` then returns a `.sgsnap.enc`, sealed with
+  ChaCha20-Poly1305 in 64 KiB frames. Import **sniffs** the file: an encrypted
+  snapshot needs the key, a plaintext one is read exactly as before, so turning
+  encryption on does not strand the snapshots already taken.
+
+  What the construction protects against, and what it does not:
+
+  - **Reading.** The frames are encrypted, not merely framed.
+  - **Alteration.** Each frame is authenticated; a flipped bit fails to open.
+  - **Truncation.** The stream ends with an authenticated terminator, so a file
+    cut short fails instead of importing a graph missing its tail. AEAD alone
+    does not give this.
+  - **Key reuse across files.** The nonce is an 8-byte random per-file prefix
+    plus a frame counter, so the same key may seal many snapshots.
+  - **Not** key rotation without downtime, which REL-09 also asks for: changing
+    the key means re-exporting.
+  - **Not** the RocksDB data directory. This is snapshots only.
+
 - The HTTP API is **unauthenticated by default**, and can be told to require a
   credential ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)):
 

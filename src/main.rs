@@ -24,6 +24,7 @@ async fn main() {
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
         Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
+        Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
         _ => {}
     }
 
@@ -40,6 +41,28 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama snapshot-key`
+///
+/// Prints a fresh 32-byte snapshot encryption key, as hex, from the OS random
+/// source. Write it to a file and pass that file to `--snapshot-key`.
+///
+/// Hex rather than raw bytes so it can be pasted into a secret manager: a key
+/// an operator can move is a key they can rotate, and REL-09 asks for rotation
+/// without downtime.
+fn cmd_snapshot_key() -> i32 {
+    match samyama::snapshot::encryption::generate_key() {
+        Ok(k) => {
+            println!("# write this to a file and pass it to --snapshot-key");
+            println!("{k}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 /// `samyama auth-token [name]`
@@ -752,6 +775,33 @@ async fn start_server() {
         }
     };
 
+    // Snapshot encryption key (REL-09). A path: a key on the command line is
+    // visible in `ps` to every user on the box.
+    let snapshot_key: Option<std::sync::Arc<[u8; samyama::snapshot::encryption::KEY_BYTES]>> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--snapshot-key")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_SNAPSHOT_KEY").ok());
+        match path {
+            None => None,
+            // A configured key that cannot be read stops the server, rather
+            // than exporting plaintext for an operator who asked for
+            // encryption.
+            Some(p) => match samyama::snapshot::encryption::read_key(std::path::Path::new(&p)) {
+                Ok(k) => {
+                    println!("HTTP API: snapshots exported encrypted, key from {p}");
+                    Some(std::sync::Arc::new(k))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --snapshot-key {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
     // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
     // secret passed on the command line is visible in `ps` to every user on the
     // box, and one in the environment is inherited by every child process.
@@ -985,6 +1035,7 @@ async fn start_server() {
     let http_credentials = credentials.clone();
     let http_tls = tls_pem.clone();
     let http_audit = audit_log.clone();
+    let http_snapshot_key = snapshot_key.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
@@ -1000,6 +1051,9 @@ async fn start_server() {
         }
         if let Some(log) = http_audit {
             http_server = http_server.with_audit_log(log);
+        }
+        if let Some(k) = http_snapshot_key {
+            http_server = http_server.with_snapshot_key(k);
         }
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);

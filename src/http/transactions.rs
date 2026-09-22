@@ -143,6 +143,7 @@ mod tests {
             embed_pipeline: None,
             embed_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
+            snapshot_key: None,
             transactions: Default::default(),
         };
         let router = Router::new()
