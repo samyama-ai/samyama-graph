@@ -104,6 +104,11 @@ fn friedman_refuses_an_input_it_is_not_defined_on() {
 }
 
 #[test]
+// `3.14` in the fixture below is a measurement from the published example, not
+// an approximation of pi. Rounding it to `std::f64::consts::PI` to satisfy the
+// lint would change the data the SciPy expectation was computed from, which is
+// the one thing this file may not do.
+#[allow(clippy::approx_constant)]
 fn wilcoxon_is_exact_when_it_can_be() {
     // scipy.stats.wilcoxon(x, y, method='exact') -> statistic=5.0, p=0.0390625
     // The p-value is a dyadic rational because the null distribution is a count
