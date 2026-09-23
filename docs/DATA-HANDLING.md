@@ -116,18 +116,33 @@ personal data. Free text carrying a home address in prose passes, and so does a
 name paired with a diagnosis, which is more sensitive than anything in the list
 above. The scan is a floor under the published set, not a judgement about it.
 
-**Current state, 2026-09-22.** Three of the four snapshots on
+**Current state, 2026-09-23.** Three of the four snapshots on
 `kg-snapshots-v1` are clean: legal-judgments, bank-model-risk and cricket,
 across 5.9 million property values.
 
-`clinical-trials.sgsnap` is **not** clean. Across 36.5 million values it
-carries contact email addresses and phone numbers in site, sponsor and trial
-description fields — most in `Site.facility`, and several in `Site.zip`, where
-a contact detail has been filed into the wrong column upstream. The data comes
-from AACT/ClinicalTrials.gov, where those contacts are themselves public, so
-this is a question about whether we re-publish them rather than a leak. It is
-tracked on the issue linked from the scan output and is not resolved by this
-page.
+`clinical-trials.sgsnap` carries contact email addresses and phone numbers —
+33 distinct addresses in `Site.facility`, 12 phone numbers in `Site.zip`, and
+smaller numbers across ten other text fields, out of 36.5 million values.
+**These are accepted, not scrubbed** (#1439), and `docs/pii-waivers.json`
+records each one with its reason.
+
+Why accepted: ClinicalTrials.gov requires contact details for recruiting
+trials and publishes them so patients can reach sites, and AACT redistributes
+that extract in full. Our ETL never reads AACT's `contacts` or
+`central_contacts` tables — it takes `facility`, `city`, `state`, `country`
+and `zip` from `contactsLocationsModule.locations`, so every match is
+incidental text inside a field we copy verbatim: a facility *name* with a
+contact appended, sponsor-written `brief_summary` prose, or a postcode column
+somebody typed a phone number into at registration. Removing them would edit
+sponsor-authored text and make this snapshot diverge from AACT, and matching
+the source is the property a benchmark snapshot most has to keep.
+
+A waiver names one field and the count accepted. **A count above that is not
+waived**, so a new contact in a field already on the list still fails the
+scan — which is what the scan is for. Four of the eighteen entries are marked
+`NOT accepted personal data`: they are residual false positives on free text
+(a twelve-digit run that satisfies Verhoeff, a drug code shaped like a PAN),
+pinned at one occurrence so a second still fails.
 
 ## What we would have to change for this page to stop being true
 

@@ -46,23 +46,55 @@ async fn main() {
     start_server().await;
 }
 
-/// `samyama pii-scan <snapshot.sgsnap>...`
+/// `samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...`
 ///
-/// Scans each snapshot for personal identifiers and exits non-zero if any are
-/// found (TRUST-10). Intended for release CI, over the artifacts about to be
-/// published.
+/// Scans each snapshot for personal identifiers and exits non-zero if any
+/// un-waived ones are found (TRUST-10). Intended for CI over the artifacts
+/// that are published.
 ///
 /// Exits 2 -- not 0 -- when a file cannot be read. A scan that could not look
 /// at the artifact must not report it clean; that is how a control passes on
 /// something it never opened.
+///
+/// A waived finding is still **printed**. A waiver that hid its finding would
+/// be indistinguishable from deleting the check, and the point of accepting
+/// something is that the next reader can see what was accepted and why.
 fn cmd_pii_scan(argv: &[String]) -> i32 {
-    let paths: Vec<&String> = argv.iter().skip(2).filter(|a| !a.starts_with('-')).collect();
+    let waiver_path = argv
+        .iter()
+        .position(|a| a == "--waivers")
+        .and_then(|i| argv.get(i + 1).cloned());
+    let paths: Vec<&String> = argv
+        .iter()
+        .skip(2)
+        .filter(|a| !a.starts_with('-'))
+        .filter(|a| Some((*a).clone()) != waiver_path)
+        .collect();
     if paths.is_empty() {
-        eprintln!("usage: samyama pii-scan <snapshot.sgsnap>...");
+        eprintln!("usage: samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...");
         return 2;
     }
 
+    let waivers = match &waiver_path {
+        None => Vec::new(),
+        Some(p) => match samyama::pii::read_waivers(std::path::Path::new(p)) {
+            Ok(w) => w,
+            // A waiver file that cannot be parsed stops the scan rather than
+            // running without it: running unwaived would flood the log and
+            // running as if it were empty would be a different check.
+            Err(e) => {
+                eprintln!("ERROR {e}");
+                return 2;
+            }
+        },
+    };
+
     let mut worst = 0;
+    // Which waivers fired, across every file. Tracked here and not per file,
+    // because a waiver for one snapshot is legitimately unused while another
+    // is being scanned.
+    let mut used: std::collections::HashSet<(String, String)> = Default::default();
+
     for path in paths {
         match samyama::pii::scan_snapshot_path(std::path::Path::new(path)) {
             Err(e) => {
@@ -74,22 +106,51 @@ fn cmd_pii_scan(argv: &[String]) -> i32 {
                     "{path}: {} nodes, {} edges, {} values scanned",
                     report.nodes_scanned, report.edges_scanned, report.values_scanned
                 );
+                let t = samyama::pii::triage(&report, &waivers);
+                for (_, w) in &t.accepted {
+                    used.insert((w.kind.clone(), w.location.clone()));
+                }
+
+                for (f, w) in &t.accepted {
+                    println!(
+                        "  accepted  {:<12} {:<34} {} of {} distinct -- {}",
+                        f.kind, f.location, f.distinct, w.max_distinct, w.decided_in
+                    );
+                }
+                for f in &t.unwaived {
+                    println!(
+                        "  FINDING   {:<12} {:<34} {} distinct, e.g. {}",
+                        f.kind,
+                        f.location,
+                        f.distinct,
+                        f.samples.join(", ")
+                    );
+                }
                 if report.is_clean() {
                     println!("  clean -- no identifier patterns found");
-                } else {
-                    for f in &report.findings {
-                        println!(
-                            "  {:<14} {:<40} {} distinct, e.g. {}",
-                            f.kind,
-                            f.location,
-                            f.distinct,
-                            f.samples.join(", ")
-                        );
-                    }
+                }
+                if !t.unwaived.is_empty() {
                     worst = worst.max(1);
                 }
             }
         }
+    }
+
+    // A waiver nobody needed is either a finding that went away or a waiver
+    // aimed at the wrong place, and both are worth seeing. Not a failure: this
+    // run may simply not have scanned the artifact it belongs to.
+    let stale: Vec<&samyama::pii::Waiver> = waivers
+        .iter()
+        .filter(|w| !used.contains(&(w.kind.clone(), w.location.clone())))
+        .collect();
+    if !stale.is_empty() {
+        println!();
+        println!("{} waiver(s) matched nothing in this run:", stale.len());
+        for w in stale {
+            println!("  {:<12} {:<34} {}", w.kind, w.location, w.decided_in);
+        }
+        println!("  Either the finding is gone -- in which case delete the waiver --");
+        println!("  or the scan did not cover the artifact it belongs to.");
     }
     worst
 }
