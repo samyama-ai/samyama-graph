@@ -37,6 +37,7 @@ pub use samyama_graph_algorithms::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
     reciprocity,
     a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,
+    fastrp, node2vec, FastRpConfig, Node2VecConfig,
 };
 
 /// Build a GraphView from the store for algorithm execution
@@ -85,7 +86,20 @@ fn build_view_inner(
     time_property: Option<Option<&str>>,
 ) -> (GraphView, Option<Vec<i64>>) {
     // 1. Collect relevant nodes
-    let nodes: Vec<AlgoNodeId> = if let Some(label_str) = node_label {
+    //
+    // Sorted by id regardless of source. `get_nodes_by_label` walks a
+    // `HashSet<NodeId>` (`label_index`), and `std`'s default hasher is keyed
+    // per `HashSet` instance -- so the *same* label on two graphs built the
+    // same way, or the same store's index rebuilt, iterates in a different
+    // order. Every algorithm below assigns a dense index by position in this
+    // vector, and several of them (FastRP, node2vec, PCA) seed per-index
+    // randomness from that position -- so an unsorted vector made "same seed,
+    // same graph" produce a different embedding depending on which HashSet
+    // iteration order happened to come back, which is exactly the
+    // determinism ML-06 asks for and silently broke whenever a label filter
+    // was used. `all_nodes()` is already id-ordered (a flattened `Vec`), so
+    // this sort is a no-op there and only pays for itself on the label path.
+    let mut nodes: Vec<AlgoNodeId> = if let Some(label_str) = node_label {
         let label = Label::new(label_str);
         store.get_nodes_by_label(&label)
             .iter()
@@ -97,6 +111,7 @@ fn build_view_inner(
             .map(|n| n.id.as_u64())
             .collect()
     };
+    nodes.sort_unstable();
 
     // 2. Build index mappings
     let mut index_to_node = Vec::with_capacity(nodes.len());

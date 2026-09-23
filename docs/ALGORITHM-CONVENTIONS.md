@@ -174,6 +174,37 @@ take on trust; with them it can be checked against their own edges.
 | Propagation ranking | propagationRanking | As temporal reachability, which it delegates to | Ignored | As temporal reachability | As temporal reachability | Arrival time ascending, then node id ascending | None |
 | Symptom explanation | symptomExplanation | In-edges, backward in time | Ignored: timestamps are used instead | Only the symptom under consideration is skipped | Nodes explaining nothing are omitted | Symptoms explained descending, then latest onset descending, then node id ascending | None: a count, a timestamp and the binding walk |
 
+## Embeddings
+
+**`gds.fastRP` and `gds.node2vec` are the one exception to "`gds.*` is the
+same row" in the introduction above.** Both names are deliberately refused
+rather than resolved (`GDS_DIVERGENT` in `operator.rs`): GDS's node2vec is
+skip-gram-trained and ours is not, and FastRP's resemblance to GDS's has not
+been checked against GDS's own defaults and knobs. `algo.fastRP`,
+`samyama.fastRP`, the bare `fastRP`, and the `node2vec` equivalents are
+unaffected -- only the `gds.` spelling is blocked, the same way an unrelated
+name like `gds.alpha.triangles` is.
+
+Both write a vector as a node property (`writeProperty`, default `embedding`)
+rather than only streaming it -- ML-06 asks for the result "stored as vector
+properties", and every other algorithm here leaves persistence to the
+caller's own `SET`, so this is a deliberate exception documented at the call
+site. Both require write access (`CALL ... YIELD node, embedding` through
+`MutQueryExecutor`) for that reason, and both are seeded and reproducible: no
+call to a clock or a process RNG, every random draw is a pure function of
+`(seed, node index, dimension index)` computed with SplitMix64.
+
+**node2vec here runs the real biased 2nd-order random walks (`returnFactor` =
+p, `inOutFactor` = q) but embeds them with a random-projection of the walks'
+co-occurrence counts, not skip-gram/word2vec training** -- see
+`samyama_graph_algorithms::embeddings` for what that means. It is not a
+drop-in replacement for a from-scratch SGNS-trained node2vec.
+
+| Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
+|---|---|---|---|---|---|---|---|
+| FastRP | fastRP | Both, symmetrised: successors and predecessors are merged into one neighbour list before propagating | Ignored | Counted twice: a self-loop's target appears in both the out- and in-neighbour list that gets merged | An isolated node's row is the zero vector: nothing propagates into it at any depth | Not applicable: one row per node, no ranking | L2-normalised per row by default (`normalize: true`); deterministic given `seed`, no RNG |
+| node2vec | node2vec | Both, symmetrised, the same way as FastRP, for both the walk and the co-occurrence projection | Ignored | A self-loop is a neighbour like any other and can be walked to and from | An isolated node's walk never leaves it, so it records no co-occurrence pair and its row is the zero vector | Not applicable: one row per node, no ranking | L2-normalised per row; deterministic given `seed`, no RNG. **Not skip-gram-trained (differs)** -- see above |
+
 ## Not a graph algorithm
 
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
