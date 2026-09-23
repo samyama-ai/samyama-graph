@@ -26,7 +26,6 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 
 ### Sub-directories
 - **[ADR/](./ADR/)** — Architecture Decision Records (30 ADRs).
-- **[product/](./product/)** — product management artifacts (personas, workflows, test cases).
 - **[test-results/](./test-results/)** — test execution reports.
 - **[optimization/](./optimization/)** — optimization case study + workflow notes (see also `crates/samyama-optimization/` and ADR-026).
 - **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive benchmark results (SF1 + SF10).
