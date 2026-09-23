@@ -226,7 +226,9 @@ To add new integration tests:
 
 ## Test Results
 
-See `docs/test-results/PHASE2_RESP_TESTS.md` for detailed test results from Phase 2 implementation.
+Current results come from the conformance harness rather than from a checked-in
+report: see the scorecard in `samyama-graph-competitor-benchmarks`, which
+measures every requirement against a named engine commit on each run.
 
 ---
 
