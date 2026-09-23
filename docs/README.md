@@ -19,7 +19,6 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 ### Core
 - **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — ACID model in v1.0.0: MVCC (RC + SI + conflict detection), Samyama logical WAL, Raft replication.
 - **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage (~90%) vs Neo4j and FalkorDB; supported clauses, functions, remaining gaps.
-- **[REQUIREMENTS.md](./REQUIREMENTS.md)** — functional and non-functional requirements specification.
 - **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK, etc.).
 - **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how Python / TypeScript SDKs, the CLI, and HTTP / RESP clients connect.
 - **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — end-to-end demo combining ingestion, federation, NLQ, and optimization.
