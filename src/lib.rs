@@ -126,6 +126,7 @@ pub mod compat;
 // anchor, and two insertions at one line conflict for no reason either change
 // is about.
 pub mod pii;
+pub mod schema_doc;
 pub mod provenance;
 pub mod rdf;
 pub mod sparql;
