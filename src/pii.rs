@@ -556,3 +556,90 @@ pub fn scan_snapshot_path(path: &std::path::Path) -> Result<Report, String> {
         scan_snapshot(BufReader::new(file))
     }
 }
+
+// ───────────────────────────────────────────────────────────────── waivers
+//
+// A finding that has been looked at and accepted still has to be reported, and
+// the job still has to go green — otherwise the scan is red forever, gets
+// ignored within a fortnight, and TRUST-10 becomes a tick over a control
+// nobody reads. That is the same failure as a check that cannot fail, reached
+// from the other side.
+//
+// So a waiver is narrow on purpose. It names one `(kind, location)` and the
+// count that was accepted. A count *above* that is not waived: new contacts in
+// a field we already looked at are exactly what this scan exists to catch, and
+// they must fail even though the field is on the list.
+
+/// One accepted finding.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Waiver {
+    pub kind: String,
+    pub location: String,
+    /// The number of distinct values accepted. A run finding more fails.
+    pub max_distinct: usize,
+    /// Why this is accepted. Required, and non-empty: a waiver file that
+    /// permits an empty reason is a mute button with extra steps.
+    pub why: String,
+    /// Where the decision was made — an issue, a commit, a document.
+    pub decided_in: String,
+}
+
+/// A finding paired with the waiver that covers it, if any.
+pub struct Triage<'a> {
+    pub accepted: Vec<(&'a Finding, &'a Waiver)>,
+    pub unwaived: Vec<&'a Finding>,
+    /// Waivers that matched nothing this run. Not a failure — the finding may
+    /// simply be gone — but reported, because a waiver nobody needs any more
+    /// is how a scan quietly stops covering something.
+    pub unused: Vec<&'a Waiver>,
+}
+
+/// Read a waiver file. Refuses one that omits a reason.
+pub fn read_waivers(path: &std::path::Path) -> Result<Vec<Waiver>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let waivers: Vec<Waiver> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    for w in &waivers {
+        if w.why.trim().is_empty() || w.decided_in.trim().is_empty() {
+            return Err(format!(
+                "{}: the waiver for {}/{} has no `why` or no `decided_in`. A waiver \
+                 without a reason is a mute button; name what was decided and where.",
+                path.display(),
+                w.kind,
+                w.location
+            ));
+        }
+    }
+    Ok(waivers)
+}
+
+/// Split a report's findings into accepted and not.
+pub fn triage<'a>(report: &'a Report, waivers: &'a [Waiver]) -> Triage<'a> {
+    let mut accepted = Vec::new();
+    let mut unwaived = Vec::new();
+    let mut used = vec![false; waivers.len()];
+
+    for f in &report.findings {
+        let hit = waivers.iter().enumerate().find(|(_, w)| {
+            w.kind == f.kind && w.location == f.location && f.distinct <= w.max_distinct
+        });
+        match hit {
+            Some((i, w)) => {
+                used[i] = true;
+                accepted.push((f, w));
+            }
+            None => unwaived.push(f),
+        }
+    }
+
+    Triage {
+        accepted,
+        unwaived,
+        unused: waivers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !used[*i])
+            .map(|(_, w)| w)
+            .collect(),
+    }
+}

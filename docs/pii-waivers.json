@@ -1,0 +1,129 @@
+[
+  {
+    "kind": "email",
+    "location": "Site.facility",
+    "max_distinct": 33,
+    "why": "ClinicalTrials.gov requires contact details for recruiting trials and publishes them so patients can reach sites; AACT redistributes the extract in full. Our ETL never reads AACT's `contacts` or `central_contacts` tables - it takes `facility`, `city`, `state`, `country`, `zip` from `contactsLocationsModule.locations`, and these addresses are text the registrant put inside the facility name. Removing them would edit the source string and make this snapshot diverge from AACT, which is the one property a benchmark snapshot must keep.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ClinicalTrial.brief_summary",
+    "max_distinct": 18,
+    "why": "Sponsor-written narrative prose, copied verbatim from the registry. Scrubbing would alter scientific text.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "phone",
+    "location": "Site.zip",
+    "max_distinct": 12,
+    "why": "A phone number typed into the postcode field at registration. Mirrored faithfully from AACT; the data-quality problem is upstream and is tracked separately, not fixed by editing our copy.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "Sponsor.name",
+    "max_distinct": 5,
+    "why": "Organisation name carrying a contact address, verbatim from the registry.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "Site.zip",
+    "max_distinct": 4,
+    "why": "An address typed into the postcode field at registration. Same upstream data-quality artefact as the phone numbers in this field.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ClinicalTrial.official_title",
+    "max_distinct": 3,
+    "why": "Registry title text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ClinicalTrial.title",
+    "max_distinct": 2,
+    "why": "Registry title text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "Intervention.description",
+    "max_distinct": 2,
+    "why": "Sponsor-written narrative prose, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ArmGroup.description",
+    "max_distinct": 1,
+    "why": "Sponsor-written narrative prose, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ArmGroup.label",
+    "max_distinct": 1,
+    "why": "Registry label text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "ClinicalTrial.why_stopped",
+    "max_distinct": 1,
+    "why": "Registry free text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "Outcome.description",
+    "max_distinct": 1,
+    "why": "Registry free text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "email",
+    "location": "Outcome.time_frame",
+    "max_distinct": 1,
+    "why": "Registry free text, verbatim.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "phone",
+    "location": "Site.facility",
+    "max_distinct": 1,
+    "why": "A contact number inside the facility name string, verbatim from the registry.",
+    "decided_in": "samyama-graph#1439"
+  },
+
+  {
+    "kind": "aadhaar",
+    "location": "Outcome.time_frame",
+    "max_distinct": 1,
+    "why": "NOT accepted personal data - a residual false positive. A twelve-digit run that satisfies Verhoeff by chance, in a field that holds text like '20 weeks ... 12 months'. Verhoeff admits 1 in 10 twelve-digit numbers and this snapshot has 36.5M values, so a handful is expected. Waived at one so a second occurrence still fails.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "aadhaar",
+    "location": "Site.zip",
+    "max_distinct": 1,
+    "why": "NOT accepted personal data - a residual false positive. A long postcode-or-phone digit run that satisfies Verhoeff by chance. India does not appear in this field's values as an Aadhaar would imply.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "pan",
+    "location": "Intervention.name",
+    "max_distinct": 1,
+    "why": "NOT accepted personal data - a residual false positive. A drug or arm code of the shape AAAAA9999A. PAN has no checksum, so the shape carries the whole weight and pharmaceutical codes collide with it.",
+    "decided_in": "samyama-graph#1439"
+  },
+  {
+    "kind": "ssn",
+    "location": "Outcome.description",
+    "max_distinct": 1,
+    "why": "NOT accepted personal data - a residual false positive. A NNN-NN-NNNN digit group inside outcome prose. A US Social Security number in a trial outcome description is not a plausible reading.",
+    "decided_in": "samyama-graph#1439"
+  }
+]
