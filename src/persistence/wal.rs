@@ -184,14 +184,39 @@ impl Wal {
             path,
             current_file: None,
             sequence,
-            sync_mode: false, // Default to async for performance
+            sync_mode: Self::sync_mode_from_env(),
         })
     }
 
-    /// Set sync mode
+    /// Whether an acknowledged write has been forced to the platter.
+    ///
+    /// `SAMYAMA_FSYNC=1` turns it on. **Off by default**, which is what the
+    /// engine has always done, and the default is the honest one to keep: this
+    /// is a change of what users can choose, not a change of what they get
+    /// without asking. `docs/ACID_GUARANTEES.md` §4 states both costs.
+    ///
+    /// Read once, at construction. A durability level that could change under
+    /// a running process would make "was this write durable?" unanswerable for
+    /// any particular write.
+    fn sync_mode_from_env() -> bool {
+        matches!(
+            std::env::var("SAMYAMA_FSYNC").unwrap_or_default().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }
+
+    /// Set sync mode.
+    ///
+    /// Exists so a caller can override the environment — the benchmark that
+    /// measures what fsync costs needs both modes in one process.
     pub fn set_sync_mode(&mut self, sync: bool) {
         self.sync_mode = sync;
         debug!("WAL sync mode: {}", sync);
+    }
+
+    /// Is an acknowledged write forced to the platter?
+    pub fn sync_mode(&self) -> bool {
+        self.sync_mode
     }
 
     /// Get current sequence number
@@ -228,9 +253,18 @@ impl Wal {
             // Write data
             file.write_all(&data)?;
 
-            // Flush if in sync mode
+            // Sync if asked. `flush()` alone moves bytes out of the `BufWriter`
+            // into the OS page cache and is **not** a durability barrier — a
+            // host crash or power loss still loses them. `sync_data()` is the
+            // barrier, and it is what "durable" has to mean for a write that
+            // has been acknowledged (#1309).
+            //
+            // `sync_data` rather than `sync_all`: the file's length and
+            // contents are what a replay needs, and skipping the metadata
+            // flush is the cheaper of the two barriers.
             if self.sync_mode {
                 file.flush()?;
+                file.get_ref().sync_data()?;
             }
         }
 
@@ -272,9 +306,40 @@ impl Wal {
 
                 let len = u32::from_le_bytes(len_bytes) as usize;
 
-                // Read record data
+                // Read record data.
+                //
+                // A record whose body is short is a **torn tail**: the process
+                // died between writing the length prefix and writing the bytes
+                // it promised. That is the ordinary shape of a crash, and the
+                // record was never acknowledged to anyone, so dropping it is
+                // correct.
+                //
+                // Propagating the error here was not. It abandoned the whole
+                // replay and took every complete record before it down with the
+                // torn one -- so a clean crash made the WAL unreplayable rather
+                // than replayable up to the last good record. The length-prefix
+                // read above has always stopped cleanly on a short read; this
+                // is the same stop, for the same reason, one field later
+                // (samyama-graph#1311).
+                //
+                // A failed **checksum** still errors. That is corruption of a
+                // record that was written in full, which is a different fact
+                // from a write that did not finish, and quietly discarding it
+                // would hide a damaged disk.
                 buf.resize(len, 0);
-                reader.read_exact(&mut buf)?;
+                match reader.read_exact(&mut buf) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        warn!(
+                            "WAL {}: a record promising {} bytes is short; the write \
+                             did not finish. Replaying up to the previous record.",
+                            file_path.display(),
+                            len
+                        );
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
 
                 // Deserialize
                 let record: WalRecord = bincode::deserialize(&buf)?;

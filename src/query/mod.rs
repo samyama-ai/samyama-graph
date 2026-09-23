@@ -76,6 +76,8 @@ pub mod star;
 pub mod validate;
 pub mod executor;
 pub mod csv_source;
+pub mod span;
+pub mod metrics;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -150,6 +152,9 @@ pub struct QueryEngine {
     stats: CacheStats,
     /// Per-query timeout in seconds (0 = no timeout)
     query_timeout_secs: u64,
+    /// Log a query that takes longer than this, in milliseconds. `0` disables
+    /// the log. See `SLOW_QUERY_MS`.
+    slow_query_ms: u64,
     /// Rows a single operator may produce before the query is refused
     /// (0 = unlimited). See `executor::budget`.
     row_budget: u64,
@@ -169,6 +174,8 @@ pub struct QueryEngine {
     result_cache_budget: usize,
     /// Hit/miss counters for the result cache, separate from the AST cache's.
     result_stats: CacheStats,
+    /// Record each result's plan hash (TRUST-06). See `with_plan_hash`.
+    plan_hash: bool,
 }
 
 /// What a cached result is keyed on.
@@ -203,6 +210,14 @@ fn canonical_params(params: &std::collections::HashMap<String, crate::graph::Pro
     pairs.iter().map(|(k, v)| format!("{k}={v:?}")).collect::<Vec<_>>().join("\u{1f}")
 }
 
+/// A query slower than this is logged at `warn`. Overridable with
+/// `SLOW_QUERY_MS`; `0` switches the log off.
+///
+/// 1000 ms because PERF-19 puts the agent-loop budget at a p95 of 500 ms and a
+/// p99 of 2 s: a query past a second is already outside the band the product
+/// promises, and one that nobody can see is one nobody fixes (REL-10).
+const DEFAULT_SLOW_QUERY_MS: u64 = 1000;
+
 impl QueryEngine {
     /// Create a new query engine with the default cache capacity (1024 entries)
     pub fn new() -> Self {
@@ -217,6 +232,8 @@ impl QueryEngine {
             stats: CacheStats::new(),
             query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
+            slow_query_ms: std::env::var("SLOW_QUERY_MS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_SLOW_QUERY_MS),
             row_budget: executor::budget::configured_budget(),
             result_cache: Mutex::new(LruCache::new(cap)),
             result_cache_bytes: Mutex::new(0),
@@ -224,7 +241,62 @@ impl QueryEngine {
                 .ok().and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_RESULT_CACHE_BYTES),
             result_stats: CacheStats::new(),
+            plan_hash: false,
         }
+    }
+
+    /// Log a query that ran past `slow_query_ms`.
+    ///
+    /// The **query text** is in the line, not just a duration. A slow-query
+    /// log that says "a query took 4.2 s" tells an operator that something is
+    /// wrong and nothing about what; the text is the only part they can act on
+    /// without us (REL-10).
+    /// Record one executed query: the metric always, the log if it was slow.
+    ///
+    /// Both from one place, because a metric and a log that count different
+    /// things are two numbers an operator trusts neither of. `slow` here is
+    /// whatever `SLOW_QUERY_MS` decided, so tuning that threshold moves the
+    /// log and the dashboard together.
+    fn log_if_slow(
+        &self,
+        query_str: &str,
+        elapsed: std::time::Duration,
+        rows: usize,
+        succeeded: bool,
+    ) {
+        let ms = elapsed.as_millis() as u64;
+        let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
+
+        // Unconditional, and before the early return below. The latency of
+        // every query was already measured and thrown away unless it crossed
+        // the threshold, so `/metrics` could say how large the graph was and
+        // not whether anything had got slower (REL-10).
+        crate::query::metrics::record_query(elapsed, slow, !succeeded);
+
+        if !slow {
+            return;
+        }
+        // Truncated: a generated query can be megabytes, and a log line that
+        // fills the disk is its own outage.
+        let text: String = query_str.chars().take(512).collect();
+        tracing::warn!(
+            elapsed_ms = ms,
+            rows,
+            threshold_ms = self.slow_query_ms,
+            query = %text,
+            "slow query"
+        );
+    }
+
+    /// Log a query slower than `ms`; `0` switches the log off.
+    ///
+    /// The environment variable supplies the default. This exists so a caller
+    /// -- a test, or an embedding application with its own idea of slow -- can
+    /// set it without touching process-wide state, which is both racy across
+    /// threads and, in recent Rust, unsafe.
+    pub fn with_slow_query_ms(mut self, ms: u64) -> Self {
+        self.slow_query_ms = ms;
+        self
     }
 
     /// Set the per-operator row budget; `0` disables enforcement entirely.
@@ -234,6 +306,15 @@ impl QueryEngine {
     /// process-wide environment variable and lose the guard everywhere.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan behind every result
+    /// (`RecordBatch::plan_hash`, TRUST-06). Off by default, for the cost
+    /// `QueryExecutor::with_plan_hash` describes; the HTTP server, which
+    /// reports provenance, turns it on.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -268,7 +349,12 @@ impl QueryEngine {
         self.stats.record_miss();
 
         // Parse and cache (LRU evicts automatically when full)
-        let query = parse_query(query_str)?;
+        // Annotated here as well as after execution. Semantic checks -- an
+        // unbound variable, an unknown function -- are raised by the parser,
+        // so half the errors a user sees never reach the executor and a hook
+        // on execution alone missed exactly those. `pest`'s own grammar errors
+        // already carry a caret and are left alone.
+        let query = parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?;
         {
             let mut cache = self.ast_cache.lock().unwrap();
             cache.put(normalized, query.clone());
@@ -312,7 +398,24 @@ impl QueryEngine {
                 std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
             );
         }
-        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
+        // Both sides of this: the span on the error (#1358) and the timing
+        // for the slow-query log. Taking either alone would silently revert
+        // the other -- two correct fixes at one call site.
+        let started = std::time::Instant::now();
+        let outcome = executor
+            .with_row_budget(self.row_budget)
+            .with_plan_hash(self.plan_hash)
+            .execute(&query);
+        // Logged before the `?`, so a query that ran for two minutes and then
+        // failed is in the log. That one is usually the more interesting of
+        // the two.
+        self.log_if_slow(
+            query_str,
+            started.elapsed(),
+            outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+            outcome.is_ok(),
+        );
+        let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
     }
@@ -453,9 +556,71 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
-        let result = executor.with_row_budget(self.row_budget).execute(&query)?;
+        // Both sides of this: the span on the error (#1358) and the timing
+        // for the slow-query log. Taking either alone would silently revert
+        // the other -- two correct fixes at one call site.
+        let started = std::time::Instant::now();
+        let outcome = executor
+            .with_row_budget(self.row_budget)
+            .with_plan_hash(self.plan_hash)
+            .execute(&query);
+        // Logged before the `?`, so a query that ran for two minutes and then
+        // failed is in the log. That one is usually the more interesting of
+        // the two.
+        self.log_if_slow(
+            query_str,
+            started.elapsed(),
+            outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
+            outcome.is_ok(),
+        );
+        let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
+    }
+}
+
+/// An error carrying the message it had plus a caret pointing into the query.
+///
+/// A separate type rather than a field on every error: the span is a property
+/// of *this execution of this text*, not of the error value, and the same
+/// `ExecutionError` raised from a prepared statement or an internal call has no
+/// query text to point into.
+#[derive(Debug)]
+pub struct SpannedError {
+    message: String,
+    /// The error as it was before the span was added, so a caller that wants
+    /// the bare message or the code can still get at it.
+    source: Box<dyn std::error::Error>,
+}
+
+impl SpannedError {
+    /// The original error.
+    pub fn inner(&self) -> &(dyn std::error::Error + 'static) {
+        self.source.as_ref()
+    }
+}
+
+impl std::fmt::Display for SpannedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for SpannedError {}
+
+/// Point an error at the query text, when the message names something findable.
+///
+/// Returns the error unchanged otherwise. LANG-12 asks for a span on every
+/// error; giving one to an error that names nothing would satisfy the count
+/// and help nobody, so the ones that cannot be located stay as they are and
+/// the measurement stays honest about them.
+fn with_span(
+    e: Box<dyn std::error::Error>,
+    query_str: &str,
+) -> Box<dyn std::error::Error> {
+    match span::annotate(&e.to_string(), query_str) {
+        Some(message) => Box::new(SpannedError { message, source: e }),
+        None => e,
     }
 }
 

@@ -213,7 +213,7 @@ fn find_node_by_property(
 ) -> Option<NodeId> {
     let lbl = Label::new(label);
     for node in store.get_nodes_by_label(&lbl) {
-        if let Some(PropertyValue::String(s)) = node.get_property(key) {
+        if let Some(PropertyValue::String(s)) = store.node_property(node.id, key) {
             if s == value { return Some(node.id); }
         }
     }

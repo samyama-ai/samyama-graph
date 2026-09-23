@@ -3,9 +3,11 @@ name: Tag Release
 # Stage 2 of 2. Fires on every push to main; does nothing unless the
 # workspace version in Cargo.toml is one that has no tag yet — which in
 # practice means "a prepare-release.yml PR just merged." When that happens
-# this is what actually cuts `vX.Y.Z` and publishes the GitHub Release, the
-# one event that fires publish-crate.yml, publish-pypi.yml, publish-npm.yml
-# and publish-docker.yml.
+# this is what actually cuts `vX.Y.Z`, publishes the GitHub Release, and
+# dispatches publish-crate.yml, publish-pypi.yml, publish-npm.yml and
+# publish-docker.yml on the new tag. It has to dispatch them: a Release made
+# with GITHUB_TOKEN starts no workflows, so their `release: published`
+# trigger never fires for a Release made here (v1.8.0 published nothing, #1249).
 #
 # This is the piece that used to be an unautomated hand step: someone edited
 # version files, then separately ran `git tag` and filled in the GitHub
@@ -29,8 +31,14 @@ jobs:
     name: Tag and release if the version changed
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      new: ${{ steps.check.outputs.new }}
+      version: ${{ steps.check.outputs.version }}
     permissions:
       contents: write
+      actions: write   # gh workflow run, for the four publish workflows
+      id-token: write       # Sigstore, for the release SBOM attestation
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +93,10 @@ jobs:
           fi
           git show FETCH_HEAD:RELEASE-GATE.json > RELEASE-GATE.json
           cat RELEASE-GATE.json
-          python3 scripts/check_release_gate.py RELEASE-GATE.json
+          # --commit: the pass must be about this build -- measured on it, or on
+          # an ancestor with no engine change since. A green verdict from an
+          # older main does not vouch for engine code merged after it.
+          python3 scripts/check_release_gate.py RELEASE-GATE.json --commit "$GITHUB_SHA"
 
       - name: Tag and publish the GitHub Release
         if: steps.check.outputs.new == 'true'
@@ -102,3 +113,123 @@ jobs:
           gh release create "v$VERSION" \
             --title "Samyama Graph v$VERSION" \
             --generate-notes
+
+      # An SBOM of the tagged source, attached to the release and signed. REL-14 and
+      # TRUST-08 ask for three controls — SBOM, signed artifacts, cargo-deny clean in
+      # CI — and this is the first two; the third has gated every merge since #1287.
+      - name: SBOM for the tagged source
+        if: steps.check.outputs.new == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-source.spdx.json
+
+      - name: Attest the SBOM
+        if: steps.check.outputs.new == 'true'
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: sbom-source.spdx.json
+          sbom-path: sbom-source.spdx.json
+
+      - name: Attach the SBOM to the release
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: gh release upload "v$VERSION" sbom-source.spdx.json --clobber
+
+      # GitHub starts no workflow from an event GITHUB_TOKEN raised, so the
+      # Release above reaches none of the publish workflows. A dispatch is the
+      # one exception. Each runs on the tag, so it builds exactly what was
+      # tagged. If this Release is ever made with another token, the release
+      # event fires as well. That is harmless: every publish skips a version
+      # already on its registry, and Docker overwrites its own tags.
+      - name: Dispatch the publish workflows on the new tag
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-crate.yml  --ref "v$VERSION" -f dry_run=false
+          gh workflow run publish-pypi.yml   --ref "v$VERSION" -f target=pypi
+          gh workflow run publish-npm.yml    --ref "v$VERSION" -f dry_run=false
+          gh workflow run publish-docker.yml --ref "v$VERSION"
+
+  # A release with no binary is a release nobody can install without a
+  # toolchain. v1.8.0 carried zero assets, so `curl | tar` was not an option
+  # and neither was any CI in another repository that wanted to run the engine
+  # -- the KG and demo repos have no CI partly because there is nothing to
+  # fetch (#1327, #513).
+  #
+  # Built per target on its own runner rather than cross-compiled: a binary
+  # produced by a cross toolchain has not been shown to start on the machine it
+  # is for, and the smoke step below is the point of the job.
+  binaries:
+    name: Build and attach the release binaries
+    needs: tag
+    if: needs.tag.outputs.new == 'true'
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --bin samyama
+
+      # The binary has to start on the architecture it was built for, or the
+      # asset is a file rather than a release. This is the check #1327 asks for
+      # and the one the arm64 container never got: the image is built for two
+      # architectures and only ever started on one.
+      - name: It starts, and answers
+        run: |
+          set -euo pipefail
+          ./target/release/samyama --port 6399 &
+          SERVER=$!
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8080/api/status >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/api/status
+          curl -sf -X POST http://127.0.0.1:8080/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"CREATE (a:T {n:1})-[:R]->(b:T {n:2}) RETURN count(*) AS c"}'
+          curl -sf -X POST http://127.0.0.1:8080/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"MATCH (a:T)-[:R]->(b:T) RETURN a.n AS a, b.n AS b"}'
+          kill $SERVER
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="samyama-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "$NAME"
+          cp target/release/samyama "$NAME/"
+          cp README.md LICENSE "$NAME/" 2>/dev/null || true
+          tar -czf "$NAME.tar.gz" "$NAME"
+          sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          NAME="samyama-v${VERSION}-${{ matrix.target }}"
+          gh release upload "v$VERSION" "$NAME.tar.gz" "$NAME.tar.gz.sha256" --clobber

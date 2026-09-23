@@ -230,6 +230,57 @@ fn main() {
     let mut seen = std::collections::HashSet::new();
     callable.retain(|n| seen.insert(*n));
 
+    // The same reasoning across the two lists, which is the half that was
+    // missing (#1389). `nodeSimilarity` dispatches under `{topK: 3}` and is
+    // refused with no argument, so it landed in `callable` *and* in
+    // `known_but_not_callable`. An algorithm callable under any shape is
+    // callable; probing more than one shape is the point of the list, not a
+    // reason to report the name twice with opposite verdicts.
+    //
+    // What the overlap cost: CH-ALGO-COV built its count as
+    // `distinct + len(gated)` and its names as the union, so the two
+    // disagreed by exactly one -- 67 against 66. CH-ALGO-PARITY caught it
+    // (`coverage_census_agrees` was false) and picked the names, which was
+    // right, but while the denominator was in dispute ALGO-02's to-do list
+    // could not be produced at all: a fraction whose numerator and
+    // denominator come from different censuses is not a fraction.
+    rejected.retain(|entry| {
+        let name = entry.split(':').next().unwrap_or(entry);
+        !callable.iter().any(|c| *c == name)
+    });
+
+    // ALGO-06: "every algorithm supports `stream`, `write` (properties), and
+    // `mutate` (projection only)". Probed rather than assumed, and probed as
+    // three *separate* facts: the requirement asks for three modes, and
+    // reporting "algorithms work" would answer a different question.
+    //
+    // `stream` is the calling convention every `algo.*` procedure already uses
+    // -- the results come back as rows. `write` and `mutate` are refused, and
+    // the engine says so itself rather than accepting the key and ignoring it,
+    // which is what it used to do: `algo.pageRank({writeProperty: 'pr'})`
+    // looked like it worked and wrote nothing.
+    let mode_probes: [(&str, &str); 3] = [
+        ("stream", "CALL algo.pageRank() YIELD node, score RETURN count(*) AS n"),
+        ("write", "CALL algo.pageRank({writeProperty: 'pr'}) YIELD node, score RETURN count(*) AS n"),
+        ("mutate", "CALL gds.pageRank.mutate({mutateProperty: 'pr'}) YIELD nodePropertiesWritten RETURN 1 AS n"),
+    ];
+    let mut modes_working: Vec<&str> = Vec::new();
+    let mut modes_refused: Vec<String> = Vec::new();
+    for (mode, cypher) in mode_probes {
+        let outcome = match parse_query(cypher) {
+            Err(e) => format!("{e}"),
+            Ok(q) => match MutQueryExecutor::new(&mut store, "default".to_string()).execute(&q) {
+                Ok(_) => String::new(),
+                Err(e) => format!("{e}"),
+            },
+        };
+        if outcome.is_empty() {
+            modes_working.push(mode);
+        } else {
+            modes_refused.push(format!("{mode}: {}", &outcome[..outcome.len().min(160)]));
+        }
+    }
+
     let distinct: Vec<&&str> = callable.iter().filter(|n| !ALIASES.contains(n)).collect();
     let json = serde_json::json!({
         "target_h1": 40,
@@ -241,6 +292,9 @@ fn main() {
         "unknown_to_the_dispatcher": unknown,
         "refused_with_a_redirect": redirected,
         "candidates_probed": CANDIDATES.len(),
+        "write_back_modes_target": 3,
+        "write_back_modes_working": modes_working,
+        "write_back_modes_refused": modes_refused,
     });
     let out = std::env::args().collect::<Vec<_>>();
     let path = out.iter().position(|a| a == "--json").and_then(|i| out.get(i + 1));

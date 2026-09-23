@@ -682,25 +682,33 @@
    "id": "H9-01",
    "class": "H9",
    "name": "200-NN vector search restricted to the T0 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T0\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T0\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
+   "baseline": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T0\"}) WHERE EXISTS { (node)-[:IS_A*0..]->(r) } RETURN count(node) AS n",
+   "baseline_why": "subsumes() needs the index, so the index-off arm had no baseline at all and H9's speedup was not a comparison. EXISTS is the index-free spelling of the same question: set-shaped, one row per node. A plain -[:IS_A*0..]-> traversal is not \u2014 it yields one row per path and double-counts a multi-parent node (#1343)."
   },
   {
    "id": "H9-02",
    "class": "H9",
    "name": "200-NN vector search restricted to the T05 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T05\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T05\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
+   "baseline": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T05\"}) WHERE EXISTS { (node)-[:IS_A*0..]->(r) } RETURN count(node) AS n",
+   "baseline_why": "subsumes() needs the index, so the index-off arm had no baseline at all and H9's speedup was not a comparison. EXISTS is the index-free spelling of the same question: set-shaped, one row per node. A plain -[:IS_A*0..]-> traversal is not \u2014 it yields one row per path and double-counts a multi-parent node (#1343)."
   },
   {
    "id": "H9-03",
    "class": "H9",
    "name": "200-NN vector search restricted to the T1 subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T1\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T1\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
+   "baseline": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T1\"}) WHERE EXISTS { (node)-[:IS_A*0..]->(r) } RETURN count(node) AS n",
+   "baseline_why": "subsumes() needs the index, so the index-off arm had no baseline at all and H9's speedup was not a comparison. EXISTS is the index-free spelling of the same question: set-shaped, one row per node. A plain -[:IS_A*0..]-> traversal is not \u2014 it yields one row per path and double-counts a multi-parent node (#1343)."
   },
   {
    "id": "H9-04",
    "class": "H9",
    "name": "200-NN vector search restricted to the T subtree",
-   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T\"}) WHERE subsumes(node, r) RETURN count(node) AS n"
+   "cypher": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T\"}) WHERE subsumes(node, r) RETURN count(node) AS n",
+   "baseline": "CALL db.index.vector.queryNodes(\"Term\", \"emb\", [0.5, 0.5, 0.5, 0.5], 200) YIELD node, score MATCH (r:Term {code: \"T\"}) WHERE EXISTS { (node)-[:IS_A*0..]->(r) } RETURN count(node) AS n",
+   "baseline_why": "subsumes() needs the index, so the index-off arm had no baseline at all and H9's speedup was not a comparison. EXISTS is the index-free spelling of the same question: set-shaped, one row per node. A plain -[:IS_A*0..]-> traversal is not \u2014 it yields one row per path and double-counts a multi-parent node (#1343)."
   },
   {
    "id": "H10-01",

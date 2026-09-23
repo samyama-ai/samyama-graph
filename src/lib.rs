@@ -2,7 +2,7 @@
 //!
 //! A high-performance graph database written in Rust with ~90% OpenCypher query support,
 //! RESP (Redis protocol) compatibility, multi-tenancy, HNSW vector search, natural language
-//! queries, and graph algorithms. Currently at v1.7.1.
+//! queries, and graph algorithms. Currently at v1.9.0.
 //!
 //! ## How a Graph Database Works
 //!
@@ -115,11 +115,19 @@
 #![allow(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod allocator;
 pub mod graph;
 pub mod query;
 pub mod protocol;
 pub mod persistence;
 pub mod raft;
+pub mod compat;
+// Not beside `snapshot`: samyama-graph#1392 adds `pub mod migrate;` at that
+// anchor, and two insertions at one line conflict for no reason either change
+// is about.
+pub mod pii;
+pub mod schema_doc;
+pub mod provenance;
 pub mod rdf;
 pub mod sparql;
 pub mod vector;
@@ -131,6 +139,7 @@ pub mod embed;
 pub mod export;
 pub mod nlq;
 pub mod agent;
+pub mod migrate;
 pub mod snapshot;
 pub mod optimization;
 

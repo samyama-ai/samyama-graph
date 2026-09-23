@@ -142,10 +142,17 @@ One thing, verified:
 | **Type Handling** | Integer/Float coercion | ✅ | |
 | | Null propagation — comparison | ✅ | `1 > null` → `null` |
 | | Null propagation — arithmetic | ✅ | `1 + null` → `null`; `p.a + p.missing` nulls only its own row. Fixed in #457 |
-| | Temporal types | ✅ | `date()`, component access, arithmetic. No temporal index |
+| | Temporal types | ✅ | `date()`, component access on a variable **and directly on an expression** (`date('2024-05-06').year`, fixed for LANG-16), arithmetic. No temporal index |
 | | Duration arithmetic | ✅ | |
-| **Extensions** | `CREATE VECTOR INDEX` | ✅ | |
+| **Geospatial** | `point({latitude, longitude})` / `point({x, y})` | ✅ | Returns a map with `x`/`y`, the `latitude`/`longitude` aliases, `srid` and `crs`. Not a distinct type: a point is a map, so it round-trips through property storage and there is no type error for a map that merely looks like one |
+| | `point.distance(a, b)` / `distance(a, b)` | ✅ | Metres for WGS-84, haversine on a sphere (~0.5% off an ellipsoid); Euclidean for cartesian. Mixing the two is an error, not a number |
+| | `point.withinBBox(p, lowerLeft, upperRight)` | ✅ | Closed on the boundary |
+| | `CREATE POINT INDEX` | ❌ | No spatial index. A `point.distance` or `withinBBox` predicate is evaluated per row |
+| **Extensions** | `CREATE VECTOR INDEX` | ✅ | Both spellings: Neo4j 5's `FOR (n:L) ON (n.prop)` and the `ON :L(prop)` form every other index DDL here uses. `OPTIONS {dimensions, similarity, quantization}`; any other option is an error, not a default. `quantization: "fp16"` halves the bytes the index holds, in the HNSW graph and in the copy kept for persistence — measured, not asserted: `tests/vector_quantization.rs` |
+| | `SHOW INDEXES` | ✅ | Lists property (`BTREE`) and `VECTOR` indexes. Hierarchy indexes have their own `SHOW HIERARCHY INDEXES` |
 | | `CALL db.index.vector.queryNodes` | ✅ | |
+| | `approx.countDistinct(x)` | ✅ | HyperLogLog, p=14 (16 KB). ~0.81% standard error. Not a bound: the figure describes the spread of estimates, not any one of them. Nulls are not counted, and `1` and `1.0` are one value, so it agrees with `count(DISTINCT x)` |
+| | `approx.percentile(x, q)` | ✅ | t-digest, compression 100. Accurate at the tails by construction and approximate near the median — the opposite of a uniform sample, and the right way round for a p99. `null` for no rows, because zero is a value the data might have had |
 | | `algo.pageRank` | ✅ | Config map: `algo.pageRank({iterations: 2})` |
 | | `algo.wcc` / `algo.scc` | ✅ | |
 | | `algo.shortestPath` / `algo.weightedPath` | ✅ | **Positional** args: `algo.shortestPath(0, 2)` |
@@ -155,8 +162,29 @@ One thing, verified:
 | | `algo.cdlp` / `algo.lcc` | ✅ | |
 | | `algo.bfs` / `algo.dijkstra` | ❌ | Not registered. The error now redirects to `algo.shortestPath` / `algo.weightedPath` and lists every procedure with its argument shape |
 | | `algo.or.solve` | ✅ | Requires write access |
+| **Introspection** | `db.labels` / `db.relationshipTypes` / `db.propertyKeys` | ✅ | Names only, no counts |
+| | `db.schema.visualization` | ✅ | Distinct `(:Src)-[:T]->(:Tgt)` triples. Walked only the first 1000 edges of each type until #1348 — the answer was a sample presented as the schema |
+| | `db.schema.forLLM(token_budget)` | ✅ | Not openCypher. One call: label counts, property types with null fraction, distinct count and sample values, relationship triples with counts, one example query. Budget defaults to 2000 tokens (estimated at 4 bytes each); a truncated answer says so in the text and in the `complete` column |
 
 ## Known inconsistency
+
+**A label scan yields ascending node id, with or without a `LIMIT`.** Cypher
+promises nothing about row order and you should still write `ORDER BY` when the
+order matters — but paging is not really a question about order. It used to be
+that the unlimited scan sorted its ids while the limited one took an arbitrary
+subset of a hash set, so `MATCH (c:Company) RETURN c.name LIMIT 4` was not the
+first four rows of the same query without the `LIMIT`, and **`SKIP`/`LIMIT`
+paging without `ORDER BY` could skip a row or return one twice** — page 2 came
+from a different ordering than page 1. Neo4j has the same freedom and a far more
+stable scan in practice, so a query ported from it started dropping rows here
+with nothing looking wrong ([#1364](https://github.com/samyama-ai/samyama-graph/issues/1364)).
+
+Fixed by walking the label bitset, whose bits are in id order, so a limited scan
+is a prefix of the unlimited one. What is still **not** guaranteed: anything
+about the order of rows after an expand, a join, or an aggregation — only the
+label scan at the bottom of the plan. Write `ORDER BY` when the answer depends
+on it.
+
 
 Algorithm procedures do not share a calling convention. `algo.pageRank` and `algo.or.solve` take a config map; `algo.shortestPath`, `algo.weightedPath`, `algo.maxFlow`, `algo.mst`, `algo.cdlp` and `algo.lcc` take **positional** arguments. This is still inconsistent, but an unknown or misused name now reports the full list with each procedure's argument shape, so it costs one failed attempt rather than three.
 

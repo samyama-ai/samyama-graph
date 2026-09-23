@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
@@ -711,6 +715,8 @@ async fn run_benchmark(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // First, so it prints on every path: a run that measured anything says under which allocator.
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     bench_setup::init();
     // Opening calibration, before anything else competes for the CPU. Closed
     // out at the end of the suite so a host that changed speed mid-run says so

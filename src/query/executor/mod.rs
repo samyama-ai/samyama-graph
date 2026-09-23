@@ -225,6 +225,9 @@ pub struct QueryExecutor<'a> {
     params: HashMap<String, crate::graph::PropertyValue>,
     deadline: Option<std::time::Instant>,
     row_budget: u64,
+    /// Record the executed plan's structural hash on the result. See
+    /// `with_plan_hash`.
+    plan_hash: bool,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -236,6 +239,7 @@ impl<'a> QueryExecutor<'a> {
             params: HashMap::new(),
             deadline: None,
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -247,6 +251,7 @@ impl<'a> QueryExecutor<'a> {
             params: HashMap::new(),
             deadline: None,
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -265,6 +270,17 @@ impl<'a> QueryExecutor<'a> {
     /// caller goes through.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan that runs on the result
+    /// (`RecordBatch::plan_hash`, TRUST-06).
+    ///
+    /// Off by default. Describing a plan costs a few microseconds per query,
+    /// which the fastest reads would feel, so only a caller that reports
+    /// provenance -- the HTTP server -- asks for it.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -353,7 +369,7 @@ impl<'a> QueryExecutor<'a> {
             records.retain(|r| seen.insert(r.dedup_key()));
         }
 
-        Ok(RecordBatch { records, columns })
+        Ok(RecordBatch { records, columns, plan_hash: None })
     }
 
     /// Execute a read-only query and return results
@@ -421,7 +437,7 @@ impl<'a> QueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty() || !query.params.is_empty() {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -449,17 +465,30 @@ impl<'a> QueryExecutor<'a> {
 
         // Plan the query
         let plan = self.planner.plan(query, self.store)?;
+        // TRUST-06: the hash of the plan that runs, taken before it is
+        // consumed. Re-planning later could describe a different plan: the
+        // planner reads statistics that move with the data.
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
-            return Ok(Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget));
+            let mut batch = Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget);
+            batch.plan_hash = plan_hash;
+            return Ok(batch);
         }
 
         // Check if this is a write query - if so, error out
         if plan.is_write {
-            return Err(ExecutionError::write_in_read(
-                "Cannot execute write query with read-only executor. Use MutQueryExecutor instead.".to_string()
-            ));
+            // Names the clause that writes, for two reasons. It is what the
+            // user has to change, and "read-only executor / MutQueryExecutor"
+            // named two internal Rust types at somebody who is holding a
+            // Cypher string and an HTTP endpoint. Naming the clause also lets
+            // the error be pointed at a position in the query (LANG-12).
+            let clause = query.write_clause().unwrap_or("this query");
+            return Err(ExecutionError::write_in_read(format!(
+                "`{clause}` writes, and this connection is read-only. Send the \
+                 statement on a write path instead."
+            )));
         }
 
         // Handle PROFILE - execute the query and attribute the wall-clock to
@@ -504,11 +533,13 @@ impl<'a> QueryExecutor<'a> {
 
             let mut record = Record::new();
             record.bind("plan".to_string(), Value::Property(PropertyValue::String(profile_text)));
-            return Ok(RecordBatch { records: vec![record], columns: vec!["plan".to_string()] });
+            return Ok(RecordBatch { records: vec![record], columns: vec!["plan".to_string()], plan_hash });
         }
 
         // Execute the plan
-        self.execute_plan(plan)
+        let mut batch = self.execute_plan(plan)?;
+        batch.plan_hash = plan_hash;
+        Ok(batch)
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
@@ -580,6 +611,7 @@ impl<'a> QueryExecutor<'a> {
         RecordBatch {
             records: vec![record],
             columns: vec!["plan".to_string()],
+            plan_hash: None,
         }
     }
 
@@ -616,6 +648,7 @@ impl<'a> QueryExecutor<'a> {
         Ok(RecordBatch {
             records,
             columns: plan.output_columns,
+            plan_hash: None,
         })
     }
 }
@@ -628,6 +661,8 @@ pub struct MutQueryExecutor<'a> {
     tenant_id: String,
     params: HashMap<String, crate::graph::PropertyValue>,
     row_budget: u64,
+    /// See `QueryExecutor::with_plan_hash`.
+    plan_hash: bool,
 }
 
 impl<'a> MutQueryExecutor<'a> {
@@ -639,6 +674,7 @@ impl<'a> MutQueryExecutor<'a> {
             tenant_id,
             params: HashMap::new(),
             row_budget: 0,
+            plan_hash: false,
         }
     }
 
@@ -646,6 +682,17 @@ impl<'a> MutQueryExecutor<'a> {
     /// `0` is off. See `QueryExecutor::with_row_budget`.
     pub fn with_row_budget(mut self, rows: u64) -> Self {
         self.row_budget = rows;
+        self
+    }
+
+    /// Record the structural hash of the plan that runs on the result
+    /// (`RecordBatch::plan_hash`, TRUST-06).
+    ///
+    /// Off by default. Describing a plan costs a few microseconds per query,
+    /// which the fastest reads would feel, so only a caller that reports
+    /// provenance -- the HTTP server -- asks for it.
+    pub fn with_plan_hash(mut self, on: bool) -> Self {
+        self.plan_hash = on;
         self
     }
 
@@ -662,7 +709,7 @@ impl<'a> MutQueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty() || !query.params.is_empty() {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -686,11 +733,15 @@ impl<'a> MutQueryExecutor<'a> {
             let store_ref: &GraphStore = self.store;
             self.planner.plan(query, store_ref)?
         };
+        // TRUST-06, as on the read executor.
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            return Ok(QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget));
+            let mut batch = QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget);
+            batch.plan_hash = plan_hash;
+            return Ok(batch);
         }
 
         // Execute the plan with mutable access.
@@ -703,7 +754,8 @@ impl<'a> MutQueryExecutor<'a> {
         //
         // The plan is still driven to exhaustion — the rows are what is
         // discarded, not the work. Discarding earlier would skip the writes.
-        let batch = self.execute_plan_mut(plan)?;
+        let mut batch = self.execute_plan_mut(plan)?;
+        batch.plan_hash = plan_hash;
         // Scoped to **data writes**, not to "any query without a RETURN".
         // Two neighbours produce rows with no RETURN and must keep doing so:
         // `CALL … YIELD` yields its results, and DDL such as
@@ -721,7 +773,7 @@ impl<'a> MutQueryExecutor<'a> {
             // return a row where `CREATE (a), (b)` correctly returns none.
             || query.clauses.iter().any(|c| c.is_write());
         if is_data_write && query.return_clause.is_none() && query.call_clause.is_none() {
-            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new() });
+            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new(), plan_hash });
         }
         Ok(batch)
     }
@@ -742,45 +794,269 @@ impl<'a> MutQueryExecutor<'a> {
         Ok(RecordBatch {
             records,
             columns: plan.output_columns,
+            plan_hash: None,
         })
     }
 }
 
-/// Substitute Expression::Parameter references with Expression::Literal values from the params map.
+/// Substitute `$parameter`s with literals, in every clause that can hold an
+/// expression.
+///
+/// This covered WHERE, RETURN, WITH items, ORDER BY and SET items only.
+/// Everywhere else a parameter reached the operators unresolved and failed
+/// with "Unresolved parameter": `DELETE list[$i]`, `UNWIND $rows`, a MERGE or
+/// CREATE property, FOREACH's list, a CALL argument. The TCK found them once
+/// its harness passed parameters.
 fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
-    // Recursively substitute in WHERE clause
+    use crate::query::ast::Clause;
+    let p = params;
     if let Some(wc) = &mut query.where_clause {
-        substitute_expr(&mut wc.predicate, params)?;
+        substitute_expr(&mut wc.predicate, p)?;
     }
-    // Substitute in RETURN clause
+    if let Some(wc) = &mut query.post_with_where_clause {
+        substitute_expr(&mut wc.predicate, p)?;
+    }
     if let Some(rc) = &mut query.return_clause {
         for item in &mut rc.items {
-            substitute_expr(&mut item.expression, params)?;
+            substitute_expr(&mut item.expression, p)?;
         }
     }
-    // Substitute in WITH clause
     if let Some(wc) = &mut query.with_clause {
-        for item in &mut wc.items {
-            substitute_expr(&mut item.expression, params)?;
-        }
-        if let Some(where_clause) = &mut wc.where_clause {
-            substitute_expr(&mut where_clause.predicate, params)?;
-        }
+        substitute_with(wc, p)?;
     }
-    // Substitute in ORDER BY
     if let Some(ob) = &mut query.order_by {
         for item in &mut ob.items {
-            substitute_expr(&mut item.expression, params)?;
+            substitute_expr(&mut item.expression, p)?;
         }
     }
-    // Substitute in SET clauses
     for sc in &mut query.set_clauses {
-        for item in &mut sc.items {
-            substitute_expr(&mut item.value, params)?;
+        substitute_set(sc, p)?;
+    }
+    for mc in &mut query.match_clauses {
+        substitute_pattern(&mut mc.pattern, p)?;
+    }
+    if let Some(cc) = &mut query.create_clause {
+        substitute_pattern(&mut cc.pattern, p)?;
+    }
+    if let Some(mc) = &mut query.merge_clause {
+        substitute_merge(mc, p)?;
+    }
+    if let Some(dc) = &mut query.delete_clause {
+        for e in &mut dc.expressions {
+            substitute_expr(e, p)?;
+        }
+    }
+    if let Some(fc) = &mut query.foreach_clause {
+        substitute_foreach(fc, p)?;
+    }
+    for u in query
+        .unwind_clause
+        .iter_mut()
+        .chain(query.extra_unwind_clauses.iter_mut())
+        .chain(query.post_with_unwind_clauses.iter_mut())
+    {
+        substitute_expr(&mut u.expression, p)?;
+    }
+    if let Some(l) = &mut query.load_csv_clause {
+        substitute_expr(&mut l.source, p)?;
+    }
+    if let Some(c) = &mut query.call_clause {
+        for a in &mut c.arguments {
+            substitute_expr(a, p)?;
+        }
+    }
+    for (wc, unwind, matches, wh) in &mut query.extra_with_stages {
+        substitute_with(wc, p)?;
+        if let Some(u) = unwind {
+            substitute_expr(&mut u.expression, p)?;
+        }
+        for mc in matches {
+            substitute_pattern(&mut mc.pattern, p)?;
+        }
+        if let Some(w) = wh {
+            substitute_expr(&mut w.predicate, p)?;
+        }
+    }
+    for clause in &mut query.clauses {
+        match clause {
+            Clause::Match(mc) => substitute_pattern(&mut mc.pattern, p)?,
+            Clause::Where(w) => substitute_expr(&mut w.predicate, p)?,
+            Clause::Unwind(u) => substitute_expr(&mut u.expression, p)?,
+            Clause::LoadCsv(l) => substitute_expr(&mut l.source, p)?,
+            Clause::With(wc) => substitute_with(wc, p)?,
+            Clause::Create(cc) => substitute_pattern(&mut cc.pattern, p)?,
+            Clause::Merge(mc) => substitute_merge(mc, p)?,
+            Clause::Set(sc) => substitute_set(sc, p)?,
+            Clause::Remove(_) => {}
+            Clause::Delete(dc) => {
+                for e in &mut dc.expressions {
+                    substitute_expr(e, p)?;
+                }
+            }
+            Clause::Foreach(fc) => substitute_foreach(fc, p)?,
+            Clause::Call(c) => {
+                for a in &mut c.arguments {
+                    substitute_expr(a, p)?;
+                }
+            }
+            Clause::Return(rc) => {
+                for item in &mut rc.items {
+                    substitute_expr(&mut item.expression, p)?;
+                }
+            }
+        }
+    }
+    resolve_row_count(&mut query.deferred_skip, &mut query.skip, p)?;
+    resolve_row_count(&mut query.deferred_limit, &mut query.limit, p)?;
+    if let Some(inner) = &mut query.call_subquery {
+        substitute_params(inner, p)?;
+    }
+    for (u, _) in &mut query.union_queries {
+        substitute_params(u, p)?;
+    }
+    Ok(())
+}
+
+/// A FOREACH's list and every clause of its body, nested bodies included.
+fn substitute_foreach(
+    fc: &mut crate::query::ast::ForeachClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::query::ast::ForeachBody;
+    substitute_expr(&mut fc.expression, p)?;
+    for clause in &mut fc.body {
+        match clause {
+            ForeachBody::Set(sc) => substitute_set(sc, p)?,
+            ForeachBody::Remove(_) => {}
+            ForeachBody::Delete(dc) => {
+                for e in &mut dc.expressions {
+                    substitute_expr(e, p)?;
+                }
+            }
+            ForeachBody::Create(cc) => substitute_pattern(&mut cc.pattern, p)?,
+            ForeachBody::Merge(mc) => substitute_merge(mc, p)?,
+            ForeachBody::Foreach(inner) => substitute_foreach(inner, p)?,
         }
     }
     Ok(())
 }
+
+fn substitute_with(
+    wc: &mut crate::query::ast::WithClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    for item in &mut wc.items {
+        substitute_expr(&mut item.expression, p)?;
+    }
+    if let Some(w) = &mut wc.where_clause {
+        substitute_expr(&mut w.predicate, p)?;
+    }
+    if let Some(ob) = &mut wc.order_by {
+        for item in &mut ob.items {
+            substitute_expr(&mut item.expression, p)?;
+        }
+    }
+    resolve_row_count(&mut wc.deferred_skip, &mut wc.skip, p)?;
+    resolve_row_count(&mut wc.deferred_limit, &mut wc.limit, p)
+}
+
+fn substitute_set(
+    sc: &mut crate::query::ast::SetClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    for item in &mut sc.items {
+        substitute_expr(&mut item.value, p)?;
+    }
+    for item in &mut sc.entity_items {
+        substitute_expr(&mut item.value, p)?;
+    }
+    Ok(())
+}
+
+fn substitute_merge(
+    mc: &mut crate::query::ast::MergeClause,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    substitute_pattern(&mut mc.pattern, p)?;
+    for item in mc.on_create_set.iter_mut().chain(mc.on_match_set.iter_mut()) {
+        substitute_expr(&mut item.value, p)?;
+    }
+    for item in mc.on_create_entity_set.iter_mut().chain(mc.on_match_entity_set.iter_mut()) {
+        substitute_expr(&mut item.value, p)?;
+    }
+    Ok(())
+}
+
+/// A pattern's property maps. A substituted value is a literal, and it moves
+/// to `properties`, so `(n {name: $n})` plans exactly as `(n {name: 'x'})`.
+fn substitute_pattern(
+    pattern: &mut crate::query::ast::Pattern,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::query::ast::Expression;
+    type Literals = Option<HashMap<String, crate::graph::PropertyValue>>;
+    fn props(
+        literals: &mut Literals,
+        exprs: &mut Option<HashMap<String, Expression>>,
+        p: &HashMap<String, crate::graph::PropertyValue>,
+    ) -> ExecutionResult<()> {
+        let Some(map) = exprs else { return Ok(()) };
+        for e in map.values_mut() {
+            substitute_expr(e, p)?;
+        }
+        let done: Vec<String> = map
+            .iter()
+            .filter(|(_, e)| matches!(e, Expression::Literal(_)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in done {
+            if let Some(Expression::Literal(v)) = map.remove(&k) {
+                literals.get_or_insert_with(HashMap::new).insert(k, v);
+            }
+        }
+        if map.is_empty() {
+            *exprs = None;
+        }
+        Ok(())
+    }
+    for path in &mut pattern.paths {
+        props(&mut path.start.properties, &mut path.start.property_exprs, p)?;
+        for seg in &mut path.segments {
+            props(&mut seg.edge.properties, &mut seg.edge.property_exprs, p)?;
+            props(&mut seg.node.properties, &mut seg.node.property_exprs, p)?;
+        }
+    }
+    Ok(())
+}
+
+/// A deferred SKIP/LIMIT: substitute, evaluate, and check it as a literal
+/// count is checked. A parameter the caller did not supply is an error here,
+/// not a missing SKIP.
+fn resolve_row_count(
+    deferred: &mut Option<crate::query::ast::Expression>,
+    fixed: &mut Option<usize>,
+    p: &HashMap<String, crate::graph::PropertyValue>,
+) -> ExecutionResult<()> {
+    use crate::graph::PropertyValue;
+    let Some(mut e) = deferred.take() else { return Ok(()) };
+    substitute_expr(&mut e, p)?;
+    let v = crate::query::executor::operator::eval_expression(
+        &e,
+        &crate::query::executor::Record::new(),
+        &crate::graph::GraphStore::new(),
+    )?;
+    *fixed = Some(match v {
+        Value::Property(PropertyValue::Integer(n)) if n >= 0 => n as usize,
+        Value::Property(PropertyValue::Float(f)) if f >= 0.0 && f.fract() == 0.0 => f as usize,
+        other => {
+            return Err(ExecutionError::TypeError(format!(
+                "SKIP/LIMIT takes a non-negative whole number, got {other:?}"
+            )))
+        }
+    });
+    Ok(())
+}
+
 
 fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
     use crate::query::ast::Expression;
@@ -790,12 +1066,12 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
         // missing variable at evaluation time (#654).
         Expression::ListExpr(items) => {
             for e in items.iter_mut() {
-                substitute_expr(e, params);
+                substitute_expr(e, params)?;
             }
         }
         Expression::MapExpr(entries) => {
             for (_, e) in entries.iter_mut() {
-                substitute_expr(e, params);
+                substitute_expr(e, params)?;
             }
         }
         Expression::Parameter(name) => {
@@ -858,7 +1134,8 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
             substitute_expr(list_expr, params)?;
             substitute_expr(expression, params)?;
         }
-        Expression::PatternComprehension { filter, projection, .. } => {
+        Expression::PatternComprehension { pattern, filter, projection, .. } => {
+            substitute_pattern(pattern, params)?;
             if let Some(f) = filter {
                 substitute_expr(f, params)?;
             }
@@ -866,7 +1143,13 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
         }
         // Leaf expressions — no substitution needed
         Expression::Variable(_) | Expression::Property { .. } | Expression::Literal(_)
-        | Expression::PathVariable(_) | Expression::ExistsSubquery { .. } => {}
+        | Expression::PathVariable(_) => {}
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
+            substitute_pattern(pattern, params)?;
+            if let Some(w) = where_clause {
+                substitute_expr(&mut w.predicate, params)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1192,7 +1475,7 @@ mod tests {
         // The node should have been processed
         let node = store.get_node(alice).unwrap();
         assert_eq!(
-            node.properties.get("processed"),
+            store.node_property(node.id, "processed").as_ref(),
             Some(&PropertyValue::Boolean(true))
         );
     }
@@ -1459,7 +1742,7 @@ mod tests {
         assert!(result.is_ok(), "SET query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert_eq!(node.properties.get("age"), Some(&PropertyValue::Integer(31)));
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(31)));
     }
 
     #[test]
@@ -1472,7 +1755,7 @@ mod tests {
             node.set_property("temp", "temporary");
         }
 
-        assert!(store.get_node(alice).unwrap().properties.contains_key("temp"));
+        assert!(store.node_property(alice, "temp").is_some());
 
         let query = parse_query(
             "MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.temp"
@@ -1482,7 +1765,7 @@ mod tests {
         assert!(result.is_ok(), "REMOVE query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert!(!node.properties.contains_key("temp"));
+        assert!(store.node_property(node.id, "temp").is_none());
     }
 
     #[test]
@@ -2217,8 +2500,8 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
-        assert_eq!(node.properties.get("name").unwrap().as_string(), Some("Alice"));
-        assert_eq!(node.properties.get("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -2271,7 +2554,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
         exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 30");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -2280,7 +2563,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
         exec_mut(&mut store, "MATCH (n:Person) SET n.email = 'alice@example.com'");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("email").unwrap().as_string(), Some("alice@example.com"));
+        assert_eq!(store.node_property(nodes[0].id, "email").as_ref().unwrap().as_string(), Some("alice@example.com"));
     }
 
     #[test]
@@ -2289,7 +2572,7 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
         exec_mut(&mut store, "MATCH (n:Person) REMOVE n.age");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert!(nodes[0].properties.get("age").is_none());
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none());
     }
 
     #[test]
@@ -2312,7 +2595,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
@@ -2322,7 +2605,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("seen").unwrap().as_integer(), Some(1));
+        assert_eq!(store.node_property(nodes[0].id, "seen").as_ref().unwrap().as_integer(), Some(1));
     }
 
     #[test]
@@ -2331,7 +2614,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Bob'})");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Bob"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
@@ -2642,7 +2925,7 @@ mod tests {
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params);
         executor.execute(&query).unwrap();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("senior"));
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("senior"));
     }
 
     // ========== Batch 5: UNION ==========
@@ -4186,8 +4469,8 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
-        assert_eq!(nodes[0].properties.get("city").unwrap().as_string(), Some("NYC"));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     // --- DETACH DELETE with multiple edges ---
@@ -5040,11 +5323,11 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert!(nodes.len() >= 3, "Should have 3 Person nodes");
         let alice_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5117,11 +5400,11 @@ mod tests {
         let mut store = build_triangle_graph();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         let alice_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Alice")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
         let charlie_id = nodes.iter()
-            .find(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("Charlie")))
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
@@ -5430,8 +5713,8 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("MergeTest"));
-        assert_eq!(nodes[0].properties.get("created"), Some(&PropertyValue::Boolean(true)));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("MergeTest"));
+        assert_eq!(store.node_property(nodes[0].id, "created").as_ref(), Some(&PropertyValue::Boolean(true)));
     }
 
     #[test]
@@ -5444,7 +5727,7 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "MERGE should not create a duplicate");
-        assert_eq!(nodes[0].properties.get("matched"), Some(&PropertyValue::Boolean(true)),
+        assert_eq!(store.node_property(nodes[0].id, "matched").as_ref(), Some(&PropertyValue::Boolean(true)),
             "ON MATCH SET should have set matched property");
     }
 
@@ -5456,7 +5739,7 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("new"),
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("new"),
             "First MERGE should trigger ON CREATE SET");
 
         exec_mut(&mut store,
@@ -5464,7 +5747,7 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "Should not create a duplicate");
-        assert_eq!(nodes[0].properties.get("status").unwrap().as_string(), Some("existing"),
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("existing"),
             "Second MERGE should trigger ON MATCH SET");
     }
 
@@ -5488,8 +5771,8 @@ mod tests {
         exec_mut(&mut store, "CREATE (a:Person {name: 'A1'})-[:KNOWS]->(b:Person {name: 'B1'})");
         exec_mut(&mut store, "MATCH (a:Person {name: 'A1'})-[r:KNOWS]->(b:Person {name: 'B1'}) DELETE r");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        let a_exists = nodes.iter().any(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("A1")));
-        let b_exists = nodes.iter().any(|n| n.properties.get("name").map_or(false, |v| v.as_string() == Some("B1")));
+        let a_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("A1")));
+        let b_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("B1")));
         assert!(a_exists, "Node A1 should still exist after edge deletion");
         assert!(b_exists, "Node B1 should still exist after edge deletion");
         let result = exec_read(&store, "MATCH (a:Person {name: 'A1'})-[:KNOWS]->(b:Person) RETURN b.name");
@@ -5515,9 +5798,9 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        let age = nodes[0].properties.get("age");
+        let age = store.node_property(nodes[0].id, "age");
         if let Some(val) = age {
-            assert_eq!(val, &PropertyValue::Null, "Setting to null should make property Null");
+            assert_eq!(val, PropertyValue::Null, "Setting to null should make property Null");
         }
     }
 
@@ -5529,8 +5812,8 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(30));
-        assert_eq!(nodes[0].properties.get("city").unwrap().as_string(), Some("NYC"));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     #[test]
@@ -5540,7 +5823,7 @@ mod tests {
         exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 35");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(nodes[0].properties.get("age").unwrap().as_integer(), Some(35));
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(35));
     }
 
     #[test]
@@ -5563,9 +5846,9 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].properties.get("age").is_none(), "age property should be removed");
-        assert!(nodes[0].properties.get("name").is_some(), "name property should still exist");
-        assert!(nodes[0].properties.get("city").is_some(), "city property should still exist");
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age property should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name property should still exist");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_some(), "city property should still exist");
     }
 
     #[test]
@@ -5576,7 +5859,7 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].properties.get("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
@@ -5587,10 +5870,10 @@ mod tests {
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].properties.get("age").is_none(), "age should be removed");
-        assert!(nodes[0].properties.get("city").is_none(), "city should be removed");
-        assert!(nodes[0].properties.get("name").is_some(), "name should still exist");
-        assert!(nodes[0].properties.get("score").is_some(), "score should still exist");
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age should be removed");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_none(), "city should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name should still exist");
+        assert!(store.node_property(nodes[0].id, "score").as_ref().is_some(), "score should still exist");
     }
 
     #[test]

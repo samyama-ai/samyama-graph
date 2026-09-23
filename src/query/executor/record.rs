@@ -556,14 +556,7 @@ impl Value {
                 }
             }
             Value::EdgeRef(id, ..) => {
-                let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
-                if !prop.is_null() {
-                    prop
-                } else if let Some(edge) = store.get_edge(*id) {
-                    edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)
-                } else {
-                    PropertyValue::Null
-                }
+                store.edge_property(*id, property).unwrap_or(PropertyValue::Null)
             }
             // Map property access: `m.a` where `m` is a map, from a literal, an
             // `UNWIND` over a list of maps, or a map-valued node property.
@@ -723,6 +716,10 @@ pub struct RecordBatch {
     pub records: Vec<Record>,
     /// Column names for the result
     pub columns: Vec<String>,
+    /// Structural hash of the plan that produced these rows (TRUST-06), when
+    /// the executor was asked to record it (`with_plan_hash`). A result served
+    /// from the result cache keeps the hash of the plan that computed it.
+    pub plan_hash: Option<u64>,
 }
 
 impl RecordBatch {
@@ -744,6 +741,7 @@ impl RecordBatch {
         Self {
             records: Vec::new(),
             columns,
+            plan_hash: None,
         }
     }
 
@@ -1304,6 +1302,12 @@ pub struct PropertyCursor {
     property: Arc<str>,
     node_column: Option<crate::graph::storage::columnar::ColumnId>,
     edge_column: Option<crate::graph::storage::columnar::ColumnId>,
+    /// Whether the node / relationship column holds strings, once known.
+    /// `read_str` stops trying a column that does not: a date or number sort
+    /// key otherwise looked for a string on every row before reading the
+    /// value, ~30 ms of LDBC IC9's ~467k-row sort.
+    node_str: Option<bool>,
+    edge_str: Option<bool>,
 }
 
 impl PropertyCursor {
@@ -1313,6 +1317,8 @@ impl PropertyCursor {
             property: property.into(),
             node_column: None,
             edge_column: None,
+            node_str: None,
+            edge_str: None,
         }
     }
 
@@ -1360,13 +1366,64 @@ impl PropertyCursor {
                         return value;
                     }
                 }
-                match store.get_edge(*id) {
-                    Some(edge) => edge.get_property(&self.property).cloned().unwrap_or(PropertyValue::Null),
-                    None => PropertyValue::Null,
+                // The column has no value here; read the row map in place.
+                if !store.has_edge(*id) {
+                    return PropertyValue::Null;
                 }
+                store
+                    .get_edge_properties(*id)
+                    .and_then(|props| props.get(&*self.property).cloned())
+                    .unwrap_or(PropertyValue::Null)
             }
             Some(other) => other.resolve_property(&self.property, store),
             None => PropertyValue::Null,
+        }
+    }
+
+    /// `read`, borrowed, for a value held in a string column. `None` for
+    /// anything else -- another type, a value only in row storage, an absent
+    /// property, a variable that is not a node or relationship -- where the
+    /// caller falls back to `read`. A sort key only compares its string and
+    /// never needs its own copy of it (#750).
+    pub fn read_str<'s>(&mut self, record: &Record, store: &'s GraphStore) -> Option<&'s str> {
+        // Known not to be a string column for nodes, and not known to be one
+        // for relationships: skip the lookup. The caller reads the value
+        // instead, so the answer is the same either way.
+        if self.node_str == Some(false) && self.edge_str != Some(true) {
+            return None;
+        }
+        match record.get(&self.variable) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => {
+                let column = match self.node_column {
+                    Some(c) => c,
+                    None => {
+                        let found = store.node_columns.column_id(&self.property)?;
+                        self.node_column = Some(found);
+                        found
+                    }
+                };
+                let is_str = *self.node_str.get_or_insert_with(|| store.node_columns.is_str_column(column));
+                if !is_str {
+                    return None;
+                }
+                store.node_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => {
+                let column = match self.edge_column {
+                    Some(c) => c,
+                    None => {
+                        let found = store.edge_columns.column_id(&self.property)?;
+                        self.edge_column = Some(found);
+                        found
+                    }
+                };
+                let is_str = *self.edge_str.get_or_insert_with(|| store.edge_columns.is_str_column(column));
+                if !is_str {
+                    return None;
+                }
+                store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            _ => None,
         }
     }
 }
@@ -1375,6 +1432,43 @@ impl PropertyCursor {
 ///
 /// Absent components are `Null`, which is Cypher's answer — `date.hour` has no
 /// meaning and is null rather than zero. Returning zero would read as midnight.
+/// Component access on any temporal value, wherever the value came from.
+///
+/// `date('2024-05-06').year` and `WITH date('2024-05-06') AS d RETURN d.year`
+/// are the same question and used to take different paths: property access on
+/// a *bound* value reached `temporal_component` below, while access on an
+/// expression went through the executor's index operator, which knows about
+/// lists and maps and refused a `Date` with "cannot index Date: it is not a
+/// list or a map" (LANG-16).
+///
+/// One function, called from both, so the two spellings cannot drift apart.
+///
+/// `Some` for a temporal value, `None` for anything else, so the caller can
+/// keep its own error for a value that genuinely has no components.
+pub(crate) fn temporal_property(v: &PropertyValue, property: &str) -> Option<PropertyValue> {
+    match v {
+        PropertyValue::Date(_)
+        | PropertyValue::LocalTime(_)
+        | PropertyValue::Time { .. }
+        | PropertyValue::LocalDateTime { .. }
+        | PropertyValue::ZonedDateTime { .. } => Some(temporal_component(v, property)),
+        // The legacy millisecond timestamp, read as the UTC zoned datetime it
+        // is -- lossless, because milliseconds fit exactly -- rather than
+        // given a second implementation of `.year` that could disagree with
+        // the first.
+        PropertyValue::DateTime(millis) => Some(temporal_component(
+            &PropertyValue::ZonedDateTime {
+                secs: millis.div_euclid(1000),
+                nanos: (millis.rem_euclid(1000) * 1_000_000) as u32,
+                offset_seconds: 0,
+                zone: None,
+            },
+            property,
+        )),
+        _ => None,
+    }
+}
+
 fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
     use chrono::{Datelike, Timelike};
     const DAY_NS: i64 = 86_400 * 1_000_000_000;
@@ -1463,6 +1557,34 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
     }
 }
 
+/// Where a value ranks in `ORDER BY`, before values of its own rank are
+/// compared with each other. Shared by `cypher_order_value` and the sort key
+/// comparator, which must agree with it (#750).
+///
+/// Ranks are the ascending order in `cypher_order_value`'s documentation.
+/// `Value::List`/`Value::Map` and their `PropertyValue` spellings are the same
+/// type to a query and must rank the same, or `[1]` and a list of nodes sort
+/// into different places.
+pub(crate) fn cypher_order_rank(v: &Value) -> u8 {
+    match v {
+        Value::Map(_) => 0,
+        Value::Node(..) | Value::NodeRef(_) => 1,
+        Value::Edge(..) | Value::EdgeRef(..) => 2,
+        Value::List(_) => 3,
+        Value::Path { .. } => 4,
+        Value::Null => 9,
+        Value::Property(p) => match p {
+            PropertyValue::Map(_) => 0,
+            PropertyValue::Array(_) | PropertyValue::Vector(_) => 3,
+            PropertyValue::String(_) => 5,
+            PropertyValue::Boolean(_) => 6,
+            PropertyValue::Float(f) if f.is_nan() => 8,
+            PropertyValue::Null => 9,
+            _ => 7,
+        },
+    }
+}
+
 /// Cypher's orderability over `Value`, for `ORDER BY`.
 ///
 /// openCypher defines one total order across types, ascending:
@@ -1486,30 +1608,7 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
 pub fn cypher_order_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    // Ranks are the ascending order above. `Value::List`/`Value::Map` and
-    // their `PropertyValue` spellings are the same type to a query and must
-    // rank the same, or `[1]` and a list of nodes sort into different places.
-    fn rank(v: &Value) -> u8 {
-        match v {
-            Value::Map(_) => 0,
-            Value::Node(..) | Value::NodeRef(_) => 1,
-            Value::Edge(..) | Value::EdgeRef(..) => 2,
-            Value::List(_) => 3,
-            Value::Path { .. } => 4,
-            Value::Null => 9,
-            Value::Property(p) => match p {
-                PropertyValue::Map(_) => 0,
-                PropertyValue::Array(_) | PropertyValue::Vector(_) => 3,
-                PropertyValue::String(_) => 5,
-                PropertyValue::Boolean(_) => 6,
-                PropertyValue::Float(f) if f.is_nan() => 8,
-                PropertyValue::Null => 9,
-                _ => 7,
-            },
-        }
-    }
-
-    let (ra, rb) = (rank(a), rank(b));
+    let (ra, rb) = (cypher_order_rank(a), cypher_order_rank(b));
     if ra != rb {
         return ra.cmp(&rb);
     }

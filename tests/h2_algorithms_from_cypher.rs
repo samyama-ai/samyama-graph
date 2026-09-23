@@ -220,7 +220,11 @@ fn node_similarity_includes_pairs_that_are_already_connected() {
     // Link prediction excludes joined pairs by construction. "Who else is like
     // this" must not.
     let (s, _) = graph(3, &[(0, 1), (0, 2), (1, 2)]);
-    assert!(rows(&s, "CALL algo.nodeSimilarity({topK: 3}) YIELD node, other, similarity RETURN node") > 0);
+    // Was `{topK: 3}`, which `nodeSimilarity` never read -- it reads `cutoff` --
+    // so the config was accepted, discarded, and the test asserted its result
+    // anyway. Dropped rather than translated: the assertion is "connected pairs
+    // still appear", and no config was needed for it (samyama-graph#1316).
+    assert!(rows(&s, "CALL algo.nodeSimilarity() YIELD node, other, similarity RETURN node") > 0);
 }
 
 #[test]

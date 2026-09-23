@@ -59,6 +59,78 @@ jobs:
           path: ${{ runner.temp }}/sweep/logs/
           retention-days: 14
 
+  # The Python extension, built and then actually imported.
+  #
+  # ci.yml runs `cargo check` on `sdk/python` and deliberately does not select
+  # `test_embedded.py` or `test_vector.py`, saying they belong in the nightly
+  # sweep. They did not: there was no such job, so the only two suites that
+  # load the compiled binding ran nowhere, on any branch, ever.
+  #
+  # `cargo check` catches a signature drift. It cannot catch a change in what
+  # the binding *returns* -- the pyo3 0.29 migration rewrote every
+  # `serde_json::Value` to Python conversion in `json_to_py`, and a check
+  # compiles all of it whether an integer comes back as an `int` or as
+  # something else entirely.
+  python-extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-python-extension
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and install the extension
+        working-directory: sdk/python
+        run: |
+          python -m venv .venv
+          # ipython and pandas are what `test_notebook_magic.py` needs. They
+          # are installed rather than left to `importorskip`, because a test
+          # that skips in CI is a check that cannot fail: INT-09's magic could
+          # stop registering and this job would stay green.
+          .venv/bin/pip install --quiet maturin pytest ipython pandas
+          VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --release
+
+      - name: Tests that need the compiled binding
+        working-directory: sdk/python
+        # `-p no:randomly` is not needed, but `--strict-markers` and a zero
+        # tolerance for skips are: every suite named here must actually run.
+        run: |
+          .venv/bin/python -m pytest -q -rs \
+            tests/test_embedded.py tests/test_vector.py \
+            tests/test_async_client.py tests/test_notebook_magic.py \
+            | tee /tmp/pytest.out
+          if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then
+            echo "::error::a suite skipped. These tests exist because the thing \
+          they check is easy to break silently; a skip here is a green tick over \
+          an unrun check."
+            exit 1
+          fi
+
+      - name: The conversions themselves
+        working-directory: sdk/python
+        # Named types, not `assert it ran`. Every branch of `json_to_py` has a
+        # row here, because that function is what a pyo3 upgrade rewrites and
+        # what no compile error would report on.
+        run: |
+          .venv/bin/python - <<'EOF'
+          import samyama
+          c = samyama.SamyamaClient.embedded()
+          row = c.query(
+              'RETURN "txt" AS s, 7 AS i, 1.5 AS f, true AS b, null AS n, '
+              '[1, 2] AS arr, {a: 1, b: [true, null]} AS obj'
+          ).records[0]
+          got = [type(v).__name__ for v in row]
+          want = ["str", "int", "float", "bool", "NoneType", "list", "dict"]
+          assert got == want, f"{got} != {want}"
+          assert row[6] == {"a": 1, "b": [True, None]}, row[6]
+          print("ok: every json_to_py branch returns the Python type it names")
+          EOF
+
       - name: Summarise into the run page
         if: always()
         run: |

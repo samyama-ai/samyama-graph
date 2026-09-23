@@ -148,9 +148,10 @@ pub fn louvain(view: &GraphView, max_passes: usize) -> Communities {
         let mut tot = deg.clone();
 
         let mut improved = false;
-        // One sweep in index order. More sweeps converge further; one is
-        // enough to make progress and keeps the cost predictable, and the
-        // outer pass loop provides the rest.
+        // Up to ten sweeps in index order, stopping early when no node moved.
+        // The comment here used to say one sweep, directly above a loop that
+        // does ten -- a reader budgeting the cost of a pass would have been out
+        // by an order of magnitude.
         for _sweep in 0..10 {
             let mut moved = false;
             for u in 0..cur_n {

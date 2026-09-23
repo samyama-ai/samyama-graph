@@ -26,7 +26,7 @@ use samyama_graph_algorithms::{
     rich_club_coefficient, square_clustering, transitivity,
     constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
     betweenness_centrality, closeness_centrality, core_number, degree_centrality,
-    eigenvector_centrality, harmonic_centrality,
+    eigenvector_centrality, harmonic_centrality, pca, PcaConfig,
     link_prediction::{score_one, LinkScore},
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::article_rank,
@@ -220,7 +220,9 @@ fn main() {
             .collect();
         let dij_costs: Vec<(String, Option<f64>)> = targets
             .iter()
-            .map(|t| ((*t).to_string(), dijkstra(&view, 0, *t as NodeId).map(|p| p.cost)))
+            .map(|t| ((*t).to_string(), dijkstra(&view, 0, *t as NodeId)
+                .expect("the parity graphs are built with non-negative weights")
+                .map(|p| p.cost)))
             .collect();
 
         let flow = edmonds_karp(&view, 0, (r.n - 1) as NodeId).map(|f| f.max_flow);
@@ -320,7 +322,9 @@ fn main() {
                 // A* with a zero heuristic is Dijkstra, which is what the
                 // reference runs. A heuristic of our own would make this a
                 // test of the heuristic rather than of the search.
-                if let Some((_, cost)) = a_star(&view, sv, tv, &zero) {
+                if let Some((_, cost)) = a_star(&view, sv, tv, &zero)
+                    .expect("the parity graphs are built with non-negative weights")
+                {
                     wdist.insert(key, cost);
                 }
             }
@@ -345,7 +349,9 @@ fn main() {
             let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
             simple.insert(
                 far.clone(),
-                yens_k_shortest(&view, sv, tv, 5).into_iter().map(|(_, c)| c).collect(),
+                yens_k_shortest(&view, sv, tv, 5)
+                    .expect("the parity graphs are built with non-negative weights")
+                    .into_iter().map(|(_, c)| c).collect(),
             );
         }
 
@@ -426,8 +432,40 @@ fn main() {
         // modularity is defined on here.
         let louvain_partition = louvain(&single, 10);
 
+        // `allPairsShortestPath` and `nodeSimilarity` (ALGO-02). Both were out
+        // of the parity denominator, excused as having no deterministic
+        // reference. Neither reason was that: `allPairsShortestPath` was
+        // "already checked as `hop_distance` over every pair" and
+        // `nodeSimilarity` was "the underlying Jaccard is already checked
+        // pairwise". Both attribute the coverage to a check on **different
+        // code** -- `hop_distance` runs `all_shortest_paths` and the Jaccard
+        // check runs the link-prediction scorer, while these two call
+        // `all_pairs_hops` and `node_similarity`. An algorithm excused because
+        // something else is checked is an algorithm nobody checks.
+        let all_pairs_hops_out: HashMap<String, usize> =
+            samyama_graph_algorithms::all_pairs_hops(&view)
+                .into_iter()
+                .map(|((a, b), d)| (format!("{a}-{b}"), d))
+                .collect();
+        // Exported with the parameters, so the reference runs the same query.
+        // `topK` and `cutoff` decide which pairs come back at all; a reference
+        // guessing them would compare two different questions.
+        const NODE_SIM_TOPK: usize = 10;
+        const NODE_SIM_CUTOFF: f64 = 0.0;
+        let node_similarity_out: Vec<serde_json::Value> =
+            samyama_graph_algorithms::node_similarity(&single, NODE_SIM_TOPK, NODE_SIM_CUTOFF)
+                .into_iter()
+                .map(|(a, b, s)| serde_json::json!([a, b, s]))
+                .collect();
+
         let mut h2 = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
+        put("all_pairs_hops", serde_json::json!(all_pairs_hops_out));
+        put("node_similarity", serde_json::json!({
+            "top_k": NODE_SIM_TOPK,
+            "cutoff": NODE_SIM_CUTOFF,
+            "pairs": node_similarity_out,
+        }));
         // ArticleRank (ALGO-02). Deterministic for a given damping and iteration
         // count, so it has exactly one right answer and belongs in the parity
         // denominator — "no library ships it" is not the same as "no reference can
@@ -454,10 +492,17 @@ fn main() {
             match samyama_graph_algorithms::temporal::TemporalEdges::new(&view, edge_times.clone()) {
                 Ok(te) => {
                     let sources = [0usize];
+                    // `[id, arrival]`, as before. The walk now comes back too
+                    // (ALGO-15) and is deliberately **not** exported: the
+                    // recorded answers are what the reference implementations
+                    // also produce, and neither NetworkX nor igraph returns a
+                    // time-respecting walk, so adding it here would put a
+                    // column in the parity corpus that nothing can be compared
+                    // against.
                     let reach = temporal_reachability(&view, &te, &sources, 0)
-                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
                     let prop = propagation_ranking(&view, &te, &sources, 0)
-                        .map(|v| v.into_iter().map(|(id, t)| serde_json::json!([id, t])).collect::<Vec<_>>());
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
                     let tsp = temporal_shortest_path(&view, &te, 0, r.n - 1, 0).map(|p| {
                         p.map(|p| serde_json::json!({
                             "nodes": p.nodes,
@@ -533,6 +578,30 @@ fn main() {
                 .to_vec()).unwrap());
         put("reciprocity",
             serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
+
+        // PCA, against a matrix this file also exports (benchmarks#199).
+        //
+        // `pca` became callable from Cypher and arrived in ALGO-02's
+        // denominator with nothing to compare it to. The tempting conclusion is
+        // that it cannot have a reference, because a component's **sign** is
+        // arbitrary and ours fixes none. That is true of the components and not
+        // of the variance: `explained_variance_ratio` is a property of the data,
+        // identical in any basis, and it is the number a user reads.
+        //
+        // The matrix is exported rather than derived on both sides. A parity
+        // check whose two halves each build "the same" input is partly checking
+        // two input builders, and when it disagrees you cannot tell which moved
+        // -- the same reason the graphs themselves are exported.
+        let features: Vec<Vec<f64>> = (0..r.n).map(|i| vec![
+            view.out_degree(i) as f64,
+            view.in_degree(i) as f64,
+            view.weights(i).map(|w| w.iter().sum::<f64>()).unwrap_or(0.0),
+            view.successors(i).iter().map(|&t| t as f64).sum::<f64>() / (r.n as f64),
+        ]).collect();
+        let p = pca(&features, PcaConfig { n_components: 3, ..Default::default() });
+        put("pca_matrix", serde_json::to_value(&features).unwrap());
+        put("pca_explained_variance_ratio",
+            serde_json::to_value(&p.explained_variance_ratio).unwrap());
 
         let mut entry = serde_json::json!({
             "name": r.name,
@@ -669,13 +738,27 @@ fn main() {
                 // right; the pairing was the bug, and a check that pairs by position
                 // across two orderings is one transposition away from a false
                 // failure at any time.
-                let pairs: Vec<(f64, f64)> = store
+                //
+                // Read through `store.node_property`, not `node.get_property`.
+                // The Cypher write path stores properties columnar and
+                // `Node::get_property` reads the node's own inline map, so it
+                // answers `None` for a property that is there (#1313). Both
+                // reads here returned NaN, JSON wrote `null`, and the
+                // comparator raised on it -- so this check had silently stopped
+                // running, and the harness was reading an old report.
+                let ids: Vec<_> = store
                     .get_nodes_by_label(&samyama::graph::Label::new("Item"))
                     .iter()
-                    .map(|n| {
+                    .map(|n| n.id)
+                    .collect();
+                let pairs: Vec<(f64, f64)> = ids
+                    .iter()
+                    .map(|id| {
                         (
-                            n.get_property("cost").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
-                            n.get_property("qty").and_then(|v| v.as_float()).unwrap_or(f64::NAN),
+                            store.node_property(*id, "cost").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
+                            store.node_property(*id, "qty").and_then(|v| v.as_float())
+                                .unwrap_or(f64::NAN),
                         )
                     })
                     .collect();

@@ -24,6 +24,20 @@ use crate::query::{RecordBatch, Value};
 
 /// Reserved node property holding quarantined enrichments (never queried as data).
 pub const ENRICHMENT_PROPERTY: &str = "_enrichment";
+/// Reserved key marking an artifact a model made or touched (TRUST-05, #1413).
+///
+/// A map, so **one** predicate covers every case the requirement names:
+/// `created` is true when the node or edge itself was produced by a model,
+/// and `properties` lists the properties whose current value was. A caller
+/// excludes the lot with `WHERE n._generated IS NULL`.
+///
+/// It is written at **promotion**, not at quarantine: a quarantined answer is
+/// not in the graph yet, and marking it would mean marking a value the engine
+/// has not believed. Before this existed, a promoted value was written onto
+/// the real property with no marker of any kind -- the only trace was
+/// `_enrichment.<prop>.status = "verified"`, nested inside a map -- so a model
+/// answer and an ingested one were the same thing once verified.
+pub const GENERATED_PROPERTY: &str = "_generated";
 /// Confidence for an LLM (parametric, unsourced) value — deliberately low.
 pub const LLM_DEFAULT_CONFIDENCE: f64 = 0.4;
 /// OSS serves a single graph; the store API still takes a tenant id.
@@ -376,15 +390,157 @@ fn materialize_edges(store: &mut GraphStore, node_id: NodeId, targets: &[String]
         } else {
             let id = store.create_node(tlabel.clone());
             let _ = store.set_node_property(TENANT, id, mat.target_key.clone(), PropertyValue::String(name.clone()));
-            let _ = store.set_node_property(TENANT, id, "source", PropertyValue::String("LLM-derived".into()));
+            // Was `source: "LLM-derived"` -- an unreserved property name that
+            // collides with any graph that already has a `source`, and that
+            // nothing read. The reserved marker says the same thing where one
+            // predicate can find it, and says the node was created whole.
+            let _ = store.set_node_property(
+                TENANT, id, GENERATED_PROPERTY,
+                generated_map(true, vec![mat.target_key.clone()]),
+            );
             existing.insert(name.clone(), id);
             id
         };
-        if store.create_edge(node_id, tid, mat.edge_type.clone()).is_ok() {
+        // The edge is the assertion. A target node may be ordinary data the
+        // model merely named; the edge between them is the part the model
+        // invented, and it carried nothing at all before this.
+        if let Ok(eid) = store.create_edge(node_id, tid, mat.edge_type.clone()) {
+            store.set_edge_property_sparse(eid, GENERATED_PROPERTY, generated_map(true, vec![]));
             created += 1;
         }
     }
     created
+}
+
+fn read_generated_map(store: &GraphStore, node_id: NodeId) -> HashMap<String, PropertyValue> {
+    match store.node_properties_merged(node_id).get(GENERATED_PROPERTY) {
+        Some(PropertyValue::Map(m)) => m.clone(),
+        _ => HashMap::new(),
+    }
+}
+
+fn generated_map(created: bool, properties: Vec<String>) -> PropertyValue {
+    let mut m: HashMap<String, PropertyValue> = HashMap::new();
+    m.insert("created".into(), PropertyValue::Boolean(created));
+    m.insert(
+        "properties".into(),
+        PropertyValue::Array(properties.into_iter().map(PropertyValue::String).collect()),
+    );
+    PropertyValue::Map(m)
+}
+
+/// Add `property` to a node's generated list, creating the marker if absent.
+fn mark_generated_property(store: &mut GraphStore, node_id: NodeId, property: &str) {
+    let existing = read_generated_map(store, node_id);
+    let created = matches!(existing.get("created"), Some(PropertyValue::Boolean(true)));
+    let mut names: Vec<String> = match existing.get("properties") {
+        Some(PropertyValue::Array(a)) => a
+            .iter()
+            .filter_map(|v| if let PropertyValue::String(s) = v { Some(s.clone()) } else { None })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !names.iter().any(|n| n == property) {
+        names.push(property.to_string());
+    }
+    let _ = store.set_node_property(TENANT, node_id, GENERATED_PROPERTY, generated_map(created, names));
+}
+
+fn is_generated_whole(store: &GraphStore, node_id: NodeId) -> bool {
+    matches!(
+        read_generated_map(store, node_id).get("created"),
+        Some(PropertyValue::Boolean(true))
+    )
+}
+
+/// What a retraction undid.
+#[derive(Debug, Default, Serialize)]
+pub struct RetractReport {
+    pub nodes_processed: usize,
+    pub properties_removed: usize,
+    pub edges_removed: usize,
+    pub nodes_removed: usize,
+}
+
+/// Withdraw everything a model wrote about the given nodes (TRUST-05, #1413).
+///
+/// Promoted properties are removed, materialized edges deleted, and target
+/// nodes the model created whole deleted once nothing else points at them. A
+/// node the model only *named* -- one that was already in the graph when the
+/// model mentioned it -- is kept: retraction removes what the model made, not
+/// what it referred to.
+///
+/// The quarantine entry survives and its status goes back to
+/// `pending_verification`. Retraction withdraws the belief, not the evidence:
+/// a later pass with a different floor can look at the same answer again, and
+/// a retraction that destroyed it would make the decision unreviewable.
+///
+/// This is not a transaction. The engine has no statement-level rollback
+/// (LANG-07), so this is a compensating pass, and a failure part-way through
+/// leaves a partly-retracted graph rather than the state it started in.
+pub fn retract(store: &mut GraphStore, node_ids: &[NodeId]) -> RetractReport {
+    let mut rep = RetractReport::default();
+    for &id in node_ids {
+        let marker = read_generated_map(store, id);
+        let edges: Vec<(crate::graph::EdgeId, NodeId)> = store
+            .get_outgoing_edges(id)
+            .into_iter()
+            .filter(|e| e.properties.contains_key(GENERATED_PROPERTY))
+            .map(|e| (e.id, e.target))
+            .collect();
+        if marker.is_empty() && edges.is_empty() {
+            continue;
+        }
+        rep.nodes_processed += 1;
+
+        let names: Vec<String> = match marker.get("properties") {
+            Some(PropertyValue::Array(a)) => a
+                .iter()
+                .filter_map(|v| if let PropertyValue::String(s) = v { Some(s.clone()) } else { None })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for name in &names {
+            store.remove_node_property(id, name);
+            rep.properties_removed += 1;
+        }
+
+        let mut touched: Vec<NodeId> = Vec::new();
+        for (eid, target) in edges {
+            if store.delete_edge(eid).is_ok() {
+                rep.edges_removed += 1;
+                touched.push(target);
+            }
+        }
+        // Only a node the model created whole, and only once nothing points at
+        // it any more. Deleting a target the model merely named would take
+        // ingested data out of the graph.
+        touched.sort_by_key(|n| n.0);
+        touched.dedup();
+        for t in touched {
+            if is_generated_whole(store, t)
+                && store.get_incoming_edges(t).is_empty()
+                && store.get_outgoing_edges(t).is_empty()
+                && store.delete_node(TENANT, t).is_ok()
+            {
+                rep.nodes_removed += 1;
+            }
+        }
+
+        let mut root = read_enrichment_map(store, id);
+        for (_property, entry) in root.iter_mut() {
+            if let PropertyValue::Map(e) = entry {
+                if matches!(e.get("status"), Some(PropertyValue::String(s)) if s == "verified") {
+                    e.insert("status".into(), PropertyValue::String("pending_verification".into()));
+                }
+            }
+        }
+        if !root.is_empty() {
+            let _ = store.set_node_property(TENANT, id, ENRICHMENT_PROPERTY, PropertyValue::Map(root));
+        }
+        store.remove_node_property(id, GENERATED_PROPERTY);
+    }
+    rep
 }
 
 /// Report from a verification pass.
@@ -460,6 +616,9 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
                 if let Some(PropertyValue::Map(e)) = root.get_mut(&property) {
                     e.insert("status".into(), PropertyValue::String("verified".into()));
                 }
+                // The node now carries a value no human wrote. Marked here,
+                // where the belief is taken on, rather than at quarantine.
+                mark_generated_property(store, id, &property);
                 rep.promoted += 1;
             }
         }
@@ -479,14 +638,9 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
 /// Build an [`EnrichmentWorker`] from environment config (same knobs as `/api/nlq`).
 pub fn worker_from_env() -> Result<EnrichmentWorker, String> {
     use crate::persistence::tenant::{LLMProvider, NLQConfig};
-    let provider = match std::env::var("NLQ_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
-        "ollama" => LLMProvider::Ollama,
-        "gemini" => LLMProvider::Gemini,
-        "anthropic" => LLMProvider::Anthropic,
-        "azure" | "azureopenai" => LLMProvider::AzureOpenAI,
-        "mock" => LLMProvider::Mock,
-        _ => LLMProvider::OpenAI,
-    };
+    // Same refusal as `/api/nlq`, and it matters more here: enrichment sends the
+    // gap node's actual property **values**, not just schema metadata.
+    let provider = LLMProvider::parse(&std::env::var("NLQ_PROVIDER").unwrap_or_default())?;
     let model = std::env::var("NLQ_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
     let config = NLQConfig {
         enabled: true,

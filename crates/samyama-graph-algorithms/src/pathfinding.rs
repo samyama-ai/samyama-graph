@@ -88,7 +88,58 @@ impl PartialOrd for State {
 /// Dijkstra's Algorithm (Weighted Shortest Path)
 ///
 /// Uses edge weights from GraphView if available, otherwise assumes 1.0.
+///
+/// **A negative weight is skipped, not rejected.** Dijkstra is only correct on
+/// non-negative weights, and this drops such an edge and carries on — so the
+/// path returned is the shortest path in a graph without those edges, with
+/// nothing in the result to say so. The Cypher surfaces refuse a negative
+/// weight and name `algo.bellmanFord`, which handles them and detects a
+/// negative cycle; a caller reaching this function directly is now refused
+/// too, rather than getting the skip (samyama-graph#1303).
+/// A graph carried a negative weight into an algorithm that cannot take one.
+///
+/// Dijkstra and A* are correct only on non-negative weights. Skipping the
+/// offending edge is not a repair: it answers about a *different* graph -- the
+/// one without those edges -- and nothing in the result says so. A refusal is
+/// an answer; a silently different graph is not (samyama-graph#1303).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NegativeWeight {
+    /// The first negative weight found, for the message.
+    pub weight: f64,
+}
+
+impl std::fmt::Display for NegativeWeight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "edge weight {} is negative; dijkstra and aStar are correct only on \
+             non-negative weights. Use bellmanFord, which handles them and detects \
+             a negative cycle reachable from the source",
+            self.weight
+        )
+    }
+}
+
+impl std::error::Error for NegativeWeight {}
+
 pub fn dijkstra(
+    view: &GraphView,
+    source: NodeId,
+    target: NodeId,
+) -> Result<Option<PathResult>, NegativeWeight> {
+    // One scan of the weight array per call, not a test per edge: "can this
+    // algorithm run on this graph" is a question about the graph, and asking
+    // it per edge is how the old code ended up dropping edges one at a time.
+    //
+    // `Ok(None)` stays "no path exists". That is a different fact from "this
+    // algorithm cannot answer", and it now has a different shape.
+    if let Some(w) = view.first_negative_weight() {
+        return Err(NegativeWeight { weight: w });
+    }
+    Ok(dijkstra_non_negative(view, source, target))
+}
+
+fn dijkstra_non_negative(
     view: &GraphView,
     source: NodeId,
     target: NodeId,
@@ -310,7 +361,7 @@ mod tests {
             Some(weights),
         );
 
-        let result = dijkstra(&view, 1, 3).unwrap();
+        let result = dijkstra(&view, 1, 3).expect("no negative weights").unwrap();
         assert_eq!(result.path, vec![1, 2, 3]);
         assert_eq!(result.cost, 15.0);
     }

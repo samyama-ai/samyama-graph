@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -160,6 +160,93 @@ impl RespServer {
     }
 }
 
+/// A transaction open on one RESP connection: the writer's lock, held from
+/// GRAPH.BEGIN until GRAPH.COMMIT or GRAPH.ROLLBACK (#1200 step 6b).
+///
+/// Holding the lock is what keeps the transaction's writes from every other
+/// connection, and it is why the transaction has a deadline: while it is open
+/// nobody else can read or write.
+struct OpenTxn {
+    guard: tokio::sync::OwnedRwLockWriteGuard<GraphStore>,
+    deadline: tokio::time::Instant,
+}
+
+/// Per-connection transaction state.
+#[derive(Default)]
+struct ConnTxn {
+    open: Option<OpenTxn>,
+    /// The last transaction ended by its deadline, so a later COMMIT can say so.
+    timed_out: bool,
+}
+
+/// Answer one command, routing the transaction commands and anything run
+/// inside an open transaction to the lock the connection holds.
+async fn respond(
+    handler: &CommandHandler,
+    value: &RespValue,
+    store: &Arc<RwLock<GraphStore>>,
+    txn: &mut ConnTxn,
+) -> RespValue {
+    let name = value
+        .as_array()
+        .ok()
+        .and_then(|args| args.first())
+        .and_then(|v| v.as_string().ok().flatten())
+        .map(|s| s.to_uppercase());
+    let limit = GraphStore::session_transaction_timeout();
+    match (name.as_deref(), txn.open.as_mut()) {
+        (Some("GRAPH.BEGIN"), Some(_)) => {
+            RespValue::Error("ERR a transaction is already open on this connection".to_string())
+        }
+        (Some("GRAPH.BEGIN"), None) => {
+            let mut guard = Arc::clone(store).write_owned().await;
+            let reply = handler.begin_transaction_on(&mut guard);
+            if !matches!(reply, RespValue::Error(_)) {
+                txn.open = Some(OpenTxn { guard, deadline: tokio::time::Instant::now() + limit });
+                txn.timed_out = false;
+            }
+            reply
+        }
+        (Some("GRAPH.COMMIT"), Some(_)) => {
+            let mut open = txn.open.take().expect("matched Some");
+            handler.commit_transaction_on(&mut open.guard)
+        }
+        (Some("GRAPH.ROLLBACK"), Some(_)) => {
+            let mut open = txn.open.take().expect("matched Some");
+            handler.rollback_transaction_on(&mut open.guard)
+        }
+        (Some("GRAPH.COMMIT") | Some("GRAPH.ROLLBACK"), None) => RespValue::Error(if txn.timed_out {
+            format!(
+                "ERR the transaction was open longer than {}s and was rolled back",
+                limit.as_secs()
+            )
+        } else {
+            "ERR no transaction is open on this connection".to_string()
+        }),
+        (Some("GRAPH.QUERY"), Some(open)) => {
+            let args = value.as_array().unwrap_or(&[]);
+            handler.query_in_transaction(args, &mut open.guard, false)
+        }
+        (Some("GRAPH.RO_QUERY"), Some(open)) => {
+            let args = value.as_array().unwrap_or(&[]);
+            handler.query_in_transaction(args, &mut open.guard, true)
+        }
+        // These never touch the store, so they cannot wait on the lock this
+        // connection itself holds.
+        (Some("PING") | Some("ECHO") | Some("INFO"), Some(_)) => {
+            handler.handle_command(value, store).await
+        }
+        // Anything else would take the store's lock, which this connection
+        // already holds, and wait on itself for good.
+        (_, Some(_)) => RespValue::Error(
+            "ERR inside a transaction only GRAPH.QUERY, GRAPH.RO_QUERY, GRAPH.COMMIT, \
+             GRAPH.ROLLBACK, PING, ECHO and INFO are accepted"
+                .to_string(),
+        ),
+        (_, None) => handler.handle_command(value, store).await,
+    }
+}
+
 /// Handle a single client connection
 async fn handle_connection(
     mut socket: TcpStream,
@@ -169,11 +256,57 @@ async fn handle_connection(
     proxy: Option<Arc<Proxy>>,
     cluster: Option<Arc<ClusterManager>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = ConnTxn::default();
+    let result =
+        serve_connection(&mut socket, &store, &handler, router, proxy, cluster, &mut txn).await;
+    // However the connection ends -- a clean close, a protocol error, a failed
+    // write -- a transaction still open is rolled back, or its partial writes
+    // would stay and the lock it held would be gone with no one to finish it.
+    if let Some(mut open) = txn.open.take() {
+        handler.rollback_transaction_on(&mut open.guard);
+        debug!("connection closed with a transaction open; rolled back");
+    }
+    result
+}
+
+enum Wake {
+    Read(std::io::Result<usize>),
+    Expired,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_connection(
+    socket: &mut TcpStream,
+    store: &Arc<RwLock<GraphStore>>,
+    handler: &Arc<CommandHandler>,
+    router: Option<Arc<Router>>,
+    proxy: Option<Arc<Proxy>>,
+    cluster: Option<Arc<ClusterManager>>,
+    txn: &mut ConnTxn,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = BytesMut::with_capacity(4096);
 
     loop {
-        // Read data from socket
-        let n = socket.read_buf(&mut buffer).await?;
+        // Read data from socket, unless an open transaction reaches its
+        // deadline first: then it is rolled back and the lock released.
+        let wake = match txn.open.as_ref().map(|t| t.deadline) {
+            Some(deadline) => tokio::select! {
+                r = socket.read_buf(&mut buffer) => Wake::Read(r),
+                _ = tokio::time::sleep_until(deadline) => Wake::Expired,
+            },
+            None => Wake::Read(socket.read_buf(&mut buffer).await),
+        };
+        let n = match wake {
+            Wake::Expired => {
+                if let Some(mut open) = txn.open.take() {
+                    handler.rollback_transaction_on(&mut open.guard);
+                    warn!("a RESP transaction reached its deadline and was rolled back");
+                }
+                txn.timed_out = true;
+                continue;
+            }
+            Wake::Read(r) => r?,
+        };
 
         if n == 0 {
             // Connection closed
@@ -230,7 +363,7 @@ async fn handle_connection(
 
                     if !forwarded {
                         // Process command locally
-                        let response = handler.handle_command(&value, &store).await;
+                        let response = respond(handler, &value, store, txn).await;
 
                         // Encode and send response
                         let mut response_buf = Vec::new();
@@ -263,6 +396,235 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cmd(parts: &[&str]) -> RespValue {
+        RespValue::Array(parts.iter().map(|p| RespValue::BulkString(Some(p.as_bytes().to_vec()))).collect())
+    }
+
+    fn is_error(v: &RespValue) -> bool {
+        matches!(v, RespValue::Error(_))
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_transaction_leaves_nothing_and_a_committed_one_stays() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let mut txn = ConnTxn::default();
+
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await));
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn).await;
+        assert!(!is_error(&r), "{r:?}");
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await));
+        assert_eq!(store.read().await.node_count(), 0, "a rolled-back CREATE survived");
+
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn).await;
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await));
+        assert_eq!(store.read().await.node_count(), 1, "a committed CREATE was lost");
+    }
+
+    #[tokio::test]
+    async fn nobody_else_can_read_while_a_connection_holds_a_transaction() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let mut txn = ConnTxn::default();
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        assert!(store.try_read().is_err(), "another reader got in during a transaction");
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
+        assert!(store.try_read().is_ok(), "the lock was not released");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_would_take_the_lock_is_refused_inside_a_transaction() {
+        // GRAPH.LIST takes the store's lock, which this connection holds; run
+        // as-is it would wait on itself forever.
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let mut txn = ConnTxn::default();
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            respond(&handler, &cmd(&["GRAPH.LIST"]), &store, &mut txn),
+        )
+        .await
+        .expect("GRAPH.LIST inside a transaction deadlocked");
+        assert!(is_error(&r));
+        let pong = respond(&handler, &cmd(&["PING"]), &store, &mut txn).await;
+        assert!(!is_error(&pong), "PING was refused inside a transaction");
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
+    }
+
+    #[tokio::test]
+    async fn begin_twice_and_commit_with_none_open_are_errors() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let mut txn = ConnTxn::default();
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await));
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await));
+        let r = respond(&handler, &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:T)"]), &store, &mut txn).await;
+        assert!(is_error(&r), "RO_QUERY ran a write inside a transaction");
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await));
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_closes_mid_transaction_rolls_it_back() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = Arc::new(CommandHandler::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = handle_connection(socket, s, h, None, None, None).await;
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let send = |parts: &[&str]| {
+            let mut bytes = Vec::new();
+            cmd(parts).encode(&mut bytes).unwrap();
+            bytes
+        };
+        let begin = send(&["GRAPH.BEGIN"]);
+        let create = send(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]);
+        client.write_all(&begin).await.unwrap();
+        let mut reply = [0u8; 256];
+        let _ = client.read(&mut reply).await.unwrap();
+        client.write_all(&create).await.unwrap();
+        let _ = client.read(&mut reply).await.unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap();
+        let guard = store.read().await;
+        assert_eq!(guard.node_count(), 0, "a transaction left open by a closed connection kept its write");
+        assert!(guard.session_transaction_version().is_none(), "the store still has a transaction open");
+    }
+
+    /// #1311 item 5: the transaction deadline had never been tripped.
+    ///
+    /// `session_transaction_timeout()` was read at BEGIN, `ConnTxn.timed_out`
+    /// was set when the deadline fired, and the COMMIT arm had a branch that
+    /// produced a specific message for it -- and no test set, tripped or
+    /// asserted any of them. A timeout nobody has watched is a timeout nobody
+    /// knows the shape of: whether the write is rolled back, whether the store
+    /// is left with a transaction open, and what the client is actually told.
+    ///
+    /// All three are asserted here, because the useful part of a timeout is
+    /// not that it fires but what it leaves behind.
+    ///
+    /// `SAMYAMA_TX_TIMEOUT_SECS` has a one-second floor, so this test costs a
+    /// second. It sets the variable for the whole process, which is safe only
+    /// because every other transaction test in this binary finishes in
+    /// milliseconds and so cannot reach a one-second deadline.
+    #[tokio::test]
+    async fn a_transaction_left_open_past_its_deadline_is_rolled_back() {
+        std::env::set_var("SAMYAMA_TX_TIMEOUT_SECS", "1");
+
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = Arc::new(CommandHandler::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = handle_connection(socket, s, h, None, None, None).await;
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let send = |parts: &[&str]| {
+            let mut bytes = Vec::new();
+            cmd(parts).encode(&mut bytes).unwrap();
+            bytes
+        };
+        let mut reply = [0u8; 512];
+
+        client.write_all(&send(&["GRAPH.BEGIN"])).await.unwrap();
+        let _ = client.read(&mut reply).await.unwrap();
+        client
+            .write_all(&send(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]))
+            .await
+            .unwrap();
+        let _ = client.read(&mut reply).await.unwrap();
+
+        // The next `store.read()` blocks until the transaction releases its
+        // write guard, which happens when the deadline fires. So the wait *is*
+        // the measurement, and the elapsed time is asserted below: without it
+        // this test passes under the 30-second default too, just thirty times
+        // slower, and could not tell a honoured deadline from an ignored one.
+        let opened = std::time::Instant::now();
+
+        // 1. The write is gone, and the deadline that removed it was the
+        //    configured one.
+        {
+            let guard = store.read().await;
+            let waited = opened.elapsed();
+            assert!(
+                waited < std::time::Duration::from_secs(5),
+                "the transaction held its guard for {waited:?}; the 1s deadline was \
+                 not honoured (the 30s default would also end up here, eventually)"
+            );
+            assert_eq!(
+                guard.node_count(),
+                0,
+                "a transaction past its deadline kept its write"
+            );
+            assert!(
+                guard.session_transaction_version().is_none(),
+                "the store still has a transaction open after the deadline"
+            );
+        }
+
+        // 2. The client is told *why*, not just that nothing is open. The
+        //    distinction is the whole point of `timed_out`: "you have no
+        //    transaction" and "your transaction was taken away from you" are
+        //    different things for an operator to read in a log.
+        client.write_all(&send(&["GRAPH.COMMIT"])).await.unwrap();
+        let n = client.read(&mut reply).await.unwrap();
+        let msg = String::from_utf8_lossy(&reply[..n]).to_string();
+        assert!(
+            msg.contains("rolled back") && msg.contains("longer than"),
+            "the reply must say the transaction timed out, not merely that none is open: {msg}"
+        );
+
+        drop(client);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        std::env::remove_var("SAMYAMA_TX_TIMEOUT_SECS");
+    }
+
+    /// #1274: a COMMIT that could not be persisted used to log a warning and
+    /// reply with the version, so the client was told a write was durable that a
+    /// restart would lose. It must be refused and rolled back, in memory and on
+    /// disk, where a write that got through before the failure is put back too.
+    #[tokio::test]
+    async fn a_commit_that_cannot_be_persisted_is_refused_and_rolled_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+        let mut txn = ConnTxn::default();
+
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn).await;
+        assert!(!is_error(&r), "{r:?}");
+        let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
+        // One node persisted; a quota of one refuses the next new node at commit.
+        let quotas = crate::persistence::tenant::ResourceQuotas { max_nodes: Some(1), ..crate::persistence::tenant::ResourceQuotas::unlimited() };
+        pm.tenants().update_quotas("default", quotas).unwrap();
+
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn).await;
+        assert!(!is_error(&r), "{r:?}");
+        let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await;
+        assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
+
+        let guard = store.read().await;
+        assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
+        assert_eq!(guard.node_count(), 1, "the refused CREATE is still in memory");
+        assert_eq!(guard.node_property(p, "x"), Some(crate::graph::PropertyValue::Integer(1)), "the refused SET is still in memory");
+        drop(guard);
+
+        let on_disk = pm.storage().get_node("default", p.as_u64()).unwrap().expect("P left the disk");
+        assert_eq!(on_disk.properties.get("x"), Some(&crate::graph::PropertyValue::Integer(1)), "the refused SET reached the disk");
+        assert!(pm.storage().get_node("default", p.as_u64() + 1).unwrap().is_none(), "the refused CREATE reached the disk");
+    }
 
     #[test]
     fn test_server_config_default() {
@@ -483,8 +845,32 @@ mod tests {
             let n = stream.read(&mut buf).await.unwrap();
             // Should get an error response
             let response = String::from_utf8_lossy(&buf[..n]);
-            assert!(response.contains("ERR") || response.contains("-"),
-                "Expected error response, got: {}", response);
+            // The old assertion was `contains("ERR") || contains("-")`. Every
+            // RESP error frame begins with `-`, and so does any reply carrying
+            // a minus sign anywhere, so it was close to unfalsifiable: it could
+            // not tell an error from a success that happened to contain a
+            // hyphen (#1311).
+            //
+            // What a client actually needs from a protocol error is that the
+            // frame is an error frame, that it is terminated so the client can
+            // move on, and that it says what was wrong with the bytes rather
+            // than just that something was.
+            assert!(
+                response.starts_with('-'),
+                "a protocol error must come back as a RESP error frame, got: {response:?}"
+            );
+            assert!(
+                response.ends_with("\r\n"),
+                "the frame must be terminated or the client hangs: {response:?}"
+            );
+            assert!(
+                response.to_lowercase().contains("protocol error"),
+                "the reply must name the class of fault: {response:?}"
+            );
+            assert!(
+                response.contains("array length"),
+                "and what was wrong with these bytes -- a bad array length: {response:?}"
+            );
             drop(stream);
         });
 

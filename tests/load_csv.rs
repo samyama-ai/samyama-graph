@@ -62,8 +62,8 @@ fn load_csv_end_to_end() {
     let names: std::collections::BTreeSet<String> = store
         .get_nodes_by_label(&"P".into())
         .iter()
-        .filter_map(|n| match n.properties.get("n") {
-            Some(samyama::graph::PropertyValue::String(s)) => Some(s.clone()),
+        .filter_map(|n| match store.node_property(n.id, "n") {
+            Some(samyama::graph::PropertyValue::String(s)) => Some(s),
             _ => None,
         })
         .collect();
@@ -127,7 +127,7 @@ fn load_csv_end_to_end() {
             T,
         )
         .unwrap();
-    let z = store.get_nodes_by_label(&"Z".into())[0].properties.get("code").cloned();
+    let z = store.node_property(store.get_nodes_by_label(&"Z".into())[0].id, "code");
     assert_eq!(
         z,
         Some(samyama::graph::PropertyValue::String("007".into())),

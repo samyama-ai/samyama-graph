@@ -3,6 +3,7 @@
 //! Handles indexing for different node labels and property keys.
 
 use crate::graph::NodeId;
+use crate::vector::index::Quantization;
 use crate::vector::index::{VectorIndex, DistanceMetric, VectorResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -18,6 +19,14 @@ pub struct IndexKey {
 #[derive(Debug)]
 pub struct VectorIndexManager {
     indices: RwLock<HashMap<IndexKey, Arc<RwLock<VectorIndex>>>>,
+    /// Index name -> the (label, property) it indexes.
+    ///
+    /// `CREATE VECTOR INDEX vidx FOR (n:N) ON (n.embedding)` names the index, and until
+    /// #1041 that name was parsed and dropped: the query addressed the index by label and
+    /// property instead, so the name a user was required to supply was never usable. It is
+    /// how Neo4j's form of `db.index.vector.queryNodes` addresses an index, so it has to
+    /// survive creation.
+    names: RwLock<HashMap<String, IndexKey>>,
 }
 
 impl VectorIndexManager {
@@ -25,7 +34,41 @@ impl VectorIndexManager {
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            names: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Create a new index, remembering the name it was given.
+    pub fn create_index_named(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+    ) -> VectorResult<()> {
+        self.create_index_quantized(label, property_key, dimensions, metric, quantization)?;
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            self.names.write().unwrap().insert(
+                name.to_string(),
+                IndexKey { label: label.to_string(), property_key: property_key.to_string() },
+            );
+        }
+        Ok(())
+    }
+
+    /// The (label, property) an index name refers to.
+    pub fn resolve_name(&self, name: &str) -> Option<(String, String)> {
+        self.names.read().unwrap().get(name)
+            .map(|k| (k.label.clone(), k.property_key.clone()))
+    }
+
+    /// Every index name known, for an error message that can be acted on.
+    pub fn index_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.names.read().unwrap().keys().cloned().collect();
+        v.sort();
+        v
     }
 
     /// Create a new index
@@ -36,12 +79,24 @@ impl VectorIndexManager {
         dimensions: usize,
         metric: DistanceMetric,
     ) -> VectorResult<()> {
+        self.create_index_quantized(label, property_key, dimensions, metric, Quantization::None)
+    }
+
+    /// Create an index that stores its vectors at the given precision (NDS-09).
+    pub fn create_index_quantized(
+        &self,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+    ) -> VectorResult<()> {
         let key = IndexKey {
             label: label.to_string(),
             property_key: property_key.to_string(),
         };
         
-        let index = VectorIndex::new(dimensions, metric);
+        let index = VectorIndex::with_quantization(dimensions, metric, quantization);
         let mut indices = self.indices.write().unwrap();
         indices.insert(key, Arc::new(RwLock::new(index)));
         
@@ -164,13 +219,21 @@ impl VectorIndexManager {
             label: label.to_string(),
             property_key: property_key.to_string(),
         };
-        // Read dims + metric under a short read lock, then release before building.
-        let (dims, metric) = {
+        // Read dims + metric + quantization under a short read lock, then
+        // release before building.
+        //
+        // Quantization has to come across with the rest. `CREATE VECTOR INDEX
+        // ... OPTIONS {quantization: "fp16"}` registers the index and the
+        // operator then backfills it through here, so a rebuild that rebuilt
+        // at full precision silently undid the option one statement after it
+        // was honoured -- the caller asked for half the memory, got an f32
+        // index, and was told the statement succeeded (#1385).
+        let (dims, metric, quantization) = {
             let indices = self.indices.read().unwrap();
             match indices.get(&key) {
                 Some(idx_lock) => {
                     let idx = idx_lock.read().unwrap();
-                    (idx.dimensions(), idx.metric())
+                    (idx.dimensions(), idx.metric(), idx.quantization())
                 }
                 None => return Ok(()), // no index registered for this key — nothing to do
             }
@@ -179,7 +242,7 @@ impl VectorIndexManager {
         // Skip individual vectors that don't match the index dimension rather than
         // aborting the whole rebuild — a single malformed embedding must not leave the
         // entire index empty (which then returns 0 results / panics on search).
-        let mut new_index = VectorIndex::new(dims, metric);
+        let mut new_index = VectorIndex::with_quantization(dims, metric, quantization);
         let mut skipped = 0usize;
         for (node_id, vec) in vectors {
             if new_index.add(*node_id, vec).is_err() {

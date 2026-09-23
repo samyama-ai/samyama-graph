@@ -209,6 +209,65 @@ pub enum LLMProvider {
     Mock,
 }
 
+impl LLMProvider {
+    /// Every accepted spelling, for an error message that says what to write.
+    pub const NAMES: &'static [&'static str] = &[
+        "openai",
+        "ollama",
+        "gemini",
+        "azure",
+        "azureopenai",
+        "anthropic",
+        "claudecode",
+        "mock",
+    ];
+
+    /// Parse a provider name, refusing anything not on the list.
+    ///
+    /// **An unknown name is an error, not OpenAI.** Both callers of this used
+    /// to end `_ => LLMProvider::OpenAI`, so `NLQ_PROVIDER=claudecode` — a
+    /// spelling neither of them listed — sent the prompt to a third party
+    /// instead of the local CLI the operator asked for, and so did a typo.
+    /// Choosing where a graph's content is sent is not a defaultable decision:
+    /// the failure is silent, the data is already gone, and the operator's
+    /// evidence that they picked a local provider is the env var they set.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        Self::parse_named("NLQ_PROVIDER", name)
+    }
+
+    /// As [`Self::parse`], naming the variable the value came from.
+    ///
+    /// `EMBED_PROVIDER` has the same shape and the same failure, and an error
+    /// that names the wrong variable sends the reader to the wrong line of
+    /// their config.
+    pub fn parse_named(var: &str, name: &str) -> Result<Self, String> {
+        let given = name.trim();
+        match given.to_lowercase().as_str() {
+            "openai" => Ok(LLMProvider::OpenAI),
+            "ollama" => Ok(LLMProvider::Ollama),
+            "gemini" => Ok(LLMProvider::Gemini),
+            "azure" | "azureopenai" => Ok(LLMProvider::AzureOpenAI),
+            "anthropic" => Ok(LLMProvider::Anthropic),
+            "claudecode" => Ok(LLMProvider::ClaudeCode),
+            "mock" => Ok(LLMProvider::Mock),
+            "" => Err(format!(
+                "{var} is not set. Set it to one of: {}. \
+                 It has no default: openai, gemini and azure send your data to a third \
+                 party, and that is not something to fall into.",
+                Self::NAMES.join(", ")
+            )),
+            // Quoted exactly as it was set, not lowercased: the operator is
+            // looking for their own typo and a normalised echo hides half of it.
+            _ => Err(format!(
+                "unknown {var} {given:?}. Expected one of: {}. \
+                 Refused rather than defaulted: an unrecognised name used to mean openai, \
+                 so a typo sent the prompt to a third party.",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+}
+
 /// Tool definition for agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
@@ -671,8 +730,27 @@ mod tests {
     #[test]
     fn test_cannot_delete_default() {
         let manager = TenantManager::new();
-        let result = manager.delete_tenant("default");
-        assert!(result.is_err());
+        let err = manager
+            .delete_tenant("default")
+            .expect_err("the default tenant cannot be deleted");
+
+        // `is_err()` alone would pass if the call failed because the tenant did
+        // not exist, which is the opposite of what this guards (#1311).
+        // The wrong reason is available and plausible: `delete_tenant` returns
+        // `NotFound` for a tenant that is absent, and `is_err()` could not tell
+        // "you may not delete this" from "there was nothing to delete".
+        assert!(
+            matches!(err, TenantError::PermissionDenied(_)),
+            "refused for the wrong reason: {err:?}"
+        );
+        assert!(
+            err.to_string().to_lowercase().contains("default"),
+            "the refusal must name what it protected: {err}"
+        );
+        assert!(
+            manager.get_tenant("default").is_ok(),
+            "the default tenant must still be there after a refused delete"
+        );
     }
 
     #[test]
@@ -993,8 +1071,25 @@ mod tests {
             manager.increment_usage("t1", "edges", 1).unwrap();
         }
 
-        let result = manager.check_quota("t1", "edges");
-        assert!(result.is_err());
+        let err = manager
+            .check_quota("t1", "edges")
+            .expect_err("the sixth edge is over the quota of five");
+        assert!(
+            matches!(err, TenantError::QuotaExceeded { .. }),
+            "refused for the wrong reason: {err:?}"
+        );
+        // The resource field is `edges (5/5)`: it names what ran out *and* how
+        // much there was. Asserted on both, because the count is the half an
+        // operator acts on and nothing else was checking it was there.
+        assert!(
+            matches!(&err, TenantError::QuotaExceeded { resource, .. }
+                     if resource.starts_with("edges")),
+            "the refusal must name the resource that ran out: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("5/5"),
+            "and the limit they hit, not just that they hit one: {err}"
+        );
     }
 
     #[test]
@@ -1011,8 +1106,13 @@ mod tests {
         manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
 
         manager.increment_usage("t1", "memory", 1024).unwrap();
-        let result = manager.check_quota("t1", "memory");
-        assert!(result.is_err());
+        let err = manager
+            .check_quota("t1", "memory")
+            .expect_err("the quota is exactly used up, so the next request is over");
+        assert!(
+            matches!(err, TenantError::QuotaExceeded { .. }),
+            "refused for the wrong reason: {err:?}"
+        );
     }
 
     #[test]

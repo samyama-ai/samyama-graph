@@ -1,5 +1,6 @@
 export { SamyamaClient } from "./client.js";
 export { HttpTransport } from "./http-client.js";
+export type { ConnectionOptions, RequestOptions } from "./http-client.js";
 export type {
   SdkNode,
   SdkEdge,

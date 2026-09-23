@@ -1,11 +1,33 @@
+# Supply-chain policy, checked by the `supply-chain` job in .github/workflows/ci.yml (#1042).
+#
+# Schema: cargo-deny 0.14+. The previous file used keys that release removed
+# (`vulnerability`, `notice`, `unlicensed`, `copyleft`, `unmaintained = "warn"`),
+# so it failed to load and had never checked anything.
+#
+# Vulnerabilities and unsound advisories are errors by default. Every entry in
+# `ignore` names why it cannot be fixed yet and what would remove it; delete the
+# entry when that happens, and the gate will say if you forgot.
+
+[graph]
+all-features = false
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
+ignore = [
+    # quick-xml 0.36 / 0.37: quadratic duplicate-attribute check and unbounded
+    # namespace allocation. Reached only through the RDF crates rio_xml 0.8 and
+    # sparesults 0.2, which pin these versions; fixed in quick-xml 0.41. Remove
+    # when those crates release against it. Input is RDF/XML and SPARQL results
+    # the operator chose to load, not network input.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml pinned by rio_xml/sparesults; fixed upstream in 0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml pinned by rio_xml/sparesults; fixed upstream in 0.41" },
+    # bincode is unmaintained with no successor release. It is the snapshot and
+    # WAL serialisation format, so replacing it is a format migration (#1099).
+    { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained, no fixed release; replacement is a storage-format change (#1099)" },
+]
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "Apache-2.0",
     "MIT",
@@ -19,8 +41,11 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "MPL-2.0",
+    # webpki-root-certs: Mozilla's root certificates as data, via reqwest ->
+    # rustls-platform-verifier. A permissive data licence.
+    "CDLA-Permissive-2.0",
 ]
-copyleft = "warn"
+confidence-threshold = 0.8
 
 [[licenses.clarify]]
 name = "ring"
@@ -30,3 +55,7 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

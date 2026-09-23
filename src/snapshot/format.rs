@@ -18,6 +18,14 @@ pub struct SnapshotHeader {
     pub edge_types: Vec<String>,
     pub created_at: String,       // ISO 8601
     pub samyama_version: String,
+    /// What this export did not carry (INT-06).
+    ///
+    /// In the file as well as in the return value, so that whoever finds the
+    /// snapshot later -- which is usually not whoever wrote it -- can read the
+    /// losses off the artifact itself. Additive: `default` keeps older files
+    /// loading and the format version where it is.
+    #[serde(default)]
+    pub dropped: Vec<Dropped>,
 }
 
 /// Current snapshot format version.
@@ -32,6 +40,26 @@ pub struct SnapshotNode {
     pub id: u64,                  // Original NodeId
     pub labels: Vec<String>,
     pub props: HashMap<String, serde_json::Value>,
+    /// Creation timestamp, milliseconds since the epoch (#1124).
+    ///
+    /// Additive, in the same sense as `SnapshotHierarchyIndex` below: a snapshot
+    /// written before this field simply lacks it and defaults to 0, which is the
+    /// value import produced for every node until now, so old files load
+    /// unchanged and the format version does not move. Older readers ignore the
+    /// extra key.
+    ///
+    /// Zero means "not carried", not "created at the epoch". Import leaves the
+    /// node's own timestamp alone rather than writing 0 over it, so a v1 snapshot
+    /// does not stamp every node with a false creation time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at: i64,
+    /// Last-update timestamp, milliseconds since the epoch. See `created_at`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub updated_at: i64,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 /// An edge record in the snapshot
@@ -54,6 +82,30 @@ pub struct ExportStats {
     pub labels: Vec<String>,
     pub edge_types: Vec<String>,
     pub bytes_written: u64,
+    /// What the format did not carry (INT-06).
+    pub dropped: Vec<Dropped>,
+}
+
+/// One thing an export did not carry.
+///
+/// INT-06 asks for full-fidelity export **plus an explicit loss report**. The
+/// snapshot has always dropped things -- index declarations, edge timestamps,
+/// version history -- and a user had no way to learn that except by comparing
+/// the two graphs afterwards and noticing. An export that is silent about its
+/// losses is the shape of a backup somebody discovers is incomplete during a
+/// restore.
+///
+/// A row is emitted **only when there was something to lose**: a graph with no
+/// vector index produces no vector-index row, so the report is a list of what
+/// happened to this graph rather than a standing disclaimer nobody reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Dropped {
+    /// A stable identifier a client can branch on, e.g. `property_indexes`.
+    pub what: String,
+    /// How many of them.
+    pub count: u64,
+    /// What it means for the restored graph, in one sentence.
+    pub detail: String,
 }
 
 /// A hierarchy index **declaration** in the snapshot (ADR-035 §6).

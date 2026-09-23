@@ -2,11 +2,11 @@
   <h1 align="center">Samyama Graph</h1>
   <p align="center">A Rust-native graph-vector database for GraphRAG, knowledge graphs, and billion-edge analytics.</p>
   <p align="center">
-    <strong>The graph database that queried 1 billion edges for $2.50</strong>
+    <strong>99.9% of the openCypher TCK's evaluated scenarios pass · SNB Interactive 21/21 and SNB BI 20/20, no timeouts · 1B edges on one machine</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue" alt="Version"></a>
-    <a href="https://github.com/samyama-ai/samyama-graph/actions"><img src="https://img.shields.io/badge/tests-2238_passing-brightgreen" alt="Tests"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.9.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml"><img src="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
     <a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d"><img src="https://img.shields.io/badge/community-WhatsApp-25D366?logo=whatsapp&logoColor=white" alt="WhatsApp Community"></a>
@@ -31,12 +31,12 @@ It brings together graph traversal, OpenCypher-style querying, vector search, gr
 **Step 1 — Prerequisites**
 
 - ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No AWS account or credentials needed — the image is publicly available
+- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.9.0` for a reproducible setup)
 
 **Step 2 — Pull the Docker image**
 
 ```bash
-docker pull public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker pull ghcr.io/samyama-ai/samyama-graph:latest
 ```
 
 **Step 3 — Docker Compose setup**
@@ -65,7 +65,7 @@ notepad docker-compose.yml
 version: "3.9"
 services:
   samyama-graph:
-    image: public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    image: ghcr.io/samyama-ai/samyama-graph:latest
     container_name: samyama-graph
     restart: unless-stopped
     ports:
@@ -125,13 +125,44 @@ curl -X POST http://localhost:8080/api/query \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
 
-> **Note on `-->`**: the published `1.1.0` image cannot parse the bare arrow
-> form (`MATCH (a)-->(b)`); write `-[]->` or name the relationship type until a
-> newer image is published ([#1038](https://github.com/samyama-ai/samyama-graph/issues/1038)).
-
 **Step 7 — Samyama Visualizer**
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
+
+The visualizer is a page on the public web calling a server on your machine, so
+the server has to name it. Start Samyama with the origin allowed:
+
+```bash
+samyama --cors-origin https://graph.samyama.cloud
+```
+
+or `SAMYAMA_CORS_ORIGINS=https://graph.samyama.cloud`. Without it the browser
+refuses the call. **This is deliberate** — `/api/query` runs arbitrary Cypher
+including `DELETE`, so until v1.9 any web page you happened to visit could
+drive it ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)).
+The server also listens on loopback unless `--host` says otherwise.
+
+To require a credential as well:
+
+```bash
+samyama auth-token ops >> credentials     # prints the token once; store the line
+samyama --auth-file credentials --host 0.0.0.0
+```
+
+Every request then needs `Authorization: Bearer <token>`, on every route.
+Without `--auth-file` the API reads no credential, which is the default and
+what every release before this one did. A token is all-or-nothing: there are no
+users, roles or per-graph grants yet.
+
+To serve TLS as well:
+
+```bash
+samyama --tls-cert fullchain.pem --tls-key key.pem --auth-file credentials --host 0.0.0.0
+```
+
+Both are required together — one without the other stops the server rather
+than quietly serving cleartext — and there is no self-signed fallback. Plain
+HTTP remains the default.
 
 1. Open https://graph.samyama.cloud/ in your browser.
 2. Sign up for a new account, or sign in if you already have one.
@@ -347,16 +378,19 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 
 | What | How |
 |------|-----|
-| **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge ($2.50 spot) |
+| **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge; that run cost about $2.50 at the spot price of the day, which is a fact about one run and not a price list |
 | **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
-| **Parallel everything** | Rayon-parallel PageRank, LCC, CDLP and triangle counting; parallel scan, filter, compaction |
+| **Four algorithms scale with cores** | PageRank, LCC, CDLP and triangle counting are Rayon-parallel, as are scan, filter and compaction. Measured at 16 cores: 3 of 7 frontier algorithms reach ≥0.6 efficiency, and `wcc`, `betweenness` and `closeness` are sequential at 0.06 — one thread on sixteen (`CH-ALGO-PARALLEL`, ALGO-09) |
 | **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 12/12 against the LDBC reference answers |
+| **200 resident bytes per edge** | Measured on LDBC SNB SF10 (176M edges) by `CH-MEM-01`, against a 256 B/edge target |
+| **Transactions with a published isolation table** | `BEGIN` / `COMMIT` / `ROLLBACK` over RESP and HTTP; every anomaly mapped to the test that pins it in [`docs/ACID_GUARANTEES.md`](docs/ACID_GUARANTEES.md) |
+| **Every headline number re-measured on a schedule** | A conformance harness publishes `SCORECARD.json`, and a regression gate blocks the release tag on a stale or red verdict |
 
 ---
 
 ## The 30-Second Tour
 
-**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,760 of 3,763, at 96.6% coverage of the 3,897-scenario corpus, measured 2026-08-30), and **none of the three remaining failures is a wrong answer** — all three raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
+**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,845 of 3,847, at 98.7% coverage of the 3,897-scenario corpus, measured 2026-09-15), and **neither of the two remaining failures is a wrong answer** — both raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
 
 ```cypher
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
@@ -375,6 +409,15 @@ RETURN nodeId, score ORDER BY score DESC LIMIT 10
 
 ```cypher
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
+
+-- Half the memory, at 16-bit precision. The index holds f16 in the HNSW graph
+-- and in the copy kept for persistence, so the saving is real rather than a
+-- claim about one of the two. What it costs in recall is a property of your
+-- corpus: measured on random vectors at 64 and 384 dimensions it was
+-- indistinguishable from f32, and `tests/vector_quantization.rs` is the
+-- instrument to measure your own.
+CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding)
+  OPTIONS {dimensions: 384, similarity: 'cosine', quantization: 'fp16'}
 
 CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
@@ -448,6 +491,42 @@ one; the geometric mean of the per-query ratios is 88×. Both are recomputed fro
 committed per-query timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no
 longer exists.
 
+**The 58 queries behind that figure are the classes the index wins.** 94× and
+88× are computed over the queries *expressible on both engines* — H1, H2, H3,
+H5 and H10. The three classes where our index-written form is a net cost are
+not expressible on Neo4j and so are absent by construction: H7 lowest common
+ancestor, H4 cross-hierarchy conjunction, H6 anti-subsumption. That is what
+"expressible on both" means, and a reader is entitled to know which classes the
+comparison could not include.
+
+**The local corpus answers two different questions and the column headings did
+not say so.** Of its 112 queries, 27 run the *same query text* twice with the
+index toggled; the other 85 carry a separate hand-written `baseline` query.
+Split:
+
+| Comparison | n | Total time |
+|---|---:|---:|
+| **same text, index on vs off** — what the index does | 27 | **35.3× faster** |
+| index-written query vs a hand-written alternative | 81 | 0.43× |
+
+Only the first row is a statement about the index, and there it is a large win
+(2 of the 27 are slower). The second is a statement about how the two queries
+were written — and on H7 the index-written form calls `hierarchy_lca(a, b)`
+inside a `WHERE` evaluated once per `:Term`, while the hand-written arm is a
+single path join. H6's alternative is `NOT (d.code STARTS WITH "T")`, a
+string-prefix test that works only because this synthetic corpus encodes
+ancestry in the code and would not exist on a real ontology.
+
+Both figures are measured by `CH-BENCH-HIER` every run, as
+`index_on_same_query_total_time` and `index_written_vs_hand_written_total_time`.
+
+One more caveat on the 94× itself: it predates
+[#1343](https://github.com/samyama-ai/samyama-graph/issues/1343), which found
+the index answering a roll-up with a subsumption result — set-shaped where the
+pattern is defined over paths — and narrowed where the rewrite applies. A
+speedup measured before a correctness fix in the same code path is partly a
+speedup over the wrong answer. Re-measuring needs both engines on one host.
+
 ### Scale: 74M Nodes, 1 Billion Edges
 
 | KG | Source | Nodes | Edges |
@@ -483,7 +562,7 @@ re-derived or refuted.
 | SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
 | SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
 | Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
-| FinBench | **21 read queries run, 18 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
+| FinBench | **21 read queries run, 21 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
 
 One of those is not clean, and saying so is the point of publishing them:
 three FinBench queries are pinned to ids the generated data does not
@@ -583,6 +662,12 @@ samyama
 | Biomedical Benchmark | [100 queries, 96 pass](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
 | LDBC Results | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| Algorithm Conventions | [docs/ALGORITHM-CONVENTIONS.md](docs/ALGORITHM-CONVENTIONS.md) — directedness, weights, self-loops, disconnected components, tie-breaking and normalisation, per algorithm |
+| Failure Modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) — what happens when something goes wrong, each row naming the test that observed it |
+| Data Handling | [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) — there is no telemetry; the three features that can send data to a third party, what each sends, and how to switch them off |
+| Migrating from Neo4j | [docs/MIGRATING-FROM-NEO4J.md](docs/MIGRATING-FROM-NEO4J.md) — point `compatibility_report` at your queries, then what each refusal means |
+| Leaving Samyama | [docs/LEAVING-SAMYAMA.md](docs/LEAVING-SAMYAMA.md) — every export route and what it costs |
+| Grafana dashboard | [ops/grafana/](ops/grafana/) — query latency percentiles, band occupancy and the slow-query counter, over metrics the engine actually exports |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
 | API Spec | [api/openapi.yaml](api/openapi.yaml) |
 | Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |

@@ -1,3 +1,7 @@
+// The shipped allocator (ADR-038): mimalloc unless built with --no-default-features.
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
 use samyama::http::HttpServer;
 use samyama::persistence::{AutoEmbedConfig, LLMProvider};
@@ -19,6 +23,11 @@ async fn main() {
         Some("verify") => std::process::exit(cmd_verify(&argv)),
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
+        Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
+        Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
+        Some("schema") => std::process::exit(cmd_schema(&argv)),
+        Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
+        Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
         _ => {}
     }
 
@@ -35,6 +44,268 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...`
+///
+/// Scans each snapshot for personal identifiers and exits non-zero if any
+/// un-waived ones are found (TRUST-10). Intended for CI over the artifacts
+/// that are published.
+///
+/// Exits 2 -- not 0 -- when a file cannot be read. A scan that could not look
+/// at the artifact must not report it clean; that is how a control passes on
+/// something it never opened.
+///
+/// A waived finding is still **printed**. A waiver that hid its finding would
+/// be indistinguishable from deleting the check, and the point of accepting
+/// something is that the next reader can see what was accepted and why.
+fn cmd_pii_scan(argv: &[String]) -> i32 {
+    let waiver_path = argv
+        .iter()
+        .position(|a| a == "--waivers")
+        .and_then(|i| argv.get(i + 1).cloned());
+    let paths: Vec<&String> = argv
+        .iter()
+        .skip(2)
+        .filter(|a| !a.starts_with('-'))
+        .filter(|a| Some((*a).clone()) != waiver_path)
+        .collect();
+    if paths.is_empty() {
+        eprintln!("usage: samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...");
+        return 2;
+    }
+
+    let waivers = match &waiver_path {
+        None => Vec::new(),
+        Some(p) => match samyama::pii::read_waivers(std::path::Path::new(p)) {
+            Ok(w) => w,
+            // A waiver file that cannot be parsed stops the scan rather than
+            // running without it: running unwaived would flood the log and
+            // running as if it were empty would be a different check.
+            Err(e) => {
+                eprintln!("ERROR {e}");
+                return 2;
+            }
+        },
+    };
+
+    let mut worst = 0;
+    // Which waivers fired, across every file. Tracked here and not per file,
+    // because a waiver for one snapshot is legitimately unused while another
+    // is being scanned.
+    let mut used: std::collections::HashSet<(String, String)> = Default::default();
+
+    for path in paths {
+        match samyama::pii::scan_snapshot_path(std::path::Path::new(path)) {
+            Err(e) => {
+                eprintln!("ERROR {path}: {e}");
+                worst = worst.max(2);
+            }
+            Ok(report) => {
+                println!(
+                    "{path}: {} nodes, {} edges, {} values scanned",
+                    report.nodes_scanned, report.edges_scanned, report.values_scanned
+                );
+                let t = samyama::pii::triage(&report, &waivers);
+                for (_, w) in &t.accepted {
+                    used.insert((w.kind.clone(), w.location.clone()));
+                }
+
+                for (f, w) in &t.accepted {
+                    println!(
+                        "  accepted  {:<12} {:<34} {} of {} distinct -- {}",
+                        f.kind, f.location, f.distinct, w.max_distinct, w.decided_in
+                    );
+                }
+                for f in &t.unwaived {
+                    println!(
+                        "  FINDING   {:<12} {:<34} {} distinct, e.g. {}",
+                        f.kind,
+                        f.location,
+                        f.distinct,
+                        f.samples.join(", ")
+                    );
+                }
+                if report.is_clean() {
+                    println!("  clean -- no identifier patterns found");
+                }
+                if !t.unwaived.is_empty() {
+                    worst = worst.max(1);
+                }
+            }
+        }
+    }
+
+    // A waiver nobody needed is either a finding that went away or a waiver
+    // aimed at the wrong place, and both are worth seeing. Not a failure: this
+    // run may simply not have scanned the artifact it belongs to.
+    let stale: Vec<&samyama::pii::Waiver> = waivers
+        .iter()
+        .filter(|w| !used.contains(&(w.kind.clone(), w.location.clone())))
+        .collect();
+    if !stale.is_empty() {
+        println!();
+        println!("{} waiver(s) matched nothing in this run:", stale.len());
+        for w in stale {
+            println!("  {:<12} {:<34} {}", w.kind, w.location, w.decided_in);
+        }
+        println!("  Either the finding is gone -- in which case delete the waiver --");
+        println!("  or the scan did not cover the artifact it belongs to.");
+    }
+    worst
+}
+
+/// `samyama schema <snapshot.sgsnap> [--markdown]`
+///
+/// Prints the schema the snapshot actually contains, as a mermaid diagram or a
+/// table (KG-02). Every relationship shown is one that occurs, with the number
+/// of times it does.
+fn cmd_schema(argv: &[String]) -> i32 {
+    let markdown = argv.iter().any(|a| a == "--markdown");
+    let Some(path) = argv.iter().skip(2).find(|a| !a.starts_with('-')) else {
+        eprintln!("usage: samyama schema <snapshot.sgsnap> [--markdown]");
+        return 2;
+    };
+    match samyama::schema_doc::derive_from_path(std::path::Path::new(path)) {
+        Ok(s) => {
+            eprintln!(
+                "{path}: {} nodes, {} edges, {} labels, {} edge types, {} distinct relationships",
+                s.nodes,
+                s.edges,
+                s.labels.len(),
+                s.edge_types.len(),
+                s.triples.len()
+            );
+            if s.dangling_edges > 0 {
+                eprintln!(
+                    "warning: {} edge(s) point at a node this snapshot does not contain",
+                    s.dangling_edges
+                );
+            }
+            print!("{}", if markdown { s.to_markdown() } else { s.to_mermaid() });
+            0
+        }
+        Err(e) => {
+            eprintln!("ERROR {path}: {e}");
+            2
+        }
+    }
+}
+
+/// `samyama snapshot-key`
+///
+/// Prints a fresh 32-byte snapshot encryption key, as hex, from the OS random
+/// source. Write it to a file and pass that file to `--snapshot-key`.
+///
+/// Hex rather than raw bytes so it can be pasted into a secret manager: a key
+/// an operator can move is a key they can rotate, and REL-09 asks for rotation
+/// without downtime.
+fn cmd_snapshot_key() -> i32 {
+    match samyama::snapshot::encryption::generate_key() {
+        Ok(k) => {
+            println!("# write this to a file and pass it to --snapshot-key");
+            println!("{k}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `samyama auth-user <name>` — reads a password from stdin, prints a credential line.
+///
+/// Stdin and not an argument: a password on the command line is visible in
+/// `ps` to every user on the box, and lands in the shell history of the person
+/// who typed it.
+///
+/// The output is an argon2id hash. That is the slow hash, and the reason the
+/// two kinds of credential differ: against a stolen file the defence for a
+/// human-chosen password is the cost of each guess, while a 32-byte random
+/// token has nothing to guess and gets the fast one.
+fn cmd_auth_user(argv: &[String]) -> i32 {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+
+    let Some(name) = argv.get(2) else {
+        eprintln!("usage: samyama auth-user <name>   (the password is read from stdin)");
+        return 2;
+    };
+    if name.contains(':') {
+        eprintln!("a credential name cannot contain `:` -- it separates the name from the hash");
+        return 2;
+    }
+
+    let mut password = String::new();
+    if std::io::stdin().read_line(&mut password).is_err() {
+        eprintln!("could not read the password from stdin");
+        return 1;
+    }
+    let password = password.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        eprintln!("refusing to hash an empty password");
+        return 2;
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    match argon2::Argon2::default().hash_password(password.as_bytes(), &salt) {
+        Ok(h) => {
+            println!("# add this line to the file you pass to --auth-file");
+            println!("{name}:{h}");
+            0
+        }
+        Err(e) => {
+            eprintln!("hashing failed: {e}");
+            1
+        }
+    }
+}
+
+/// `samyama auth-token [name]`
+///
+/// Prints a credential line for `--auth-file`, and the token itself once.
+///
+/// It generates the token rather than taking one, because a token an operator
+/// thinks of is a password, and a password is the thing a SHA-256 credential
+/// file is *not* built for: a fast hash is the right choice against a stolen
+/// file only when there is nothing to guess. 32 bytes from the OS random source
+/// leaves nothing to guess.
+///
+/// The token is printed to stdout and never stored. What goes in the file is
+/// the digest, so the file is not usable as a credential itself.
+fn cmd_auth_token(argv: &[String]) -> i32 {
+    use sha2::{Digest, Sha256};
+
+    let name = argv.get(2).cloned().unwrap_or_else(|| "operator".to_string());
+    if name.contains(':') {
+        eprintln!("a credential name cannot contain `:` -- it separates the name from the digest");
+        return 2;
+    }
+
+    // `getrandom` is already in the tree; reading /dev/urandom directly keeps
+    // this to the standard library and makes the source of the entropy the
+    // obvious thing rather than a crate feature.
+    let mut raw = [0u8; 32];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read;
+        f.read_exact(&mut raw)
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("cannot read /dev/urandom: {e}");
+            return 1;
+        }
+    }
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let digest: String =
+        Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+
+    println!("# add this line to the file you pass to --auth-file");
+    println!("{name}:{digest}");
+    println!();
+    println!("# the token itself, shown once -- the server stores only the digest above");
+    println!("{token}");
+    0
 }
 
 /// `samyama verify <snapshot.sgsnap> --queries <catalog.json>`
@@ -633,6 +904,145 @@ async fn start_server() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    // Origins allowed to call the HTTP API from a browser, and the only origins
+    // the Private Network Access opt-in is echoed to. Repeatable `--cors-origin`,
+    // or `SAMYAMA_CORS_ORIGINS` as a comma-separated list. Empty by default:
+    // before #1328 the server accepted every origin and echoed PNA to whoever
+    // asked, so a page on the open web could drive `/api/query`.
+    let mut cors_origins: Vec<String> = Vec::new();
+    {
+        let args: Vec<String> = std::env::args().collect();
+        for (i, a) in args.iter().enumerate() {
+            if a == "--cors-origin" {
+                if let Some(v) = args.get(i + 1) {
+                    cors_origins.push(v.clone());
+                }
+            }
+        }
+        if let Ok(env) = std::env::var("SAMYAMA_CORS_ORIGINS") {
+            cors_origins.extend(
+                env.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()),
+            );
+        }
+    }
+
+    // TLS for the HTTP listener (REL-09). Paths, like the credential file:
+    // a private key is a secret and belongs in a file with file permissions,
+    // not in argv where `ps` shows it to every user on the box.
+    let tls_pem: Option<(String, String)> = {
+        let args: Vec<String> = std::env::args().collect();
+        let pick = |flag: &str, env: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1).cloned())
+                .or_else(|| std::env::var(env).ok())
+        };
+        let cert = pick("--tls-cert", "SAMYAMA_TLS_CERT");
+        let key = pick("--tls-key", "SAMYAMA_TLS_KEY");
+        match (cert, key) {
+            (None, None) => None,
+            // One without the other is a misconfiguration, not a default. A
+            // server that fell back to plain HTTP here would look like it had
+            // TLS to the operator who asked for it.
+            (Some(_), None) | (None, Some(_)) => {
+                eprintln!("FATAL: --tls-cert and --tls-key must be given together");
+                std::process::exit(1);
+            }
+            (Some(c), Some(k)) => {
+                let read = |p: &str| match std::fs::read_to_string(p) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("FATAL: cannot read {p}: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                Some((read(&c), read(&k)))
+            }
+        }
+    };
+
+    // Audit log for state-changing HTTP requests (REL-08).
+    let audit_log: Option<std::sync::Arc<samyama::http::server::AuditLog>> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--audit-log")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_AUDIT_LOG").ok());
+        match path {
+            None => None,
+            // A configured audit log that cannot be opened stops the server.
+            // Starting without it would run unaudited for an operator who
+            // asked to be audited, which is the state the flag exists to leave.
+            Some(p) => match samyama::http::server::AuditLog::open(&p) {
+                Ok(l) => {
+                    println!("HTTP API: auditing state-changing requests to {p}");
+                    Some(std::sync::Arc::new(l))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --audit-log {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
+    // Snapshot encryption key (REL-09). A path: a key on the command line is
+    // visible in `ps` to every user on the box.
+    let snapshot_key: Option<std::sync::Arc<[u8; samyama::snapshot::encryption::KEY_BYTES]>> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--snapshot-key")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_SNAPSHOT_KEY").ok());
+        match path {
+            None => None,
+            // A configured key that cannot be read stops the server, rather
+            // than exporting plaintext for an operator who asked for
+            // encryption.
+            Some(p) => match samyama::snapshot::encryption::read_key(std::path::Path::new(&p)) {
+                Ok(k) => {
+                    println!("HTTP API: snapshots exported encrypted, key from {p}");
+                    Some(std::sync::Arc::new(k))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --snapshot-key {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
+    // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
+    // secret passed on the command line is visible in `ps` to every user on the
+    // box, and one in the environment is inherited by every child process.
+    let credentials: Vec<samyama::http::server::Credential> = {
+        let args: Vec<String> = std::env::args().collect();
+        let path = args
+            .iter()
+            .position(|a| a == "--auth-file")
+            .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| std::env::var("SAMYAMA_AUTH_FILE").ok());
+        match path {
+            None => Vec::new(),
+            // A configured file that cannot be read stops the server. Starting
+            // anyway would publish an unauthenticated API to an operator who
+            // had just asked for the opposite, and the log line saying so would
+            // scroll past.
+            Some(p) => match samyama::http::server::read_credentials(std::path::Path::new(&p)) {
+                Ok(c) => {
+                    println!("HTTP API: {} credential(s) loaded from {p}", c.len());
+                    c
+                }
+                Err(e) => {
+                    eprintln!("FATAL: --auth-file {p}: {e}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
     // Parse --data-path <dir> (snapshot/RocksDB persistence dir) and --ephemeral
     // (no persistence — guarantees an empty store, no CWD-relative ./samyama_data
     // recovery). --ephemeral wins if both are given.
@@ -765,13 +1175,19 @@ async fn start_server() {
 
     let global_embed_pipeline: Option<Arc<EmbedPipeline>> =
         if std::env::var("EMBED_ENABLED").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
-            let provider = match std::env::var("EMBED_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
-                "ollama"      => LLMProvider::Ollama,
-                "gemini"      => LLMProvider::Gemini,
-                "azureopenai" => LLMProvider::AzureOpenAI,
-                "anthropic"   => LLMProvider::Anthropic,
-                "claudecode"  => LLMProvider::ClaudeCode,
-                _             => LLMProvider::OpenAI,
+            // Refused, not defaulted — and this is the path that matters most,
+            // because embedding sends the property **value**, not the schema.
+            // The old arm list did not even carry `azure`, so that spelling
+            // meant OpenAI, and so did every typo.
+            let provider = match LLMProvider::parse_named(
+                "EMBED_PROVIDER",
+                &std::env::var("EMBED_PROVIDER").unwrap_or_default(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("EMBED_ENABLED is true but the provider is unusable: {e}");
+                    std::process::exit(2);
+                }
             };
             let model     = std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
             let api_key   = std::env::var("EMBED_API_KEY").ok();
@@ -826,10 +1242,31 @@ async fn start_server() {
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);
     let http_persistence = persistence.clone();
+    let http_bind_host = config.address.clone();
+    let http_cors_origins = cors_origins.clone();
+    let http_credentials = credentials.clone();
+    let http_tls = tls_pem.clone();
+    let http_audit = audit_log.clone();
+    let http_snapshot_key = snapshot_key.clone();
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
+            // The same host as the RESP listener. The HTTP server used to bind
+            // 0.0.0.0 unconditionally while RESP defaulted to loopback, so
+            // `--host` said one thing and half the server did another (#1328).
+            .with_bind_host(http_bind_host)
+            .with_allowed_origins(http_cors_origins)
+            .with_credentials(http_credentials)
             .with_tenant_manager(http_tenants);
+        if let Some((cert, key)) = http_tls {
+            http_server = http_server.with_tls(cert, key);
+        }
+        if let Some(log) = http_audit {
+            http_server = http_server.with_audit_log(log);
+        }
+        if let Some(k) = http_snapshot_key {
+            http_server = http_server.with_snapshot_key(k);
+        }
         if let Some(pm) = http_persistence {
             http_server = http_server.with_persistence(pm);
         }

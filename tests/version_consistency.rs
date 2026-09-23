@@ -135,6 +135,48 @@ fn every_cargo_manifest_carries_the_version_of_record() {
     }
 }
 
+/// Every path dependency between workspace crates that pins a version pins
+/// the version of record.
+///
+/// `prepare-release.yml` bumped each crate's own `version` and left these pins
+/// alone, so on the v1.8.0 branch every crate still declared
+/// `samyama-sdk = { path = ..., version = "1.7.1" }` and the like. It builds —
+/// 1.8.0 satisfies `^1.7.1` — which is why nothing noticed, but the published
+/// crates would each accept any 1.7.x-or-later sibling, and could pair
+/// `samyama-sdk` 1.8.0 with an older algorithms crate on crates.io.
+#[test]
+fn every_internal_dependency_pin_names_the_version_of_record() {
+    let mut checked = 0;
+    for rel in [
+        "Cargo.toml",
+        "cli/Cargo.toml",
+        "crates/samyama-sdk/Cargo.toml",
+        "crates/samyama-optimization/Cargo.toml",
+        "crates/samyama-graph-algorithms/Cargo.toml",
+        "crates/samyama-gpu/Cargo.toml",
+        "sdk/python/Cargo.toml",
+    ] {
+        for line in read(rel).lines() {
+            let l = line.trim();
+            if !(l.contains("path = ") && l.contains("version = \"")) {
+                continue;
+            }
+            let pinned = l
+                .split("version = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or("");
+            checked += 1;
+            assert_eq!(
+                pinned, VERSION,
+                "{rel}: `{l}` pins {pinned}; the version of record is {VERSION}"
+            );
+        }
+    }
+    // Ten pins exist today; a scan that finds none is not a check.
+    assert!(checked >= 5, "found only {checked} pinned path dependencies — the scan is vacuous");
+}
+
 #[test]
 fn the_python_wheel_reports_the_version_of_record() {
     // PEP 440 permits `1.7.0rc1` where cargo writes `1.7.0-rc1`; the release
@@ -204,6 +246,31 @@ fn the_prose_that_names_a_version_names_the_current_one() {
     }
 }
 
+/// The README's version badge.
+///
+/// v1.8.0 shipped with every manifest, the OpenAPI document and the prose
+/// above all in agreement — and a README badge reading `1.1.0`, seven minor
+/// releases stale. It is the first version number a visitor sees, and it was
+/// the one location this file did not read. The badge is checked for
+/// *equality*, not containment: it states exactly one version, and it is the
+/// claim a reader takes as "what am I installing".
+#[test]
+fn the_readme_version_badge_is_the_version_of_record() {
+    let text = read("README.md");
+    let marker = "img.shields.io/badge/version-";
+    let badges: Vec<String> = text
+        .match_indices(marker)
+        .map(|(i, _)| &text[i + marker.len()..])
+        // shields.io writes a literal `-` as `--`, so `1.9.0-rc1` appears as
+        // `1.9.0--rc1`; the value ends at the first *single* dash.
+        .map(|rest| rest.replace("--", "\u{0}").split('-').next().unwrap_or("").replace('\u{0}', "-"))
+        .collect();
+    assert!(!badges.is_empty(), "README.md has no version badge — the scan is vacuous");
+    for b in badges {
+        assert_eq!(b, VERSION, "README.md's version badge reads {b}; the version of record is {VERSION}");
+    }
+}
+
 #[test]
 fn the_release_checklist_locations_all_exist() {
     // The failure mode this guards: a file is moved, the check above reads
@@ -221,6 +288,7 @@ fn the_release_checklist_locations_all_exist() {
         "api/openapi.yaml",
         "src/lib.rs",
         "CLAUDE.md",
+        "README.md",
     ] {
         assert!(
             Path::new(&root().join(rel)).exists(),

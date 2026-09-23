@@ -8,7 +8,7 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_index_stmt | create_constraint_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
+statement = { show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
 //
@@ -36,8 +36,17 @@ return_stmt = { return_clause ~ order_by_clause? ~ skip_clause? ~ limit_clause? 
 // The optional index name must not swallow `FOR`. `variable?` matched it, and the rule
 // then failed at the "(" -- so the unnamed form was rejected outright. Same trap as
 // the optional constraint name.
-index_name = @{ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
-create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" ~ options? }
+index_name = @{ !((^"FOR" | ^"ON") ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// Two spellings of the same statement. The `FOR (n:L) ON (n.prop)` form is the
+// one Neo4j 5 documents for vector indexes; the `ON :L(prop)` form is the one
+// every other index DDL here uses, including `CREATE INDEX` below. Accepting
+// only the first made the vector index the odd one out for no reason a caller
+// could see -- a uniformity gap, not a missing capability, so it is a grammar
+// alternative and not a feature. Both build the same index: the builder
+// dispatches on `label`/`property_key` and ignores the pattern variable.
+create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
+vector_index_for = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" }
+vector_index_on = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
 create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
@@ -55,6 +64,15 @@ hier_types = { label ~ ("|" ~ ":"? ~ label)* }
 hier_measure = { ^"MEASURE" ~ (label ~ ".")? ~ property_key }
 hier_aggregates = { ^"AGGREGATE" ~ property_key ~ ("," ~ property_key)* }
 drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
+
+// CREATE FULLTEXT INDEX (NDS-06). Neo4j's form is `FOR (n:L) ON EACH [n.a, n.b]`;
+// the single-property `ON (n.a)` spelling is accepted too, because that is what
+// every other index DDL here looks like and the difference carries no meaning.
+create_fulltext_index_stmt = { ^"CREATE" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one) }
+fulltext_each = _{ ^"EACH" ~ "[" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ "]" }
+fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
+drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
+
 show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
 create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
@@ -78,6 +96,10 @@ match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
 
 // CALL subquery: CALL { MATCH ... RETURN ... }
 call_subquery = { ^"CALL" ~ "{" ~ statement ~ "}" }
+// `MATCH ... CALL { WITH a, b <statement> }` (#1236): a subquery run once per
+// row, with `a` and `b` imported from it. `WITH *` imports everything in scope.
+correlated_call = { ^"CALL" ~ "{" ~ ^"WITH" ~ call_imports ~ statement ~ "}" }
+call_imports = { "*" | variable ~ ("," ~ variable)* }
 
 // CALL clause
 call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
@@ -99,12 +121,12 @@ on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
-match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ call_clause? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ (correlated_call | call_clause)? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A FOREACH with no preceding MATCH/UNWIND. It drives itself off a single
 // empty row, the same way a bare RETURN does, so no pattern is required.
 foreach_stmt = { foreach_clause }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
-foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause }
+foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause | merge_inline | foreach_clause }
 unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // LOAD CSV (LANG-09). A reading clause: it produces one row per record, the way
 // UNWIND produces one row per list element, and everything downstream of it is
@@ -181,7 +203,13 @@ create_stmt = { create_clause+ ~ return_clause? ~ order_by_clause? ~ skip_clause
 
 // Pattern matching
 pattern = { named_path ~ ("," ~ named_path)* }
-named_path = { (variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path_modes ~ path) | (variable ~ "=" ~ path) | shortest_path_call | (path_modes ~ path) | path }
+// `path_modes` may precede the path variable or follow it. ISO/IEC 39075 writes
+// the modes first -- `MATCH TRAIL p = (...)` -- and so do the worked examples in
+// the standard's reference exposition; we originally accepted only the inverted
+// form, so the specification's own queries did not parse (#1148). Both are taken.
+// Ordered choice: the modes-first alternative must precede `path_modes ~ path`,
+// which would otherwise consume the modes and then fail on the variable.
+named_path = { (variable ~ "=" ~ shortest_path_call) | (path_modes ~ variable ~ "=" ~ shortest_path_call) | (variable ~ "=" ~ path_modes ~ path) | (path_modes ~ variable ~ "=" ~ path) | (variable ~ "=" ~ path) | shortest_path_call | (path_modes ~ path) | path }
 
 // GQL path selectors and restrictors (ISO/IEC 39075:2024), as a prefix on a path
 // pattern: `MATCH ALL SHORTEST ACYCLIC (a)-[:R*1..3]->(b)`.
@@ -204,7 +232,7 @@ shortest_path_call = { (^"allShortestPaths" | ^"shortestPath") ~ "(" ~ path ~ ")
 // Node pattern: (n:Person {name: "Alice"})
 node = { "(" ~ variable? ~ labels? ~ properties? ~ ")" }
 labels = { (":" ~ label)+ }
-label = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+label = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Edge pattern: -[:KNOWS]-> or <-[:KNOWS]- or -[:KNOWS]-
 //
@@ -229,7 +257,7 @@ edge_detail = { "[" ~ variable? ~ edge_types? ~ length_pattern? ~ properties? ~ 
 // spelling openCypher's own scenarios use. Only `:A|B` and `:A:B` parsed, so
 // the query failed outright rather than matching either type (#909).
 edge_types = { ":" ~ edge_type ~ (("|" ~ ":"? | ":") ~ edge_type)* }
-edge_type = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+edge_type = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 
 // Variable length: *1..5 or * or *3..
 length_pattern = { "*" ~ (range_pattern | integer)? }
@@ -309,6 +337,7 @@ primary = {
     predicate_function |
     pattern_comprehension |
     list_comprehension |
+    count_subquery |
     count_star |
     function_call |
     nested_property_access |
@@ -316,6 +345,7 @@ primary = {
     parameter |
     value |
     list_expr |
+    map_projection |
     map_expr |
     variable |
     pattern_predicate |
@@ -328,6 +358,9 @@ pattern_predicate = { node ~ (edge_pattern ~ node)+ }
 
 // COUNT(*) — special rule since * is not a valid expression
 count_star = { ^"COUNT" ~ "(" ~ distinct? ~ "*" ~ ")" }
+// `COUNT { pattern WHERE ... }` (#1235): how many matches. Braces, not
+// parentheses, so it cannot be mistaken for `count(*)` or `count(x)`.
+count_subquery = { ^"COUNT" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ "}" }
 
 // Query parameter: $name
 parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
@@ -363,7 +396,13 @@ pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~
 // subquery produces at least one row, so what those rows contain cannot change
 // the answer. The parser already ignored every inner rule but `pattern` and
 // `where_clause`, which is why allowing RETURN needed no evaluator change.
-exists_subquery = { ^"EXISTS" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}" }
+//
+// A body with more than that -- `WITH`, aggregation, a second MATCH -- is a
+// full subquery, run once per outer row (#1211). The simple form is tried
+// first and keeps its fast path. The `"}"` inside each alternative is what
+// lets a simple body that stops short (at `WITH`, say) fall through to the
+// full one.
+exists_subquery = { ^"EXISTS" ~ "{" ~ ((^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}") | (statement ~ "}")) }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is
@@ -403,9 +442,16 @@ function_call = { function_name ~ "(" ~ distinct? ~ (expression ~ ("," ~ express
 // after the name, so `n.name` fails the rule and the PEG backtracks to
 // `property_access` as before -- and `function_call` is already tried first in
 // `primary`, so the ordering does not change either (#769).
+// One segment was `?`, so `apoc.text.join(...)` -- two segments, and the
+// commonest shape in a Neo4j corpus -- was a **parse error** whose message
+// read "expected EOI, union_clause, order_by_clause, ...". A migrating user
+// learned nothing from that; with `*` it reaches the evaluator and comes back
+// as "Unknown function 'apoc.text.join'", which names the thing they have to
+// replace. Accepting a name is not implementing it, and the refusal is the
+// point: it is a better refusal.
 function_name = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    ~ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*)?
+    ~ ("." ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*)*
 }
 
 // Operators
@@ -464,6 +510,18 @@ map_entry = { (string | property_key) ~ ":" ~ value }
 list_expr = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
 map_expr = { "{" ~ (map_expr_entry ~ ("," ~ map_expr_entry)*)? ~ "}" }
 map_expr_entry = { (string | property_key) ~ ":" ~ expression }
+// Map projection, `p {.name, .*, key: expr, other}` (#1239). Ahead of
+// `variable` in `primary`, and behind `exists_subquery`, so `EXISTS {` stays a
+// subquery.
+map_projection = { variable ~ "{" ~ (map_projection_item ~ ("," ~ map_projection_item)*)? ~ "}" }
+map_projection_item = { map_projection_all | map_projection_property | map_expr_entry | variable }
+map_projection_all = { "." ~ "*" }
+map_projection_property = { "." ~ property_key }
 
 // Variable names
-variable = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+// `escaped_name` first: a backtick cannot begin an undelimited name, so the
+// ordered choice is unambiguous. Atomic, like `label` and `property_key`, so
+// `as_str()` returns the delimiters too and every read site must strip them
+// with `unescape_name` -- a site that forgets binds the variable under a name
+// carrying backticks and every later reference silently misses it (#1373).
+variable = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }

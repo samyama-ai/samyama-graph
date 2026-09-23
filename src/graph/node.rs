@@ -16,13 +16,13 @@
 //!
 //! ## MVCC (Multi-Version Concurrency Control)
 //!
-//! Each node carries a `version: u64` field that is incremented on mutation.
-//! In the storage layer ([`GraphStore`](super::store::GraphStore)), nodes are
-//! stored in a `Vec<Vec<Node>>` arena where the inner `Vec` holds successive
-//! versions of the same node. This enables **snapshot isolation**: a reader
-//! operating at version V sees only node versions <= V, and is never blocked by
-//! a concurrent writer creating version V+1. MVCC is the same concurrency
-//! strategy used by PostgreSQL, Oracle, and most modern databases.
+//! Each node carries a `version: u64`: the version of its last write. The
+//! storage layer ([`GraphStore`](super::store::GraphStore)) keeps only the
+//! current node. Its history is an undo log beside the columns: for each write
+//! at a later version, the value (or label) it replaced. A read at version V
+//! takes the current node and undoes the entries newer than V, so changing one
+//! property of a 20-property node records one value, not a copy of the node
+//! (samyama-graph#1200).
 //!
 //! ## Identity semantics
 //!
@@ -187,8 +187,53 @@ impl Node {
         old
     }
 
-    /// Get a property value
+    /// Get a property value **from this node's own map**.
+    ///
+    /// This is not the whole store. The Cypher write path keeps properties in
+    /// the columnar store (ADR-021), and a `Node` holds no reference to it, so
+    /// this answers `None` for a property that a query would return:
+    ///
+    /// ```text
+    /// CREATE (:Item {cost: 7.0})     through Cypher
+    ///   node.get_property("cost")         => None
+    ///   store.node_property(id, "cost")   => Some(Float(7.0))
+    ///
+    /// set_property("cost", 7.0)      through this API
+    ///   node.get_property("cost")         => Some(Float(7.0))
+    ///   store.node_property(id, "cost")   => Some(Float(7.0))
+    /// ```
+    ///
+    /// So **prefer [`GraphStore::node_property`]**, which reads both, unless you
+    /// specifically want the inline map. Reading through here cost the parity
+    /// exporter its `or.solve` check: both properties came back `None`, the
+    /// export wrote `NaN`, and the comparator died on it without anyone
+    /// noticing for weeks (#1313).
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
+        self.inline_property(key)
+    }
+
+    /// The property as held in this node's **inline map**, and nothing else.
+    ///
+    /// The honest name for what [`Node::get_property`] does. A `Node` is a
+    /// detached value with no handle on the store, so it cannot consult the
+    /// columnar side (ADR-021) where the Cypher write path puts properties --
+    /// this method can only read half the store, and a name that says
+    /// `get_property` invites a caller to believe otherwise (#1313).
+    ///
+    /// `None` here means "not in the inline map", which is a different fact
+    /// from "this node has no such property". For the second question use
+    /// [`GraphStore::node_property`], which reads both sides.
+    ///
+    /// Concretely, after `CREATE (:Item {cost: 7.0})`:
+    ///
+    /// ```text
+    /// node.inline_property("cost")      => None
+    /// store.node_property(id, "cost")   => Some(Float(7.0))
+    /// ```
+    ///
+    /// Both are correct answers to different questions. The trap is that only
+    /// one of them looks like the question a caller meant to ask.
+    pub fn inline_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
     }
 

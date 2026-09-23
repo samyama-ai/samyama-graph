@@ -7,12 +7,15 @@
 //!
 //! On import, old node IDs are remapped to new IDs via a HashMap.
 
+pub mod encryption;
 pub mod format;
 pub mod persist;
 pub mod verify;
 pub mod publish_gate;
 
 use std::collections::{HashMap, HashSet};
+
+use crate::graph::Label;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use flate2::read::GzDecoder;
@@ -119,20 +122,21 @@ pub fn export_tenant_with_compression(
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(_nid, eid) in &frozen {
             if !full_edge_ids.contains(eid.as_u64()) {
+                // A frozen entry whose type misses is a relationship deleted
+                // after compaction, kept only behind its tombstone. It is not
+                // in the graph, so it is not counted or written (#1096).
+                let Some(et) = store.get_edge_type(eid) else { continue };
                 adjacency_edge_count += 1;
-                if let Some(et) = store.get_edge_type(eid) {
-                    edge_type_set.insert(et.as_str().to_string());
-                }
+                edge_type_set.insert(et.as_str().to_string());
             }
         }
         // Write buffer outgoing
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(_nid, eid) in buf {
             if !full_edge_ids.contains(eid.as_u64()) {
+                let Some(et) = store.get_edge_type(eid) else { continue };
                 adjacency_edge_count += 1;
-                if let Some(et) = store.get_edge_type(eid) {
-                    edge_type_set.insert(et.as_str().to_string());
-                }
+                edge_type_set.insert(et.as_str().to_string());
             }
         }
     }
@@ -150,6 +154,8 @@ pub fn export_tenant_with_compression(
     let node_count = nodes.len() as u64;
     let total_edge_count = full_edges.len() as u64 + adjacency_edge_count;
 
+    let dropped = losses(store, total_edge_count);
+
     // Create gzip encoder
     let mut gz = GzEncoder::new(writer, Compression::new(compression_level.min(9)));
 
@@ -164,6 +170,7 @@ pub fn export_tenant_with_compression(
         edge_types: edge_types.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         samyama_version: crate::VERSION.to_string(),
+        dropped: dropped.clone(),
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -213,6 +220,8 @@ pub fn export_tenant_with_compression(
             id: node.id.as_u64(),
             labels: node.labels.iter().map(|l| l.as_str().to_string()).collect(),
             props,
+            created_at: node.created_at,
+            updated_at: node.updated_at,
         };
         let node_json = serde_json::to_string(&snap_node)?;
         gz.write_all(node_json.as_bytes())?;
@@ -248,9 +257,9 @@ pub fn export_tenant_with_compression(
         let frozen = store.frozen_outgoing_neighbors(idx);
         for &(tgt_nid, eid) in &frozen {
             if full_edge_ids.contains(eid.as_u64()) { continue; }
-            let et = store.get_edge_type(eid)
-                .map(|e| e.as_str().to_string())
-                .unwrap_or_default();
+            // Same rule as the count above: no type means deleted. Writing it
+            // with `edge_type: ""` brought it back on import, live (#1096).
+            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
             let snap_edge = SnapshotEdge {
                 t: "e".to_string(),
                 id: eid.as_u64(),
@@ -268,9 +277,9 @@ pub fn export_tenant_with_compression(
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(tgt_nid, eid) in buf {
             if full_edge_ids.contains(eid.as_u64()) { continue; }
-            let et = store.get_edge_type(eid)
-                .map(|e| e.as_str().to_string())
-                .unwrap_or_default();
+            // Same rule as the count above: no type means deleted. Writing it
+            // with `edge_type: ""` brought it back on import, live (#1096).
+            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
             let snap_edge = SnapshotEdge {
                 t: "e".to_string(),
                 id: eid.as_u64(),
@@ -294,7 +303,88 @@ pub fn export_tenant_with_compression(
         labels,
         edge_types,
         bytes_written: 0,
+        dropped,
     })
+}
+
+/// What this export will not carry, for this graph (INT-06).
+///
+/// Only things that are actually there: a graph with no vector index produces
+/// no vector-index row. A standing list of everything the format *could* drop
+/// is a disclaimer, and nobody reads those; a list of what happened to this
+/// graph is a finding.
+///
+/// Each row says what it means for the restored graph rather than naming an
+/// internal structure, because the reader of this is deciding whether the
+/// restore is good enough.
+fn losses(store: &GraphStore, edge_count: u64) -> Vec<crate::snapshot::format::Dropped> {
+    use crate::snapshot::format::Dropped;
+    let mut out = Vec::new();
+
+    let indexes = store.property_index.list_indexes();
+    if !indexes.is_empty() {
+        out.push(Dropped {
+            what: "property_indexes".to_string(),
+            count: indexes.len() as u64,
+            detail: format!(
+                "Index declarations are not in the file. After import the data is \
+                 complete and unindexed, so queries that relied on them scan. \
+                 Re-create: {}",
+                indexes
+                    .iter()
+                    .map(|(l, p)| format!("CREATE INDEX ON :{}({p})", l.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+
+    let constraints = store.property_index.list_constraints();
+    if !constraints.is_empty() {
+        out.push(Dropped {
+            what: "unique_constraints".to_string(),
+            count: constraints.len() as u64,
+            // Worse than a missing index: an index costs speed, a missing
+            // constraint lets the restored graph accept duplicates the original
+            // refused.
+            detail: format!(
+                "Uniqueness is not enforced on the restored graph until these are \
+                 re-created: {}",
+                constraints
+                    .iter()
+                    .map(|(l, p)| format!("CREATE CONSTRAINT ON (n:{}) ASSERT n.{p} IS UNIQUE",
+                                          l.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+
+    let vectors = store.vector_index.list_indices();
+    if !vectors.is_empty() {
+        out.push(Dropped {
+            what: "vector_index_declarations".to_string(),
+            count: vectors.len() as u64,
+            detail: "The vectors themselves are node properties and survive. The \
+                     index declaration -- its name, dimensions and metric -- does \
+                     not, so vector search finds nothing until the index is \
+                     re-created."
+                .to_string(),
+        });
+    }
+
+    if edge_count > 0 {
+        out.push(Dropped {
+            what: "edge_creation_timestamps".to_string(),
+            count: edge_count,
+            detail: "Edges carry id, endpoints, type and properties. Creation time \
+                     is not among them, so a temporal query over edge age answers \
+                     differently after a round trip. Node timestamps do survive."
+                .to_string(),
+        });
+    }
+
+    out
 }
 
 /// Import nodes and edges from a .sgsnap stream into the store.
@@ -310,6 +400,59 @@ pub fn import_tenant(
     reader: impl Read,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     import_tenant_with_dedup(store, reader, &[])
+}
+
+/// Export encrypted at rest (REL-09).
+///
+/// The encryption wraps the ordinary snapshot stream rather than replacing it,
+/// so what is sealed is byte-for-byte what would otherwise have been written.
+pub fn export_tenant_encrypted(
+    store: &GraphStore,
+    writer: impl Write,
+    key: &[u8; encryption::KEY_BYTES],
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    let mut enc = encryption::EncryptingWriter::new(writer, key)?;
+    let stats = export_tenant(store, &mut enc)?;
+    // `finish` and not `Drop`: the terminator is what tells a reader the file
+    // is whole, and a `Drop` that failed to write it on a full disk could not
+    // say so. A snapshot without its terminator does not import.
+    enc.finish()?;
+    Ok(stats)
+}
+
+/// Import a snapshot that may or may not be encrypted.
+///
+/// The first bytes decide: an encrypted file starts with a magic string, and
+/// anything else is read exactly as before. Sniffing rather than requiring the
+/// caller to say means an operator who turns encryption on does not have to
+/// migrate the snapshots they already have.
+///
+/// A file that *is* encrypted and no key was given is an error naming that,
+/// rather than a gzip failure -- the two look identical otherwise, and the
+/// difference is what the operator needs to act on.
+pub fn import_tenant_maybe_encrypted(
+    store: &mut GraphStore,
+    mut reader: impl Read,
+    key: Option<&[u8; encryption::KEY_BYTES]>,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    let mut head = [0u8; 12];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match reader.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    let head = &head[..filled];
+
+    if !encryption::looks_encrypted(head) {
+        return import_tenant_with_dedup(store, head.chain(reader), &[]);
+    }
+    let key = key.ok_or(
+        "this snapshot is encrypted and no key was given: pass --snapshot-key",
+    )?;
+    let dec = encryption::DecryptingReader::new(reader, key, head)?;
+    import_tenant_with_dedup(store, dec, &[])
 }
 
 /// Import with entity deduplication on specified property keys.
@@ -452,20 +595,22 @@ fn import_tenant_inner(
             // Parse as node
             let snap_node: SnapshotNode = serde_json::from_str(&line)?;
 
-            let first_label = snap_node
-                .labels
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "".to_string());
+            // A node with no labels is legal -- Neo4j allows it, `CREATE (n)`
+            // makes one, and `create_node_with_labels` takes an empty
+            // iterator. Defaulting to `""` and creating the node *with* that
+            // label is how a snapshot round trip turned an unlabelled node
+            // into one labelled with the empty string: before the trip
+            // `MATCH (n) WHERE size(labels(n)) = 0` counted it, and after the
+            // trip it did not.
+            let first_label = snap_node.labels.first().cloned();
 
             // --- Entity dedup: check if this node already exists (only if dedup requested) ---
             // Try every label the incoming node carries, for the same reason the index
             // holds every label: a match on any shared label is a match.
-            let snap_labels: Vec<String> = if snap_node.labels.is_empty() {
-                vec![String::new()]
-            } else {
-                snap_node.labels.clone()
-            };
+            // An unlabelled node has no label to match on. The empty string
+            // is not a label it carries, and using it as one would let two
+            // unrelated unlabelled nodes dedup against each other.
+            let snap_labels: Vec<String> = snap_node.labels.clone();
             let mut existing_id: Option<NodeId> = None;
             'dedup: for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
@@ -524,11 +669,10 @@ fn import_tenant_inner(
                     }
                 }
 
-                // Add any new labels
-                if let Some(node) = store.get_node_mut(eid) {
-                    for label in &snap_node.labels {
-                        node.add_label(label.as_str());
-                    }
+                // Same reason as above: through the store, so `label_index`
+                // learns about a label a deduped node did not already carry.
+                for label in &snap_node.labels {
+                    let _ = store.add_label_to_node("default", eid, Label::new(label.as_str()));
                 }
 
                 // Track labels
@@ -541,13 +685,30 @@ fn import_tenant_inner(
             // --- Create new node ---
             if use_stubs {
                 // v2: use lightweight stubs + column properties
-                let new_id = store.create_node_stub(first_label.as_str());
+                // Every label at once, through the store, because
+                // `Node::add_label` writes to the struct and not to
+                // `label_index`. Adding the second and later labels that way
+                // left them on the node and invisible to `MATCH (n:Label)`:
+                // after a round trip a `:Person:Employee` node was findable
+                // by exactly one of its labels, and **which one was
+                // arbitrary** -- the snapshot's label order comes from a
+                // HashSet. `create_node_with_labels` indexes all of them.
+                let new_id = store.create_node_with_labels(
+                    snap_node.labels.iter().map(|l| Label::new(l.as_str())),
+                );
                 created_nodes.push(new_id);
-                // Add remaining labels
                 if let Some(node) = store.get_node_mut(new_id) {
-                    for label in snap_node.labels.iter().skip(1) {
-                        node.add_label(label.as_str());
-                    }
+                    // Restore the timestamps the snapshot carries (#1124).
+                    //
+                    // Zero means the snapshot predates the fields. `create_node_stub`
+                    // left the node at zero too, so "keep whatever it has" was the
+                    // same thing as "zero"; `create_node_with_labels` stamps `now`,
+                    // so the node has to be zeroed explicitly or an old file's nodes
+                    // come back claiming to have been created at import time.
+                    // `a_snapshot_without_the_fields_still_imports` caught exactly
+                    // that.
+                    node.created_at = snap_node.created_at;
+                    node.updated_at = snap_node.updated_at;
                 }
                 // Every property reaches the ColumnStore, whatever its type.
                 //
@@ -598,12 +759,11 @@ fn import_tenant_inner(
                 id_remap.insert(snap_node.id, new_id);
             } else {
                 // v1: use full create_node with HashMap properties
-                let new_id = store.create_node(first_label.as_str());
+                let new_id = store.create_node_with_labels(
+                    snap_node.labels.iter().map(|l| Label::new(l.as_str())),
+                );
                 created_nodes.push(new_id);
                 if let Some(node) = store.get_node_mut(new_id) {
-                    for label in snap_node.labels.iter().skip(1) {
-                        node.add_label(label.as_str());
-                    }
                     for (key, json_val) in &snap_node.props {
                         node.set_property(key.clone(), json_to_property(json_val));
                     }
@@ -1414,6 +1574,7 @@ mod tests {
             edge_types: vec![],
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
+            dropped: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -1440,6 +1601,7 @@ mod tests {
             edge_types: vec![],
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
+            dropped: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();

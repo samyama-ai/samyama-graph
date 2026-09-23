@@ -334,6 +334,16 @@ pub fn validate_entry_shape(id: &str, cypher: &str, params: &[ParamSpec]) -> Res
             ));
         }
     }
+    // `LIMIT $k` and `SKIP $k` are Cypher, and the engine binds them. A
+    // published catalog must still not hand whoever fills its parameters an
+    // unbounded row-count slot (#1156). The parser used to refuse them, which
+    // is what kept this unreachable; the catalog now refuses them itself.
+    if crate::query::parse_query(cypher).is_ok_and(|q| q.has_deferred_row_counts()) {
+        return Err(format!(
+            "{id}: SKIP/LIMIT takes a parameter. A catalog query fixes its own row \
+             count; a parameter there is an unbounded slot for whoever fills it."
+        ));
+    }
     let referenced = referenced_params(cypher);
     for name in &referenced {
         if !params.iter().any(|p| &p.name == name) {

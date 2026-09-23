@@ -14,7 +14,7 @@ exclude = ["sdk/python"]
 # check. sdk/python is its own workspace (excluded above) and is kept in
 # lockstep by hand — the same guard covers it.
 [workspace.package]
-version = "1.7.1"
+version = "1.9.0"
 
 [package]
 name = "samyama"
@@ -78,6 +78,12 @@ chrono = "0.4"
 # identifiers in engine source is the same principle.
 chrono-tz = "0.10"
 sha2 = "0.10"
+# Password verification for REL-08's credential store. A *slow* hash, unlike the
+# SHA-256 used for machine tokens: against a stolen file the defence for a
+# human-chosen password is the cost of each guess, and for a 32-byte random
+# token there is nothing to guess. The two live in one file and are told apart
+# by the hash format.
+argon2 = "0.5"
 
 # Arrow + Parquet export (INT-05 / ML-01, #1097). Version 53 matches what
 # samyama-graph-enterprise already vets and ships, so this adds no new licence
@@ -107,6 +113,18 @@ spargebra = "0.3"          # SPARQL 1.1 parser
 sparesults = "0.2"         # SPARQL results formats
 # HTTP server (for SPARQL endpoint and Visualizer)
 axum = { version = "0.7", features = ["multipart"] }  # HTTP framework
+# TLS on our own listener (REL-09). `rustls` and `tokio-rustls` were already in
+# the tree through `reqwest`, but that is us calling out to somebody else's
+# API -- a client speaking HTTPS is not an acceptor on our socket.
+#
+# `tokio-rustls` directly rather than `axum-server`: the latter is a smaller
+# amount of code here but depends on `rustls-pemfile`, which is unmaintained
+# (RUSTSEC-2025-0134) with no safe upgrade. Adding an advisory to fix a
+# security requirement is the wrong trade, and `cargo deny` fails the build on
+# it -- which is what jammed every pull request earlier today.
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
+hyper = "1"
 tower = { version = "0.5", features = ["util"] }  # Middleware
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 http-body-util = "0.1"     # Body utilities for HTTP testing
@@ -115,42 +133,68 @@ percent-encoding = "2.3"   # URL encoding
 mime = "0.3"               # MIME types
 
 # Vector Search (Phase 6)
-hnsw_rs = "0.2.1"
+hnsw_rs = "0.3.4"
+# Promoted from a transitive dependency for NDS-09's fp16 vector quantization.
+# `half::f16` satisfies `Hnsw`'s `Clone + Send + Sync` bound, so the index holds
+# the quantized values rather than converting at the boundary -- which is what
+# makes the memory saving real rather than a claim about the persistence copy.
+half = { version = "2", features = ["serde"] }
 rand = "0.8"
 regex = "1"
-lru = "0.12"
+lru = "0.18"
 
 # Snapshot compression
 flate2 = "1.0"
+# At-rest encryption for snapshots (REL-09). ChaCha20-Poly1305 rather than
+# AES-GCM: no hardware dependency, so the same code path is used and tested on
+# every platform the engine ships to, and no risk of a silent fallback to a
+# constant-time-unsafe software AES on a machine without AES-NI.
+chacha20poly1305 = "0.10"
 
 # Parallel processing
 rayon = "1.10"
 
 # Optimization Engine (Phase 7)
-samyama-optimization = { path = "crates/samyama-optimization", version = "1.7.1" }
+samyama-optimization = { path = "crates/samyama-optimization", version = "1.9.0" }
 uuid = { version = "1.8", features = ["v4"] }
 tokio-stream = "0.1"
 futures = "0.3"
-samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.7.1" }
+samyama-graph-algorithms = { path = "crates/samyama-graph-algorithms", version = "1.9.0" }
 ndarray = "0.15"
 reqwest = { version = "0.13.1", features = ["json"] }
 
 # GPU acceleration (optional; pulls the wgpu/cudarc dep tree only under --features gpu)
-samyama-gpu = { path = "crates/samyama-gpu", version = "1.7.1", optional = true }
+samyama-gpu = { path = "crates/samyama-gpu", version = "1.9.0", optional = true }
 
 [features]
-default = []
+# mimalloc is the server's and the benchmarks' global allocator (ADR-038). A
+# library never installs one: samyama-sdk depends on this crate without default
+# features, so embedded users keep their host's allocator.
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 # Enable in-engine GPU acceleration. Off by default so users who do not want the
 # large wgpu/cudarc dep tree never compile it. See docs/ADR/ADR-025.
 gpu = ["dep:samyama-gpu", "samyama-graph-algorithms/gpu"]
 # NVIDIA CUDA fast path (implies gpu). Requires a CUDA toolkit at build time.
 cuda = ["gpu", "samyama-gpu/cuda"]
 
+[dependencies.mimalloc]
+version = "0.1"
+optional = true
+default-features = false
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
-samyama-sdk = { path = "crates/samyama-sdk", version = "1.7.1" }
+samyama-sdk = { path = "crates/samyama-sdk", version = "1.9.0" }
 http-body-util = "0.1"
+# Reads the GraphML we write back, so the tests check the file against an XML
+# parser rather than against the writer that produced it.
+quick-xml = "0.37"
+# REL-09's TLS test makes its own certificate and then *verifies* it, rather
+# than telling the client to skip verification. A test that disabled
+# verification would pass against a server offering no TLS at all.
+rcgen = "0.14"
 
 # These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
 # `test = false`, so without this the tests inside them compile and never run —
@@ -244,6 +288,14 @@ harness = false
 
 [[bench]]
 name = "plan_share"
+harness = false
+
+[[bench]]
+name = "restore_curve"
+harness = false
+
+[[bench]]
+name = "persist_row_cost"
 harness = false
 
 [[bench]]

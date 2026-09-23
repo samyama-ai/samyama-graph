@@ -183,14 +183,9 @@ where
 
         match graph.create_edge(src_node, tgt_node, edge_type) {
             Ok(edge_id) => {
-                let props = parse_props(&headers, &fields);
-                if !props.is_empty() {
-                    if let Some(edge_props) = graph.get_edge_properties_mut(edge_id) {
-                        for (key, val) in props {
-                            edge_props.insert(key.to_string(), val);
-                        }
-                    }
-                }
+                // Through the store's batch setter, so the values reach the
+                // columns the query engine reads first (#1192).
+                graph.set_edge_properties_sparse(edge_id, parse_props(&headers, &fields));
                 count += 1;
             }
             Err(_) => { skipped += 1; }

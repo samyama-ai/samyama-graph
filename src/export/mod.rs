@@ -245,7 +245,58 @@ fn as_text(v: &Value) -> Option<String> {
     }
 }
 
+/// Replace every node in a result with the node as the store holds it (#545).
+///
+/// A record carries `Value::Node(id, node)` where `node` is a clone of the row
+/// copy taken at bind time. Snapshot import leaves that copy empty for every
+/// scalar, so an exported node rendered `"properties": {}` for a node whose
+/// values are all present -- and once #545 stops writing the row copy, every
+/// node would. `json_of` cannot fix it: it sees a value, not the store.
+///
+/// Run while the caller still holds the store; export itself then needs no
+/// store, and no lock is held across Parquet encoding. Recurses into lists and
+/// maps because `json_of` renders nodes found there too.
+pub fn resolve_nodes(batch: &mut RecordBatch, store: &crate::graph::GraphStore) {
+    fn resolve(v: Value, store: &crate::graph::GraphStore) -> Value {
+        match v {
+            Value::Node(id, node) => match store.node_materialized(id) {
+                Some(full) => Value::Node(id, Box::new(full)),
+                None => Value::Node(id, node),
+            },
+            // Late materialization (ADR-012) leaves a node inside a list, and a
+            // node in the JSON fallback column, as a bare reference -- which
+            // `json_of` renders as `{"id": n}` with no labels or properties at
+            // all. Resolving it here is what makes an exported node carry the
+            // data it holds, whichever form the executor happened to leave it in.
+            Value::NodeRef(id) => match store.node_materialized(id) {
+                Some(full) => Value::Node(id, Box::new(full)),
+                None => Value::NodeRef(id),
+            },
+            Value::List(items) => Value::List(items.into_iter().map(|i| resolve(i, store)).collect()),
+            Value::Map(entries) => Value::Map(
+                entries.into_iter().map(|(k, v)| (k, resolve(v, store))).collect(),
+            ),
+            other => other,
+        }
+    }
+    for rec in &mut batch.records {
+        let names: Vec<_> = rec.bindings().iter().map(|(n, _)| n.clone()).collect();
+        for name in names {
+            if let Some(v) = rec.get(&name).cloned() {
+                rec.bind(name, resolve(v, store));
+            }
+        }
+    }
+}
+
 /// JSON for the fallback column, and for entities inside a list.
+/// A `Value` as JSON, for the exports that need one field of text where the
+/// result holds a structure. Shared so CSV and Arrow do not disagree about
+/// what a node looks like in a string column.
+pub(crate) fn value_as_json(v: &Value) -> serde_json::Value {
+    json_of(v)
+}
+
 fn json_of(v: &Value) -> serde_json::Value {
     use serde_json::json;
     match v {
@@ -483,6 +534,9 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// the file cannot make — and guessing it here would produce an importer whose
 /// meaning depends on which exporter wrote the file. `LOAD PARQUET` (#1098) is
 /// where that belongs, with the mapping written in the query.
+pub mod csv;
+pub mod graphml;
+
 pub mod import {
     use std::collections::HashMap;
 

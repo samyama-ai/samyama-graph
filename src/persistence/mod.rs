@@ -36,6 +36,7 @@
 //! startup, any WAL entries written after the last checkpoint are replayed to bring the
 //! in-memory graph state up to date.
 
+pub mod health;
 pub mod storage;
 pub mod tenant;
 pub mod wal;
@@ -63,6 +64,8 @@ pub struct PersistenceManager {
     wal: Arc<std::sync::Mutex<Wal>>,
     /// Tenant manager
     tenants: Arc<TenantManager>,
+    /// Make the next `apply_mutations` fail. See that method.
+    fail_next_apply: std::sync::atomic::AtomicBool,
 }
 
 impl PersistenceManager {
@@ -98,7 +101,35 @@ impl PersistenceManager {
             storage: Arc::new(storage),
             wal: Arc::new(std::sync::Mutex::new(wal)),
             tenants: Arc::new(tenants),
+            fail_next_apply: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Force the WAL's sync mode, overriding `SAMYAMA_FSYNC`.
+    ///
+    /// The benchmark that measures what fsync costs needs both modes in one
+    /// process, on one host, alternated — two processes would be two hosts'
+    /// worth of noise in a ratio between two numbers.
+    ///
+    /// Note this moves the **WAL** only. RocksDB's `WriteOptions` are fixed at
+    /// open, so a measurement taken through this sees the WAL barrier and not
+    /// the store's; that is stated in the example rather than hidden, because a
+    /// cost that measures half the path is a cost that understates.
+    #[doc(hidden)]
+    pub fn set_wal_sync_for_test(&self, sync: bool) {
+        self.wal.lock().unwrap().set_sync_mode(sync);
+    }
+
+    /// Make the next [`Self::apply_mutations`] fail, once.
+    ///
+    /// Tests only, and `pub` because the durability tests are integration
+    /// tests. Not settable from the environment on purpose: a switch that
+    /// turns off durability should not be reachable by a stray variable on a
+    /// production host.
+    #[doc(hidden)]
+    pub fn fail_next_apply_for_test(&self) {
+        self.fail_next_apply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get tenant manager
@@ -239,6 +270,47 @@ impl PersistenceManager {
         Ok(())
     }
 
+    /// COMMIT the store's open session transaction, persisted first (#1274).
+    ///
+    /// The reply to COMMIT is a promise that the writes survive a restart, so
+    /// they are written to disk before the transaction is closed. If that fails
+    /// the transaction is rolled back instead, and whatever part of it already
+    /// reached the disk is overwritten with the rolled-back state. Returns the
+    /// commit version, or why the commit was refused.
+    pub fn commit_session_transaction(&self, tenant: &str, store: &mut GraphStore) -> Result<u64, String> {
+        use crate::graph::event::Mutation;
+        if store.session_transaction_version().is_none() {
+            return store.commit_session_transaction().map_err(|e| e.to_string());
+        }
+        let mutations = store.take_write_log();
+        let failure = match self.apply_mutations(tenant, store, &mutations) {
+            Ok(_) => return store.commit_session_transaction().map_err(|e| e.to_string()),
+            Err(e) => e,
+        };
+        if let Err(e) = store.rollback_session_transaction() {
+            return Err(format!("the transaction could not be persisted ({failure}) and its rollback failed: {e}"));
+        }
+        // Every entity the transaction or its rollback touched, as it now is.
+        // One the rollback removed is a delete, since `apply_mutations` skips an
+        // upsert of an absent entity and would leave it on disk.
+        let repair: Vec<Mutation> = mutations
+            .into_iter()
+            .chain(store.take_write_log())
+            .map(|m| match m {
+                Mutation::NodeUpserted(id) if store.get_node(id).is_none() => Mutation::NodeDeleted(id),
+                Mutation::EdgeUpserted(id) if store.get_edge(id).is_none() => Mutation::EdgeDeleted(id),
+                m => m,
+            })
+            .collect();
+        match self.apply_mutations(tenant, store, &repair) {
+            Ok(_) => Err(format!("the transaction could not be persisted and was rolled back: {failure}")),
+            Err(e) => Err(format!(
+                "the transaction could not be persisted ({failure}) and was rolled back in memory; \
+                 restoring the disk also failed ({e}), so it may hold part of the transaction until restart"
+            )),
+        }
+    }
+
     /// Persist a statement's changes, as recorded by [`GraphStore::take_write_log`] (#1094).
     ///
     /// This replaces reading durability off the *result* of a write query. That older
@@ -263,6 +335,18 @@ impl PersistenceManager {
     ) -> Result<usize, PersistenceError> {
         use crate::graph::event::Mutation;
         use std::collections::HashMap;
+
+        // A test hook, and deliberately not an environment variable: a switch
+        // that turns off durability must not be reachable by a stray variable
+        // in production. The durability path cannot be tested without a way to
+        // make a write fail, and a read-only directory does not do it --
+        // RocksDB buffers, so the failure surfaces somewhere else or not at
+        // all. One relaxed load per persist, next to a RocksDB write.
+        if self.fail_next_apply.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(PersistenceError::Io(std::io::Error::other(
+                "injected failure (fail_next_apply_for_test)",
+            )));
+        }
 
         // Last operation wins, in order of first appearance. Order matters only for
         // reading a WAL by eye; correctness comes from each entry carrying final state.
@@ -297,6 +381,11 @@ impl PersistenceManager {
                     if let Some(node) = store.node_materialized(crate::graph::NodeId::new(id)) {
                         let node = &node;
                         let existed = self.storage.get_node(tenant, id)?.is_some();
+                        // Before the write, not after: a refused node must not
+                        // reach the disk (#1274).
+                        if !existed {
+                            self.tenants.check_quota(tenant, "nodes")?;
+                        }
                         let properties = bincode::serialize(&node.properties)?;
                         self.wal.lock().unwrap().append(WalEntry::CreateNode {
                             tenant: tenant.to_string(),
@@ -306,7 +395,6 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_node(tenant, node)?;
                         if !existed {
-                            self.tenants.check_quota(tenant, "nodes")?;
                             self.tenants.increment_usage(tenant, "nodes", 1)?;
                         }
                         written += 1;
@@ -321,6 +409,9 @@ impl PersistenceManager {
                 (true, false) => {
                     if let Some(edge) = store.get_edge(crate::graph::EdgeId::new(id)) {
                         let existed = self.storage.get_edge(tenant, id)?.is_some();
+                        if !existed {
+                            self.tenants.check_quota(tenant, "edges")?;
+                        }
                         let properties = bincode::serialize(&edge.properties)?;
                         self.wal.lock().unwrap().append(WalEntry::CreateEdge {
                             tenant: tenant.to_string(),
@@ -332,7 +423,6 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_edge(tenant, &edge)?;
                         if !existed {
-                            self.tenants.check_quota(tenant, "edges")?;
                             self.tenants.increment_usage(tenant, "edges", 1)?;
                         }
                         written += 1;

@@ -18,9 +18,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing of the pushed image (REL-14 / TRUST-08). No key to
+      # store, rotate or leak: the identity is this workflow, and the signature is
+      # verifiable with `gh attestation verify`.
+      id-token: write
+      attestations: write
 
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      # Consumed by mirror-to-ecr: the digest makes the copy exact, and the
+      # tag list keeps the two registries carrying the same set.
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +59,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -60,9 +70,194 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # What a user pulls is the image, so that is what has to carry provenance —
+      # attesting a file in the repository would sign something nobody downloads.
+      - name: Attest the image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/samyama-ai/samyama-graph
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # An SBOM of the image, beside the image, in the registry.
+      - name: SBOM for the image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/samyama-ai/samyama-graph@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-image.spdx.json
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ghcr.io/samyama-ai/samyama-graph
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-image.spdx.json
+          push-to-registry: true
+
+  # Mirror the published image to ECR Public.
+  #
+  # Until now nothing did: the registry holds 1.1.0, 1.7.0 and 1.7.1, pushed by
+  # hand, and v1.8.0 is simply absent because nobody ran the manual step. The
+  # tags that were pushed went unused — every reference across the KG repos and
+  # samyama-cloud still names 1.1.0 — so the manual step was both unreliable and
+  # invisible when it was skipped.
+  #
+  # Three properties this job is built for:
+  #
+  # 1. **It cannot break the GHCR publish.** It is a separate job that runs
+  #    after the image is out and smoke-tested, so an AWS outage or an expired
+  #    role costs the mirror, not the release.
+  # 2. **It copies, it does not rebuild.** `imagetools create` re-points tags at
+  #    an existing multi-arch manifest by digest, so ECR gets the exact bytes
+  #    GHCR has and the same digest. A second `build-push-action` would produce
+  #    a second image that merely ought to be identical.
+  # 3. **It waits for the smoke test.** #1327 was an arm64 image that had never
+  #    been started reaching the registry. Mirroring an image that has not run
+  #    would reintroduce that, one registry over.
+  #
+  # Inert until configured: with ECR_PUBLIC_REGISTRY unset the `if` is false
+  # and the job is skipped, so merging this changes nothing until the IAM role
+  # exists.
+  #
+  # Why this is safe in a public repository:
+  #
+  #   - This workflow never runs on a pull request. It triggers only on
+  #     `release: published` and `workflow_dispatch`, both of which require
+  #     write access to this repository. A fork PR cannot start it, and a fork
+  #     PR is never given secrets or an id-token in the first place.
+  #   - There is no AWS key to leak. OIDC mints a credential per run; the role
+  #     trust policy accepts it only for `refs/tags/v*` of this one repository,
+  #     so the same token presented from a branch, a fork or another repo is
+  #     refused by AWS.
+  #   - The credential is minted, used and discarded in-process.
+  #     `get-login-password` is piped straight into `docker login
+  #     --password-stdin` and never lands in a variable, a file or the log,
+  #     and configure-aws-credentials registers what it issues as a masked
+  #     value.
+  #   - The role can push to one repository and nothing else: no delete, no
+  #     repository creation, no private ECR, no other AWS service. The worst a
+  #     compromised run can do is publish a bad image tag -- which is true of
+  #     the GHCR push above as well.
+  mirror-to-ecr:
+    needs: [build-and-push, smoke-test]
+    # Gated on the *variable*, not the secret: the `secrets` context is not
+    # available in a job-level `if`, and a gate that silently evaluated to
+    # empty would skip the mirror on every release without saying why.
+    if: vars.ECR_PUBLIC_REGISTRY != ''
+    runs-on: ubuntu-latest
+    # Same as publish-crate, publish-npm and publish-pypi. The role ARN lives
+    # here as an environment secret, so it is reachable only from a job that
+    # names this environment -- and any required-reviewer rule added later
+    # applies to the push without touching this file.
+    environment: ecr-public
+    permissions:
+      contents: read
+      # OIDC, for the same reason publish-crate.yml uses it: no long-lived AWS
+      # key in repository secrets to rotate, leak or quietly expire.
+      id-token: write
+
+    steps:
+      - name: Assume the publishing role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # A secret rather than a variable: `vars` are printed verbatim in
+          # public run logs, and this string carries the AWS account id.
+          # Nothing is stored that can authenticate on its own -- the ARN
+          # names a role, it does not open it -- but there is no reason to
+          # publish the account id either.
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN }}
+          # ECR Public's API lives in us-east-1 regardless of where the
+          # images are served from. A different region here fails to
+          # authenticate rather than publishing somewhere unexpected.
+          aws-region: us-east-1
+
+      - name: Login to ECR Public
+        run: |
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
+
+      # Every tag the GHCR step produced, pointed at the same digest.
+      # Derived from the metadata job's output rather than re-listed here, so
+      # the two registries cannot drift apart in which tags they carry.
+      # Copy the two platform manifests, not the whole index.
+      #
+      # `imagetools create ... $SRC` copies the index verbatim, attestation
+      # manifests included (unknown/unknown, vnd.docker.reference.*). ECR
+      # Public accepted that index and then could not serve one of them, so
+      # v1.9.0 pulled and ran correctly while anything walking the index --
+      # a scanner, cosign, `imagetools inspect` -- failed on a dangling
+      # reference:
+      #
+      #   ERROR: failed to copy: httpReadSeeker: failed open:
+      #   content at .../manifests/sha256:5e31c2b0...
+      #
+      # Naming the platform manifests builds an index with nothing dangling.
+      # The attestations stay on GHCR, which is where the README sends people
+      # and where `gh attestation verify` looks.
+      - name: Mirror every tag, platform manifests only
+        env:
+          SRC: ghcr.io/samyama-ai/samyama-graph@${{ needs.build-and-push.outputs.digest }}
+          DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
+          TAGS: ${{ needs.build-and-push.outputs.tags }}
+        run: |
+          set -euo pipefail
+          PLATFORM_FILTER='.manifests[] | select(.platform.architecture and .platform.architecture != "unknown")'
+          mapfile -t REFS < <(docker buildx imagetools inspect "$SRC" --raw | jq -r "$PLATFORM_FILTER | .digest")
+          [ "${#REFS[@]}" -eq 2 ] || { echo "::error::expected 2 platform manifests, found ${#REFS[@]}"; exit 1; }
+          SRCS=()
+          for d in "${REFS[@]}"; do SRCS+=("ghcr.io/samyama-ai/samyama-graph@$d"); done
+          echo "platform sources: ${SRCS[*]}"
+          count=0
+          while read -r ref; do
+            [ -n "$ref" ] || continue
+            tag="${ref##*:}"
+            echo "--> $DEST:$tag"
+            docker buildx imagetools create --tag "$DEST:$tag" "${SRCS[@]}"
+            count=$((count + 1))
+          done <<< "$TAGS"
+          [ "$count" -gt 0 ] || { echo "::error::no tags to mirror"; exit 1; }
+          echo "mirrored $count tag(s)"
+
+      # Verify against the registry rather than trusting the push. The index
+      # digest is no longer comparable -- ours is a new index over the same two
+      # manifests -- so compare the platform digests, which are what decide
+      # what a user actually runs. Read raw: resolving the index is what broke.
+      - name: Verify what ECR now serves
+        env:
+          SRC: ghcr.io/samyama-ai/samyama-graph@${{ needs.build-and-push.outputs.digest }}
+          DEST: ${{ vars.ECR_PUBLIC_REGISTRY }}/samyama-graph
+          VERSION: ${{ needs.build-and-push.outputs.version }}
+        run: |
+          set -euo pipefail
+          Q='[.manifests[] | select(.platform.architecture and .platform.architecture != "unknown") | {p: (.platform.os + "/" + .platform.architecture), d: .digest}] | sort_by(.p) | map(.p + " " + .d) | .[]'
+          docker buildx imagetools inspect "$SRC" --raw | jq -r "$Q" > /tmp/want.txt
+          docker buildx imagetools inspect "$DEST:$VERSION" --raw | jq -r "$Q" > /tmp/got.txt
+          echo "--- ghcr ---"; cat /tmp/want.txt
+          echo "--- ecr  ---"; cat /tmp/got.txt
+          diff -u /tmp/want.txt /tmp/got.txt || { echo "::error::ECR serves different platform manifests"; exit 1; }
+          grep -q '^linux/amd64 ' /tmp/got.txt && grep -q '^linux/arm64 ' /tmp/got.txt \
+            || { echo "::error::expected both architectures in ECR's index"; exit 1; }
+          echo "both architectures present, digests identical to GHCR"
+
+  # Run on both architectures the image is built for.
+  #
+  # `platforms: linux/amd64,linux/arm64` produced two images and this job
+  # started one of them. An arm64 image that has never been started is an
+  # image, not a release -- and it is pushed to GHCR either way, so the first
+  # person to find out it does not run is whoever pulls it (#1327).
   smoke-test:
     needs: build-and-push
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    name: smoke-test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       # Auth lets the first release pull the package while it's still private.
       # GHCR packages default to private on first publish — flip to public in

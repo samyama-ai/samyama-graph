@@ -100,12 +100,10 @@ const QUERIES: &[&str] = &[
 /// the same five entries come back in a different order — a false positive that
 /// would train a reader to ignore the test.
 fn canonical(s: &str) -> String {
-    // Node timestamps are struct metadata, not query answers, and a snapshot round
-    // trip resets them to 0 — a real gap, filed separately (#1124), and not one this
-    // check is about. Masked rather than left in, because a check that fails for a
-    // reason it is not testing gets muted.
-    let masked = mask_timestamps(s);
-    let s = masked.as_str();
+    // The mask that used to stand here hid #1124: a snapshot round trip reset both
+    // node timestamps to 0. The round trip now carries them, so the mask is gone
+    // and this check holds the line for free — if a future change drops them
+    // again, the parity queries below fail on the timestamps.
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(open) = rest.find('{') {
@@ -125,21 +123,6 @@ fn canonical(s: &str) -> String {
             out.push_str(&parts.join(", "));
         }
         rest = after;
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Replace `created_at: <n>` / `updated_at: <n>` with a placeholder.
-fn mask_timestamps(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find("_at: ") {
-        out.push_str(&rest[..pos + 5]);
-        rest = &rest[pos + 5..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        out.push_str("<ts>");
-        rest = &rest[end..];
     }
     out.push_str(rest);
     out
@@ -181,11 +164,12 @@ fn built(engine: &QueryEngine) -> GraphStore {
 
 /// Compare every query's answer between two stores, reporting all divergences
 /// rather than the first: one failure per run turns a corpus into a queue.
-fn compare(engine: &QueryEngine, reference: &GraphStore, other: &GraphStore, what: &str) {
+fn compare_with(engine: &QueryEngine, reference: &GraphStore, other: &GraphStore, what: &str) {
+    let render = |store: &GraphStore, q: &str| answer(engine, store, q);
     let mut diffs = Vec::new();
     for q in QUERIES {
-        let a = answer(engine, reference, q);
-        let b = answer(engine, other, q);
+        let a = render(reference, q);
+        let b = render(other, q);
         if a != b {
             diffs.push(format!("--- {q}\n  built: {a}\n  {what}: {b}"));
         }
@@ -203,7 +187,6 @@ fn compare(engine: &QueryEngine, reference: &GraphStore, other: &GraphStore, wha
 #[test]
 fn every_query_answers_the_same_after_a_persistence_restart() {
     let engine = QueryEngine::new();
-    let source = built(&engine);
 
     let dir = tempfile::tempdir().unwrap();
     let pm = PersistenceManager::new(dir.path()).unwrap();
@@ -229,7 +212,7 @@ fn every_query_answers_the_same_after_a_persistence_restart() {
     }
     assert_eq!(
         restored.node_count(),
-        source.node_count(),
+        live.node_count(),
         "the restart lost nodes, so any answer comparison below is moot"
     );
 
@@ -255,7 +238,13 @@ fn every_query_answers_the_same_after_a_persistence_restart() {
         "recovery populated neither representation"
     );
 
-    compare(&engine, &source, &restored, "a persistence restart");
+    // The reference is the store that was persisted, not a second build of the
+    // same graph. A second build is made at another moment, so its timestamps
+    // differ by construction; comparing against it needed a timestamp mask, and
+    // that mask is what #1178 read as the restart re-stamping nodes. Against
+    // `live` the timestamps match, unmasked, so a restart that did re-stamp them
+    // would fail here.
+    compare_with(&engine, &live, &restored, "a persistence restart");
 }
 
 #[test]

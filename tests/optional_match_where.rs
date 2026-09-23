@@ -95,11 +95,11 @@ fn an_optional_match_without_a_where_is_unchanged() {
 }
 
 #[test]
-fn a_predicate_on_the_outer_side_still_filters() {
-    // Not everything after an OPTIONAL MATCH becomes a join condition. A
-    // predicate naming only outer variables is an ordinary filter and must
-    // still remove rows — treating it as a join condition would return `x`
-    // rows the query excludes.
+fn a_predicate_on_the_outer_side_nulls_the_optional_side() {
+    // A WHERE after an OPTIONAL MATCH belongs to it even when it names only
+    // outer variables: a row failing it keeps `x` and gets a null `y`. This
+    // test used to expect the row deleted, as a filter would; Neo4j 2026.04
+    // answers (1, null), (4, 5), (6, null) on this graph (#1231).
     let store = graph();
     assert_eq!(
         pairs(
@@ -107,7 +107,21 @@ fn a_predicate_on_the_outer_side_still_filters() {
             "MATCH (x:X) OPTIONAL MATCH (x)-[:E1]->(y:Y) WHERE x.val > 3 \
              RETURN x.val AS a, y.val AS b"
         ),
+        vec![(1, None), (4, Some(5)), (6, None)],
+    );
+}
+
+#[test]
+fn a_where_on_the_plain_match_still_filters() {
+    // Written after the MATCH, the same predicate removes rows (Neo4j 2026.04:
+    // (4, 5), (6, null)).
+    let store = graph();
+    assert_eq!(
+        pairs(
+            &store,
+            "MATCH (x:X) WHERE x.val > 3 OPTIONAL MATCH (x)-[:E1]->(y:Y) \
+             RETURN x.val AS a, y.val AS b"
+        ),
         vec![(4, Some(5)), (6, None)],
-        "x.val = 1 is excluded entirely"
     );
 }

@@ -318,11 +318,18 @@ impl<T: Clone + Default> ColumnData<T> {
         if !dense_is_smaller(span, len, std::mem::size_of::<T>()) {
             return;
         }
+        // Move the values out of the map; do not clone them. Cloning and then
+        // dropping the map freed every original, one small free per entry, all
+        // at once and scattered among the copies. On glibc, promoting a string
+        // column during an SF1 Comment load took the free-chunk count from 6 to
+        // 1,775,224, and queries paid for that list for the life of the process
+        // (#1269).
+        let taken = std::mem::replace(m, FxHashMap::default());
         let mut values = vec![T::default(); span];
         let mut present = vec![0u64; span.div_ceil(64)];
-        for (&idx, value) in m.iter() {
+        for (idx, value) in taken {
             let slot = idx - min;
-            values[slot] = value.clone();
+            values[slot] = value;
             set_bit(&mut present, slot);
         }
         *self = ColumnData::Dense { base: min, values, present, count: len };
@@ -364,6 +371,15 @@ fn clear_bit(words: &mut [u64], slot: usize) {
 #[derive(Debug, Clone)]
 pub enum Column {
     Int(ColumnData<i64>),
+    /// `PropertyValue::DateTime`, the epoch-millisecond `i64` it wraps.
+    ///
+    /// Before this variant a date went to `Other`: a hash-map entry holding a
+    /// whole 56-byte `PropertyValue`, about 134 bytes a value measured on LDBC
+    /// SNB SF10 against the ~9 an `i64` slot and its presence bit take here
+    /// (#1195). Dates are the commonest temporal property -- every message's
+    /// `creationDate` -- and a scan filtering or sorting on one read it
+    /// through a hash probe per row.
+    DateTime(ColumnData<i64>),
     Float(ColumnData<f64>),
     String(ColumnData<String>),
     Bool(ColumnData<bool>),
@@ -371,8 +387,8 @@ pub enum Column {
     ///
     /// Two things land here:
     ///
-    /// * **variants with no typed column** — `DateTime`, `Array`, `Map`,
-    ///   `Vector`, `Duration`. Before this they were dropped on the way in and
+    /// * **variants with no typed column** — `Array`, `Map`, `Vector`,
+    ///   `Duration` and the zoned/local temporal forms. Before this they were dropped on the way in and
     ///   survived only because row storage kept a second copy of every
     ///   property. That made the duplication load-bearing rather than
     ///   redundant, and blocked removing it (#545).
@@ -391,7 +407,7 @@ impl Column {
     /// Resident bytes of this column's data, at capacity.
     pub fn heap_bytes(&self) -> usize {
         match self {
-            Column::Int(d) => d.heap_bytes(std::mem::size_of::<i64>(), |_| 0),
+            Column::Int(d) | Column::DateTime(d) => d.heap_bytes(std::mem::size_of::<i64>(), |_| 0),
             Column::Float(d) => d.heap_bytes(std::mem::size_of::<f64>(), |_| 0),
             Column::Bool(d) => d.heap_bytes(std::mem::size_of::<bool>(), |_| 0),
             Column::String(d) => d.heap_bytes(std::mem::size_of::<String>(), |s: &String| s.len()),
@@ -424,6 +440,7 @@ fn property_value_heap(v: &PropertyValue) -> usize {
 
 impl Column {
     pub fn new_int() -> Self { Column::Int(ColumnData::new()) }
+    pub fn new_datetime() -> Self { Column::DateTime(ColumnData::new()) }
     pub fn new_float() -> Self { Column::Float(ColumnData::new()) }
     pub fn new_string() -> Self { Column::String(ColumnData::new()) }
     pub fn new_bool() -> Self { Column::Bool(ColumnData::new()) }
@@ -433,6 +450,7 @@ impl Column {
     pub fn for_value(value: &PropertyValue) -> Self {
         match value {
             PropertyValue::Integer(_) => Column::new_int(),
+            PropertyValue::DateTime(_) => Column::new_datetime(),
             PropertyValue::Float(_) => Column::new_float(),
             PropertyValue::String(_) => Column::new_string(),
             PropertyValue::Boolean(_) => Column::new_bool(),
@@ -443,6 +461,7 @@ impl Column {
     pub fn set(&mut self, idx: usize, value: PropertyValue) {
         match (&mut *self, value) {
             (Column::Int(m), PropertyValue::Integer(val)) => m.set(idx, val),
+            (Column::DateTime(m), PropertyValue::DateTime(val)) => m.set(idx, val),
             (Column::Float(m), PropertyValue::Float(val)) => m.set(idx, val),
             (Column::String(m), PropertyValue::String(val)) => m.set(idx, val),
             (Column::Bool(m), PropertyValue::Boolean(val)) => m.set(idx, val),
@@ -470,6 +489,7 @@ impl Column {
         let mut spilled: FxHashMap<usize, PropertyValue> = FxHashMap::default();
         match self {
             Column::Int(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Integer(*v)); }),
+            Column::DateTime(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::DateTime(*v)); }),
             Column::Float(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Float(*v)); }),
             Column::Bool(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Boolean(*v)); }),
             Column::String(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::String(v.clone())); }),
@@ -481,7 +501,7 @@ impl Column {
     /// Remove this row's value from the column, if present.
     pub fn remove(&mut self, idx: usize) {
         match self {
-            Column::Int(m) => m.remove(idx),
+            Column::Int(m) | Column::DateTime(m) => m.remove(idx),
             Column::Float(m) => m.remove(idx),
             Column::String(m) => m.remove(idx),
             Column::Bool(m) => m.remove(idx),
@@ -494,6 +514,7 @@ impl Column {
     pub fn get(&self, idx: usize) -> PropertyValue {
         match self {
             Column::Int(m) => m.get(idx).map(|&v| PropertyValue::Integer(v)).unwrap_or(PropertyValue::Null),
+            Column::DateTime(m) => m.get(idx).map(|&v| PropertyValue::DateTime(v)).unwrap_or(PropertyValue::Null),
             Column::Float(m) => m.get(idx).map(|&v| PropertyValue::Float(v)).unwrap_or(PropertyValue::Null),
             Column::Bool(m) => m.get(idx).map(|&v| PropertyValue::Boolean(v)).unwrap_or(PropertyValue::Null),
             Column::String(m) => m.get(idx).map(|s| PropertyValue::String(s.clone())).unwrap_or(PropertyValue::Null),
@@ -501,10 +522,20 @@ impl Column {
         }
     }
 
+    /// The string at `idx`, borrowed, when this is a string column holding
+    /// one. `get` hands back an owned copy, which a caller that only compares
+    /// the value does not need (#750).
+    pub fn get_str(&self, idx: usize) -> Option<&str> {
+        match self {
+            Column::String(m) => m.get(idx).map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
     /// Check if a value exists at the given index.
     pub fn has(&self, idx: usize) -> bool {
         match self {
-            Column::Int(m) => m.has(idx),
+            Column::Int(m) | Column::DateTime(m) => m.has(idx),
             Column::Float(m) => m.has(idx),
             Column::String(m) => m.has(idx),
             Column::Bool(m) => m.has(idx),
@@ -515,7 +546,7 @@ impl Column {
     /// Number of entries in this column.
     pub fn len(&self) -> usize {
         match self {
-            Column::Int(m) => m.len(),
+            Column::Int(m) | Column::DateTime(m) => m.len(),
             Column::Float(m) => m.len(),
             Column::String(m) => m.len(),
             Column::Bool(m) => m.len(),
@@ -527,7 +558,7 @@ impl Column {
     /// no caller should behave differently based on it.
     pub fn is_dense(&self) -> bool {
         match self {
-            Column::Int(m) => matches!(m, ColumnData::Dense { .. }),
+            Column::Int(m) | Column::DateTime(m) => matches!(m, ColumnData::Dense { .. }),
             Column::Float(m) => matches!(m, ColumnData::Dense { .. }),
             Column::String(m) => matches!(m, ColumnData::Dense { .. }),
             Column::Bool(m) => matches!(m, ColumnData::Dense { .. }),
@@ -604,6 +635,20 @@ impl ColumnStore {
             Some(col) => col.get(idx),
             None => PropertyValue::Null,
         }
+    }
+
+    /// `get_by_id` for a string, borrowed: `None` when the column is not a
+    /// string column or holds nothing at `idx`.
+    #[inline]
+    pub fn get_str_by_id(&self, id: ColumnId, idx: usize) -> Option<&str> {
+        self.columns.get(id.0 as usize)?.get_str(idx)
+    }
+
+    /// Whether the column holds strings, so a reader that only borrows
+    /// strings can stop asking a column that never will.
+    #[inline]
+    pub fn is_str_column(&self, id: ColumnId) -> bool {
+        matches!(self.columns.get(id.0 as usize), Some(Column::String(_)))
     }
 
     pub fn set_property(&mut self, idx: usize, key: &str, value: PropertyValue) {
@@ -918,6 +963,47 @@ mod tests {
         assert_eq!(col.get(DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
         assert_eq!(col.get(DENSE_N + 1), PropertyValue::String("odd one out".to_string()));
         assert_eq!(col.get(DENSE_N), PropertyValue::Null, "the gap is still a gap");
+    }
+
+    #[test]
+    fn a_date_column_is_typed_and_a_fraction_of_the_spill_map() {
+        // #1195: dates went to `Other`, a hash map of whole `PropertyValue`s.
+        // The same dates in the typed column must round-trip and cost a small
+        // fraction of that -- a ratio in one process, not an absolute bound.
+        const N: usize = 50_000;
+        let mut typed = Column::for_value(&PropertyValue::DateTime(0));
+        let mut spilled = Column::Other(FxHashMap::default());
+        for i in 0..N {
+            let v = PropertyValue::DateTime(1_262_304_000_000 + i as i64 * 60_000);
+            typed.set(i, v.clone());
+            spilled.set(i, v);
+        }
+        assert!(matches!(typed, Column::DateTime(_)), "a date must get the typed column");
+        assert!(typed.is_dense(), "{N} contiguous dates should be stored densely");
+        assert_eq!(typed.len(), N);
+        for i in [0, 1, N / 2, N - 1] {
+            assert_eq!(typed.get(i), spilled.get(i), "row {i} reads differently");
+        }
+        assert_eq!(typed.get(N), PropertyValue::Null, "an unset row is still null");
+        let (t, o) = (typed.heap_bytes(), spilled.heap_bytes());
+        assert!(
+            t * 4 < o,
+            "typed date column {t} B against {o} B in the spill map: expected under a quarter"
+        );
+    }
+
+    #[test]
+    fn a_date_column_keeps_its_dates_when_it_meets_another_type() {
+        let mut col = Column::for_value(&PropertyValue::DateTime(5));
+        col.set(0, PropertyValue::DateTime(5));
+        col.set(1, PropertyValue::DateTime(6));
+        col.set(2, PropertyValue::Integer(7));
+        assert!(matches!(col, Column::Other(_)), "a mixed column promotes");
+        assert_eq!(col.get(0), PropertyValue::DateTime(5));
+        assert_eq!(col.get(1), PropertyValue::DateTime(6));
+        assert_eq!(col.get(2), PropertyValue::Integer(7));
+        col.remove(1);
+        assert_eq!(col.get(1), PropertyValue::Null);
     }
 
     #[test]

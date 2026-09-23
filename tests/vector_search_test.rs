@@ -33,8 +33,7 @@ fn test_vector_search_integration() {
     assert_eq!(results.len(), 1);
     let (node_id, distance) = results[0];
     
-    let node = store.get_node(node_id).unwrap();
-    assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
+    assert_eq!(store.node_property(node_id, "name").unwrap().as_string(), Some("Alice"));
     assert!(distance < 0.1); // Distance should be small
 }
 

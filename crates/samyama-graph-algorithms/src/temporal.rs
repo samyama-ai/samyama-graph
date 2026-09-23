@@ -30,10 +30,13 @@
 //! # Timestamps
 //!
 //! Edge times are supplied alongside the [`GraphView`] rather than inside it,
-//! aligned with `out_targets`. [`TemporalEdges::new`] **checks that
-//! alignment** instead of trusting it: a times array off by one silently
-//! answers a different question on every edge, and the answer still looks like
-//! a plausible set of nodes and times.
+//! aligned with `out_targets`. [`TemporalEdges::new`] checks the **length** of
+//! the times array against `out_targets`, which catches an array built from the
+//! wrong graph and **does not catch a misalignment**: a times array rotated or
+//! shifted by one has the same length, passes, and silently answers a different
+//! question on every edge — and the answer still looks like a plausible set of
+//! nodes and times. That is the failure this note used to claim was prevented
+//! (samyama-graph#1304).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -53,6 +56,12 @@ pub enum TemporalError {
     Misaligned { edges: usize, times: usize },
     /// A node index that the view does not contain.
     NoSuchNode(usize),
+    /// A pair named an edge the view does not have.
+    NoSuchEdge { from: usize, to: usize },
+    /// The view has an edge no pair gave a time for.
+    UntimedEdge { from: usize, to: usize },
+    /// More times were given for `from -> to` than the view has such edges.
+    TooManyTimes { from: usize, to: usize, have: usize },
 }
 
 impl std::fmt::Display for TemporalError {
@@ -64,6 +73,20 @@ impl std::fmt::Display for TemporalError {
                  the view has {edges} and {times} times were given"
             ),
             TemporalError::NoSuchNode(i) => write!(f, "node index {i} is not in this graph"),
+            TemporalError::NoSuchEdge { from, to } => write!(
+                f,
+                "no edge {from} -> {to} in this graph, so there is nothing to time"
+            ),
+            TemporalError::UntimedEdge { from, to } => write!(
+                f,
+                "edge {from} -> {to} was given no time; every edge needs one, \
+                    because an untimed edge silently becomes untraversable"
+            ),
+            TemporalError::TooManyTimes { from, to, have } => write!(
+                f,
+                "more times given for {from} -> {to} than the {have} such edge(s) \
+                    the graph has"
+            ),
         }
     }
 }
@@ -73,10 +96,16 @@ impl std::error::Error for TemporalError {}
 impl TemporalEdges {
     /// Wrap a times array, checking it against the view.
     ///
-    /// The length check is the whole point of the type. An array off by one
-    /// pairs every edge with its neighbour's timestamp, which changes every
-    /// answer and produces no symptom -- the result is still a well-formed set
-    /// of nodes with plausible times.
+    /// The check is on **length only**, and it is worth being precise about what
+    /// that does and does not buy. It catches a times array built from a
+    /// different graph. It does not catch an array of the right length whose
+    /// entries are rotated or shifted: that pairs every edge with another
+    /// edge's timestamp, changes every answer, and produces no symptom -- the
+    /// result is still a well-formed set of nodes with plausible times.
+    ///
+    /// Collecting the times in the same pass that builds the CSR is the only
+    /// construction that rules that out; this constructor exists for callers
+    /// that cannot (samyama-graph#1304).
     pub fn new(view: &GraphView, times: Vec<i64>) -> Result<Self, TemporalError> {
         if times.len() != view.out_targets.len() {
             return Err(TemporalError::Misaligned {
@@ -85,6 +114,84 @@ impl TemporalEdges {
             });
         }
         Ok(Self { times })
+    }
+
+    /// Build from `(from, to, time)` triples, placing each time in the slot the
+    /// view keeps that edge in.
+    ///
+    /// This is the constructor for a caller who has times but not the view's
+    /// edge ordering -- which is every caller who did not build the CSR. It is
+    /// what [`TemporalEdges::new`] cannot be: `new` takes the ordering on
+    /// trust, and an array that is rotated or shifted has the right length,
+    /// pairs every edge with another edge's timestamp, changes every answer and
+    /// produces no symptom (samyama-graph#1304).
+    ///
+    /// Here the caller names the edge and the constructor finds the slot, so
+    /// the ordering is not something they can get wrong. The mistakes that
+    /// remain are ones that *say* something false -- a pair naming an edge that
+    /// does not exist, or an edge left untimed -- and each is refused.
+    ///
+    /// An untimed edge is an error rather than a default, because a default of
+    /// 0 makes the edge traversable at the beginning of time and a default of
+    /// `i64::MAX` makes it untraversable; both are answers, and neither is the
+    /// caller's.
+    ///
+    /// Parallel edges (`from -> to` more than once) take their times in the
+    /// order given, which is the only ordering available when the endpoints do
+    /// not distinguish them.
+    pub fn from_pairs(
+        view: &GraphView,
+        pairs: impl IntoIterator<Item = (usize, usize, i64)>,
+    ) -> Result<Self, TemporalError> {
+        let slots = view.out_targets.len();
+        let mut times: Vec<Option<i64>> = vec![None; slots];
+        // Next unfilled slot for each (from, to), so parallel edges consume
+        // slots in the order the caller gives them.
+        let mut cursor: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+
+        for (from, to, t) in pairs {
+            if from >= view.node_count {
+                return Err(TemporalError::NoSuchNode(from));
+            }
+            if to >= view.node_count {
+                return Err(TemporalError::NoSuchNode(to));
+            }
+            let lo = view.out_offsets[from];
+            let hi = view.out_offsets[from + 1];
+            let matching: Vec<usize> = (lo..hi).filter(|&k| view.out_targets[k] == to).collect();
+            if matching.is_empty() {
+                return Err(TemporalError::NoSuchEdge { from, to });
+            }
+            let n = cursor.entry((from, to)).or_insert(0);
+            let Some(&slot) = matching.get(*n) else {
+                return Err(TemporalError::TooManyTimes {
+                    from,
+                    to,
+                    have: matching.len(),
+                });
+            };
+            *n += 1;
+            times[slot] = Some(t);
+        }
+
+        // Every edge must have been named. Report the first that was not, by
+        // its endpoints rather than its slot, because a slot number means
+        // nothing to a caller who never saw the ordering.
+        for (from, w) in view.out_offsets.windows(2).enumerate() {
+            for slot in w[0]..w[1] {
+                if times[slot].is_none() {
+                    return Err(TemporalError::UntimedEdge {
+                        from,
+                        to: view.out_targets[slot],
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            times: times.into_iter().map(|t| t.unwrap()).collect(),
+        })
     }
 
     /// The timestamp of the `k`-th out-edge, in the view's own ordering.
@@ -128,6 +235,48 @@ impl ArrivalTimes {
             .enumerate()
             .filter(|(i, a)| a.is_some() && !sources.contains(i))
             .count()
+    }
+
+    /// The walk that produced the earliest arrival at `node`.
+    ///
+    /// This is the *why* behind a reachability answer: not a walk that happens
+    /// to exist, but the one the traversal actually took to get there first.
+    /// `parent_edge` has recorded it all along and only
+    /// [`temporal_shortest_path`] read it, so three of the four primitives
+    /// could say when a fault arrived and not how (ALGO-15).
+    ///
+    /// `None` when the node was never reached. A source returns a one-node
+    /// path with no edges, which is the honest answer to "how did the fault
+    /// get to its own origin".
+    pub fn path_to(
+        &self,
+        view: &GraphView,
+        times: &TemporalEdges,
+        node: usize,
+    ) -> Option<TemporalPath> {
+        let arrival = (*self.arrival.get(node)?)?;
+        let mut nodes = vec![node];
+        let mut edge_times = Vec::new();
+        let mut cur = node;
+        // Bounded by the node count: a time-respecting walk cannot revisit a
+        // node, because arrival times never decrease and the relaxation is
+        // strict. The bound is here anyway — a corrupt `parent_edge` should
+        // produce a wrong answer, not a hang.
+        for _ in 0..view.node_count {
+            let Some((prev, slot)) = self.parent_edge[cur] else {
+                break;
+            };
+            edge_times.push(times.at(slot));
+            nodes.push(prev);
+            cur = prev;
+        }
+        nodes.reverse();
+        edge_times.reverse();
+        Some(TemporalPath {
+            nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
+            edge_times,
+            arrival,
+        })
     }
 }
 
@@ -193,22 +342,45 @@ pub fn earliest_arrival(
         }
     }
 
-    Ok(ArrivalTimes { arrival, parent_edge })
+    Ok(ArrivalTimes {
+        arrival,
+        parent_edge,
+    })
 }
 
-/// Which nodes a source can reach in time, and when (ALGO-15).
+/// One node a fault reaches, when it gets there, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reached {
+    /// The node reached.
+    pub node: NodeId,
+    /// The earliest time it can be reached.
+    pub arrival: i64,
+    /// The walk that got there that early — the *why* behind the row.
+    ///
+    /// Not optional: every node in this list was reached, so every one has a
+    /// walk. A `None` here would be a bug rather than a state.
+    pub path: TemporalPath,
+}
+
+/// Which nodes a source can reach in time, when, and by what walk (ALGO-15).
 ///
-/// Returns `(node_id, arrival)` pairs in increasing arrival order, excluding
-/// the sources. Sorted because the order *is* the answer: it is the sequence a
-/// fault would propagate in.
+/// Returns rows in increasing arrival order, excluding the sources. Sorted
+/// because the order *is* the answer: it is the sequence a fault would
+/// propagate in.
+///
+/// The walk is carried because "service X broke at 12:04" is an observation
+/// and "it broke at 12:04 because A reached B reached X" is a finding. ALGO-15
+/// asks for the second, and this returned the first until the path came with
+/// it — the reconstruction was already there in `parent_edge`, read only by
+/// `temporal_shortest_path`.
 pub fn temporal_reachability(
     view: &GraphView,
     times: &TemporalEdges,
     sources: &[usize],
     start: i64,
-) -> Result<Vec<(NodeId, i64)>, TemporalError> {
+) -> Result<Vec<Reached>, TemporalError> {
     let arrivals = earliest_arrival(view, times, sources, start)?;
-    let mut out: Vec<(NodeId, i64)> = arrivals
+    let mut out: Vec<Reached> = arrivals
         .arrival
         .iter()
         .enumerate()
@@ -216,13 +388,19 @@ pub fn temporal_reachability(
             if sources.contains(&i) {
                 return None;
             }
-            a.map(|t| (view.index_to_node[i], t))
+            let arrival = (*a)?;
+            let path = arrivals.path_to(view, times, i)?;
+            Some(Reached {
+                node: view.index_to_node[i],
+                arrival,
+                path,
+            })
         })
         .collect();
     // By time, then by node id, so two runs over the same data agree. An
     // unstable order here would surface as a flapping test and, worse, as a
     // different "first affected service" on each run.
-    out.sort_by_key(|&(id, t)| (t, id));
+    out.sort_by_key(|r| (r.arrival, r.node));
     Ok(out)
 }
 
@@ -255,35 +433,10 @@ pub fn temporal_shortest_path(
         return Err(TemporalError::NoSuchNode(target));
     }
     let a = earliest_arrival(view, times, &[source], start)?;
-    let Some(arrival) = a.arrival[target] else {
-        return Ok(None);
-    };
-    if target == source {
-        return Ok(Some(TemporalPath {
-            nodes: vec![view.index_to_node[source]],
-            edge_times: Vec::new(),
-            arrival,
-        }));
-    }
-
-    let mut nodes = vec![target];
-    let mut edge_times = Vec::new();
-    let mut cur = target;
-    while let Some((prev, slot)) = a.parent_edge[cur] {
-        edge_times.push(times.at(slot));
-        nodes.push(prev);
-        cur = prev;
-        if cur == source {
-            break;
-        }
-    }
-    nodes.reverse();
-    edge_times.reverse();
-    Ok(Some(TemporalPath {
-        nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
-        edge_times,
-        arrival,
-    }))
+    // One reconstruction, shared with the reachability primitives. Two copies
+    // of this loop would be two chances for the path and the arrival time to
+    // disagree about the same walk.
+    Ok(a.path_to(view, times, target))
 }
 
 /// What a fault at `source` reaches, ranked by how soon (ALGO-15).
@@ -297,7 +450,7 @@ pub fn propagation_ranking(
     times: &TemporalEdges,
     sources: &[usize],
     start: i64,
-) -> Result<Vec<(NodeId, i64)>, TemporalError> {
+) -> Result<Vec<Reached>, TemporalError> {
     temporal_reachability(view, times, sources, start)
 }
 
@@ -312,6 +465,17 @@ pub struct Explanation {
     /// fired long before the first symptom explains less well than one that
     /// fired just before it.
     pub latest_onset: i64,
+    /// The walk to the symptom whose constraint set `latest_onset`.
+    ///
+    /// A candidate may explain five symptoms by five different walks, and a
+    /// row can show one. It shows the **binding** one: the symptom that forced
+    /// the onset earliest is the reason the fit is no tighter than it is, so
+    /// it is the walk an operator should look at first. Showing an arbitrary
+    /// one would make the path and the onset describe different journeys
+    /// (ALGO-15).
+    ///
+    /// `None` only if reconstruction failed, which would be a bug.
+    pub supporting_path: Option<TemporalPath>,
 }
 
 /// Rank candidate causes for a set of observed symptoms (ALGO-15).
@@ -348,9 +512,15 @@ pub fn symptom_explanation(
     // max-heap and the guard is `t <= current`.
     let mut explained: Vec<usize> = vec![0; n];
     let mut onset: Vec<i64> = vec![i64::MAX; n];
+    let mut binding: Vec<Option<TemporalPath>> = vec![None; n];
 
     for &(sym, seen_at) in symptoms {
         let mut latest: Vec<Option<i64>> = vec![None; n];
+        // `next_hop[v]` = the edge out of `v` this walk would take toward the
+        // symptom, and the node it lands on. The forward mirror of
+        // `parent_edge`: this search runs backwards, so the pointer has to as
+        // well, and reconstruction reads it in the direction a fault travels.
+        let mut next_hop: Vec<Option<(usize, usize)>> = vec![None; n];
         let mut heap: BinaryHeap<(i64, usize)> = BinaryHeap::new();
         latest[sym] = Some(seen_at);
         heap.push((seen_at, sym));
@@ -379,6 +549,7 @@ pub fn symptom_explanation(
                     }
                     if latest[u].is_none_or(|l| t > l) {
                         latest[u] = Some(t);
+                        next_hop[u] = Some((v, slot));
                         heap.push((t, u));
                     }
                 }
@@ -394,7 +565,10 @@ pub fn symptom_explanation(
                 // The binding constraint across symptoms: a cause must have
                 // started early enough for *every* symptom it explains, so the
                 // tightest (smallest) latest-departure wins.
-                onset[i] = onset[i].min(*t);
+                if *t < onset[i] {
+                    onset[i] = *t;
+                    binding[i] = walk_forward(view, times, &next_hop, i, *t);
+                }
             }
         }
     }
@@ -405,6 +579,7 @@ pub fn symptom_explanation(
             node: view.index_to_node[i],
             symptoms_explained: explained[i],
             latest_onset: onset[i],
+            supporting_path: binding[i].clone(),
         })
         .collect();
     // Most symptoms first; then the tightest fit; then node id, so the order
@@ -418,6 +593,44 @@ pub fn symptom_explanation(
     Ok(out)
 }
 
+/// Follow `next_hop` from `from` to the symptom it leads to.
+///
+/// The backward search records where each node would go *next*; this reads
+/// that in the direction the fault would actually travel, so the path a reader
+/// sees runs cause-first like every other path here.
+fn walk_forward(
+    view: &GraphView,
+    times: &TemporalEdges,
+    next_hop: &[Option<(usize, usize)>],
+    from: usize,
+    departure: i64,
+) -> Option<TemporalPath> {
+    let mut nodes = vec![from];
+    let mut edge_times = Vec::new();
+    let mut cur = from;
+    // Bounded by the node count for the same reason as `path_to`: a
+    // time-respecting walk cannot revisit a node, and a corrupt pointer should
+    // give a wrong answer rather than a hang.
+    for _ in 0..view.node_count {
+        let Some((next, slot)) = next_hop[cur] else {
+            break;
+        };
+        edge_times.push(times.at(slot));
+        nodes.push(next);
+        cur = next;
+    }
+    if nodes.len() < 2 {
+        // A candidate with no hop to the symptom did not explain it.
+        return None;
+    }
+    let arrival = *edge_times.last().unwrap_or(&departure);
+    Some(TemporalPath {
+        nodes: nodes.into_iter().map(|i| view.index_to_node[i]).collect(),
+        edge_times,
+        arrival,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +640,106 @@ mod tests {
     /// `(from, to, time)` and inserted in that order, so the times array is
     /// built the same way the view is and the alignment is real rather than
     /// assumed.
+    /// Every path a reachability answer carries must explain its own row.
+    ///
+    /// Three properties, and the third is the one that catches a walk
+    /// belonging to a different journey: the times must never decrease (that
+    /// is what time-respecting means), the walk must end at the node the row
+    /// is about, and its **last edge time must equal the arrival the row
+    /// reports**. A path that merely exists is not evidence.
+    #[test]
+    fn every_reachability_path_explains_its_own_row() {
+        // Two routes to 3, arriving at different times, so "which walk" has a
+        // checkable answer rather than a single possibility.
+        let (v, t) = view(
+            5,
+            &[(0, 1, 10), (0, 2, 20), (1, 3, 30), (2, 3, 40), (3, 4, 5)],
+        );
+        let reached = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        assert!(!reached.is_empty());
+        for r in &reached {
+            assert!(
+                r.path.edge_times.windows(2).all(|w| w[0] <= w[1]),
+                "a walk whose times go backwards is not time-respecting: {r:?}"
+            );
+            assert_eq!(
+                r.path.nodes.first().copied(),
+                Some(v.index_to_node[0]),
+                "the walk must start at the source: {r:?}"
+            );
+            assert_eq!(
+                r.path.nodes.last().copied(),
+                Some(r.node),
+                "the walk must end at the node it is about: {r:?}"
+            );
+            assert_eq!(
+                r.path.edge_times.last().copied(),
+                Some(r.arrival),
+                "the last edge is what set the arrival; a different value means \
+                 the path and the time describe different journeys: {r:?}"
+            );
+        }
+        // And specifically: 3 is reached at 30 by 0 -> 1 -> 3, not by the
+        // route through 2 that arrives at 40.
+        let to_three = reached
+            .iter()
+            .find(|r| r.node == v.index_to_node[3])
+            .expect("3 is reachable");
+        assert_eq!(to_three.arrival, 30);
+        assert_eq!(
+            to_three.path.nodes,
+            vec![v.index_to_node[0], v.index_to_node[1], v.index_to_node[3]]
+        );
+    }
+
+    #[test]
+    fn a_symptoms_supporting_walk_reaches_it_by_its_observed_time() {
+        let (v, t) = view(4, &[(0, 1, 10), (1, 2, 30), (0, 3, 50)]);
+        let ranked = symptom_explanation(&v, &t, &[(2, 35)]).unwrap();
+        assert!(!ranked.is_empty());
+        for e in &ranked {
+            let path = e
+                .supporting_path
+                .as_ref()
+                .unwrap_or_else(|| panic!("an explanation with no walk: {e:?}"));
+            assert_eq!(
+                path.nodes.first().copied(),
+                Some(e.node),
+                "the walk must start at the candidate cause: {e:?}"
+            );
+            assert_eq!(
+                path.nodes.last().copied(),
+                Some(v.index_to_node[2]),
+                "the walk must end at the symptom: {e:?}"
+            );
+            assert!(
+                path.edge_times.windows(2).all(|w| w[0] <= w[1]),
+                "not time-respecting: {e:?}"
+            );
+            assert!(
+                path.edge_times.last().is_none_or(|&last| last <= 35),
+                "a walk arriving after the symptom was seen explains nothing: {e:?}"
+            );
+        }
+    }
+
+    /// `temporal_reachability` as the `(node, arrival)` pairs these tests were
+    /// written against, dropping the path. The path has its own tests below;
+    /// rewriting thirty assertions to carry one would have hidden what each
+    /// was checking.
+    fn reach(
+        v: &GraphView,
+        t: &TemporalEdges,
+        sources: &[usize],
+        start: i64,
+    ) -> Vec<(NodeId, i64)> {
+        temporal_reachability(v, t, sources, start)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.node, r.arrival))
+            .collect()
+    }
+
     fn view(n: usize, edges: &[(usize, usize, i64)]) -> (GraphView, TemporalEdges) {
         let mut out: Vec<Vec<(usize, i64)>> = vec![Vec::new(); n];
         let mut inc: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -468,7 +781,7 @@ mod tests {
         // is the whole difference between these algorithms and a BFS, so it
         // is the first thing asserted.
         let (v, t) = view(3, &[(0, 1, 10), (1, 2, 5)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 10)], "c must not be reachable: {r:?}");
     }
 
@@ -476,7 +789,7 @@ mod tests {
     fn the_same_edges_in_a_workable_order_do_reach() {
         // The control for the test above: identical topology, times swapped.
         let (v, t) = view(3, &[(0, 1, 5), (1, 2, 10)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 5), (2, 10)]);
     }
 
@@ -486,14 +799,20 @@ mod tests {
         // causally chainable. `>` rather than `>=` here would silently drop
         // every simultaneous hop, which is the common case in a trace.
         let (v, t) = view(3, &[(0, 1, 7), (1, 2, 7)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 7).unwrap(), vec![(1, 7), (2, 7)]);
+        assert_eq!(
+            reach(&v, &t, &[0], 7),
+            vec![(1, 7), (2, 7)]
+        );
     }
 
     #[test]
     fn a_start_time_after_the_edge_blocks_it() {
         let (v, t) = view(2, &[(0, 1, 5)]);
-        assert!(temporal_reachability(&v, &t, &[0], 6).unwrap().is_empty());
-        assert_eq!(temporal_reachability(&v, &t, &[0], 5).unwrap(), vec![(1, 5)]);
+        assert!(reach(&v, &t, &[0], 6).is_empty());
+        assert_eq!(
+            reach(&v, &t, &[0], 5),
+            vec![(1, 5)]
+        );
     }
 
     #[test]
@@ -527,7 +846,7 @@ mod tests {
         // assertion that matters is that a repeated source does not double up
         // or corrupt the arrival.
         let (v, t) = view(3, &[(0, 1, 1), (1, 2, 4)]);
-        let r = temporal_reachability(&v, &t, &[0, 1, 0], 0).unwrap();
+        let r = reach(&v, &t, &[0, 1, 0], 0);
         assert_eq!(r, vec![(2, 4)]);
     }
 
@@ -535,7 +854,7 @@ mod tests {
     fn propagation_is_ranked_by_when_not_by_distance() {
         // 3 is two hops away but arrives before 1's other neighbour.
         let (v, t) = view(4, &[(0, 1, 1), (1, 3, 2), (0, 2, 9)]);
-        let r = propagation_ranking(&v, &t, &[0], 0).unwrap();
+        let r = propagation_ranking(&v, &t, &[0], 0).unwrap().into_iter().map(|r| (r.node, r.arrival)).collect::<Vec<_>>();
         assert_eq!(r, vec![(1, 1), (3, 2), (2, 9)]);
     }
 
@@ -595,7 +914,10 @@ mod tests {
     #[test]
     fn a_node_index_outside_the_graph_is_refused() {
         let (v, t) = view(2, &[(0, 1, 5)]);
-        assert_eq!(earliest_arrival(&v, &t, &[7], 0).unwrap_err(), TemporalError::NoSuchNode(7));
+        assert_eq!(
+            earliest_arrival(&v, &t, &[7], 0).unwrap_err(),
+            TemporalError::NoSuchNode(7)
+        );
         assert!(temporal_shortest_path(&v, &t, 0, 9, 0).is_err());
         assert!(symptom_explanation(&v, &t, &[(9, 1)]).is_err());
     }
@@ -605,7 +927,7 @@ mod tests {
         // Time makes cycles finite: once you leave a node at its earliest
         // arrival, coming back later can never improve it.
         let (v, t) = view(3, &[(0, 1, 1), (1, 2, 2), (2, 0, 3), (0, 1, 4)]);
-        let r = temporal_reachability(&v, &t, &[0], 0).unwrap();
+        let r = reach(&v, &t, &[0], 0);
         assert_eq!(r, vec![(1, 1), (2, 2)]);
     }
 
@@ -614,7 +936,100 @@ mod tests {
         // Two edges 0->1, at 2 and at 8. From start=5 only the later one is
         // available, so the arrival is 8 rather than unreachable.
         let (v, t) = view(2, &[(0, 1, 2), (0, 1, 8)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 5).unwrap(), vec![(1, 8)]);
-        assert_eq!(temporal_reachability(&v, &t, &[0], 0).unwrap(), vec![(1, 2)]);
+        assert_eq!(
+            reach(&v, &t, &[0], 5),
+            vec![(1, 8)]
+        );
+        assert_eq!(
+            reach(&v, &t, &[0], 0),
+            vec![(1, 2)]
+        );
+    }
+
+    /// A rotated times array is exactly what `new` cannot see, and exactly what
+    /// `from_pairs` makes impossible to express.
+    ///
+    /// The point is not that rotation is a likely typo. It is that `new`'s
+    /// contract is "the caller got the ordering right", the only evidence it
+    /// asks for is a length, and a wrong ordering changes every answer while
+    /// producing a well-formed result (samyama-graph#1304).
+    #[test]
+    fn a_rotated_times_array_passes_the_length_check() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+        let right = vec![1i64, 2, 3];
+        let rotated = vec![3i64, 1, 2];
+
+        // Both accepted: same length, and that is all `new` asks.
+        let a = TemporalEdges::new(&v, right.clone()).unwrap();
+        let b = TemporalEdges::new(&v, rotated.clone()).unwrap();
+        assert_eq!(a.len(), b.len());
+
+        // And they are different graphs in time. If this ever stops differing,
+        // the fixture has stopped exercising the thing.
+        let reach_a = temporal_reachability(&v, &a, &[0], 0).unwrap();
+        let reach_b = temporal_reachability(&v, &b, &[0], 0).unwrap();
+        assert_ne!(
+            reach_a, reach_b,
+            "the rotation must change the answer, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn from_pairs_places_times_by_endpoint() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+        // Deliberately given out of CSR order: the constructor places them.
+        let t = TemporalEdges::from_pairs(&v, [(2usize, 3usize, 3i64), (0, 1, 1), (1, 2, 2)])
+            .expect("every edge named once");
+        let direct = TemporalEdges::new(&v, vec![1, 2, 3]).unwrap();
+        assert_eq!(
+            temporal_reachability(&v, &t, &[0], 0),
+            temporal_reachability(&v, &direct, &[0], 0),
+            "naming edges by endpoint must agree with the correctly ordered array"
+        );
+    }
+
+    #[test]
+    fn from_pairs_refuses_what_it_cannot_place() {
+        let (v, _) = view(4, &[(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+
+        // An edge the graph does not have.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 1i64), (0, 3, 9)]).unwrap_err(),
+            TemporalError::NoSuchEdge { from: 0, to: 3 }
+        );
+
+        // A node the graph does not have.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(9usize, 1usize, 1i64)]).unwrap_err(),
+            TemporalError::NoSuchNode(9)
+        );
+
+        // An edge left untimed. Not defaulted: 0 makes it traversable from the
+        // beginning of time and i64::MAX makes it untraversable, and both are
+        // answers the caller did not give.
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 1i64), (1, 2, 2)]).unwrap_err(),
+            TemporalError::UntimedEdge { from: 2, to: 3 }
+        );
+    }
+
+    #[test]
+    fn from_pairs_gives_parallel_edges_their_times_in_order() {
+        // Two 0 -> 1 edges. The endpoints cannot tell them apart, so the times
+        // are taken in the order given -- and a third time for the same pair is
+        // refused rather than silently dropped.
+        let (v, _) = view(2, &[(0, 1, 5), (0, 1, 9)]);
+        let t = TemporalEdges::from_pairs(&v, [(0usize, 1usize, 5i64), (0, 1, 9)]).unwrap();
+        assert_eq!((t.at(0), t.at(1)), (5, 9));
+
+        assert_eq!(
+            TemporalEdges::from_pairs(&v, [(0usize, 1usize, 5i64), (0, 1, 9), (0, 1, 11)])
+                .unwrap_err(),
+            TemporalError::TooManyTimes {
+                from: 0,
+                to: 1,
+                have: 2
+            }
+        );
     }
 }

@@ -14,6 +14,7 @@ use samyama::algo::{
     PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
     CdlpConfig, CdlpResult, LccResult, PcaConfig, PcaResult, PcaSolver,
 };
+use samyama_graph_algorithms::pathfinding::NegativeWeight;
 use samyama_graph_algorithms::GraphView;
 
 use crate::embedded::EmbeddedClient;
@@ -65,6 +66,11 @@ pub trait AlgorithmClient {
     ) -> Option<PathResult>;
 
     /// Dijkstra's shortest path from source to target (weighted).
+    ///
+    /// `Ok(None)` is "no path"; `Err` is "this graph has a negative weight and
+    /// Dijkstra cannot answer about it". Folding the refusal into `None` would
+    /// report a graph with a cheap negative-weight route as having no route at
+    /// all (samyama-graph#1303).
     async fn dijkstra(
         &self,
         source: u64,
@@ -72,7 +78,7 @@ pub trait AlgorithmClient {
         label: Option<&str>,
         edge_type: Option<&str>,
         weight_prop: Option<&str>,
-    ) -> Option<PathResult>;
+    ) -> Result<Option<PathResult>, NegativeWeight>;
 
     /// Edmonds-Karp maximum flow from source to sink.
     async fn edmonds_karp(
@@ -196,7 +202,7 @@ impl AlgorithmClient for EmbeddedClient {
         label: Option<&str>,
         edge_type: Option<&str>,
         weight_prop: Option<&str>,
-    ) -> Option<PathResult> {
+    ) -> Result<Option<PathResult>, NegativeWeight> {
         let store = self.store.read().await;
         let view = build_view(&store, label, edge_type, weight_prop);
         dijkstra(&view, source, target)
@@ -291,9 +297,12 @@ impl AlgorithmClient for EmbeddedClient {
         let mut data_flat = vec![0.0f64; n * d];
         for (i, node) in nodes.iter().enumerate() {
             for (j, &prop) in properties.iter().enumerate() {
-                data_flat[i * d + j] = match node.get_property(prop) {
-                    Some(PropertyValue::Integer(v)) => *v as f64,
-                    Some(PropertyValue::Float(v)) => *v,
+                // Column first, through the store. `node.get_property` read the
+                // row copy only, which a node restored from a snapshot does not
+                // have, so every feature of an imported graph was 0.0 (#1022).
+                data_flat[i * d + j] = match store.node_property(node.id, prop) {
+                    Some(PropertyValue::Integer(v)) => v as f64,
+                    Some(PropertyValue::Float(v)) => v,
                     _ => 0.0,
                 };
             }

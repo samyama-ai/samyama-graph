@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
 
@@ -91,7 +95,7 @@ RETURN length(p) AS pathLength",
             category: "complex",
             // 3-hop transfer cycle: A->B->C->A
             cypher: "\
-MATCH (a:Account {id: 1})-[t1:TRANSFER]->(b:Account)-[t2:TRANSFER]->(c:Account)-[t3:TRANSFER]->(a)
+MATCH (a:Account {id: $cycleAccount})-[t1:TRANSFER]->(b:Account)-[t2:TRANSFER]->(c:Account)-[t3:TRANSFER]->(a)
 WHERE b.id <> a.id AND c.id <> a.id AND b.id <> c.id
 RETURN a.id, b.id, c.id, t1.amount, t2.amount, t3.amount
 LIMIT 10",
@@ -103,7 +107,7 @@ LIMIT 10",
             category: "complex",
             // Persons/companies connected to an account and their other accounts' transfers
             cypher: "\
-MATCH (owner)-[:OWN]->(a:Account {id: 1})
+MATCH (owner)-[:OWN]->(a:Account {id: $ownedAccount})
 WITH owner
 MATCH (owner)-[:OWN]->(otherAcct:Account)
 MATCH (otherAcct)-[t:TRANSFER]->(dst:Account)
@@ -155,7 +159,7 @@ LIMIT 20",
             category: "complex",
             // Find guarantee chains from a company (up to 3 hops)
             cypher: "\
-MATCH (c:Company {id: 1})-[:GUARANTEE*1..3]->(guaranteed)
+MATCH (c:Company {id: $guarantorCompany})-[:GUARANTEE*1..3]->(guaranteed)
 RETURN DISTINCT guaranteed.id, guaranteed.name
 LIMIT 20",
         },
@@ -455,18 +459,93 @@ fn format_ms(d: Duration) -> String {
     }
 }
 
+
+/// Ids taken from the data, for the queries that cannot be pinned to a literal.
+///
+/// CR-4, CR-5 and CR-9 were written against `{id: 1}`. The synthetic generator
+/// wires GUARANTEE edges between *randomly chosen* parties and lays transfers
+/// down at random, so whether account 1 sits on a 3-cycle, or company 1
+/// guarantees anyone, is chance. All three returned zero rows, and a query that
+/// returns nothing has exercised the parser and the planner and no traversal at
+/// all -- while being reported as passing and, at 0.06 ms, as the fastest
+/// complex read in the suite (#918).
+///
+/// This is the same trap as LDBC's default substitution parameters, where a
+/// query bound to the wrong extract is empty, fast, and costed at zero rows.
+/// The fix there is `--derive-params`; the fix here is the same idea.
+#[derive(Debug, Default)]
+struct Anchors {
+    cycle_account: Option<i64>,
+    owned_account: Option<i64>,
+    guarantor_company: Option<i64>,
+}
+
+/// Run a probe and take the first integer in the first row, if there is one.
+async fn first_id(client: &EmbeddedClient, cypher: &str) -> Option<i64> {
+    let result = client.query_readonly("default", cypher).await.ok()?;
+    let row = result.records.first()?;
+    row.iter().find_map(|v| v.as_i64())
+}
+
+impl Anchors {
+    /// Ask the loaded graph for one id of each shape the three queries need.
+    ///
+    /// Each probe asks for exactly the structure its query will traverse -- a
+    /// node *on* a 3-cycle, an owner with a second account that transfers, a
+    /// company that actually guarantees someone. An anchor found by a weaker
+    /// probe than the query uses would put the query back where it started.
+    async fn derive(client: &EmbeddedClient) -> Self {
+        Self {
+            cycle_account: first_id(client, "\
+MATCH (a:Account)-[:TRANSFER]->(b:Account)-[:TRANSFER]->(c:Account)-[:TRANSFER]->(a)
+WHERE b.id <> a.id AND c.id <> a.id AND b.id <> c.id
+RETURN a.id LIMIT 1").await,
+            owned_account: first_id(client, "\
+MATCH (owner)-[:OWN]->(a:Account)
+MATCH (owner)-[:OWN]->(other:Account)-[:TRANSFER]->(:Account)
+WHERE other.id <> a.id
+RETURN a.id LIMIT 1").await,
+            guarantor_company: first_id(client, "\
+MATCH (c:Company)-[:GUARANTEE]->() RETURN c.id LIMIT 1").await,
+        }
+    }
+
+    /// Substitute into a query, or say which anchor the data does not contain.
+    ///
+    /// A query whose anchor is missing is **not run**. Running it would put a
+    /// zero-row result and a meaningless timing into the table, which is the
+    /// state this function exists to leave.
+    fn bind(&self, cypher: &str) -> Result<String, &'static str> {
+        let mut out = cypher.to_string();
+        for (token, value, what) in [
+            ("$cycleAccount", self.cycle_account, "no account lies on a 3-hop transfer cycle"),
+            ("$ownedAccount", self.owned_account, "no owner has a second account that transfers"),
+            ("$guarantorCompany", self.guarantor_company, "no company guarantees anyone"),
+        ] {
+            if out.contains(token) {
+                match value {
+                    Some(v) => out = out.replace(token, &v.to_string()),
+                    None => return Err(what),
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 async fn run_benchmark(
     client: &EmbeddedClient,
     query: &FinBenchQuery,
+    cypher: &str,
     runs: usize,
 ) -> BenchResult {
     let is_mutating = query.category == "write" || query.category == "readwrite";
 
     // Warm-up: 1 run, discard (skip for writes — they mutate state)
     let warmup = if is_mutating {
-        client.query("default", query.cypher).await
+        client.query("default", cypher).await
     } else {
-        client.query_readonly("default", query.cypher).await
+        client.query_readonly("default", cypher).await
     };
     if let Err(e) = &warmup {
         return BenchResult {
@@ -483,13 +562,17 @@ async fn run_benchmark(
     let mut timings = Vec::with_capacity(runs);
     let mut row_count = 0;
 
-    let actual_runs = if is_mutating { 1 } else { runs }; // mutations run once
+    // Creates run once: repeating one grows the graph it is timed on. The RW
+    // queries set a flag to the value it already holds after the warm-up, so
+    // every run does the same work, and one sample per run made RW-3 read 2.03x
+    // on a same-host A/B that 3 local runs of 11 did not show.
+    let actual_runs = if query.category == "write" { 1 } else { runs };
     for _ in 0..actual_runs {
         let start = Instant::now();
         let run_result = if is_mutating {
-            client.query("default", query.cypher).await
+            client.query("default", cypher).await
         } else {
-            client.query_readonly("default", query.cypher).await
+            client.query_readonly("default", cypher).await
         };
         match run_result {
             Ok(result) => {
@@ -530,6 +613,8 @@ async fn run_benchmark(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // First, so it prints on every path: a run that measured anything says under which allocator.
+    eprintln!("Allocator: {} (ADR-038)", samyama::allocator::NAME);
     bench_setup::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -645,8 +730,27 @@ async fn main() -> Result<(), Error> {
     println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
         "------", "------------------------------------", "------", "----------", "----------", "----------", "------");
 
+    // Anchors first: three queries are written against ids the generator does
+    // not guarantee, and running them unbound is what produced "21/21 passed"
+    // over three queries that traversed nothing (#918).
+    let anchors = Anchors::derive(&client).await;
+    // Printed, because a derived parameter that nobody can see is a magic
+    // number: a reader comparing two runs needs to know whether they asked the
+    // same question of the same nodes.
+    println!(
+        "Anchors derived from the data: cycleAccount={}, ownedAccount={}, guarantorCompany={}",
+        anchors.cycle_account.map_or("none".to_string(), |v| v.to_string()),
+        anchors.owned_account.map_or("none".to_string(), |v| v.to_string()),
+        anchors.guarantor_company.map_or("none".to_string(), |v| v.to_string()),
+    );
+
     let mut passed = 0usize;
     let mut errors = 0usize;
+    let mut skipped: Vec<(&str, &'static str)> = Vec::new();
+    // Reads that returned nothing (#918). They stay `OK` and count as passed,
+    // because CH-BENCH-FIN parses `OK|ERROR` and `passed, N errors` exactly;
+    // they are named in a warning after the summary instead.
+    let mut empty_reads: Vec<&str> = Vec::new();
     let mut last_category = "";
     let bench_start = Instant::now();
 
@@ -667,7 +771,22 @@ async fn main() -> Result<(), Error> {
 
         eprint!("  Running {}...\r", query.id);
 
-        let result = run_benchmark(&client, query, runs).await;
+        // A query whose anchor the data does not contain is **not run**.
+        // Running it would put a zero-row result and a meaningless timing in
+        // the table, which is the state this change exists to leave -- and it
+        // would count as passed.
+        let cypher = match anchors.bind(query.cypher) {
+            Ok(c) => c,
+            Err(why) => {
+                println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  SKIPPED",
+                    query.id, query.name, "-", "-", "-", "-");
+                eprintln!("       not run: {}", why);
+                skipped.push((query.id, why));
+                continue;
+            }
+        };
+
+        let result = run_benchmark(&client, query, &cypher, runs).await;
 
         if let Some(ref err) = result.error {
             println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  ERROR",
@@ -682,6 +801,9 @@ async fn main() -> Result<(), Error> {
                 format_ms(result.median),
                 format_ms(result.max));
             passed += 1;
+            if result.rows == 0 && matches!(query.category, "complex" | "simple") {
+                empty_reads.push(query.id);
+            }
         }
     }
 
@@ -693,6 +815,29 @@ async fn main() -> Result<(), Error> {
     println!();
     println!("Summary: {}/{} passed, {} errors (total benchmark time: {})",
         passed, queries.len(), errors, format_duration(bench_time));
+    if !skipped.is_empty() {
+        // Its own line, and not folded into `passed`: a query that could not be
+        // anchored has not passed, and the count that says so is the point.
+        println!(
+            "SKIPPED: {} query(ies) had no anchor in this data and were not run: {}",
+            skipped.len(),
+            skipped.iter().map(|(id, why)| format!("{id} ({why})"))
+                .collect::<Vec<_>>().join(", ")
+        );
+    }
+    // A read that returns nothing exercised the parser and the planner and
+    // nothing else, and it is also the fastest row in the table (#918). CR-4,
+    // CR-5 and CR-9 are pinned to ids the synthetic generator does not
+    // guarantee edges for; anchors derived from the data would fix them, and
+    // that needs a CH-REGRESS re-baseline on the fixed host.
+    if !empty_reads.is_empty() {
+        println!(
+            "WARNING: {} read(s) returned 0 rows and measured no traversal: {}. \
+             Their parameters are pinned to ids the generated data does not guarantee (#918).",
+            empty_reads.len(),
+            empty_reads.join(", ")
+        );
+    }
 
     // Cache stats
     let stats = client.cache_stats();

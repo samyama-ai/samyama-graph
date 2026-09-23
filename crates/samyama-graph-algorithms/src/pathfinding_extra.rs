@@ -12,6 +12,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet, VecDeque};
 
 use crate::common::{GraphView, NodeId};
+use crate::pathfinding::NegativeWeight;
 
 /// Edge weight of the `slot`-th out-edge, or 1.0 when the view is unweighted.
 fn weight_at(view: &GraphView, slot: usize) -> f64 {
@@ -28,6 +29,9 @@ fn weight_at(view: &GraphView, slot: usize) -> f64 {
 /// `limit` caps the enumeration: the count of shortest paths is exponential in
 /// the worst case, and a graph that hits that would otherwise hang rather than
 /// answer.
+///
+/// Each returned path is `dedup`ed, so a consecutive repeat of the same node id
+/// is collapsed before it reaches the caller.
 pub fn all_shortest_paths(
     view: &GraphView,
     source: usize,
@@ -88,11 +92,30 @@ pub fn all_shortest_paths(
 ///
 /// `heuristic[v]` is an estimate of the cost from `v` to the target. It must
 /// be **admissible** — never an overestimate — or the result is not the
-/// shortest path, merely a path. Passing all zeros makes this exactly
-/// Dijkstra, which is the honest default when a caller has no estimate:
+/// shortest path, merely a path. Passing all zeros makes this Dijkstra in
+/// substance, which is the honest default when a caller has no estimate:
 /// A* without a heuristic *is* Dijkstra, and pretending otherwise would be
 /// selling a name rather than an algorithm.
+///
+/// Two differences from `pathfinding::dijkstra` remain even with a zero heuristic, and
+/// "exactly Dijkstra" overstated it: the priority key here is quantised to
+/// `1e-6` and clamped at zero, so costs within that tie artificially. The
+/// negative-weight gap is closed: a negative weight used to relax `g` while
+/// the clamped key ordered it wrongly, so the path returned might not be the
+/// shortest and nothing said so (samyama-graph#1303).
 pub fn a_star(
+    view: &GraphView,
+    source: usize,
+    target: usize,
+    heuristic: &[f64],
+) -> Result<Option<(Vec<NodeId>, f64)>, NegativeWeight> {
+    if let Some(w) = view.first_negative_weight() {
+        return Err(NegativeWeight { weight: w });
+    }
+    Ok(a_star_non_negative(view, source, target, heuristic))
+}
+
+fn a_star_non_negative(
     view: &GraphView,
     source: usize,
     target: usize,
@@ -146,14 +169,19 @@ pub fn yens_k_shortest(
     source: usize,
     target: usize,
     k: usize,
-) -> Vec<(Vec<NodeId>, f64)> {
+) -> Result<Vec<(Vec<NodeId>, f64)>, NegativeWeight> {
+    // Yen's builds on A*, so it inherits A*'s precondition. Checked once here
+    // rather than on every spur search: the question is about the graph.
+    if let Some(w) = view.first_negative_weight() {
+        return Err(NegativeWeight { weight: w });
+    }
     let n = view.node_count;
     if source >= n || target >= n || k == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let zero = vec![0.0; n];
-    let Some((first, cost)) = a_star(view, source, target, &zero) else {
-        return Vec::new();
+    let Some((first, cost)) = a_star_non_negative(view, source, target, &zero) else {
+        return Ok(Vec::new());
     };
     let mut accepted: Vec<(Vec<NodeId>, f64)> = vec![(first, cost)];
     let mut candidates: Vec<(Vec<NodeId>, f64)> = Vec::new();
@@ -197,7 +225,7 @@ pub fn yens_k_shortest(
         });
         accepted.push(candidates.remove(0));
     }
-    accepted
+    Ok(accepted)
 }
 
 /// Dijkstra avoiding a set of edges and nodes, for Yen's spur search.

@@ -60,22 +60,61 @@ Where the baseline is not simply the same query with the index off, it is one of
 
 18,975 nodes, 5 reps, median per query. `speedup = baseline / indexed`.
 
-| Class | n | Agree | Indexed (ms) | Baseline (ms) | Speedup |
-|---|---:|---:|---:|---:|---:|
-| H1 order test | 15 | 15/15 | 0.759 | 0.868 | 1.1× |
-| H2 single roll-up | 24 | 24/24 | 0.003 | 22.132 | **8596×** |
-| H3 level roll-up | 9 | 9/9 | 0.670 | 3.974 | 5.9× |
-| H4 cross-hierarchy conjunction | 12 | 12/12 | 19.406 | 22.166 | 1.1× |
-| H5 hierarchy × traversal | 10 | 10/10 | 0.562 | 15.390 | **27.4×** |
-| H6 anti-subsumption | 10 | 10/10 | 6.664 | 1.896 | 0.3× |
-| H7 lowest common ancestor | 10 | 10/10 | 5.079 | 8.425 | 1.7× |
-| H8 top-k over roll-up | 8 | 8/8 | 0.630 | 3.330 | 5.3× |
-| H10 temporal roll-up windows | 10 | 10/10 | 0.017 | 1.873 | 108.5× |
-| **All** | **108** | **108/108** | 3.506 | 10.634 | 3.0× |
+| Class | n | Agree | Indexed (ms) | Baseline (ms) | Median speedup | Total-time |
+|---|---:|---:|---:|---:|---:|---:|
+| H1 order test | 15 | 15/15 | 0.239 | 0.471 | 2.0× | 1.44× |
+| H2 single roll-up | 24 | 24/24 | 0.005 | 0.029 | 5.3× | **36.30×** |
+| H3 level roll-up | 9 | 9/9 | 0.092 | 0.617 | 6.7× | 2.00× |
+| H4 cross-hierarchy conjunction | 12 | 12/12 | 9.368 | 1.079 | 0.1× | **0.21×** |
+| H5 hierarchy × traversal | 10 | 10/10 | 0.079 | 0.171 | 2.2× | 2.23× |
+| H6 anti-subsumption | 10 | 10/10 | 4.234 | 1.930 | 0.5× | **0.49×** |
+| H7 lowest common ancestor | 10 | 10/10 | 4.154 | 0.390 | 0.1× | **0.09×** |
+| H8 top-k over roll-up | 8 | 8/8 | 0.114 | 0.608 | 5.3× | 2.80× |
+| H10 temporal roll-up windows | 10 | 10/10 | 0.014 | 0.093 | 6.5× | 5.56× |
+| **All** | **108** | **108/108** | 0.151 | 0.386 | 2.6× | **0.45×** |
+
+**Two speedup columns, and a third thing the columns do not say.** The median
+column is the per-class ratio of medians; the total-time column is the sum of
+the right column over the sum of the left, which is what the corpus costs.
+
+**The two columns are not always index-on against index-off.** 85 of the 112
+queries carry a separate hand-written `baseline`; only 27 run the same text
+twice with the index toggled. Those are different questions and the table mixes
+them:
+
+| Comparison | n | Total time | Medians | Slower |
+|---|---:|---:|---:|---:|
+| **same text, index on vs off** | 27 | **35.26×** | 11.83× | 2 |
+| index-written vs hand-written | 81 | 0.43× | 0.52× | 32 |
+| all rows (this table) | 108 | 0.45× | 2.56× | 34 |
+
+Read the first row for what the index does: **35× on total time**, with 2 of 27
+slower. The second row says how the two spellings compare, which is a fact about
+the corpus's queries rather than about the index — and it is where H4, H6 and H7
+lose:
+
+- **H7** writes `hierarchy_lca(a, b)` inside a `WHERE` evaluated once per
+  `:Term`, against a hand-written single path join. The call does not depend on
+  the row.
+- **H6**'s alternative is `NOT (d.code STARTS WITH "T")` — a string-prefix test
+  that works only because this synthetic corpus encodes ancestry in the code. It
+  is not a traversal and would not exist on a real ontology.
+- **H4** conjoins two hierarchies against a var-length path join.
+
+An earlier version of this page reported the mixed 0.45× as the index's own
+result. It is not; `CH-BENCH-HIER` now publishes the two separately as
+`index_on_same_query_total_time` and `index_written_vs_hand_written_total_time`.
+
+The class table above was re-measured on documented hardware (2026-09-21). The
+version it replaced was from a 2026-08-14 host that no longer exists and
+reported H4 1.1×, H6 0.3×, H7 1.7×, All 3.0×. **The host changed as well as the
+code**, so the difference is not attributable to either alone.
 
 **Against Neo4j** on an identical graph (`samyama-graph-competitor-benchmarks/benchmarks/hier/`):
 H2 **1124×**, H10 **144×**, H3 **88×**, H1 **9.1×**, H5 **8.2×** — 94× across the 58 queries
-expressible on both engines. No class loses.
+expressible on both engines. No class in *that comparison* loses — and those five classes
+are exactly the ones the index wins. H4, H6 and H7 are not expressible on Neo4j, so the
+three classes where the index is a net cost are absent from it by construction.
 
 Index sizes and build cost:
 

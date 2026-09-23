@@ -40,6 +40,9 @@ env:
 jobs:
   publish:
     name: Publish crates
+    # Knowledge-graph data releases (kg-snapshots-v*) are Releases too, and
+    # every one of them failed this workflow. Only a v* tag is an engine release.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -70,6 +73,12 @@ jobs:
       # than trusted to stay in step.
       - name: Verify tag matches every manifest version
         shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
 
@@ -104,14 +113,25 @@ jobs:
             fi
           done
 
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-            if [ "${TAG#v}" != "$WS_VERSION" ]; then
-              echo "::error::release tag $TAG does not match version $WS_VERSION"
-              exit 1
-            fi
-            echo "tag $TAG matches all manifests"
+          # The tag being released: the Release's own, or the tag a dispatch runs
+          # on (tag-release.yml dispatches this workflow, #1249). A real upload
+          # must come from a tag, so a dispatch from a branch can only dry-run.
+          if [ "$EVENT" = "release" ]; then
+            TAG=$RELEASE_TAG
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG=$REF_NAME
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "dry run on branch $REF_NAME: no tag to check"
+            exit 0
+          else
+            echo "::error::a real publish must run on a v* tag, not the branch $REF_NAME"
+            exit 1
           fi
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::tag $TAG does not match version $WS_VERSION"
+            exit 1
+          fi
+          echo "tag $TAG matches all manifests"
 
       # Exchanges this job's GitHub OIDC identity for a 30-minute crates.io
       # token, scoped to the crates whose trusted-publisher settings name this
@@ -148,8 +168,13 @@ jobs:
             samyama-graph-algorithms
           )
 
-          # For the same reason, the dry run cannot be hoisted into a separate
-          # up-front pass over all six: crate N's dry run only resolves once
+          # Three, not six. The engine (`samyama`), the Rust SDK and the CLI are
+          # absent because a dev-dependency cycle blocks their publish order
+          # (#1056) — not because they are unwanted. A reader who counts the array
+          # against the sentence below should not have to guess which is stale.
+          #
+          # For the same reason as the chaining, the dry run cannot be hoisted into
+          # a separate up-front pass over the three: crate N's dry run only resolves once
           # crate N-1 is genuinely on the index. So each crate is validated
           # immediately before it is uploaded, and the chain advances one at a
           # time. cargo waits for each publish to appear on the index before
@@ -174,6 +199,23 @@ jobs:
                       rm -f "$TMPLOG"; echo "::endgroup::"; return 0
                   fi
                   echo "::error::dry run failed for $CRATE (exit $EXIT_CODE)"
+                  rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
+              fi
+
+              # The dry run above only proves $CRATE compiles standalone — cargo
+              # resolves its dependencies from the registry for packaging, but
+              # this still runs from the workspace checkout with local path
+              # deps. A crate that passes CI inside the workspace can still be
+              # broken for anyone who actually depends on it; this is the
+              # closest check to that without unpacking the real .crate and
+              # testing it in isolation, and it is cheap enough to run on
+              # every crate before it ships. Runs in dry-run mode too, so a
+              # validate-only dispatch still catches a real test failure.
+              echo "--- test: $CRATE"
+              cargo test -p "$CRATE" 2>&1 | tee "$TMPLOG"
+              EXIT_CODE=${PIPESTATUS[0]}
+              if [ "$EXIT_CODE" -ne 0 ]; then
+                  echo "::error::tests failed for $CRATE (exit $EXIT_CODE) — refusing to publish"
                   rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
               fi
 

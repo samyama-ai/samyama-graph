@@ -44,6 +44,15 @@
 use crate::graph::{EdgeType, Label, PropertyValue};
 use std::collections::HashMap;
 
+/// A correlated `CALL { WITH ... }` subquery (#1236).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrelatedCall {
+    /// The variables the leading `WITH` imports; `None` for `WITH *`.
+    pub imports: Option<Vec<String>>,
+    /// The subquery after that `WITH`.
+    pub body: Box<Query>,
+}
+
 /// The root AST node representing a complete Cypher query.
 ///
 /// Every parsed Cypher statement produces exactly one `Query`. Its fields are grouped
@@ -81,10 +90,19 @@ pub struct Query {
     pub limit: Option<usize>,
     /// SKIP clause (optional)
     pub skip: Option<usize>,
+    /// `SKIP`/`LIMIT` holding a `$parameter`. No parameters exist at parse
+    /// time, so the count is kept as an expression and resolved into
+    /// `skip`/`limit` when parameters are bound; evaluating it at parse time
+    /// made `SKIP $s` a parse error.
+    pub deferred_skip: Option<Expression>,
+    pub deferred_limit: Option<Expression>,
     /// CALL clause (optional)
     pub call_clause: Option<CallClause>,
     /// CALL subquery (optional)
     pub call_subquery: Option<Box<Query>>,
+    /// `MATCH ... CALL { WITH a, b <body> }` (#1236): `body` runs once per
+    /// outer row, with the imported variables bound from that row.
+    pub correlated_call: Option<CorrelatedCall>,
     /// DELETE clause (optional)
     pub delete_clause: Option<DeleteClause>,
     /// SET clauses
@@ -95,6 +113,8 @@ pub struct Query {
     pub with_clause: Option<WithClause>,
     /// CREATE VECTOR INDEX clause (optional)
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
+    pub create_fulltext_index_clause: Option<CreateFullTextIndexClause>,
+    pub drop_fulltext_index_clause: Option<DropFullTextIndexClause>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
     /// DROP INDEX clause (optional)
@@ -185,6 +205,34 @@ pub struct Query {
     /// Additional WITH stages (for multi-WITH queries like WITH ... MATCH ... WITH ... RETURN)
     /// Each stage: (with_clause, unwind_clause, post_match_clauses, post_where_clause)
     pub extra_with_stages: Vec<(WithClause, Option<UnwindClause>, Vec<MatchClause>, Option<WhereClause>)>,
+    /// The conjuncts of every WHERE written straight after an OPTIONAL MATCH,
+    /// each with that clause's pattern (#1231).
+    ///
+    /// A group's WHEREs are ANDed into one predicate (`where_clause`,
+    /// `post_with_where_clause`, a stage's), and the planner scopes each
+    /// conjunct by the variables it names. That cannot tell `OPTIONAL MATCH
+    /// (y) WHERE x.v > 1` from `MATCH (x) WHERE x.v > 1`: both name only `x`.
+    /// The first belongs to the optional match -- a row failing it keeps its
+    /// outer bindings and gets nulls -- and the second filters. This records
+    /// which is which. The predicate stays in the group's WHERE as well, so a
+    /// reader that does not consult this sees the query as before.
+    pub optional_where: Vec<(Pattern, Expression)>,
+}
+
+/// CREATE VECTOR INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFullTextIndexClause {
+    pub index_name: String,
+    pub label: Label,
+    /// One or more properties. Neo4j's `ON EACH [n.a, n.b]` indexes several,
+    /// and the single-property form is the same thing with one entry.
+    pub property_keys: Vec<String>,
+}
+
+/// DROP FULLTEXT INDEX clause
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropFullTextIndexClause {
+    pub index_name: String,
 }
 
 /// CREATE VECTOR INDEX clause
@@ -195,6 +243,9 @@ pub struct CreateVectorIndexClause {
     pub property_key: String,
     pub dimensions: usize,
     pub similarity: String, // 'cosine', 'l2', etc.
+    /// How the index stores its values (NDS-09). `None` unless the caller asked
+    /// for `quantization: "fp16"`, so the default is unchanged.
+    pub quantization: crate::vector::index::Quantization,
 }
 
 /// CREATE INDEX clause
@@ -646,6 +697,15 @@ pub enum Expression {
         /// tell them apart, and applying it to both rejects every
         /// `EXISTS { MATCH (n)-->(m) ... }` — which is what happened (#798).
         bare_pattern: bool,
+        /// `COUNT { ... }` (#1235): the number of matches, not whether one
+        /// exists. Same pattern, same walk, an integer instead of a boolean.
+        count: bool,
+        /// The whole subquery, when the body holds more than a pattern, a WHERE
+        /// and a RETURN: `EXISTS { MATCH ... WITH ... RETURN ... }` (#1211).
+        /// It runs once per outer row as a semi-join, so the planner takes it
+        /// out of the WHERE and plans it; it is never evaluated in place.
+        /// `pattern` is then the body's first MATCH pattern.
+        body: Option<Box<Query>>,
     },
     /// List comprehension: [x IN list WHERE cond | expr]
     ListComprehension {
@@ -748,6 +808,38 @@ pub enum BinaryOp {
     In,
     /// Regex match (=~)
     RegexMatch,
+}
+
+impl BinaryOp {
+    /// How this operator is written in Cypher.
+    ///
+    /// Used in error messages so they name the operator the user typed, which
+    /// is both clearer than "binary op" and what lets an error be pointed at a
+    /// position in the query text (LANG-12).
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            BinaryOp::Eq => "=",
+            BinaryOp::Ne => "<>",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::And => "AND",
+            BinaryOp::Or => "OR",
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Pow => "^",
+            BinaryOp::Xor => "XOR",
+            BinaryOp::Mod => "%",
+            BinaryOp::StartsWith => "STARTS WITH",
+            BinaryOp::EndsWith => "ENDS WITH",
+            BinaryOp::Contains => "CONTAINS",
+            BinaryOp::In => "IN",
+            BinaryOp::RegexMatch => "=~",
+        }
+    }
 }
 
 /// Unary operators
@@ -899,17 +991,31 @@ pub enum RemoveItem {
     Label { variable: String, label: Label },
 }
 
-/// FOREACH clause: FOREACH (x IN list | SET x.prop = val)
+/// FOREACH clause: `FOREACH (x IN list | <updating clauses>)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeachClause {
     /// Variable name for each element
     pub variable: String,
     /// List expression to iterate
     pub expression: Expression,
-    /// SET items to apply for each element
-    pub set_clauses: Vec<SetClause>,
-    /// CREATE clauses to apply for each element
-    pub create_clauses: Vec<CreateClause>,
+    /// The updating clauses to run per element, in the order written.
+    pub body: Vec<ForeachBody>,
+}
+
+/// One updating clause in a FOREACH body. The grammar admits exactly these,
+/// so a `RETURN` in the body is a parse error.
+///
+/// One ordered list rather than a field per clause kind: the two fields this
+/// replaced held SET and CREATE only, so DELETE and REMOVE, which the grammar
+/// accepted, had nowhere to go and were dropped (#465).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForeachBody {
+    Set(SetClause),
+    Remove(RemoveClause),
+    Delete(DeleteClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Foreach(Box<ForeachClause>),
 }
 
 /// UNWIND clause: `UNWIND [1,2,3] AS x`
@@ -964,6 +1070,9 @@ pub struct WithClause {
     pub skip: Option<usize>,
     /// LIMIT within WITH
     pub limit: Option<usize>,
+    /// SKIP/LIMIT holding a `$parameter`, resolved when parameters are bound.
+    pub deferred_skip: Option<Expression>,
+    pub deferred_limit: Option<Expression>,
 }
 
 /// ORDER BY clause
@@ -983,6 +1092,18 @@ pub struct OrderByItem {
 }
 
 impl Query {
+    /// Whether a SKIP/LIMIT anywhere in the query waits for a parameter.
+    pub fn has_deferred_row_counts(&self) -> bool {
+        let with = |w: &WithClause| w.deferred_skip.is_some() || w.deferred_limit.is_some();
+        self.deferred_skip.is_some()
+            || self.deferred_limit.is_some()
+            || self.with_clause.as_ref().is_some_and(with)
+            || self.extra_with_stages.iter().any(|(w, ..)| with(w))
+            || self.clauses.iter().any(|c| matches!(c, Clause::With(w) if with(w)))
+            || self.call_subquery.as_deref().is_some_and(Query::has_deferred_row_counts)
+            || self.union_queries.iter().any(|(u, _)| u.has_deferred_row_counts())
+    }
+
     /// Create a new empty query
     /// Whether executing this statement can change the graph.
     ///
@@ -1003,6 +1124,35 @@ impl Query {
     ///
     /// `union_queries` and `call_subquery` are checked recursively: a read query
     /// whose subquery writes is a write.
+    /// The first clause that writes, by the name a user typed it as.
+    ///
+    /// For error messages: "`DELETE` writes, and this connection is read-only"
+    /// tells a caller what to change, where the type names of the two Rust
+    /// executors did not.
+    pub fn write_clause(&self) -> Option<&'static str> {
+        if let Some(c) = self.clauses.iter().find(|c| c.is_write()) {
+            return Some(c.kind());
+        }
+        // The legacy fields, which hold the write when the query was parsed
+        // into the older shape rather than into `clauses`. Checking only
+        // `clauses` reported `MATCH (n) DELETE n` as having no write clause,
+        // which is the same two-AST-shapes trap the rest of this file warns
+        // about.
+        if self.create_clause.is_some() {
+            return Some("CREATE");
+        }
+        if self.delete_clause.is_some() {
+            return Some("DELETE");
+        }
+        if !self.set_clauses.is_empty() {
+            return Some("SET");
+        }
+        if !self.remove_clauses.is_empty() {
+            return Some("REMOVE");
+        }
+        None
+    }
+
     pub fn is_write(&self) -> bool {
         if self.clauses.iter().any(Clause::is_write) {
             return true;
@@ -1020,6 +1170,8 @@ impl Query {
         if self.create_index_clause.is_some()
             || self.drop_index_clause.is_some()
             || self.create_vector_index_clause.is_some()
+            || self.create_fulltext_index_clause.is_some()
+            || self.drop_fulltext_index_clause.is_some()
             || self.create_constraint_clause.is_some()
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
@@ -1042,13 +1194,18 @@ impl Query {
             order_by: None,
             limit: None,
             skip: None,
+            deferred_skip: None,
+            deferred_limit: None,
             call_clause: None,
             call_subquery: None,
+            correlated_call: None,
             delete_clause: None,
             set_clauses: Vec::new(),
             remove_clauses: Vec::new(),
             with_clause: None,
             create_vector_index_clause: None,
+            create_fulltext_index_clause: None,
+            drop_fulltext_index_clause: None,
             create_index_clause: None,
             drop_index_clause: None,
             create_constraint_clause: None,
@@ -1074,6 +1231,7 @@ impl Query {
             explain: false,
             with_split_index: None,
             post_with_where_clause: None,
+            optional_where: Vec::new(),
             extra_with_stages: Vec::new(),
         }
     }

@@ -101,6 +101,87 @@ impl CommandHandler {
         }
     }
 
+    /// GRAPH.BEGIN, on a connection that already holds the writer's lock
+    /// (#1200 step 6b). Replies with the version the transaction writes at.
+    pub fn begin_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        match store.begin_session_transaction() {
+            Ok(version) => {
+                if self.persistence.is_some() {
+                    store.enable_write_log();
+                }
+                RespValue::Integer(version as i64)
+            }
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.COMMIT: persist the transaction's writes, all at once, then keep
+    /// them. If they cannot be persisted the transaction is rolled back and the
+    /// reply is an error (#1274).
+    pub fn commit_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        let outcome = match &self.persistence {
+            Some(pm) => pm.commit_session_transaction("default", store),
+            None => store.commit_session_transaction().map_err(|e| e.to_string()),
+        };
+        match outcome {
+            Ok(version) => RespValue::Integer(version as i64),
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.ROLLBACK: undo the transaction. What it logged for persistence
+    /// is dropped, since none of it reached disk.
+    pub fn rollback_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        let outcome = store.rollback_session_transaction();
+        let _ = store.take_write_log();
+        match outcome {
+            Ok(()) => RespValue::SimpleString("OK".to_string()),
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.QUERY or GRAPH.RO_QUERY inside an open transaction, against the
+    /// lock the connection holds. Nothing is persisted until COMMIT.
+    pub fn query_in_transaction(
+        &self,
+        args: &[RespValue],
+        store: &mut GraphStore,
+        read_only: bool,
+    ) -> RespValue {
+        if args.len() < 3 {
+            return RespValue::Error("ERR wrong number of arguments for a query".to_string());
+        }
+        let graph_name = match args[1].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        if graph_name != "default" {
+            return RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
+                graph_name
+            ));
+        }
+        let query_str = match args[2].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null query".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
+        if read_only && is_write {
+            return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
+        }
+        let result = if is_write {
+            self.query_engine.execute_mut(&query_str, store, &graph_name)
+        } else {
+            self.query_engine.execute(&query_str, store)
+        };
+        match result {
+            Ok(batch) => self.format_query_result(batch),
+            Err(e) => RespValue::Error(format!("ERR {}", e)),
+        }
+    }
+
     /// Handle GRAPH.QUERY command
     /// Format: GRAPH.QUERY graph_name "MATCH (n) RETURN n"
     async fn handle_graph_query(
@@ -149,6 +230,17 @@ impl CommandHandler {
 
         // Execute query with appropriate method
         let result = if is_write_query {
+            // Once one write has not reached disk, the store is ahead of the
+            // disk and every later write widens the gap: a restart replays a
+            // prefix that does not include the first failure and may not
+            // include anything after it. Refusing is the only lever a
+            // statement has, because it has no rollback (#1274).
+            if crate::persistence::health::is_degraded() {
+                return RespValue::Error(format!(
+                    "ERR {}",
+                    crate::persistence::health::refusal()
+                ));
+            }
             let mut store_guard = store.write().await;
 
             // Record what the statement changes, so persistence does not depend on
@@ -167,16 +259,37 @@ impl CommandHandler {
             // log on error left those rows visible in memory and absent from disk,
             // which is the REL-06 violation rather than the guard against one
             // (#1106).
-            if let Some(ref persist_mgr) = self.persistence {
+            let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
-                    Ok(n) => debug!("Persisted {} entities from {} mutations", n, mutations.len()),
-                    Err(e) => warn!("Failed to persist write: {}", e),
+                    Ok(n) => {
+                        debug!("Persisted {} entities from {} mutations", n, mutations.len());
+                        None
+                    }
+                    Err(e) => {
+                        // Was a `warn!` and a success reply. The client was
+                        // told the write landed, the store kept it and the
+                        // disk did not, so a restart silently threw it away
+                        // (#1274). A statement has no rollback, so the rows
+                        // stay in memory; what changes is that the client is
+                        // told, and that nothing further is accepted.
+                        warn!("Failed to persist write: {}", e);
+                        crate::persistence::health::mark_degraded(e.to_string());
+                        Some(e.to_string())
+                    }
                 }
-            }
+            } else {
+                None
+            };
 
             drop(store_guard);
-            res
+            match persist_failed {
+                None => res,
+                Some(e) => Err(Box::<dyn std::error::Error>::from(format!(
+                    "the write was applied in memory and did not reach disk ({e}); \
+                     it will be lost on restart, and further writes are refused"
+                ))),
+            }
         } else {
             let store_guard = store.read().await;
             let res = self.query_engine.execute(&query_str, &*store_guard);

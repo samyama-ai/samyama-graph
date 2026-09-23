@@ -1,4 +1,4 @@
-//! Edge properties written the way bulk loaders write them are readable.
+//! Edge properties are readable whichever store they were written to.
 //!
 //! `GraphStore` keeps edge properties in two places — the row map in
 //! `edge_properties` and the typed `edge_columns` — and which of them a given edge
@@ -6,36 +6,28 @@
 //!
 //! | writer | row | columnar | reached by |
 //! |---|---|---|---|
-//! | `create_edge_with_properties` | yes | yes | direct API only |
-//! | `set_edge_property` | yes | yes | direct API only |
-//! | Cypher `CREATE ()-[:R {..}]->()` | **yes** | **no** | every query |
-//! | `create_edge` + `get_edge_properties_mut` | **yes** | **no** | every bulk loader |
+//! | `create_edge_with_properties` | yes | yes | snapshot import, direct API |
+//! | `set_edge_property` | yes | yes | direct API |
+//! | `set_edge_property_sparse` / `set_edge_properties_sparse` | yes | yes | Cypher `CREATE`/`MERGE`/`SET`, the FinBench loader |
+//! | `create_edge` + `get_edge_properties_mut` | **yes** | **no** | the LDBC loader, the banking demo |
 //!
-//! Measured, not assumed: after `CREATE (a)-[:R {w: 2.5}]->(b)` the row map holds
-//! `w` and `edge_columns` holds `Null`. **No path a user exercises populates
-//! `edge_columns`** — the two writers that do are called only from direct API code
-//! and their own tests, while the query engine and every bulk loader in the repo
-//! (LDBC, FinBench, the banking demo) write the row map directly.
+//! Until #1059, Cypher `CREATE` wrote the row map only and `edge_columns` was empty
+//! in practice (#1127): every edge property read was answered by the **row
+//! fallback** in `record.rs`, and a `WHERE r.p ... ORDER BY r.p` scan paid two hash
+//! probes into scattered memory per row for it — 63% of FinBench CR-8.
 //!
-//! So `edge_columns` is empty in practice and **every** edge property read is
-//! answered by the **row fallback** in `record.rs`.
-//!
-//! That fallback is therefore load-bearing, and nothing said so. It reads like the
-//! slow path of an optimisation — the kind of branch someone deletes when the
-//! columnar store looks like the real representation — and deleting it would return
-//! `null` for every edge property in every bulk-loaded graph, silently, because
-//! `null` is a legal answer for an absent property.
-//!
-//! These tests pin it. If the columnar store starts being populated on this path,
-//! the precondition assertion below fails and says to re-derive the test rather
-//! than delete it.
+//! The query engine now writes both. The row fallback is still load-bearing for
+//! anything written through `get_edge_properties_mut`, and deleting it would return
+//! `null` for every such edge property, silently, because `null` is a legal answer
+//! for an absent property. The first test pins that; the second pins that the query
+//! engine's writes reach the column the reads try first.
 
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::QueryEngine;
 
 const T: &str = "default";
 
-/// Build the way `benches/ldbc_common` and `benches/finbench_common` build.
+/// Build the way `benches/ldbc_common` builds: the row map only.
 fn bulk_loaded() -> GraphStore {
     let mut store = GraphStore::new();
     let a = store.create_node("Person");
@@ -73,24 +65,25 @@ fn the_row_fallback_is_what_answers_a_bulk_loaded_edge_property() {
     let row = &batch.records[0];
     assert_eq!(
         format!("{:?}", row.get("r.since")),
-        format!("{:?}", Some(&samyama::query::executor::record::Value::Property(
-            PropertyValue::Integer(2020)
-        ))),
+        format!(
+            "{:?}",
+            Some(&samyama::query::executor::record::Value::Property(
+                PropertyValue::Integer(2020)
+            ))
+        ),
         "the row fallback stopped answering: every edge property in every \
          bulk-loaded graph now reads as null"
     );
 }
 
-/// The query engine writes the row map only — the same shape as the bulk loaders,
-/// and not what the two columnar-aware writers do.
+/// The query engine writes both stores (#1059).
 ///
-/// Pinned as the measured fact rather than the expected one: this test was first
-/// written asserting that `CREATE` populates both, on the reasoning that the query
-/// engine is the primary path and the columnar store exists for it. It does not.
-/// The assertion is inverted here so the next person reads the behaviour rather
-/// than the assumption (#1127).
+/// This test used to pin the opposite — `CREATE` writing the row map only — as the
+/// measured fact of #1127, with a message saying that populating `edge_columns`
+/// would be an improvement and to re-derive the premise when it happened. It
+/// happened: the row-map-only write was the cost of FinBench CR-8.
 #[test]
-fn the_query_engine_path_writes_the_row_map_only() {
+fn the_query_engine_path_writes_both_stores() {
     let engine = QueryEngine::new();
     let mut store = GraphStore::new();
     engine
@@ -108,16 +101,24 @@ fn the_query_engine_path_writes_the_row_map_only() {
         Some(PropertyValue::Float(2.5)),
         "the query engine no longer populates the row copy"
     );
-    assert!(
-        store.edge_columns.get_property(idx, "w").is_null(),
-        "the query engine now populates edge_columns too — that is an improvement, \
-         and it means the row fallback is no longer the only thing answering edge \
-         property reads. Re-derive this file's premise before changing the assert."
+    assert_eq!(
+        store.edge_columns.get_property(idx, "w"),
+        PropertyValue::Float(2.5),
+        "the query engine stopped writing edge_columns: every relationship property \
+         read falls back to the row map again"
     );
 
-    // And the answer is still right, because of the fallback.
     let batch = engine
         .execute("MATCH ()-[r:R]->() RETURN r.w", &store)
         .expect("query");
     assert_eq!(batch.records.len(), 1);
+    assert_eq!(
+        format!("{:?}", batch.records[0].get("r.w")),
+        format!(
+            "{:?}",
+            Some(&samyama::query::executor::record::Value::Property(
+                PropertyValue::Float(2.5)
+            ))
+        )
+    );
 }

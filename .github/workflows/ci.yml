@@ -34,6 +34,38 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  supply-chain:
+    # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
+    # list, and crates from unknown sources fail the build. Exceptions live in
+    # deny.toml, each with the reason it cannot be fixed yet.
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+      # The release generates an SBOM. Generating one here too means a broken SBOM
+      # step is found on a pull request instead of during a release, which is the
+      # failure mode of anything that only runs on a tag.
+      - name: SBOM generates
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: SBOM is not empty
+        run: |
+          set -euo pipefail
+          packages=$(python3 -c "import json;print(len(json.load(open('sbom.spdx.json')).get('packages',[])))")
+          echo "SBOM lists $packages packages"
+          # A well-formed file listing nothing is the shape of failure worth catching:
+          # the step would be green and the artifact useless.
+          [ "$packages" -ge 50 ]
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -41,7 +73,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        # ARM64 because we publish for it: linux-aarch64 and macos-aarch64
+        # wheels, and a linux/arm64 image. Until this entry nothing ran on the
+        # architecture we ship to (#1044), and atomics ordering, FMA contraction
+        # in the numeric parity checks and C `char` signedness all differ there.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -95,6 +131,10 @@ jobs:
       # that the dev profile dominates.
 
       - name: CH-META-PATH — a quantified path pattern agrees with itself
+        id: ch_meta_path
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-05, and the answer to #1140 (#1142). Three metamorphic relations
         # over six graphs and every quantifier pair:
         #
@@ -115,6 +155,10 @@ jobs:
         run: cargo test --release --test varlen_metamorphic
 
       - name: CH-IMPORT — the same graph by different paths is the same graph
+        id: ch_import
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # REL-06. Builds one fixture via Cypher, a snapshot round
         # trip, and the store API, then compares 11 invariants through Cypher.
         # Carries its own canary: a deliberately-wrong graph must be detected,
@@ -122,6 +166,10 @@ jobs:
         run: cargo run --release --example import_invariants
 
       - name: CH-DOC-EXEC — the Cypher in our documentation parses
+        id: ch_doc_exec
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # DX-04. Every fenced ```cypher block in every markdown file. Blocks
         # showing clause syntax rather than whole queries opt out with
         # ```cypher,ignore, and the opt-out count is printed so it cannot grow
@@ -129,6 +177,10 @@ jobs:
         run: cargo run --release --example doc_check
 
       - name: CH-API — the OpenAPI document and the server describe one API
+        id: ch_api
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # API-01. A documented endpoint the server does not serve is a broken
         # client; a served endpoint nobody documented is an undocumented
         # surface. #613 found one of each by hand, once. This makes it a gate
@@ -136,6 +188,10 @@ jobs:
         run: cargo run --release --example api_contract
 
       - name: CH-TCK — the openCypher pass count may not decrease
+        id: ch_tck
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-01 (#436). The rate went 57.2% -> 86.7% over a few days with
         # nothing stopping it going back: every fix so far has rested on this
         # number, and an unguarded number is one refactor from being wrong.
@@ -164,6 +220,10 @@ jobs:
           cargo run --release --example tck_runner --             --features /tmp/openCypher/tck/features --min-pass 3700
 
       - name: CH-DETERM-THREADS — the answer does not depend on the thread count
+        id: ch_determ_threads
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # LANG-14 (#611). CH-DETERM varies the *process*, which catches a
         # RandomState seed reaching results. It says nothing about a parallel
         # operator emitting rows in a different order at 8 threads than at 1.
@@ -186,11 +246,19 @@ jobs:
         run: python3 scripts/test_check_release_gate.py
 
       - name: LINT-RATCHET — the clippy warning count may not rise
+        id: lint_ratchet
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # A ceiling, not a clean-tree gate: the debt stops growing while what
         # to do about the existing 769 stays open (#487).
-        run: ./scripts/check_lint_ratchet.sh 769
+        run: ./scripts/check_lint_ratchet.sh 796
 
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
+        id: ch_algo_parity
+        # Runs even if an earlier gate failed, and the run-all-gates step
+        # below turns any failure into the job's failure. See that step.
+        continue-on-error: true
         # ALGO-02. The reference values are regenerated from NetworkX on a
         # cadence by the harness in samyama-graph-competitor-benchmarks; this
         # step re-runs the algorithms against the *recorded* answers, so it
@@ -200,3 +268,219 @@ jobs:
         # comparing against a live reference implementation — is the harness's
         # job, and the recorded file carries the date it was taken.
         run: cargo run --release --example algo_parity_check
+
+      - name: CH-API-STABILITY — the recorded request/response corpus still replays
+        id: ch_api_stability
+        continue-on-error: true
+        # API-16. A renamed field, a type that changes from integer to string,
+        # an error that stops being an error: each breaks every client, and
+        # none of them fails a test that asks whether a query returns the right
+        # rows. The corpus asks whether the answer is the *same*, not whether
+        # it is right.
+        run: |
+          set -euo pipefail
+          cargo build --release --bin samyama
+          python3 scripts/api_stability.py --check
+
+      - name: GATES — every gate above ran, and every one of them passed
+        # Each gate is `continue-on-error` so that one red does not skip the
+        # rest. This step is what makes the job fail, and it is the only place
+        # that does.
+        #
+        # The reason is #1134: the gates were sequential steps in one job, so a
+        # failure at step N silently skipped N+1 onwards and nothing in the log
+        # distinguished "passed" from "never ran". CH-API was red for a day and
+        # took CH-TCK, CH-DETERM-THREADS, LINT-RATCHET and CH-ALGO-PARITY with
+        # it -- and LINT-RATCHET, when it finally ran, turned out to have been
+        # measuring nothing for months. A gate nobody can see is a gate nobody
+        # fixes.
+        #
+        # `skipped` is failed here too. A gate that did not run has not passed,
+        # and treating the two alike is the defect this step exists to remove.
+        if: always()
+        env:
+          CH_META_PATH_OUTCOME: ${{ steps.ch_meta_path.outcome }}
+          CH_IMPORT_OUTCOME: ${{ steps.ch_import.outcome }}
+          CH_DOC_EXEC_OUTCOME: ${{ steps.ch_doc_exec.outcome }}
+          CH_API_OUTCOME: ${{ steps.ch_api.outcome }}
+          CH_TCK_OUTCOME: ${{ steps.ch_tck.outcome }}
+          CH_DETERM_THREADS_OUTCOME: ${{ steps.ch_determ_threads.outcome }}
+          LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
+          CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
+          CH_API_STABILITY_OUTCOME: ${{ steps.ch_api_stability.outcome }}
+        run: |
+          failed=""
+          check() {
+            eval "outcome=\$$(echo "$1" | tr '[:lower:]' '[:upper:]')_OUTCOME"
+            case "$outcome" in
+              success) printf '  PASS  %s\n' "$2" ;;
+              *)       printf '  FAIL  %s (%s)\n' "$2" "$outcome"; failed="$failed $2" ;;
+            esac
+          }
+          check ch_meta_path "CH-META-PATH"
+          check ch_import "CH-IMPORT"
+          check ch_doc_exec "CH-DOC-EXEC"
+          check ch_api "CH-API"
+          check ch_tck "CH-TCK"
+          check ch_determ_threads "CH-DETERM-THREADS"
+          check lint_ratchet "LINT-RATCHET"
+          check ch_algo_parity "CH-ALGO-PARITY"
+          check ch_api_stability "CH-API-STABILITY"
+          if [ -n "$failed" ]; then
+            echo
+            echo "failed gates:$failed"
+            exit 1
+          fi
+          echo
+          echo "all gates ran and passed"
+
+  typescript-sdk:
+    # 22 tests, none of which ran on a pull request until now. `sdk/typescript`
+    # is not a cargo crate, so `cargo test --workspace` cannot reach it and the
+    # only workflows mentioning it publish on a tag. Six of the tests are about
+    # request deadlines and retry, which is precisely the behaviour that is
+    # invisible until a server goes quiet in production (#1326).
+    name: typescript-sdk (transport and connection management)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        working-directory: sdk/typescript
+        run: npm ci || npm install
+      - name: Typecheck
+        working-directory: sdk/typescript
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: Tests
+        working-directory: sdk/typescript
+        run: npm run build && npm test
+
+  python-sdk:
+    # `sdk/python` holds 95 tests and until now no workflow ran them on a pull
+    # request: `cargo test --workspace` cannot reach the directory because the
+    # crate is `exclude`d from the workspace, and the only files that mentioned
+    # `sdk/python` were the four publish workflows, which run on a tag. The
+    # tests were therefore green in whatever state they were last run by hand.
+    #
+    # The MCP tools are generated from a discovered schema, so a defect here is
+    # a wrong tool handed to a model rather than a test failure anyone notices.
+    name: python-sdk (MCP tools and schema discovery)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Compile the binding. `sdk/python` is `exclude`d from the workspace, so
+      # `cargo check --workspace` cannot reach it, and the tests below are
+      # pure-Python. Nothing on a pull request built this crate, and nothing in
+      # the nightly did either -- the first thing to compile it was the publish
+      # workflow, on the tag.
+      #
+      # v1.9.0 is what that cost: #1333 changed the SDK's `dijkstra` to return
+      # `Result<Option<PathResult>, NegativeWeight>`, every workspace caller was
+      # updated, and this one was not. All five wheels failed on the same two
+      # E0308s and PyPI got nothing, while crates.io and npm published fine.
+      #
+      # `cargo check`, not a maturin build: it catches a signature drift like
+      # that one in a couple of minutes and needs no Python toolchain, which is
+      # what kept the full build out of the pull-request lane.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile the extension crate
+        working-directory: sdk/python
+        run: cargo check --all-targets
+
+      - name: Install test dependencies
+        run: pip install pytest fastmcp
+      - name: Tests
+        working-directory: sdk/python
+        # The suites that need the compiled extension (`test_embedded.py`,
+        # `test_vector.py`) are not selected: building it needs maturin and a
+        # full release compile, which belongs in the nightly sweep rather than
+        # on every pull request. Naming the files that do run keeps that
+        # deliberate -- a bare `pytest tests/` would collect them and fail on
+        # the import, and the usual repair is to make the failure disappear.
+        run: |
+          PYTHONPATH=. python -m pytest -q \
+            tests/test_mcp_schema.py \
+            tests/test_mcp_generators.py \
+            tests/test_mcp_escape.py \
+            tests/test_mcp_server.py
+
+  # HW-07 and KG-11 ask that a `.sgsnap` written on one tier loads on another
+  # with the same results. Nothing had ever checked it, because checking it
+  # needs two machines — and this workflow has had two all along, x86-64 and
+  # aarch64, which never exchanged a file.
+  #
+  # Both directions, because portability is not symmetric by assumption: a
+  # writer that emits native-endian bytes and a reader that assumes its own
+  # would agree with itself and fail the other way round.
+  #
+  # The comparison is a fingerprint of the graph *a query sees* — counts, the
+  # label and edge-type census, and an order-independent digest over each
+  # node's and edge's properties — not the file's bytes, which may legitimately
+  # differ between two exports of one graph.
+  snapshot-portability:
+    name: snapshot written on ${{ matrix.writer }}
+    needs: test
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - writer: ubuntu-latest
+            reader: ubuntu-24.04-arm
+          - writer: ubuntu-24.04-arm
+            reader: ubuntu-latest
+    runs-on: ${{ matrix.writer }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+      - name: Write the snapshot
+        run: |
+          set -euo pipefail
+          cargo run --release --example snapshot_portability -- \
+            --write snap.sgsnap --json wrote.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sgsnap-from-${{ matrix.writer }}
+          path: |
+            snap.sgsnap
+            wrote.json
+          retention-days: 1
+
+  snapshot-portability-read:
+    name: read on ${{ matrix.reader }}
+    needs: snapshot-portability
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - writer: ubuntu-latest
+            reader: ubuntu-24.04-arm
+          - writer: ubuntu-24.04-arm
+            reader: ubuntu-latest
+    runs-on: ${{ matrix.reader }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+      - uses: actions/download-artifact@v4
+        with:
+          name: sgsnap-from-${{ matrix.writer }}
+      - name: Load it and compare what a query sees
+        run: |
+          set -euo pipefail
+          cargo run --release --example snapshot_portability -- \
+            --verify snap.sgsnap --against wrote.json
