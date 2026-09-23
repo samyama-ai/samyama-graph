@@ -345,3 +345,134 @@ fn a_number_that_is_a_card_number_is_found_even_when_stored_as_an_integer() {
     assert_eq!(report.findings.len(), 1);
     assert_eq!(report.findings[0].kind, "payment_card");
 }
+
+// ───────────────────────────────────────────────────────────────── waivers
+//
+// A finding that has been looked at and accepted still has to be reported, and
+// the job still has to go green. A scan that is red forever is ignored within
+// a fortnight, and then TRUST-10 is a tick over a control nobody reads -- the
+// same failure as a check that cannot fail, reached from the other side.
+//
+// The cases that matter are the ones proving the waiver is *narrow*: one more
+// value than was accepted, or the same kind in a different field, must still
+// fail. Otherwise a waiver is a mute button.
+
+use samyama::pii::{read_waivers, triage, Scanner as PiiScanner};
+
+fn report_with(pairs: &[(&str, &str)]) -> samyama::pii::Report {
+    let mut s = PiiScanner::new();
+    for (location, value) in pairs {
+        s.observe(location, value);
+    }
+    s.finish()
+}
+
+fn waivers_json(body: &str) -> Vec<samyama::pii::Waiver> {
+    // A unique file per call. Naming it after the body length collided between
+    // two cases of the same size, and because tests run in parallel one
+    // truncated the other's file mid-read -- a failure that looked like a
+    // parser bug and was a fixture bug.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+
+    let dir = std::env::temp_dir().join(format!("pii-waiver-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let path = dir.join(format!("{}.json", N.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&path, body).expect("write");
+    read_waivers(&path).expect("parse")
+}
+
+#[test]
+fn a_waiver_covers_the_finding_it_names() {
+    let report = report_with(&[("Site.facility", "alice@example.com")]);
+    let w = waivers_json(
+        r##"[{"kind":"email","location":"Site.facility","max_distinct":1,
+             "why":"registry contact","decided_in":"#1439"}]"##,
+    );
+    let t = triage(&report, &w);
+    assert_eq!(t.accepted.len(), 1);
+    assert!(t.unwaived.is_empty());
+    assert!(t.unused.is_empty());
+}
+
+#[test]
+fn one_more_value_than_was_accepted_is_not_covered() {
+    // The case the whole design exists for: a *new* contact appearing in a
+    // field already on the list must fail, even though the field is waived.
+    let report = report_with(&[
+        ("Site.facility", "alice@example.com"),
+        ("Site.facility", "bob@example.com"),
+    ]);
+    let w = waivers_json(
+        r##"[{"kind":"email","location":"Site.facility","max_distinct":1,
+             "why":"registry contact","decided_in":"#1439"}]"##,
+    );
+    let t = triage(&report, &w);
+    assert!(t.accepted.is_empty());
+    assert_eq!(t.unwaived.len(), 1);
+    assert_eq!(t.unwaived[0].distinct, 2);
+}
+
+#[test]
+fn the_same_kind_in_a_different_field_is_not_covered() {
+    let report = report_with(&[("Sponsor.name", "alice@example.com")]);
+    let w = waivers_json(
+        r##"[{"kind":"email","location":"Site.facility","max_distinct":9,
+             "why":"registry contact","decided_in":"#1439"}]"##,
+    );
+    let t = triage(&report, &w);
+    assert_eq!(t.unwaived.len(), 1, "a waiver names one field, not a pattern");
+    assert_eq!(t.unused.len(), 1, "and the unused waiver is reported");
+}
+
+#[test]
+fn a_different_kind_in_the_same_field_is_not_covered() {
+    let report = report_with(&[("Site.facility", "+1 (415) 555-0132")]);
+    let w = waivers_json(
+        r##"[{"kind":"email","location":"Site.facility","max_distinct":9,
+             "why":"registry contact","decided_in":"#1439"}]"##,
+    );
+    let t = triage(&report, &w);
+    assert_eq!(t.unwaived.len(), 1);
+    assert_eq!(t.unwaived[0].kind, "phone");
+}
+
+#[test]
+fn a_waiver_without_a_reason_is_refused() {
+    // A waiver file that permits an empty reason is a mute button with extra
+    // steps, so the parse fails rather than the scan running half-blind.
+    let dir = std::env::temp_dir().join(format!("pii-waiver-bad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+
+    for (i, body) in [
+        r##"[{"kind":"email","location":"X.y","max_distinct":1,"why":"","decided_in":"#1"}]"##,
+        r##"[{"kind":"email","location":"X.y","max_distinct":1,"why":"  ","decided_in":"#1"}]"##,
+        r##"[{"kind":"email","location":"X.y","max_distinct":1,"why":"ok","decided_in":""}]"##,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let path = dir.join(format!("bad-{i}.json"));
+        std::fs::write(&path, body).expect("write");
+        let err = read_waivers(&path).expect_err("a waiver with no reason must be refused");
+        assert!(err.contains("mute button"), "the error should say why: {err}");
+    }
+}
+
+#[test]
+fn the_real_waiver_file_parses_and_every_entry_carries_its_decision() {
+    // The file that ships. A malformed one would stop the scan in CI, and the
+    // failure would look like a scanner problem rather than an edit.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/pii-waivers.json");
+    let waivers = read_waivers(&path).expect("docs/pii-waivers.json must parse");
+    assert!(!waivers.is_empty());
+    for w in &waivers {
+        assert!(
+            w.decided_in.contains('#'),
+            "{}/{} does not name where it was decided",
+            w.kind,
+            w.location
+        );
+        assert!(w.max_distinct >= 1);
+    }
+}

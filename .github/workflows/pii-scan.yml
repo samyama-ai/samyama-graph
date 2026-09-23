@@ -78,7 +78,16 @@ jobs:
       - name: Scan
         run: |
           set -euo pipefail
-          # `pii-scan` exits 1 when it finds identifiers and 2 when it cannot
-          # read a file. Both fail the job: a scan that could not open the
-          # artifact must never report it clean.
-          ./target/release/samyama pii-scan snapshots/*.sgsnap
+          # `pii-scan` exits 1 when it finds un-waived identifiers and 2 when
+          # it cannot read a file or a waiver. All of those fail the job: a
+          # scan that could not open the artifact must never report it clean.
+          #
+          # `docs/pii-waivers.json` carries the findings that have been looked
+          # at and accepted, each naming one field, the count accepted, why,
+          # and where it was decided. Accepted findings are still printed. A
+          # count *above* the accepted one is not waived, so a new contact in a
+          # field already on the list still fails -- which is the case this
+          # scan exists for.
+          ./target/release/samyama pii-scan \
+            --waivers docs/pii-waivers.json \
+            snapshots/*.sgsnap
