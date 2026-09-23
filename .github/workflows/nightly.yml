@@ -88,12 +88,28 @@ jobs:
         working-directory: sdk/python
         run: |
           python -m venv .venv
-          .venv/bin/pip install --quiet maturin pytest
+          # ipython and pandas are what `test_notebook_magic.py` needs. They
+          # are installed rather than left to `importorskip`, because a test
+          # that skips in CI is a check that cannot fail: INT-09's magic could
+          # stop registering and this job would stay green.
+          .venv/bin/pip install --quiet maturin pytest ipython pandas
           VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --release
 
       - name: Tests that need the compiled binding
         working-directory: sdk/python
-        run: .venv/bin/python -m pytest -q tests/test_embedded.py tests/test_vector.py tests/test_async_client.py
+        # `-p no:randomly` is not needed, but `--strict-markers` and a zero
+        # tolerance for skips are: every suite named here must actually run.
+        run: |
+          .venv/bin/python -m pytest -q -rs \
+            tests/test_embedded.py tests/test_vector.py \
+            tests/test_async_client.py tests/test_notebook_magic.py \
+            | tee /tmp/pytest.out
+          if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then
+            echo "::error::a suite skipped. These tests exist because the thing \
+          they check is easy to break silently; a skip here is a green tick over \
+          an unrun check."
+            exit 1
+          fi
 
       - name: The conversions themselves
         working-directory: sdk/python
