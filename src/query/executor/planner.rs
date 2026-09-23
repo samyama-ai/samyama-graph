@@ -1209,6 +1209,22 @@ impl QueryPlanner {
             None => (query, Vec::new()),
         };
 
+        // Handle ANALYZE (LANG-13). Before SHOW INDEXES only because the
+        // checks are independent and this keeps the statement arms together.
+        if query.analyze {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::analyze_ops::AnalyzeOperator::new()),
+                output_columns: super::analyze_ops::analyze_columns(),
+                // A cache, not the graph. Marking it a write would put it
+                // behind write access and make it unavailable to the person
+                // diagnosing a slow read, which is who asks for it.
+                is_write: false,
+                candidates_evaluated: 0,
+                chosen_plan_cost: 0.0,
+                candidate_costs: Vec::new(),
+            });
+        }
+
         // Handle SHOW INDEXES
         if query.show_indexes {
             return Ok(ExecutionPlan {

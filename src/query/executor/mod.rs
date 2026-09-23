@@ -77,6 +77,7 @@
 //! heterogeneous collections of operators.
 
 pub mod adjacency_agg_detector;
+pub mod analyze_ops;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;

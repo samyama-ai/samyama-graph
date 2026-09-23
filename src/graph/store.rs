@@ -3885,6 +3885,15 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether a computed statistics set is currently cached.
+    ///
+    /// Exists for `ANALYZE`, which reports whether it replaced a cached set or
+    /// merely populated an empty cache. Those are different facts and a caller
+    /// diagnosing a bad plan wants to know which one happened.
+    pub fn has_cached_statistics(&self) -> bool {
+        self.statistics_cache.read().unwrap().is_some()
+    }
+
     pub fn invalidate_statistics_cache(&self) {
         self.bump_epoch();
         *self.statistics_cache.write().unwrap() = None;
