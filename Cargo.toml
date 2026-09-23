@@ -307,6 +307,10 @@ name = "cold_start_share"
 harness = false
 
 [[bench]]
+name = "traversal_parallelism"
+harness = false
+
+[[bench]]
 name = "ldbc_benchmark"
 harness = false
 
