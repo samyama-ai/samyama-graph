@@ -131,6 +131,8 @@ pub struct Query {
     pub show_hierarchy_indexes: bool,
     /// SHOW INDEXES flag
     pub show_indexes: bool,
+    /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
+    pub analyze: bool,
     /// SHOW CONSTRAINTS flag
     pub show_constraints: bool,
     /// PROFILE flag
@@ -1214,6 +1216,7 @@ impl Query {
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
             show_indexes: false,
+            analyze: false,
             show_constraints: false,
             profile: false,
             params: HashMap::new(),

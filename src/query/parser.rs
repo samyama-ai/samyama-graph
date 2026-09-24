@@ -521,6 +521,9 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::show_indexes_stmt => {
                 query.show_indexes = true;
             }
+            Rule::analyze_stmt => {
+                query.analyze = true;
+            }
             Rule::show_hierarchy_indexes_stmt => {
                 query.show_hierarchy_indexes = true;
             }
