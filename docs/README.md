@@ -1,6 +1,6 @@
 # Samyama Graph — Documentation Index
 
-**Last Updated:** 2026-05-19 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
+**Last updated:** 2026-09-23 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
 
 ## Primary sources
 
@@ -16,21 +16,50 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 
 ## Files in this directory
 
-### Core
-- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — ACID model in v1.0.0: MVCC (RC + SI + conflict detection), Samyama logical WAL, Raft replication.
-- **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
-- **[API-PARITY.md](./API-PARITY.md)** — generated capability x surface matrix (HTTP, RESP, Rust/Python/TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
-- **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage (~90%) vs Neo4j and FalkorDB; supported clauses, functions, remaining gaps.
-- **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK, etc.).
-- **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how Python / TypeScript SDKs, the CLI, and HTTP / RESP clients connect.
-- **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — end-to-end demo combining ingestion, federation, NLQ, and optimization.
+Every markdown file in this directory is listed below. If you add one, add a
+line here — an index that lists some of a directory is worse than no index,
+because a reader who does not find a document assumes it does not exist.
+
+### Start here
+
+- **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)** — what to do when something does not work.
+- **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK).
+- **[MIGRATING-FROM-NEO4J.md](./MIGRATING-FROM-NEO4J.md)** — bringing queries and data across, and the compatibility report that tells you what will run.
+- **[LEAVING-SAMYAMA.md](./LEAVING-SAMYAMA.md)** — getting your data out. Documented on purpose: an exit you cannot find is not an exit.
+
+### The query language
+
+- **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage against the TCK, with the pass rate quoted beside its coverage.
+- **[FULL-TEXT-SEARCH.md](./FULL-TEXT-SEARCH.md)** — the full-text index and how it is queried.
+- **[GDS-COMPATIBILITY.md](./GDS-COMPATIBILITY.md)** — which `gds.*` names resolve here, and which deliberately do not.
+- **[ALGORITHM-CONVENTIONS.md](./ALGORITHM-CONVENTIONS.md)** — directedness, weights, self-loops, disconnected components, tie-breaking.
+
+### Guarantees and behaviour under stress
+
+- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, Raft replication, and what each does not promise.
+- **[FAILURE-MODES.md](./FAILURE-MODES.md)** — how the engine behaves when things go wrong.
+- **[BI-CONNECTIVITY.md](./BI-CONNECTIVITY.md)** — connecting BI tools.
+
+### Data, provenance and privacy
+
+- **[DATA-HANDLING.md](./DATA-HANDLING.md)** — what leaves the machine and when; the authentication, TLS, audit and at-rest-encryption surfaces.
+- **[DATA-PROVENANCE.md](./DATA-PROVENANCE.md)** — how model-generated and ingested data are kept apart.
+- **[pii-waivers.json](./pii-waivers.json)** — findings from the published-snapshot PII scan that have been reviewed and accepted, each with its reason.
+
+### Interfaces and operations
+
+- **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how the Python / TypeScript SDKs, the CLI, and the HTTP / RESP surfaces connect.
+- **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — the versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
+- **[API-PARITY.md](./API-PARITY.md)** — generated capability-by-surface matrix (HTTP, RESP, Rust / Python / TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
+- **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive results (SF1 and SF10).
+- **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — an end-to-end demo combining ingestion, federation, NLQ and optimization.
 
 ### Sub-directories
-- **[ADR/](./ADR/)** — Architecture Decision Records (30 ADRs).
-- **[test-results/](./test-results/)** — test execution reports.
-- **[optimization/](./optimization/)** — optimization case study + workflow notes (see also `crates/samyama-optimization/` and ADR-026).
-- **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive benchmark results (SF1 + SF10).
-- **[archive/](./archive/)** — historical documents and earlier-phase records.
+
+- **[ADR/](./ADR/)** — Architecture Decision Records. A record of why a decision was made *when it was made*; they are not refreshed, and old ones are not stale.
+- **[optimization/](./optimization/)** — optimization case study (see also `crates/samyama-optimization/` and ADR-026).
+- **[release-notes/](./release-notes/)** — per-release notes.
+- **[demos/](./demos/)** — recordings used by the top-level README.
 
 ### Retired
 
