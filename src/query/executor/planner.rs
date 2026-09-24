@@ -9196,6 +9196,7 @@ mod tests {
             show_indexes: false,
             show_constraints: false,
             profile: false,
+            analyze: false,
             params: std::collections::HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
