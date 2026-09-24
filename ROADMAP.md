@@ -1,6 +1,24 @@
-# Samyama Graph Database Roadmap
+# Samyama Graph Database — development history and direction
 
-This document outlines the development journey of Samyama, from its inception as a property graph engine to its current state as a distributed, AI-native Graph Vector Database.
+**Reviewed 2026-09-23 against v1.9.0.**
+
+Most of this document is **history**: the phases the engine went through to get
+here. It is kept because "how did this get built" is a fair question, and the
+answer is not otherwise written down in one place.
+
+For what is happening *now*, these are the live signals, and they are live
+because they are maintained as a side effect of the work rather than by editing
+this file:
+
+| Question | Where it is answered |
+|---|---|
+| What is being worked on | [open issues](https://github.com/samyama-ai/samyama-graph/issues) — each is a concrete unit of work, and the pull request that closes it names it |
+| What shipped, and when | [releases](https://github.com/samyama-ai/samyama-graph/releases) and `docs/release-notes/` |
+| What the engine actually does today | `docs/CYPHER_COMPATIBILITY.md`, `docs/BENCHMARKS.md`, and the conformance scorecard |
+
+A roadmap that is edited by hand goes stale between releases; this one had gone
+203 days without a change while the engine moved four minor versions. So it no
+longer tries to be the plan of record.
 
 ---
 
@@ -111,10 +129,13 @@ This document outlines the development journey of Samyama, from its inception as
 
 ### 1. Time-Travel / Temporal Queries ⏳
 
-### 3. Graph-Level Sharding
+### 2. Graph-Level Sharding
 **Goal**: Massive scale for single graphs.
 *   **Plan**: Partition *single* large graphs across nodes using Min-Cut algorithms (Metis), enabling trillion-edge scale (complexity: High).
 
 ---
 
-> **Detailed Backlog**: For a comprehensive, prioritized list of all planned work (~100 items across 13 categories), see [`samyama-cloud/docs/BACKLOG.md`](https://git.samyama.ai/samyama-ai/samyama-cloud/src/branch/main/docs/BACKLOG.md).
+> **Planned work** lives in [the issue tracker](https://github.com/samyama-ai/samyama-graph/issues).
+> A fuller internal backlog exists but is not public, so it is not linked here —
+> a link everyone outside the project hits an auth wall on is a worse answer
+> than saying where the public answer is.
