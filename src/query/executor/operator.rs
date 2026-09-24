@@ -7000,6 +7000,15 @@ pub struct ExpandOperator {
     current_edges: Vec<(crate::graph::EdgeId, NodeId, NodeId)>,
     /// Current edge index
     edge_index: usize,
+    /// Rows a morsel produced that the consumer has not asked for yet.
+    ///
+    /// A morsel is expanded whole -- that is what gives every rayon task enough
+    /// work to be worth the handoff -- so it can produce more rows than the
+    /// batch that triggered it. They are handed out in input order by
+    /// `take_pending`, never dropped (#1457).
+    pending_out: Vec<Record>,
+    /// How much of `pending_out` has been handed out.
+    pending_index: usize,
     /// Path variable name for named paths (CY-04)
     path_variable: Option<String>,
     /// `edge_types` resolved to interned ids, cached after the first use.
@@ -7097,6 +7106,8 @@ impl ExpandOperator {
             current_record: None,
             current_edges: Vec::new(),
             edge_index: 0,
+            pending_out: Vec::new(),
+            pending_index: 0,
             path_variable: None,
             type_ids: None,
         }
@@ -7191,110 +7202,58 @@ impl ExpandOperator {
     /// Consumes `current_record`, so it fires at most once per source row; the
     /// caller then falls through to pulling the next input.
     fn take_unmatched_optional_row(&mut self) -> Option<Record> {
-        let null_vars = self.optional_null_vars.as_ref()?;
+        self.optional_null_vars.as_ref()?;
         if self.emitted_for_current {
             return None;
         }
         let base = self.current_record.take()?;
-        let mut rec = base.clone_with_capacity(null_vars.len());
-        for v in null_vars {
-            rec.bind(v.clone(), Value::Null);
-        }
+        let rec = self.view().unmatched_optional_row(&base);
         self.emitted_for_current = true;
-        Some(rec)
+        rec
     }
 
-    /// Build the output record for one traversed edge.
+    /// The read-only half of this operator, as one borrow.
     ///
-    /// **One implementation, called by both `next` and `next_batch`.** Those two
-    /// carried separate copies of this logic, and the copies had already drifted
-    /// once: the isomorphism bookkeeping and the `OPTIONAL MATCH` unmatched-row
-    /// rule each have a comment in the batch path saying that missing them
-    /// "would make the answer depend on whether the plan happened to run
-    /// batched", which is the shape of #684. A rule that has to be remembered in
-    /// two places is a rule that will be applied in one.
-    ///
-    /// Everything here is a function of `base`, the edge, and the store, with no
-    /// cursor state -- which is also what makes a parallel caller possible
-    /// (#1457). It is the reason to extract it now rather than alongside that
-    /// change.
-    fn expanded_record(
-        &self,
-        base: &Record,
-        edge_id: crate::graph::EdgeId,
-        src: NodeId,
-        tgt: NodeId,
-        store: &GraphStore,
-    ) -> Record {
-        // Room for the target, and for the edge and path variables when the
-        // pattern names them -- otherwise the first bind below reallocates a Vec
-        // that was cloned at exact capacity (#562).
-        let extra = 1
-            + self.edge_var.is_some() as usize
-            + self.path_variable.is_some() as usize;
-        let mut new_record = base.clone_with_capacity(extra);
-
-        let target_id = match self.direction {
-            Direction::Outgoing => tgt,
-            Direction::Incoming => src,
-            Direction::Both => {
-                let source_val = new_record.get(&self.source_var).unwrap();
-                let source_id = source_val.node_id().unwrap();
-                if src == source_id { tgt } else { src }
-            }
-        };
-
-        new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
-
-        if let Some(edge_var) = &self.edge_var {
-            // Resolved here rather than carried: only a pattern that names the
-            // edge ever reads its type.
-            let edge_type = store
-                .get_edge_type(edge_id)
-                .unwrap_or_else(|| EdgeType::new(""));
-            new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
+    /// Everything the expansion of a single source record reads and nothing it
+    /// writes. It exists because `ExpandOperator` itself cannot cross a thread
+    /// boundary: `input` is a `Box<dyn PhysicalOperator>` and the trait is
+    /// `Send`, not `Sync`, so `&self` is not shareable however pure the method
+    /// is. The view is `Sync` by construction -- every field is a shared borrow
+    /// of a `Sync` value or a `Copy` scalar -- which is what lets one morsel be
+    /// expanded across rayon tasks (#1457).
+    fn view(&self) -> ExpandView<'_> {
+        ExpandView {
+            source_var: &self.source_var,
+            target_var: &self.target_var,
+            edge_var: &self.edge_var,
+            target_labels: &self.target_labels,
+            target_props: &self.target_props,
+            target_ids: self.target_ids.as_ref(),
+            type_ids: self.type_ids.as_deref(),
+            type_index: &self.type_index,
+            path_variable: &self.path_variable,
+            optional_null_vars: self.optional_null_vars.as_deref(),
+            target_bound_var: &self.target_bound_var,
+            co_neighbour_var: &self.co_neighbour_var,
+            // `Direction` is a three-variant enum that is not `Copy`; the
+            // clone is a tag copy.
+            direction: self.direction.clone(),
+            co_neighbour_dir: self.co_neighbour_dir.clone(),
+            track_edges: self.track_edges,
+            starts_clause: self.starts_clause,
         }
-
-        // CY-04: materialize a named path variable.
-        if let Some(ref path_var) = self.path_variable {
-            let source_id = new_record.get(&self.source_var)
-                .and_then(|v| v.node_id())
-                .unwrap_or(src);
-            let extended =
-                extend_path(new_record.get(path_var), source_id, target_id, edge_id);
-            new_record.bind(path_var.clone(), extended);
-        }
-
-        // Relationship isomorphism (#684): remember what this pattern has walked
-        // so a later segment cannot take the same edge back.
-        if self.track_edges {
-            if self.starts_clause {
-                new_record.clear_used_edges();
-            }
-            new_record.mark_edge_used(edge_id);
-        }
-
-        new_record
     }
 
-    fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
-        let source_val = record.get(&self.source_var)
-            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
-
-        // Expanding from null yields nothing; it is not an error. An
-        // `OPTIONAL MATCH` that matched nothing binds null, and a following
-        // `MATCH (a)-->(b)` on that row must simply produce no rows — Cypher
-        // says so, and raising "a is not a node" fails the whole query over a
-        // row that should quietly disappear (#671).
-        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
-            self.current_edges.clear();
-            self.edge_index = 0;
-            return Ok(());
-        }
-
-        let node_id = source_val.node_id()
-            .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
-
+    /// The bookkeeping the walk needs that is *not* per-record: resolving the
+    /// edge-type filter once, counting rows towards the type index, and
+    /// building that index when the count clears the threshold.
+    ///
+    /// Split out of `load_edges` so a morsel pays it once for `rows` records
+    /// instead of once per record, and -- the reason it has to be split -- so
+    /// everything left in the walk is `&self` and can run on another thread.
+    /// Called with `rows = 1` from the row-at-a-time path, which makes it
+    /// exactly the code that used to be inline there.
+    fn prepare_walk(&mut self, store: &GraphStore, rows: usize) {
         // Filter on the interned edge-type id *during* the adjacency walk, and
         // resolve the `EdgeType` string only for the edges that survive.
         //
@@ -7307,89 +7266,18 @@ impl ExpandOperator {
         // strings to keep 41 (#520).
         self.ensure_type_ids(store);
 
-        // Refill the existing buffer. Allocating a fresh `Vec` per source
-        // record meant one allocation plus roughly log2(degree) reallocations
-        // as it doubled, and a free of the previous one -- once per source, for
-        // a buffer that is the same shape every time (#564).
-        let mut collected = std::mem::take(&mut self.current_edges);
-        collected.clear();
-        let type_filter = self.type_ids.as_deref();
-
-        // Target-label sets, resolved once per source record rather than per
-        // edge, and applied *during* the walk rather than by a `retain`
-        // afterwards.
-        //
-        // The old code collected every incident edge and then retained the ones
-        // whose target carried the labels, testing each with
-        // `get_node(id).has_label(label)` -- a `Vec` index, a version-chain
-        // walk, a 128-byte `Node`, and a `HashSet<Label>` probe hashing a
-        // *string*. At 2.22M edges visited per LDBC IC9 run that was **26.7% of
-        // the profile**, the single largest symbol, ahead of every property
-        // read. Probing `label_index` by `NodeId` instead is one hash of a u64
-        // (#592).
-        //
-        // A label no node carries yields `None`, which matches nothing -- so
-        // the whole expansion is empty, which is correct and is why the empty
-        // case is distinguished from "no labels required".
-        // ...and by a bit rather than a hash, since #592's `HashSet<NodeId>`
-        // probe is itself a random access into a structure the size of the
-        // label. Measured, that grows 10.2 -> 36.7 ns per candidate edge as the
-        // label goes from 300k to 1.2M nodes — 35% of the whole traversal —
-        // while the storage walk under it stays flat (#730).
-        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> =
-            if self.target_labels.is_empty() {
-                None
-            } else {
-                Some(
-                    self.target_labels
-                        .iter()
-                        .map(|l| store.label_bitset(l))
-                        .collect::<Option<Vec<_>>>()
-                        .unwrap_or_default(),
-                )
-            };
-        let target_props = &self.target_props;
-        let target_ids = self.target_ids.as_ref();
-        // Relationship isomorphism (#684): an edge this pattern already walked
-        // is not a candidate. Checked here, during the adjacency walk, so a
-        // rejected edge never becomes a record.
-        //
-        // Filtered to the edges this expand could actually walk. An edge of a
-        // type outside `type_filter` is not a candidate for re-traversal, so
-        // keeping it only lengthens a `contains` that runs **per candidate
-        // edge**. On LDBC IC6 the clause walks `HAS_TAG`, `HAS_CREATOR` and
-        // `KNOWS`, so each expand inherits edges it could never take; the same
-        // reasoning applied to `VarLengthExpandOperator` is what took IC6 from
-        // forty minutes back to 309 ms (#734).
-        let used_owned: Vec<crate::graph::EdgeId>;
-        let used_edges: &[crate::graph::EdgeId] = if self.track_edges && !self.starts_clause {
-            let inherited = record.used_edge_slice();
-            if inherited.is_empty() {
-                &[]
-            } else {
-                used_owned = inherited
-                    .iter()
-                    .copied()
-                    .filter(|&e| store.edge_traversable_by(e, type_filter))
-                    .collect();
-                &used_owned
-            }
-        } else {
-            &[]
+        // Only for a single type: with two, the union would have to be merged
+        // and the saving no longer obviously beats the walk.
+        let single_type = match self.type_ids.as_deref() {
+            Some([t]) => Some(*t),
+            _ => None,
         };
+        self.rows_seen += rows;
         // A selective type against a high-degree node is the case #738 is
         // about: IC11 visits ~6.6M edges to use ~29,000, because an LDBC
         // `Person` has ~495 outgoing edges of which 2.2 are `WORK_AT`. Once
         // enough rows have gone through to pay for it, ask the store for an
         // index of just this type and walk that instead.
-        //
-        // Only for a single type: with two, the union would have to be merged
-        // and the saving no longer obviously beats the walk.
-        let single_type = match type_filter {
-            Some([t]) => Some(*t),
-            _ => None,
-        };
-        self.rows_seen += 1;
         if self.type_index.is_none() && self.rows_seen > Self::TYPE_INDEX_AFTER_ROWS {
             if let Some(t) = single_type {
                 // An undirected pattern walks both sides, so it needs both
@@ -7431,7 +7319,364 @@ impl ExpandOperator {
                 self.type_index = Some(if usable { Some((out, inc)) } else { None });
             }
         }
-        let typed = match (&self.type_index, single_type) {
+    }
+
+    /// Refill `current_edges` from one source record and rewind the cursor.
+    ///
+    /// The buffer is reused, not reallocated. Allocating a fresh `Vec` per
+    /// source record meant one allocation plus roughly log2(degree)
+    /// reallocations as it doubled, and a free of the previous one -- once per
+    /// source, for a buffer that is the same shape every time (#564).
+    fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        self.prepare_walk(store, 1);
+        let mut buf = std::mem::take(&mut self.current_edges);
+        let result = self.view().collect_edges_into(record, store, &mut buf);
+        self.current_edges = buf;
+        self.edge_index = 0;
+        result
+    }
+
+    /// Expand a morsel of source records into output rows, in input order.
+    ///
+    /// Above `expand_parallel_rows()` source records the morsel is split across
+    /// rayon tasks. Two things decide whether that is allowed to be a parallel
+    /// loop at all:
+    ///
+    /// * **Order.** `collect()` into a `Vec` restores input order whatever
+    ///   order the tasks finished in, and the per-record results are flattened
+    ///   afterwards -- so a batched run and a row-at-a-time run return the same
+    ///   rows in the same sequence. `CH-DETERM-THREADS` gates exactly this.
+    ///   `for_each` into a shared `Vec` would not, at any thread count.
+    /// * **The edge buffer.** `map_init` gives each rayon *task* one buffer,
+    ///   reused across every record that task takes. A `Vec::new()` inside the
+    ///   closure would be one allocation per source record, which is the
+    ///   allocation #520 and #564 removed, on the same path.
+    fn expand_morsel(
+        &mut self,
+        records: &[Record],
+        store: &GraphStore,
+    ) -> ExecutionResult<Vec<Record>> {
+        self.prepare_walk(store, records.len());
+        let view = self.view();
+        let per_record: Vec<ExecutionResult<Vec<Record>>> =
+            if records.len() >= expand_parallel_rows() {
+                records
+                    .par_iter()
+                    .map_init(Vec::new, |buf, rec| view.expand_one(rec, store, buf))
+                    .collect()
+            } else {
+                // One buffer for the whole morsel, the sequential equivalent of
+                // what `map_init` hands each task.
+                let mut buf = Vec::new();
+                records
+                    .iter()
+                    .map(|rec| view.expand_one(rec, store, &mut buf))
+                    .collect()
+            };
+        let mut out = Vec::with_capacity(records.len());
+        for rows in per_record {
+            out.extend(rows?);
+        }
+        Ok(out)
+    }
+
+    /// Hand out up to `n` of the rows a morsel already produced.
+    fn take_pending(&mut self, n: usize) -> Option<RecordBatch> {
+        if self.pending_index >= self.pending_out.len() {
+            return None;
+        }
+        let end = (self.pending_index + n).min(self.pending_out.len());
+        let records: Vec<Record> = self.pending_out[self.pending_index..end].to_vec();
+        self.pending_index = end;
+        if self.pending_index >= self.pending_out.len() {
+            self.pending_out.clear();
+            self.pending_index = 0;
+        }
+        Some(RecordBatch { records, columns: Vec::new(), plan_hash: None })
+    }
+
+    /// Whether the row-at-a-time cursor still *owes* rows.
+    ///
+    /// Not "has a current record": a source record whose edges are all emitted
+    /// stays in `current_record`, and treating that as active would send every
+    /// later batch down the row-at-a-time path for the rest of the query. What
+    /// is owed is the unread tail of `current_edges`, plus the one null row an
+    /// `OPTIONAL MATCH` source that matched nothing has not emitted yet.
+    fn cursor_active(&self) -> bool {
+        self.edge_index < self.current_edges.len()
+            || (self.optional_null_vars.is_some()
+                && self.current_record.is_some()
+                && !self.emitted_for_current)
+    }
+}
+
+/// Source records pulled per morsel.
+///
+/// The consumer asked for `batch_size` output rows and this asks its input for
+/// at most that many *source* rows, so the input is never pulled harder than
+/// the row-at-a-time path pulled it. The difference is that every edge of those
+/// sources is expanded rather than stopping at `batch_size` rows: the surplus
+/// is kept and handed out by the next call, so it is wasted only by a query
+/// that stops early.
+const EXPAND_MORSEL_ROWS: usize = 256;
+
+/// Source records in a morsel below which expansion stays on one thread.
+///
+/// Per-record work here is a neighbour walk plus a record clone -- small
+/// enough that a short morsel is cheaper to expand in place than to hand to
+/// rayon.
+const EXPAND_PARALLEL_ROWS: usize = 64;
+
+/// `SAMYAMA_EXPAND_PARALLEL_ROWS` overrides the threshold. `0` forces every
+/// morsel onto the parallel path and a large value forces every morsel off it,
+/// which is how the two paths are tested against each other: they have to
+/// return the same rows in the same order, and a test run twice with this set
+/// either way is the check that says so.
+///
+/// Unset in normal use. Read once -- the threshold is a constant of the
+/// process, not of the query.
+fn expand_parallel_rows() -> usize {
+    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| {
+        std::env::var("SAMYAMA_EXPAND_PARALLEL_ROWS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(EXPAND_PARALLEL_ROWS)
+    })
+}
+
+/// The read-only half of `ExpandOperator`; see `ExpandOperator::view`.
+struct ExpandView<'a> {
+    source_var: &'a Arc<str>,
+    target_var: &'a Arc<str>,
+    edge_var: &'a Option<Arc<str>>,
+    target_labels: &'a [Label],
+    target_props: &'a [(String, PropertyValue)],
+    target_ids: Option<&'a std::collections::HashSet<NodeId>>,
+    /// `edge_types` already resolved; `None` is the wildcard.
+    type_ids: Option<&'a [u16]>,
+    type_index: &'a TypeIndexSlot,
+    path_variable: &'a Option<String>,
+    optional_null_vars: Option<&'a [String]>,
+    target_bound_var: &'a Option<Arc<str>>,
+    co_neighbour_var: &'a Option<Arc<str>>,
+    direction: Direction,
+    co_neighbour_dir: Direction,
+    track_edges: bool,
+    starts_clause: bool,
+}
+
+impl ExpandView<'_> {
+    /// Build the output record for one traversed edge.
+    ///
+    /// **One implementation, called by both `next` and `next_batch`.** Those two
+    /// carried separate copies of this logic, and the copies had already drifted
+    /// once: the isomorphism bookkeeping and the `OPTIONAL MATCH` unmatched-row
+    /// rule each have a comment in the batch path saying that missing them
+    /// "would make the answer depend on whether the plan happened to run
+    /// batched", which is the shape of #684. A rule that has to be remembered in
+    /// two places is a rule that will be applied in one.
+    ///
+    /// Everything here is a function of `base`, the edge, and the store, with no
+    /// cursor state -- which is also what makes a parallel caller possible
+    /// (#1457).
+    fn expanded_record(
+        &self,
+        base: &Record,
+        edge_id: crate::graph::EdgeId,
+        src: NodeId,
+        tgt: NodeId,
+        store: &GraphStore,
+    ) -> Record {
+        // Room for the target, and for the edge and path variables when the
+        // pattern names them -- otherwise the first bind below reallocates a Vec
+        // that was cloned at exact capacity (#562).
+        let extra = 1
+            + self.edge_var.is_some() as usize
+            + self.path_variable.is_some() as usize;
+        let mut new_record = base.clone_with_capacity(extra);
+
+        let target_id = match self.direction {
+            Direction::Outgoing => tgt,
+            Direction::Incoming => src,
+            Direction::Both => {
+                let source_val = new_record.get(self.source_var).unwrap();
+                let source_id = source_val.node_id().unwrap();
+                if src == source_id { tgt } else { src }
+            }
+        };
+
+        new_record.bind(Arc::clone(self.target_var), Value::NodeRef(target_id));
+
+        if let Some(edge_var) = self.edge_var {
+            // Resolved here rather than carried: only a pattern that names the
+            // edge ever reads its type.
+            let edge_type = store
+                .get_edge_type(edge_id)
+                .unwrap_or_else(|| EdgeType::new(""));
+            new_record.bind(Arc::clone(edge_var), Value::EdgeRef(edge_id, src, tgt, edge_type));
+        }
+
+        // CY-04: materialize a named path variable.
+        if let Some(path_var) = self.path_variable {
+            let source_id = new_record.get(self.source_var)
+                .and_then(|v| v.node_id())
+                .unwrap_or(src);
+            let extended =
+                extend_path(new_record.get(path_var), source_id, target_id, edge_id);
+            new_record.bind(path_var.clone(), extended);
+        }
+
+        // Relationship isomorphism (#684): remember what this pattern has walked
+        // so a later segment cannot take the same edge back.
+        if self.track_edges {
+            if self.starts_clause {
+                new_record.clear_used_edges();
+            }
+            new_record.mark_edge_used(edge_id);
+        }
+
+        new_record
+    }
+
+    /// The null-filled row an `OPTIONAL MATCH` owes a source record that matched
+    /// nothing. `None` when this expand is not optional.
+    fn unmatched_optional_row(&self, base: &Record) -> Option<Record> {
+        let null_vars = self.optional_null_vars?;
+        let mut rec = base.clone_with_capacity(null_vars.len());
+        for v in null_vars {
+            rec.bind(v.clone(), Value::Null);
+        }
+        Some(rec)
+    }
+
+    /// Every output row one source record produces, in walk order.
+    ///
+    /// `buf` is the caller's edge buffer, refilled rather than replaced -- one
+    /// per rayon task on the parallel path, one for the whole morsel on the
+    /// sequential one. Never one per record: that is the allocation #520 and
+    /// #564 took out.
+    fn expand_one(
+        &self,
+        record: &Record,
+        store: &GraphStore,
+        buf: &mut Vec<(crate::graph::EdgeId, NodeId, NodeId)>,
+    ) -> ExecutionResult<Vec<Record>> {
+        self.collect_edges_into(record, store, buf)?;
+        if buf.is_empty() {
+            // Same rule as the single-row path: an OPTIONAL MATCH source row
+            // that matched nothing still emits once. Missing it here would make
+            // the answer depend on whether the plan happened to run batched,
+            // which is the shape of #684.
+            return Ok(self.unmatched_optional_row(record).into_iter().collect());
+        }
+        let mut out = Vec::with_capacity(buf.len());
+        for &(edge_id, src, tgt) in buf.iter() {
+            out.push(self.expanded_record(record, edge_id, src, tgt, store));
+        }
+        Ok(out)
+    }
+
+    /// Walk one source record's adjacency and collect the edges that survive
+    /// every filter, into `out`.
+    ///
+    /// `out` is cleared first and is the caller's to reuse. Nothing here writes
+    /// to the operator: the mutable part of the walk -- the type-id resolution
+    /// and the type-index decision -- is `ExpandOperator::prepare_walk`, run
+    /// before the morsel.
+    fn collect_edges_into(
+        &self,
+        record: &Record,
+        store: &GraphStore,
+        out: &mut Vec<(crate::graph::EdgeId, NodeId, NodeId)>,
+    ) -> ExecutionResult<()> {
+        out.clear();
+
+        let source_val = record.get(self.source_var)
+            .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
+
+        // Expanding from null yields nothing; it is not an error. An
+        // `OPTIONAL MATCH` that matched nothing binds null, and a following
+        // `MATCH (a)-->(b)` on that row must simply produce no rows — Cypher
+        // says so, and raising "a is not a node" fails the whole query over a
+        // row that should quietly disappear (#671).
+        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
+            return Ok(());
+        }
+
+        let node_id = source_val.node_id()
+            .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
+
+        let collected = out;
+        let type_filter = self.type_ids;
+
+        // Target-label sets, resolved once per source record rather than per
+        // edge, and applied *during* the walk rather than by a `retain`
+        // afterwards.
+        //
+        // The old code collected every incident edge and then retained the ones
+        // whose target carried the labels, testing each with
+        // `get_node(id).has_label(label)` -- a `Vec` index, a version-chain
+        // walk, a 128-byte `Node`, and a `HashSet<Label>` probe hashing a
+        // *string*. At 2.22M edges visited per LDBC IC9 run that was **26.7% of
+        // the profile**, the single largest symbol, ahead of every property
+        // read. Probing `label_index` by `NodeId` instead is one hash of a u64
+        // (#592).
+        //
+        // A label no node carries yields `None`, which matches nothing -- so
+        // the whole expansion is empty, which is correct and is why the empty
+        // case is distinguished from "no labels required".
+        // ...and by a bit rather than a hash, since #592's `HashSet<NodeId>`
+        // probe is itself a random access into a structure the size of the
+        // label. Measured, that grows 10.2 -> 36.7 ns per candidate edge as the
+        // label goes from 300k to 1.2M nodes — 35% of the whole traversal —
+        // while the storage walk under it stays flat (#730).
+        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> =
+            if self.target_labels.is_empty() {
+                None
+            } else {
+                Some(
+                    self.target_labels
+                        .iter()
+                        .map(|l| store.label_bitset(l))
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default(),
+                )
+            };
+        let target_props = self.target_props;
+        let target_ids = self.target_ids;
+        // Relationship isomorphism (#684): an edge this pattern already walked
+        // is not a candidate. Checked here, during the adjacency walk, so a
+        // rejected edge never becomes a record.
+        //
+        // Filtered to the edges this expand could actually walk. An edge of a
+        // type outside `type_filter` is not a candidate for re-traversal, so
+        // keeping it only lengthens a `contains` that runs **per candidate
+        // edge**. On LDBC IC6 the clause walks `HAS_TAG`, `HAS_CREATOR` and
+        // `KNOWS`, so each expand inherits edges it could never take; the same
+        // reasoning applied to `VarLengthExpandOperator` is what took IC6 from
+        // forty minutes back to 309 ms (#734).
+        let used_owned: Vec<crate::graph::EdgeId>;
+        let used_edges: &[crate::graph::EdgeId] = if self.track_edges && !self.starts_clause {
+            let inherited = record.used_edge_slice();
+            if inherited.is_empty() {
+                &[]
+            } else {
+                used_owned = inherited
+                    .iter()
+                    .copied()
+                    .filter(|&e| store.edge_traversable_by(e, type_filter))
+                    .collect();
+                &used_owned
+            }
+        } else {
+            &[]
+        };
+        let single_type = match type_filter {
+            Some([t]) => Some(*t),
+            _ => None,
+        };
+        let typed = match (self.type_index, single_type) {
             (Some(Some(pair)), Some(_)) => Some(pair.clone()),
             _ => None,
         };
@@ -7647,9 +7892,6 @@ impl ExpandOperator {
         // compacted the vector, and its `Direction::Both` arm ran
         // `store.get_node(node_id)` per edge purely to recover a value it
         // already had (#592).
-        self.current_edges = collected;
-
-        self.edge_index = 0;
         Ok(())
     }
 }
@@ -7670,6 +7912,19 @@ impl PhysicalOperator for ExpandOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
+            // A morsel expanded by a previous `next_batch` may still owe rows.
+            // Draining it here is what lets the two entry points be mixed on
+            // one operator without losing or reordering a row.
+            if self.pending_index < self.pending_out.len() {
+                let rec = self.pending_out[self.pending_index].clone();
+                self.pending_index += 1;
+                if self.pending_index >= self.pending_out.len() {
+                    self.pending_out.clear();
+                    self.pending_index = 0;
+                }
+                return Ok(Some(rec));
+            }
+
             // If we have edges from current record, return them
             if self.edge_index < self.current_edges.len() {
                 let (edge_id, src, tgt) = self.current_edges[self.edge_index];
@@ -7678,7 +7933,7 @@ impl PhysicalOperator for ExpandOperator {
                 // `&Record` out of `self`, and `expanded_record` also borrows
                 // `self` -- both immutable, so no clone of the source row.
                 let base = self.current_record.as_ref().unwrap();
-                let new_record = self.expanded_record(base, edge_id, src, tgt, store);
+                let new_record = self.view().expanded_record(base, edge_id, src, tgt, store);
 
                 self.emitted_for_current = true;
                 return Ok(Some(new_record));
@@ -7701,54 +7956,65 @@ impl PhysicalOperator for ExpandOperator {
         }
     }
 
+    /// Pull a morsel of source records and expand it, rather than pulling one
+    /// source record at a time.
+    ///
+    /// The row-at-a-time input pull is what kept expansion on one core: a
+    /// source with few edges never gave the inner loop enough work to split,
+    /// whatever the batch size above it (#1457). `input.next_batch` makes a
+    /// morsel of independent source records available at once, and
+    /// `expand_morsel` is where the parallelism and the order guarantee live.
+    ///
+    /// The cursor fields are still here because `next()` and `next_batch()` may
+    /// be called against the same operator; a half-finished source record is
+    /// drained the old way before a new morsel starts.
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
-        let mut expanded_records = Vec::with_capacity(batch_size);
+        if let Some(batch) = self.take_pending(batch_size) {
+            return Ok(Some(batch));
+        }
 
-        while expanded_records.len() < batch_size {
-            // If we have edges from current record, process them
-            if self.edge_index < self.current_edges.len() {
-                let take = (batch_size - expanded_records.len()).min(self.current_edges.len() - self.edge_index);
-
-                for i in 0..take {
-                    let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
-                    // Same one implementation the row-at-a-time path uses. The
-                    // isomorphism bookkeeping and the path-variable handling
-                    // used to be written out again here, and the comments said
-                    // why that was dangerous rather than removing the danger.
-                    let base = self.current_record.as_ref().unwrap();
-                    expanded_records.push(
-                        self.expanded_record(base, edge_id, src, tgt, store));
+        if self.cursor_active() {
+            let mut expanded_records = Vec::new();
+            while expanded_records.len() < batch_size && self.cursor_active() {
+                match self.next(store)? {
+                    Some(record) => expanded_records.push(record),
+                    None => break,
                 }
-                self.edge_index += take;
-                self.emitted_for_current = true;
-            } else {
-                // Same rule as the single-row path: an OPTIONAL MATCH source
-                // row that matched nothing still emits once. Missing it here
-                // would make the answer depend on whether the plan happened to
-                // run batched, which is the shape of #684.
-                if let Some(row) = self.take_unmatched_optional_row() {
-                    expanded_records.push(row);
-                    continue;
-                }
-                // Need new input record
-                if let Some(record) = self.input.next(store)? {
-                    self.current_record = Some(record.clone());
-                    self.emitted_for_current = false;
-                    self.load_edges(&record, store)?;
-                } else {
-                    break;
-                }
+            }
+            if !expanded_records.is_empty() {
+                return Ok(Some(RecordBatch {
+                    records: expanded_records,
+                    columns: Vec::new(),
+                    plan_hash: None,
+                }));
             }
         }
 
-        if expanded_records.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(RecordBatch {
-                records: expanded_records,
-                columns: Vec::new(), // Columns determined by output variables
-                plan_hash: None,
-            }))
+        // A morsel can be entirely non-matching -- every source record with no
+        // edge and no `OPTIONAL MATCH` owed -- so an empty expansion means
+        // "pull the next morsel", not "the input is finished". Returning `None`
+        // there would truncate the result.
+        loop {
+            let morsel = batch_size.min(EXPAND_MORSEL_ROWS);
+            let Some(batch) = self.input.next_batch(store, morsel)? else {
+                return Ok(None);
+            };
+            if batch.records.is_empty() {
+                return Ok(None);
+            }
+            let rows = self.expand_morsel(&batch.records, store)?;
+            // The morsel consumed whole source records, so the row-at-a-time
+            // cursor owes nothing. Left stale it would let a later `next()`
+            // emit a second null row for a source this morsel already answered.
+            self.current_record = None;
+            self.current_edges.clear();
+            self.edge_index = 0;
+            self.emitted_for_current = true;
+            if !rows.is_empty() {
+                self.pending_out = rows;
+                self.pending_index = 0;
+                return Ok(self.take_pending(batch_size));
+            }
         }
     }
 
@@ -7757,6 +8023,8 @@ impl PhysicalOperator for ExpandOperator {
         self.current_record = None;
         self.current_edges.clear();
         self.edge_index = 0;
+        self.pending_out.clear();
+        self.pending_index = 0;
         // Without this, a re-run would think the first source record had
         // already emitted and would swallow its null row (#726).
         self.emitted_for_current = false;
