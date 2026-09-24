@@ -1,6 +1,6 @@
 //! PageRank algorithm implementation
 //!
-//! Implements REQ-ALGO-001: Node centrality
+//! Node centrality. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::{GraphView, NodeId};
 use std::collections::HashMap;
