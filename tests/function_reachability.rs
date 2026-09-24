@@ -26,11 +26,40 @@ use std::path::Path;
 /// the string literals. If the dispatcher is restructured this finds nothing
 /// and the test says so loudly rather than passing on an empty set — a test
 /// that checks nothing is the failure this file exists to prevent.
+///
+/// **Scoped by brace depth to that one match.** It used to take
+/// `&src[start..]` — everything from the match to the end of the file — and so
+/// also collected the arms of `AlgorithmOperator::is_algorithm`, which lists
+/// *procedure* names reached as `CALL algo.<name>(...)` and never as scalar
+/// functions. Those names are not what this test is about, and treating them
+/// as functions made ML-06 (#1445) fail for adding `fastrp` and `node2vec` to
+/// a procedure list, which was correct code.
 fn implemented_function_names(src: &str) -> Vec<String> {
     let Some(start) = src.find("match lowered.as_str() {") else {
         return Vec::new();
     };
-    let body = &src[start..];
+    // Walk from the match's opening brace to its matching close. Braces inside
+    // string literals and char literals would break a naive count; the arms
+    // here contain neither, and if that changes the depth goes wrong in the
+    // direction of reading *less*, which shows up as the >50 guard below
+    // firing rather than as a silent pass.
+    let open = start + src[start..].find('{').expect("the match has a brace");
+    let mut depth = 0i32;
+    let mut end = src.len();
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &src[open..end];
     let mut names = Vec::new();
     for line in body.lines() {
         let t = line.trim_start();
