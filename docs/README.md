@@ -51,6 +51,7 @@ because a reader who does not find a document assumes it does not exist.
 - **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how the Python / TypeScript SDKs, the CLI, and the HTTP / RESP surfaces connect.
 - **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — the versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
 - **[API-PARITY.md](./API-PARITY.md)** — generated capability-by-surface matrix (HTTP, RESP, Rust / Python / TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
+- **[CONSTRAINED-CLIENTS.md](./CONSTRAINED-CLIENTS.md)** — writing to an Edge node from an ESP32 or Arduino-class device over RESP, and why that surface has no authentication.
 - **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive results (SF1 and SF10).
 - **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — an end-to-end demo combining ingestion, federation, NLQ and optimization.
 
