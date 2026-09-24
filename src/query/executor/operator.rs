@@ -16782,6 +16782,182 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `CALL algo.fastRP(label?, {embeddingDimension, iterationWeights, seed,
+    /// normalize, writeProperty, edgeType}) YIELD node, embedding` -- FastRP
+    /// graph embeddings (ML-06).
+    ///
+    /// Requires write access, like `algo.or.solve`: ML-06 asks for the
+    /// embedding "stored as vector properties", not only streamed, so this
+    /// writes `writeProperty` (default `embedding`) on every node in scope
+    /// before returning it as a row. That is a deliberate difference from
+    /// every other algorithm here, which streams and leaves persistence to
+    /// the caller's own `SET` -- ALGO-06's generic `write`/`mutate` modes
+    /// remain unbuilt, but ML-06 specifically asks this algorithm to persist
+    /// its own result.
+    fn execute_fastrp(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "fastRP", &[
+            "label", "edgeType", "embeddingDimension", "iterationWeights", "seed",
+            "normalize", "writeProperty",
+        ])?;
+        let view = self.structural_view(store);
+        let mut config = crate::algo::FastRpConfig::default();
+        let mut write_property = "embedding".to_string();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(v) = m.get("embeddingDimension") {
+                    match v {
+                        PropertyValue::Integer(d) if *d >= 1 => config.dimension = *d as usize,
+                        other => return Err(ExecutionError::bad_argument(format!(
+                            "algo.fastRP: embeddingDimension must be a positive integer, got {other:?}"
+                        ))),
+                    }
+                }
+                if let Some(PropertyValue::Array(items)) = m.get("iterationWeights") {
+                    let mut weights = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item {
+                            PropertyValue::Float(f) => weights.push(*f),
+                            PropertyValue::Integer(i) => weights.push(*i as f64),
+                            other => return Err(ExecutionError::TypeError(format!(
+                                "algo.fastRP: iterationWeights must be numbers, got {other:?}"
+                            ))),
+                        }
+                    }
+                    if weights.is_empty() {
+                        return Err(ExecutionError::bad_argument(
+                            "algo.fastRP: iterationWeights must not be empty".to_string(),
+                        ));
+                    }
+                    config.iteration_weights = weights;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
+                if let Some(PropertyValue::Boolean(b)) = m.get("normalize") { config.normalize = *b; }
+                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
+            }
+        }
+
+        let embeddings = crate::algo::fastrp(&view, &config);
+        for (idx, embedding) in embeddings.into_iter().enumerate() {
+            let id = NodeId::new(view.index_to_node[idx]);
+            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
+            store
+                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
+                .map_err(|e| ExecutionError::RuntimeError(format!(
+                    "algo.fastRP: failed to write `{write_property}`: {e}"
+                )))?;
+            if let Some(node) = store.get_node(id) {
+                let mut record = Record::new();
+                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
+                record.bind(
+                    "embedding".to_string(),
+                    Value::List(values.into_iter().map(Value::Property).collect()),
+                );
+                self.results.push(record);
+            }
+        }
+        Ok(())
+    }
+
+    /// `CALL algo.node2vec(label?, {embeddingDimension, walkLength,
+    /// walksPerNode, returnFactor, inOutFactor, windowSize, seed,
+    /// writeProperty, edgeType}) YIELD node, embedding` -- node2vec graph
+    /// embeddings (ML-06).
+    ///
+    /// **This runs node2vec's real biased 2nd-order random walks
+    /// (`returnFactor` = p, `inOutFactor` = q) but embeds them with a
+    /// random-projection of the walks' co-occurrence counts, not
+    /// skip-gram/word2vec training.** See `samyama_graph_algorithms::embeddings`
+    /// for what that means and why. Calling this "node2vec" is only honest
+    /// with that caveat attached, so it is repeated at both call sites.
+    ///
+    /// Requires write access for the same reason `algo.fastRP` does above.
+    fn execute_node2vec(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(&self.args, "node2vec", &[
+            "label", "edgeType", "embeddingDimension", "walkLength", "walksPerNode",
+            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty",
+        ])?;
+        let view = self.structural_view(store);
+        let mut config = crate::algo::Node2VecConfig::default();
+        let mut write_property = "embedding".to_string();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(v) = m.get("embeddingDimension") {
+                    match v {
+                        PropertyValue::Integer(d) if *d >= 1 => config.dimension = *d as usize,
+                        other => return Err(ExecutionError::bad_argument(format!(
+                            "algo.node2vec: embeddingDimension must be a positive integer, got {other:?}"
+                        ))),
+                    }
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("walkLength") {
+                    if *v < 2 {
+                        return Err(ExecutionError::bad_argument(
+                            "algo.node2vec: walkLength must be at least 2".to_string(),
+                        ));
+                    }
+                    config.walk_length = *v as usize;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("walksPerNode") {
+                    if *v < 1 {
+                        return Err(ExecutionError::bad_argument(
+                            "algo.node2vec: walksPerNode must be at least 1".to_string(),
+                        ));
+                    }
+                    config.walks_per_node = *v as usize;
+                }
+                if let Some(v) = m.get("returnFactor") {
+                    config.return_factor = match v {
+                        PropertyValue::Float(f) => *f,
+                        PropertyValue::Integer(i) => *i as f64,
+                        other => return Err(ExecutionError::TypeError(format!(
+                            "algo.node2vec: returnFactor must be a number, got {other:?}"
+                        ))),
+                    };
+                }
+                if let Some(v) = m.get("inOutFactor") {
+                    config.in_out_factor = match v {
+                        PropertyValue::Float(f) => *f,
+                        PropertyValue::Integer(i) => *i as f64,
+                        other => return Err(ExecutionError::TypeError(format!(
+                            "algo.node2vec: inOutFactor must be a number, got {other:?}"
+                        ))),
+                    };
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("windowSize") {
+                    if *v < 1 {
+                        return Err(ExecutionError::bad_argument(
+                            "algo.node2vec: windowSize must be at least 1".to_string(),
+                        ));
+                    }
+                    config.window_size = *v as usize;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
+                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
+            }
+        }
+
+        let embeddings = crate::algo::node2vec(&view, &config);
+        for (idx, embedding) in embeddings.into_iter().enumerate() {
+            let id = NodeId::new(view.index_to_node[idx]);
+            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
+            store
+                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
+                .map_err(|e| ExecutionError::RuntimeError(format!(
+                    "algo.node2vec: failed to write `{write_property}`: {e}"
+                )))?;
+            if let Some(node) = store.get_node(id) {
+                let mut record = Record::new();
+                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
+                record.bind(
+                    "embedding".to_string(),
+                    Value::List(values.into_iter().map(Value::Property).collect()),
+                );
+                self.results.push(record);
+            }
+        }
+        Ok(())
+    }
+
     /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
     ///
     /// Principal component analysis over numeric node properties: one row per
@@ -17331,12 +17507,35 @@ impl AlgorithmOperator {
             Some((head, mode)) if mode == Self::GDS_STREAMING_MODE => head,
             _ => lower.as_str(),
         };
+        if Self::GDS_DIVERGENT.contains(&bare) {
+            // A name that will never match a dispatch arm, so `is_algorithm`
+            // and the executor both refuse it -- see `GDS_DIVERGENT` for why.
+            return format!("__gds_divergent__{bare}");
+        }
         Self::GDS_RENAMES
             .iter()
             .find(|(gds, _)| *gds == bare)
             .map(|(_, ours)| (*ours).to_string())
             .unwrap_or_else(|| bare.to_string())
     }
+
+    /// `gds.*` names that share a bare name with one of ours and must not
+    /// resolve to it, because the two are not the same algorithm under that
+    /// name -- the same reasoning as `GDS_RENAMES`'s doc comment (`triangles`
+    /// counted differently from `triangleCount`), just implemented the
+    /// opposite way: those never collided by name, so nothing had to block
+    /// them; `fastRP` and `node2vec` do collide, and would otherwise resolve
+    /// for free through the ordinary lower-case-and-strip-prefix path.
+    ///
+    /// `node2vec` here is not skip-gram-trained -- see
+    /// `samyama_graph_algorithms::embeddings` -- and would put a materially
+    /// different embedding under the name a GDS user asked for. FastRP is
+    /// closer (the same propagation idea), but has not been checked against
+    /// GDS's defaults and knobs (`normalizationStrength`, `propertyRatio`,
+    /// `nodeSelfInfluence`, ...); resolving it on the strength of a shared
+    /// name and an unverified resemblance is the mistake this table exists to
+    /// avoid, not a shortcut around it (ALGO-03/ML-06).
+    const GDS_DIVERGENT: &'static [&'static str] = &["fastrp", "node2vec"];
 
     /// GDS procedures we implement under a different name.
     ///
@@ -17399,6 +17598,13 @@ impl AlgorithmOperator {
                 // here as unknown.
                 | "pca"
                 | "or.solve"
+                // Graph embeddings (ML-06): node2vec's biased walks and
+                // FastRP's sparse-projection propagation, both writing a
+                // vector property rather than only streaming -- see
+                // `execute_fastrp`/`execute_node2vec` for what each does and
+                // does not do.
+                | "fastrp"
+                | "node2vec"
                 // The four causal/temporal primitives (ALGO-15). Reachability
                 // in a temporal graph is not transitive -- an edge that fired
                 // before you arrived is not traversable -- so none of these
@@ -17557,6 +17763,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
                 "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
+                "fastrp" => return Err(ExecutionError::RuntimeError("algo.fastRP requires write access (MutQueryExecutor): it writes the embedding as a node property".to_string())),
+                "node2vec" => return Err(ExecutionError::RuntimeError("algo.node2vec requires write access (MutQueryExecutor): it writes the embedding as a node property".to_string())),
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.apply_yield_aliases();
@@ -17576,6 +17784,8 @@ impl PhysicalOperator for AlgorithmOperator {
          if !self.executed {
             match Self::canonical_name(&self.name).as_str() {
                 "or.solve" => self.execute_or_solve(store, tenant_id)?,
+                "fastrp" => self.execute_fastrp(store, tenant_id)?,
+                "node2vec" => self.execute_node2vec(store, tenant_id)?,
                 // For read-only algos, we can just call the immutable implementations
                 // But we need to borrow store immutably.
                 // Since we have &mut store, we can reborrow as &store
@@ -17666,7 +17876,7 @@ impl PhysicalOperator for AlgorithmOperator {
     }
 
     fn is_mutating(&self) -> bool {
-        self.name == "algo.or.solve"
+        matches!(Self::canonical_name(&self.name).as_str(), "or.solve" | "fastrp" | "node2vec")
     }
 
     fn reset(&mut self) {

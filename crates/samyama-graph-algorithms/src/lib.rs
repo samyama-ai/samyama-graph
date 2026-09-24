@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod pathfinding_extra;
 pub mod traversal;
 pub mod temporal;
+pub mod embeddings;
 
 pub use common::{GraphView, NodeId};
 pub use pagerank::{page_rank, PageRankConfig};
@@ -75,3 +76,4 @@ pub use temporal::{
     temporal_shortest_path, ArrivalTimes, Explanation, TemporalEdges, TemporalError,
     TemporalPath,
 };
+pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
