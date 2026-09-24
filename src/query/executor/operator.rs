@@ -7204,6 +7204,79 @@ impl ExpandOperator {
         Some(rec)
     }
 
+    /// Build the output record for one traversed edge.
+    ///
+    /// **One implementation, called by both `next` and `next_batch`.** Those two
+    /// carried separate copies of this logic, and the copies had already drifted
+    /// once: the isomorphism bookkeeping and the `OPTIONAL MATCH` unmatched-row
+    /// rule each have a comment in the batch path saying that missing them
+    /// "would make the answer depend on whether the plan happened to run
+    /// batched", which is the shape of #684. A rule that has to be remembered in
+    /// two places is a rule that will be applied in one.
+    ///
+    /// Everything here is a function of `base`, the edge, and the store, with no
+    /// cursor state -- which is also what makes a parallel caller possible
+    /// (#1457). It is the reason to extract it now rather than alongside that
+    /// change.
+    fn expanded_record(
+        &self,
+        base: &Record,
+        edge_id: crate::graph::EdgeId,
+        src: NodeId,
+        tgt: NodeId,
+        store: &GraphStore,
+    ) -> Record {
+        // Room for the target, and for the edge and path variables when the
+        // pattern names them -- otherwise the first bind below reallocates a Vec
+        // that was cloned at exact capacity (#562).
+        let extra = 1
+            + self.edge_var.is_some() as usize
+            + self.path_variable.is_some() as usize;
+        let mut new_record = base.clone_with_capacity(extra);
+
+        let target_id = match self.direction {
+            Direction::Outgoing => tgt,
+            Direction::Incoming => src,
+            Direction::Both => {
+                let source_val = new_record.get(&self.source_var).unwrap();
+                let source_id = source_val.node_id().unwrap();
+                if src == source_id { tgt } else { src }
+            }
+        };
+
+        new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
+
+        if let Some(edge_var) = &self.edge_var {
+            // Resolved here rather than carried: only a pattern that names the
+            // edge ever reads its type.
+            let edge_type = store
+                .get_edge_type(edge_id)
+                .unwrap_or_else(|| EdgeType::new(""));
+            new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
+        }
+
+        // CY-04: materialize a named path variable.
+        if let Some(ref path_var) = self.path_variable {
+            let source_id = new_record.get(&self.source_var)
+                .and_then(|v| v.node_id())
+                .unwrap_or(src);
+            let extended =
+                extend_path(new_record.get(path_var), source_id, target_id, edge_id);
+            new_record.bind(path_var.clone(), extended);
+        }
+
+        // Relationship isomorphism (#684): remember what this pattern has walked
+        // so a later segment cannot take the same edge back.
+        if self.track_edges {
+            if self.starts_clause {
+                new_record.clear_used_edges();
+            }
+            new_record.mark_edge_used(edge_id);
+        }
+
+        new_record
+    }
+
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
         let source_val = record.get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
@@ -7602,55 +7675,10 @@ impl PhysicalOperator for ExpandOperator {
                 let (edge_id, src, tgt) = self.current_edges[self.edge_index];
                 self.edge_index += 1;
 
-                // Room for the target, and for the edge and path variables when
-                // the pattern names them -- otherwise the first bind below
-                // reallocates a Vec that was cloned at exact capacity (#562).
-                let extra = 1
-                    + self.edge_var.is_some() as usize
-                    + self.path_variable.is_some() as usize;
-                let mut new_record =
-                    self.current_record.as_ref().unwrap().clone_with_capacity(extra);
-
-                // Determine target node based on direction
-                let target_id = match self.direction {
-                    Direction::Outgoing => tgt,
-                    Direction::Incoming => src,
-                    Direction::Both => {
-                        let source_val = new_record.get(&self.source_var).unwrap();
-                        let source_id = source_val.node_id().unwrap();
-                        if src == source_id { tgt } else { src }
-                    }
-                };
-
-                new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
-
-                if let Some(edge_var) = &self.edge_var {
-                    // Resolved here rather than carried: only a pattern that
-                    // names the edge ever reads its type.
-                    let edge_type = store
-                        .get_edge_type(edge_id)
-                        .unwrap_or_else(|| EdgeType::new(""));
-                    new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
-                }
-
-                // CY-04: Materialize named path variable
-                if let Some(ref path_var) = self.path_variable {
-                    let source_id = new_record.get(&self.source_var)
-                        .and_then(|v| v.node_id())
-                        .unwrap_or(src);
-                    let extended =
-                        extend_path(new_record.get(path_var), source_id, target_id, edge_id);
-                    new_record.bind(path_var.clone(), extended);
-                }
-
-                // Relationship isomorphism (#684): remember what this pattern
-                // has walked so a later segment cannot take the same edge back.
-                if self.track_edges {
-                    if self.starts_clause {
-                        new_record.clear_used_edges();
-                    }
-                    new_record.mark_edge_used(edge_id);
-                }
+                // `&Record` out of `self`, and `expanded_record` also borrows
+                // `self` -- both immutable, so no clone of the source row.
+                let base = self.current_record.as_ref().unwrap();
+                let new_record = self.expanded_record(base, edge_id, src, tgt, store);
 
                 self.emitted_for_current = true;
                 return Ok(Some(new_record));
@@ -7683,53 +7711,13 @@ impl PhysicalOperator for ExpandOperator {
 
                 for i in 0..take {
                     let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
-                    // Room for the target, and for the edge and path variables when
-                // the pattern names them -- otherwise the first bind below
-                // reallocates a Vec that was cloned at exact capacity (#562).
-                let extra = 1
-                    + self.edge_var.is_some() as usize
-                    + self.path_variable.is_some() as usize;
-                let mut new_record =
-                    self.current_record.as_ref().unwrap().clone_with_capacity(extra);
-
-                    let target_id = match self.direction {
-                        Direction::Outgoing => tgt,
-                        Direction::Incoming => src,
-                        Direction::Both => {
-                            let source_val = new_record.get(&self.source_var).unwrap();
-                            let source_id = source_val.node_id().unwrap();
-                            if src == source_id { tgt } else { src }
-                        }
-                    };
-
-                    new_record.bind(self.target_var.clone(), Value::NodeRef(target_id));
-                    if let Some(edge_var) = &self.edge_var {
-                        // Resolved here rather than carried: only a pattern
-                        // that names the edge ever reads its type.
-                        let edge_type = store
-                            .get_edge_type(edge_id)
-                            .unwrap_or_else(|| EdgeType::new(""));
-                        new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
-                    }
-                    // CY-04: Materialize named path variable in batch mode
-                    if let Some(ref path_var) = self.path_variable {
-                        let source_id = new_record.get(&self.source_var)
-                            .and_then(|v| v.node_id())
-                            .unwrap_or(src);
-                        let extended =
-                            extend_path(new_record.get(path_var), source_id, target_id, edge_id);
-                        new_record.bind(path_var.clone(), extended);
-                    }
-                    // Same isomorphism bookkeeping as the single-row path
-                    // above. Missing it here would make the answer depend on
-                    // whether the plan happened to run batched (#684).
-                    if self.track_edges {
-                        if self.starts_clause {
-                            new_record.clear_used_edges();
-                        }
-                        new_record.mark_edge_used(edge_id);
-                    }
-                    expanded_records.push(new_record);
+                    // Same one implementation the row-at-a-time path uses. The
+                    // isomorphism bookkeeping and the path-variable handling
+                    // used to be written out again here, and the comments said
+                    // why that was dangerous rather than removing the danger.
+                    let base = self.current_record.as_ref().unwrap();
+                    expanded_records.push(
+                        self.expanded_record(base, edge_id, src, tgt, store));
                 }
                 self.edge_index += take;
                 self.emitted_for_current = true;
