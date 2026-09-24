@@ -18,6 +18,8 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 
 ### Core
 - **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — ACID model in v1.0.0: MVCC (RC + SI + conflict detection), Samyama logical WAL, Raft replication.
+- **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
+- **[API-PARITY.md](./API-PARITY.md)** — generated capability x surface matrix (HTTP, RESP, Rust/Python/TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
 - **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage (~90%) vs Neo4j and FalkorDB; supported clauses, functions, remaining gaps.
 - **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK, etc.).
 - **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how Python / TypeScript SDKs, the CLI, and HTTP / RESP clients connect.
