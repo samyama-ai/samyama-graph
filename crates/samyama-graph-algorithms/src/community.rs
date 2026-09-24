@@ -1,6 +1,7 @@
 //! Community detection algorithms
 //!
-//! Implements REQ-ALGO-004 (Weakly Connected Components)
+//! Weakly connected components. Counted towards ALGO-01 (algorithms callable
+//! from Cypher).
 
 use super::common::{GraphView, NodeId};
 use std::collections::HashMap;

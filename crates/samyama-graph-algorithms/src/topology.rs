@@ -1,6 +1,6 @@
 //! Graph topology analysis algorithms
 //!
-//! Implements REQ-ALGO-005 (Triangle Counting)
+//! Triangle counting. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::GraphView;
 use std::collections::HashSet;

@@ -21,14 +21,12 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 - **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
 - **[API-PARITY.md](./API-PARITY.md)** — generated capability x surface matrix (HTTP, RESP, Rust/Python/TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
 - **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage (~90%) vs Neo4j and FalkorDB; supported clauses, functions, remaining gaps.
-- **[REQUIREMENTS.md](./REQUIREMENTS.md)** — functional and non-functional requirements specification.
 - **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK, etc.).
 - **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how Python / TypeScript SDKs, the CLI, and HTTP / RESP clients connect.
 - **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — end-to-end demo combining ingestion, federation, NLQ, and optimization.
 
 ### Sub-directories
 - **[ADR/](./ADR/)** — Architecture Decision Records (30 ADRs).
-- **[product/](./product/)** — product management artifacts (personas, workflows, test cases).
 - **[test-results/](./test-results/)** — test execution reports.
 - **[optimization/](./optimization/)** — optimization case study + workflow notes (see also `crates/samyama-optimization/` and ADR-026).
 - **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive benchmark results (SF1 + SF10).

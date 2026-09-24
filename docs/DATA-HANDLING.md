@@ -199,7 +199,7 @@ numbers above is that the two can be checked against each other.
   than taking one: against a stolen file, a fast hash is safe only when there
   is nothing to guess.
 
-- **Users with passwords**, in the same file (REL-08, REQ-SEC-001):
+- **Users with passwords**, in the same file (REL-08):
 
   ```bash
   samyama auth-user alice >> /etc/samyama/credentials   # password read from stdin
