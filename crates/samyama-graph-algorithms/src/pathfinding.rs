@@ -1,6 +1,6 @@
 //! Pathfinding algorithms
 //!
-//! Implements REQ-ALGO-002 (BFS) and REQ-ALGO-003 (Dijkstra)
+//! BFS and Dijkstra. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::{GraphView, NodeId};
 use std::collections::{HashMap, VecDeque, BinaryHeap};

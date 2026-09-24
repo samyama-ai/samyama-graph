@@ -284,7 +284,7 @@ fn user_credentials(name: &str, password: &str) -> Vec<Credential> {
 
 #[tokio::test]
 async fn a_user_authenticates_with_a_password() {
-    // REL-08's credential store, and `docs/REQUIREMENTS.md`'s REQ-SEC-001:
+    // REL-08's credential store:
     // "MUST support authentication (username/password minimum)".
     let creds = user_credentials("alice", "hunter2");
     assert_eq!(
