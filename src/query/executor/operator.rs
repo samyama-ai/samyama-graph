@@ -7338,19 +7338,23 @@ impl ExpandOperator {
 
     /// Expand a morsel of source records into output rows, in input order.
     ///
-    /// Above `expand_parallel_rows()` source records the morsel is split across
-    /// rayon tasks. Two things decide whether that is allowed to be a parallel
-    /// loop at all:
+    /// Above `expand_parallel_rows()` source records the morsel is split into
+    /// contiguous chunks, one per worker. Three things decide whether this is
+    /// allowed to be a parallel loop at all:
     ///
-    /// * **Order.** `collect()` into a `Vec` restores input order whatever
-    ///   order the tasks finished in, and the per-record results are flattened
-    ///   afterwards -- so a batched run and a row-at-a-time run return the same
-    ///   rows in the same sequence. `CH-DETERM-THREADS` gates exactly this.
-    ///   `for_each` into a shared `Vec` would not, at any thread count.
-    /// * **The edge buffer.** `map_init` gives each rayon *task* one buffer,
-    ///   reused across every record that task takes. A `Vec::new()` inside the
-    ///   closure would be one allocation per source record, which is the
-    ///   allocation #520 and #564 removed, on the same path.
+    /// * **Order.** `par_chunks` is indexed and `collect()` into a `Vec`
+    ///   restores chunk order whatever order the workers finished in; within a
+    ///   chunk the records are walked in sequence. So a batched run returns the
+    ///   same rows in the same order as a row-at-a-time run.
+    ///   `CH-DETERM-THREADS` gates exactly this. `for_each` into a shared `Vec`
+    ///   would not, at any thread count.
+    /// * **The edge buffer.** One per chunk, refilled for every record in it --
+    ///   not one per record, which is the allocation #520 and #564 removed.
+    /// * **The output buffer.** Also one per chunk. A `Vec<Record>` returned
+    ///   per source record is one allocation per row when the source has degree
+    ///   1, and that alone made the parallel path 1.5x *slower* in wall time
+    ///   than not parallelising while reading 7.9 of 16 cores -- utilisation
+    ///   bought with allocator traffic, which is the failure mode #1457 names.
     fn expand_morsel(
         &mut self,
         records: &[Record],
@@ -7358,24 +7362,33 @@ impl ExpandOperator {
     ) -> ExecutionResult<Vec<Record>> {
         self.prepare_walk(store, records.len());
         let view = self.view();
-        let per_record: Vec<ExecutionResult<Vec<Record>>> =
-            if records.len() >= expand_parallel_rows() {
-                records
-                    .par_iter()
-                    .map_init(Vec::new, |buf, rec| view.expand_one(rec, store, buf))
-                    .collect()
-            } else {
-                // One buffer for the whole morsel, the sequential equivalent of
-                // what `map_init` hands each task.
+
+        if records.len() < expand_parallel_rows() {
+            let mut buf = Vec::new();
+            let mut out = Vec::with_capacity(records.len());
+            for record in records {
+                view.expand_into(record, store, &mut buf, &mut out)?;
+            }
+            return Ok(out);
+        }
+
+        let workers = rayon::current_num_threads().max(1);
+        let chunk = records.len().div_ceil(workers).max(1);
+        let parts: Vec<ExecutionResult<Vec<Record>>> = records
+            .par_chunks(chunk)
+            .map(|part| {
                 let mut buf = Vec::new();
-                records
-                    .iter()
-                    .map(|rec| view.expand_one(rec, store, &mut buf))
-                    .collect()
-            };
+                let mut out = Vec::with_capacity(part.len());
+                for record in part {
+                    view.expand_into(record, store, &mut buf, &mut out)?;
+                }
+                Ok(out)
+            })
+            .collect();
+
         let mut out = Vec::with_capacity(records.len());
-        for rows in per_record {
-            out.extend(rows?);
+        for part in parts {
+            out.extend(part?);
         }
         Ok(out)
     }
@@ -7550,31 +7563,34 @@ impl ExpandView<'_> {
         Some(rec)
     }
 
-    /// Every output row one source record produces, in walk order.
+    /// Append every output row one source record produces, in walk order.
     ///
-    /// `buf` is the caller's edge buffer, refilled rather than replaced -- one
-    /// per rayon task on the parallel path, one for the whole morsel on the
-    /// sequential one. Never one per record: that is the allocation #520 and
-    /// #564 took out.
-    fn expand_one(
+    /// Both `buf` and `out` belong to the caller and are reused across the
+    /// records of a chunk. Neither is allocated here: an edge buffer per record
+    /// is the allocation #520 and #564 took out, and an output `Vec` per record
+    /// is the same mistake one level up -- with a degree-1 source that is one
+    /// allocation per row, which measured slower than not parallelising at all.
+    fn expand_into(
         &self,
         record: &Record,
         store: &GraphStore,
         buf: &mut Vec<(crate::graph::EdgeId, NodeId, NodeId)>,
-    ) -> ExecutionResult<Vec<Record>> {
+        out: &mut Vec<Record>,
+    ) -> ExecutionResult<()> {
         self.collect_edges_into(record, store, buf)?;
         if buf.is_empty() {
             // Same rule as the single-row path: an OPTIONAL MATCH source row
             // that matched nothing still emits once. Missing it here would make
             // the answer depend on whether the plan happened to run batched,
             // which is the shape of #684.
-            return Ok(self.unmatched_optional_row(record).into_iter().collect());
+            out.extend(self.unmatched_optional_row(record));
+            return Ok(());
         }
-        let mut out = Vec::with_capacity(buf.len());
+        out.reserve(buf.len());
         for &(edge_id, src, tgt) in buf.iter() {
             out.push(self.expanded_record(record, edge_id, src, tgt, store));
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Walk one source record's adjacency and collect the edges that survive

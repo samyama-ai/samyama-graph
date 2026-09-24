@@ -311,6 +311,10 @@ name = "traversal_parallelism"
 harness = false
 
 [[bench]]
+name = "expand_parallelism_probe"
+harness = false
+
+[[bench]]
 name = "ldbc_benchmark"
 harness = false
 
