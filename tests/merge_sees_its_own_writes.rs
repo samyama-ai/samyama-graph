@@ -209,3 +209,96 @@ fn a_match_later_in_the_statement_sees_what_the_statement_created() {
         "the indexed MATCH did not see the node its own statement created"
     );
 }
+
+/// Full-text is maintained on the write path too, and for a blunter reason than
+/// MERGE's: on a store with a subscriber nothing else maintained it at all.
+///
+/// Measured on the v1.9.0 release binary before this change, persistent server:
+///
+/// ```text
+/// CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)
+/// CREATE (:Doc {body: 'quick brown fox jumps'})
+/// CALL db.index.fulltext.queryNodes('docs', 'brown') YIELD node RETURN count(node)  -> 0
+/// MATCH (d:Doc) RETURN count(d)                                                     -> 1
+/// ```
+///
+/// The channel never carried full-text events, so the only maintainer was the
+/// no-subscriber branch — tests. A search returned nothing and said nothing.
+#[test]
+fn the_fulltext_index_is_maintained_on_a_store_that_has_a_subscriber() {
+    let (mut store, _rx) = GraphStore::with_async_indexing();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)", &mut store, T)
+        .unwrap();
+    engine
+        .execute_mut("CREATE (:Doc {body: 'quick brown fox jumps'})", &mut store, T)
+        .unwrap();
+    let hits = engine
+        .execute(
+            "CALL db.index.fulltext.queryNodes('docs', 'brown') YIELD node RETURN count(node)",
+            &store,
+        )
+        .unwrap();
+    let n = hits.records[0]
+        .get("count(node)")
+        .and_then(|v| v.as_property())
+        .and_then(|p| p.as_integer())
+        .expect("count(node) is an integer");
+    assert_eq!(n, 1, "the full-text index did not see a document that was written");
+}
+
+/// The vector index stays on the channel, and this is what says it still arrives.
+///
+/// The split this test guards: the write path maintains the indexes a statement
+/// reads back (property, full-text); the HNSW index is maintained by the
+/// background loop, because an HNSW insert is a graph descent with distance
+/// computations at every level and nothing reads that index back mid-statement.
+/// If someone moves it onto the write path again, the ingest measurement in the
+/// PR body is the thing to re-run; if someone removes it from the loop, this
+/// test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vector_written_through_the_channel_reaches_the_index() {
+    use std::sync::Arc;
+    use samyama::graph::PropertyValue;
+
+    let (mut store, rx) = GraphStore::with_async_indexing();
+    let vector_index = Arc::clone(&store.vector_index);
+    let property_index = Arc::clone(&store.property_index);
+    let tenants = Arc::new(samyama::persistence::TenantManager::new());
+    vector_index
+        .create_index("Doc", "embedding", 4, samyama::vector::DistanceMetric::Cosine)
+        .expect("create vector index");
+    {
+        let (vi, pi, tm) = (Arc::clone(&vector_index), property_index, Arc::clone(&tenants));
+        tokio::spawn(async move { GraphStore::start_background_indexer(rx, vi, pi, tm).await });
+    }
+
+    let id = store.create_node("Doc");
+    store
+        .set_node_property(
+            T,
+            id,
+            "embedding".to_string(),
+            PropertyValue::Array(vec![
+                PropertyValue::Float(1.0),
+                PropertyValue::Float(0.0),
+                PropertyValue::Float(0.0),
+                PropertyValue::Float(0.0),
+            ]),
+        )
+        .expect("set embedding");
+
+    // The loop is asynchronous by design; poll rather than sleep a fixed time.
+    let mut hits = Vec::new();
+    for _ in 0..100 {
+        hits = vector_index
+            .search("Doc", "embedding", &[1.0f32, 0.0, 0.0, 0.0], 1)
+            .expect("search");
+        if !hits.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(hits.len(), 1, "the vector never reached the index");
+}
