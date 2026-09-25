@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use Samyama Graph in your work, please cite it as below."
+title: "Samyama Graph"
+type: software
+abstract: >-
+  A graph database in Rust with OpenCypher querying, vector search, graph
+  algorithms and optimization in one engine, speaking both the Redis
+  serialization protocol and HTTP.
+authors:
+  - name: "Samyama"
+    website: "https://github.com/samyama-ai"
+repository-code: "https://github.com/samyama-ai/samyama-graph"
+url: "https://graph.samyama.cloud"
+license: Apache-2.0
+version: "1.9.0"
+date-released: "2026-09-25"
+keywords:
+  - graph-database
+  - opencypher
+  - vector-search
+  - graph-algorithms
+  - rust
