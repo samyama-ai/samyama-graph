@@ -1181,10 +1181,47 @@ impl Query {
         {
             return true;
         }
+        // A `CALL` to a procedure that writes. Classifying by clause alone read
+        // `CALL algo.or.solve(...)` as a read, routed it to the read executor and
+        // had it refused with "requires write access" — so no optimisation solver
+        // was reachable over HTTP or RESP, both of which classify here (#1468).
+        //
+        // The answer comes from the operator's own list rather than a second one
+        // kept here: a list per side is how these two disagreed.
+        if self.calls_a_mutating_procedure() {
+            return true;
+        }
         if self.union_queries.iter().any(|(q, _all)| q.is_write()) {
             return true;
         }
+        if self
+            .correlated_call
+            .as_ref()
+            .is_some_and(|c| c.body.is_write())
+        {
+            return true;
+        }
         self.call_subquery.as_deref().is_some_and(|q| q.is_write())
+    }
+
+    /// Does any `CALL` in this statement name a procedure that needs write access?
+    ///
+    /// Both AST shapes are checked: `call_clause` holds the CALL when the query was
+    /// parsed into the older shape, `clauses` when it was parsed into the newer one.
+    /// Checking one of them is the trap the rest of this file warns about.
+    fn calls_a_mutating_procedure(&self) -> bool {
+        use crate::query::executor::operator::AlgorithmOperator;
+        if self
+            .call_clause
+            .as_ref()
+            .is_some_and(|c| AlgorithmOperator::procedure_is_mutating(&c.procedure_name))
+        {
+            return true;
+        }
+        self.clauses.iter().any(|c| match c {
+            Clause::Call(call) => AlgorithmOperator::procedure_is_mutating(&call.procedure_name),
+            _ => false,
+        })
     }
 
     pub fn new() -> Self {
