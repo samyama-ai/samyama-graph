@@ -65,15 +65,29 @@ So:
   formality: on an ESP32 it is the difference between a sketch that fits
   comfortably and one that does not.
 
-## Escaping
+## Escaping — or, better, binding
 
-RESP `GRAPH.QUERY` takes no parameter list, so values are formatted into the
-statement text and escaping is the caller's problem.
+`GRAPH.QUERY` takes optional trailing `key value` pairs, and their values are
+**bound**: they reach the engine as values and are never re-read as Cypher
+(#1463). So a value that arrived from somewhere else goes in a pair, not in the
+statement text:
 
-Format numbers you produced yourself. Do not interpolate a string that arrived
-from anywhere else — another device, a configuration server, a received packet
-— into a statement. There is no bound parameter to hide behind here, and the
-sketch is written to only ever format its own floats for that reason.
+```text
+*7\r\n$11\r\nGRAPH.QUERY\r\n$7\r\ndefault\r\n$41\r\nCREATE (:Reading {sensor:$s, celsius:$c})\r\n$1\r\ns\r\n$8\r\nesp32-01\r\n$1\r\nc\r\n$5\r\n21.50\r\n
+```
+
+A value is read as JSON when it parses as JSON (`21.5` a float, `true` a
+boolean, `[1,2]` a list) and as a plain string when it does not, so `s esp32-01`
+needs no quoting and `s "12"` is the way to bind the *string* `12`. A key the
+statement never mentions is refused rather than dropped, because a dropped key
+is a typo nobody sees.
+
+The old advice, for a statement you still build by hand: format numbers you
+produced yourself, and do not interpolate a string that arrived from anywhere
+else — another device, a configuration server, a received packet. The sketch
+formats only its own floats for that reason. With bound pairs available, a
+statement that interpolates a received string is now a choice rather than a
+constraint.
 
 ## What is verified, and what is not
 

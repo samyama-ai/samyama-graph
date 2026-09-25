@@ -125,6 +125,22 @@ curl -X POST http://localhost:8080/api/query \
   -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
 ```
 
+**Parameters.** A runtime value goes in `params`, not in the query text:
+
+```bash
+curl -X POST http://localhost:8080/api/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"MATCH (p:Person) WHERE p.name = $name RETURN p.name","params":{"name":"Alice"}}'
+```
+
+The values are bound, so a value is never re-read as Cypher — `{"name": "' OR
+1=1 --"}` matches a person with that name and nothing else. JSON integers,
+floats, booleans, strings, `null`, lists and nested objects all map through; a
+number too large for an `i64` is refused rather than silently converted. A key
+the query never mentions is refused too, because ignoring it would drop a typo
+in silence. The same values go over RESP as trailing pairs:
+`GRAPH.QUERY default "MATCH (p:Person) WHERE p.name = $name RETURN p.name" name Alice`.
+
 **Step 7 — Samyama Visualizer**
 
 Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
