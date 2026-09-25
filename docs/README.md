@@ -1,6 +1,6 @@
 # Samyama Graph — Documentation Index
 
-**Last updated:** 2026-09-23 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
+**Last updated:** 2026-09-25 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
 
 ## Primary sources
 
@@ -19,6 +19,12 @@ If you're new to the codebase, start with the book; if you're touching a subsyst
 Every markdown file in this directory is listed below. If you add one, add a
 line here — an index that lists some of a directory is worse than no index,
 because a reader who does not find a document assumes it does not exist.
+
+That is now a check rather than a request: `tests/docs_index_lists_every_document.rs`
+reads this directory and fails if a document or sub-directory is unlisted, if a
+relative link here points at nothing, or if the engine's current version has no
+release notes. The list was hand-maintained until 2026-09-25 and had drifted to
+eight of eighteen documents (#1450).
 
 ### Start here
 
@@ -59,7 +65,7 @@ because a reader who does not find a document assumes it does not exist.
 
 - **[ADR/](./ADR/)** — Architecture Decision Records. A record of why a decision was made *when it was made*; they are not refreshed, and old ones are not stale.
 - **[optimization/](./optimization/)** — optimization case study (see also `crates/samyama-optimization/` and ADR-026).
-- **[release-notes/](./release-notes/)** — per-release notes.
+- **[release-notes/](./release-notes/)** — per-release notes, current back to [1.7.0](./release-notes/1.7.0.md). Earlier tags (1.0.x, 1.1.0, 1.7.1) have none and are not back-filled.
 - **[demos/](./demos/)** — recordings used by the top-level README.
 
 ### Retired
