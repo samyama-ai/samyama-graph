@@ -30,6 +30,25 @@ pub struct QueryRequest {
     /// instead of on its own (#1200 step 6b).
     #[serde(default)]
     pub tx: Option<String>,
+    /// Values for the `$name` parameters the query references (#1463).
+    ///
+    /// The field used to not exist: a `params` object was accepted by the JSON
+    /// body, dropped, and the query then failed with `Unresolved parameter` —
+    /// so the only way to pass a runtime value was to build the query text
+    /// around it. The values here are **bound**, never interpolated; see
+    /// [`crate::query::bind`] for the JSON type mapping.
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+}
+
+/// The request's parameters as bound values, or the 400 the caller gets.
+///
+/// Two refusals, both before the query runs: a value that cannot be
+/// represented exactly, and a key the query never mentions.
+fn bound_params(payload: &QueryRequest) -> Result<crate::query::BoundParams, String> {
+    let bound = crate::query::bind::properties_from_json(&payload.params)?;
+    crate::query::bind::reject_unused(&payload.query, &bound)?;
+    Ok(bound)
 }
 
 /// Whether the result cache is on for a request that did not say.
@@ -364,8 +383,19 @@ pub async fn query_handler(
             .into_response();
     }
 
+    let params = match bound_params(&payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+
     if let Some(tx) = payload.tx.as_deref() {
-        return query_in_transaction(&state, tx, &payload).await;
+        return query_in_transaction(&state, tx, &payload, &params).await;
     }
 
     // Asked of the parser, not of the query text. Two string matchers used to
@@ -405,7 +435,7 @@ pub async fn query_handler(
             .mutate(&payload.graph, |store| {
                 let result = state
                     .engine
-                    .execute_mut(&payload.query, store, &payload.graph);
+                    .execute_mut_with_params(&payload.query, store, &payload.graph, &params);
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(b, store))
@@ -418,7 +448,10 @@ pub async fn query_handler(
     } else {
         let store_guard = state.store.read().await;
         let result = if use_cache {
-            match state.engine.execute_cached(&payload.query, &*store_guard) {
+            match state
+                .engine
+                .execute_cached_with_params(&payload.query, &*store_guard, &params)
+            {
                 Ok((batch, hit)) => {
                     served_from_cache = hit;
                     Ok(batch)
@@ -426,7 +459,9 @@ pub async fn query_handler(
                 Err(e) => Err(e),
             }
         } else {
-            state.engine.execute(&payload.query, &*store_guard)
+            state
+                .engine
+                .execute_with_params(&payload.query, &*store_guard, &params)
         };
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
@@ -449,6 +484,7 @@ async fn query_in_transaction(
     state: &AppState,
     tx: &str,
     payload: &QueryRequest,
+    params: &crate::query::BoundParams,
 ) -> axum::response::Response {
     let mut sessions = state.transactions.lock().await;
     let Some(txn) = sessions.get_mut(tx) else {
@@ -468,9 +504,9 @@ async fn query_in_transaction(
     let result = if is_write {
         state
             .engine
-            .execute_mut(&payload.query, store, &payload.graph)
+            .execute_mut_with_params(&payload.query, store, &payload.graph, params)
     } else {
-        state.engine.execute(&payload.query, store)
+        state.engine.execute_with_params(&payload.query, store, params)
     };
     let props = result
         .as_ref()

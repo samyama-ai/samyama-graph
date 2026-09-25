@@ -167,14 +167,19 @@ impl CommandHandler {
             Ok(None) => return RespValue::Error("ERR null query".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
+        let params = match Self::params_from_args(&query_str, &args[3..]) {
+            Ok(p) => p,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        };
         let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
         if read_only && is_write {
             return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
         }
         let result = if is_write {
-            self.query_engine.execute_mut(&query_str, store, &graph_name)
+            self.query_engine
+                .execute_mut_with_params(&query_str, store, &graph_name, &params)
         } else {
-            self.query_engine.execute(&query_str, store)
+            self.query_engine.execute_with_params(&query_str, store, &params)
         };
         match result {
             Ok(batch) => self.format_query_result(batch),
@@ -182,8 +187,48 @@ impl CommandHandler {
         }
     }
 
+    /// Parameter values from the trailing `key value ...` arguments of a
+    /// `GRAPH.QUERY` (#1463).
+    ///
+    /// Redis-style commands carry optional arguments as pairs, so the command
+    /// is `GRAPH.QUERY default "MATCH (n) WHERE n.name = $name RETURN n" name alice`.
+    /// The values are **bound**: nothing here builds query text from one, so a
+    /// value of `1 RETURN 1` is a string and not a second clause. Typing rules
+    /// are in [`crate::query::bind::property_from_resp_text`].
+    ///
+    /// Two refusals: a dangling key with no value, which is a caller off by
+    /// one and would otherwise bind nothing silently, and a key the query
+    /// never mentions, which is a typo.
+    fn params_from_args(query: &str, rest: &[RespValue]) -> Result<crate::query::BoundParams, String> {
+        if rest.len() % 2 != 0 {
+            return Err(format!(
+                "parameters are key/value pairs; got {} trailing argument{} after the query",
+                rest.len(),
+                if rest.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let mut params = crate::query::BoundParams::new();
+        for pair in rest.chunks(2) {
+            let name = match pair[0].as_string() {
+                Ok(Some(s)) => s,
+                Ok(None) => return Err("null parameter name".to_string()),
+                Err(e) => return Err(e.to_string()),
+            };
+            // A null value is `null`, not an absent parameter: RESP can send
+            // one, and dropping it would turn it into `Unresolved parameter`.
+            let value = match pair[1].as_string() {
+                Ok(Some(s)) => crate::query::bind::property_from_resp_text(&s),
+                Ok(None) => crate::graph::PropertyValue::Null,
+                Err(e) => return Err(e.to_string()),
+            };
+            params.insert(name, value);
+        }
+        crate::query::bind::reject_unused(query, &params)?;
+        Ok(params)
+    }
+
     /// Handle GRAPH.QUERY command
-    /// Format: GRAPH.QUERY graph_name "MATCH (n) RETURN n"
+    /// Format: GRAPH.QUERY graph_name "MATCH (n) RETURN n" [param value ...]
     async fn handle_graph_query(
         &self,
         args: &[RespValue],
@@ -216,6 +261,11 @@ impl CommandHandler {
             Ok(Some(s)) => s,
             Ok(None) => return RespValue::Error("ERR null query".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+
+        let params = match Self::params_from_args(&query_str, &args[3..]) {
+            Ok(p) => p,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
         };
 
         debug!("Executing query: {}", query_str);
@@ -251,7 +301,12 @@ impl CommandHandler {
 
             // Set current tenant for indexing events
             // In a more complex architecture, the store_guard would be isolated
-            let res = self.query_engine.execute_mut(&query_str, &mut *store_guard, &graph_name);
+            let res = self.query_engine.execute_mut_with_params(
+                &query_str,
+                &mut *store_guard,
+                &graph_name,
+                &params,
+            );
 
             // Persist on the outcome of the *store*, not of the statement. A
             // statement that fails partway does not undo the rows it already wrote
@@ -292,7 +347,9 @@ impl CommandHandler {
             }
         } else {
             let store_guard = store.read().await;
-            let res = self.query_engine.execute(&query_str, &*store_guard);
+            let res = self
+                .query_engine
+                .execute_with_params(&query_str, &*store_guard, &params);
             drop(store_guard);
             res
         };

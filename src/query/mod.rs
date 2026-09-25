@@ -70,6 +70,7 @@
 //! graph.
 
 pub mod ast;
+pub mod bind;
 pub mod error_code;
 pub mod parser;
 pub mod star;
@@ -92,6 +93,14 @@ pub use executor::{
     Record, RecordBatch, Value,
     MutQueryExecutor,  // Added for CREATE/DELETE/SET support
 };
+
+/// Parameter values a caller supplied for one statement (#1463).
+///
+/// A named type rather than the bare map so the surfaces, the engine and the
+/// tests all say the same thing, and so `execute_with_params(.., &BoundParams)`
+/// reads as "bound", which is the property that matters: these values are
+/// handed to the executor, never concatenated into query text.
+pub type BoundParams = std::collections::HashMap<String, crate::graph::PropertyValue>;
 
 /// Default LRU cache capacity
 const DEFAULT_CACHE_CAPACITY: usize = 1024;
@@ -384,6 +393,20 @@ impl QueryEngine {
         query_str: &str,
         store: &crate::graph::GraphStore,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_with_params(query_str, store, &BoundParams::new())
+    }
+
+    /// The same read path with the caller's parameters **bound** (#1463).
+    ///
+    /// The values reach the executor as bindings, never as text: nothing on
+    /// this path concatenates a value into the query, so a value cannot become
+    /// syntax. `execute` is this method with an empty map.
+    pub fn execute_with_params(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -405,6 +428,7 @@ impl QueryEngine {
         let outcome = executor
             .with_row_budget(self.row_budget)
             .with_plan_hash(self.plan_hash)
+            .with_params(params.clone())
             .execute(&query);
         // Logged before the `?`, so a query that ran for two minutes and then
         // failed is in the log. That one is usually the more interesting of
@@ -450,10 +474,27 @@ impl QueryEngine {
         query_str: &str,
         store: &crate::graph::GraphStore,
     ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
+        self.execute_cached_with_params(query_str, store, &BoundParams::new())
+    }
+
+    /// The cached read path with the caller's parameters bound (#1463).
+    ///
+    /// The bound values are **part of the key**. They have to be: the key is
+    /// otherwise the query text, and two requests that differ only in their
+    /// parameters have identical text — the second would be served the first
+    /// one's answer, which is a wrong answer that looks right.
+    pub fn execute_cached_with_params(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+    ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
+        let mut effective = query.params.clone();
+        effective.extend(params.clone());
         let key = ResultKey {
             query: query_str.split_whitespace().collect::<Vec<_>>().join(" "),
-            params: canonical_params(&query.params),
+            params: canonical_params(&effective),
             epoch: store.epoch(),
         };
 
@@ -466,7 +507,7 @@ impl QueryEngine {
         }
         self.result_stats.record_miss();
 
-        let batch = self.execute(query_str, store)?;
+        let batch = self.execute_with_params(query_str, store, params)?;
 
         // Re-read the epoch rather than reusing the one read above. A write can
         // land while the query runs, and caching the result under the *old*
@@ -553,9 +594,26 @@ impl QueryEngine {
         store: &mut crate::graph::GraphStore,
         tenant_id: &str,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_mut_with_params(query_str, store, tenant_id, &BoundParams::new())
+    }
+
+    /// The write path with the caller's parameters bound (#1463).
+    ///
+    /// Writes are where interpolation hurts most — a value spliced into a
+    /// `CREATE` can close the literal and add a clause — so the write surface
+    /// binds on the same terms as the read one. Never cached: `execute_mut`
+    /// has no cached form.
+    pub fn execute_mut_with_params(
+        &self,
+        query_str: &str,
+        store: &mut crate::graph::GraphStore,
+        tenant_id: &str,
+        params: &BoundParams,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
-        let mut executor = MutQueryExecutor::new(store, tenant_id.to_string());
+        let mut executor =
+            MutQueryExecutor::new(store, tenant_id.to_string()).with_params(params.clone());
         // Both sides of this: the span on the error (#1358) and the timing
         // for the slow-query log. Taking either alone would silently revert
         // the other -- two correct fixes at one call site.
