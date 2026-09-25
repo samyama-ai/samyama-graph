@@ -28,6 +28,24 @@
 //! bench exists to check that reading against the running engine, because a
 //! grep is not a measurement.
 //!
+//! # Cores alone can be satisfied by wasting cores
+//!
+//! Mean cores measures *parallelism*, and PERF-06 wants parallelism as a proxy
+//! for speed. The two come apart whenever coordination costs more than the work
+//! being coordinated, which for graph expansion is the common case: the unit of
+//! work is "follow one edge and bind a record".
+//!
+//! #1460 demonstrated it. A morsel-driven parallel expansion raised core use
+//! from 1.00 to 6.88 on a one-hop pattern and **cut throughput from 975 to 494
+//! iterations** in the same window -- 13x the CPU to answer 2x slower, the extra
+//! cores being rayon coordination rather than work. On cores alone that branch
+//! moves PERF-06 most of the way to its H1 target while making the engine worse.
+//!
+//! So this reports **throughput beside cores** (#1461). A reader comparing two
+//! runs can then see the case that matters: cores up and throughput down is a
+//! regression wearing a requirement's colours, and no core count on its own can
+//! tell you that happened.
+//!
 //! Usage: cargo bench --bench traversal_parallelism -- [--scale N] [--depth D]
 
 use std::time::Instant;
@@ -157,10 +175,16 @@ fn main() {
     println!("  \"control_query\": {control_q:?},");
     println!("  \"control_mean_cores\": {control_cores:.3},");
     println!("  \"control_wall_s\": {control_wall:.3}, \"control_iters\": {control_iters},");
+    println!("  \"control_throughput_per_s\": {:.2},",
+             control_iters as f64 / control_wall.max(f64::MIN_POSITIVE));
     println!("  \"instrument_ok\": {instrument_ok},");
     println!("  \"traversal_query\": {trav_q:?},");
     println!("  \"traversal_mean_cores\": {trav_cores:.3},");
     println!("  \"traversal_wall_s\": {trav_wall:.3}, \"traversal_iters\": {trav_iters},");
+    // The number a core count cannot substitute for. Compared across runs, a
+    // rise in cores beside a fall here is the #1460 signature.
+    println!("  \"traversal_throughput_per_s\": {:.2},",
+             trav_iters as f64 / trav_wall.max(f64::MIN_POSITIVE));
     println!("  \"traversal_core_efficiency\": {efficiency:.4}");
     println!("}}");
 }
