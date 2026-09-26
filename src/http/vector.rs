@@ -181,6 +181,14 @@ pub async fn search_handler(
             .into_response();
     }
 
+    // Refuse a graph this build cannot serve, the same way `/api/query` and
+    // `/api/query/export` do. Without this the argument was accepted, ignored,
+    // and the default graph searched for any value — so a tenant that exists
+    // read another tenant's data, with a 200 and no notification (#1476).
+    if let Some(refusal) = crate::http::handler::reject_foreign_graph(&payload.graph) {
+        return refusal;
+    }
+
     let tenant_id = &payload.graph;
 
     // Which property holds the vectors? Ask the index, do not guess.
