@@ -15146,6 +15146,47 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "NSGA2", "MORaoDE", "SAPHR",
     ];
 
+    /// Procedures that need `&mut GraphStore`, and the refusal the read path owes
+    /// a caller who asks for one there.
+    ///
+    /// One list, read by everything that has to agree about it: the read path's
+    /// refusal below, [`AlgorithmOperator::is_mutating`], and — the reason it is
+    /// public — `Query::is_write()`, which decides which executor a statement
+    /// reaches. Those had drifted: the operator knew `or.solve` writes and the
+    /// router classified by clause only, so every `CALL algo.or.solve(...)` was
+    /// routed to the read executor and refused. All 31 solvers were unreachable
+    /// from HTTP and RESP while working in-process (#1468).
+    ///
+    /// A second hand-maintained list is how the two drifted in the first place,
+    /// so a procedure added here is routed correctly the same day.
+    pub const MUTATING_PROCEDURES: &'static [(&'static str, &'static str)] = &[
+        ("or.solve", "algo.or.solve requires write access (MutQueryExecutor)"),
+        (
+            "fastrp",
+            "algo.fastRP requires write access (MutQueryExecutor): it writes the embedding as a node property",
+        ),
+        (
+            "node2vec",
+            "algo.node2vec requires write access (MutQueryExecutor): it writes the embedding as a node property",
+        ),
+    ];
+
+    /// The refusal for a mutating procedure asked of the read executor, or `None`
+    /// if the procedure does not write. Matched on the canonical name, so
+    /// `algo.or.solve`, `samyama.OR.Solve` and a bare `or.solve` answer alike.
+    pub fn mutating_procedure_refusal(name: &str) -> Option<&'static str> {
+        let canonical = Self::canonical_name(name);
+        Self::MUTATING_PROCEDURES
+            .iter()
+            .find(|(proc_name, _)| *proc_name == canonical)
+            .map(|(_, why)| *why)
+    }
+
+    /// Does a `CALL` to this procedure name write to the graph?
+    pub fn procedure_is_mutating(name: &str) -> bool {
+        Self::mutating_procedure_refusal(name).is_some()
+    }
+
     /// Is this a name `or.solve` will run, rather than quietly substitute?
     fn is_known_solver(name: &str) -> bool {
         Self::SOLVERS.iter().any(|s| s.eq_ignore_ascii_case(name))
@@ -17695,6 +17736,13 @@ impl AlgorithmOperator {
 impl PhysicalOperator for AlgorithmOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
+            // A mutating procedure cannot run here. Reaching this point means the
+            // router sent it to the read executor, which is the bug #1468 fixed in
+            // `Query::is_write()`; the message stays for a caller who builds a read
+            // executor directly.
+            if let Some(why) = Self::mutating_procedure_refusal(&self.name) {
+                return Err(ExecutionError::RuntimeError(why.to_string()));
+            }
             match Self::canonical_name(&self.name).as_str() {
                 "pagerank" => self.execute_pagerank(store)?,
                 "shortestpath" => self.execute_shortest_path(store)?,
@@ -17762,9 +17810,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
-                "or.solve" => return Err(ExecutionError::RuntimeError("algo.or.solve requires write access (MutQueryExecutor)".to_string())),
-                "fastrp" => return Err(ExecutionError::RuntimeError("algo.fastRP requires write access (MutQueryExecutor): it writes the embedding as a node property".to_string())),
-                "node2vec" => return Err(ExecutionError::RuntimeError("algo.node2vec requires write access (MutQueryExecutor): it writes the embedding as a node property".to_string())),
+                // The three mutating procedures are refused from `MUTATING_PROCEDURES`
+                // before this match, so that the refusal and the routing decision read
+                // the same list (#1468).
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.apply_yield_aliases();
@@ -17876,7 +17924,7 @@ impl PhysicalOperator for AlgorithmOperator {
     }
 
     fn is_mutating(&self) -> bool {
-        matches!(Self::canonical_name(&self.name).as_str(), "or.solve" | "fastrp" | "node2vec")
+        Self::procedure_is_mutating(&self.name)
     }
 
     fn reset(&mut self) {
