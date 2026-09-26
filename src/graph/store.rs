@@ -1348,10 +1348,19 @@ impl GraphStore {
     /// Only auto-embed needs it, and only so the embedding it computes can be written
     /// onto the node — see [`spawn_auto_embed`]. Passing `None` keeps the old behaviour:
     /// the vector goes into the in-memory index and nowhere else.
+    ///
+    /// What is left here is the work no statement reads back: the HNSW insert,
+    /// auto-embed and the agentic-enrichment trigger. The property and
+    /// full-text indexes are maintained by the writing thread, because a query
+    /// reads them back inside the statement that wrote them and a channel
+    /// cannot promise that (#1467) -- see `apply_property_set_readback` for the
+    /// criterion. `property_index` stays in the signature so the callers keep
+    /// compiling and so the index this loop no longer touches is still named at
+    /// the call site.
     pub async fn start_background_indexer_with_store(
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
         vector_index: Arc<VectorIndexManager>,
-        property_index: Arc<IndexManager>,
+        _property_index: Arc<IndexManager>,
         tenant_manager: Arc<crate::persistence::TenantManager>,
         store: Option<Arc<tokio::sync::RwLock<GraphStore>>>,
     ) {
@@ -1372,10 +1381,12 @@ impl GraphStore {
                                 let _ = vector_index.add_vector(label.as_str(), key, id, &vec);
                             }
                         }
-                        for label in &labels {
-                            property_index.index_insert(label, key, value.clone(), id);
-                        }
-                        
+                        // The property index is *not* maintained here: the
+                        // writer does it, because a statement reads it back
+                        // (#1467). Two writers on one index would let a replay
+                        // of this event re-insert a value a later write has
+                        // already superseded.
+
                         // Auto-Embed check (#310)
                         if let PropertyValue::String(text) = value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
@@ -1432,28 +1443,17 @@ impl GraphStore {
                         }
                     }
                 }
-NodeDeleted { tenant_id: _, id, labels, properties } => {
-                    for (key, value) in properties {
-                        for label in &labels {
-                            property_index.index_remove(label, &key, &value, id);
-                        }
-                    }
+NodeDeleted { .. } => {
+                    // The property index is maintained by the writer now
+                    // (#1467), and nothing here ever removed the node's vectors
+                    // from the HNSW index, so this arm has no work left.
                 }
-                PropertySet { tenant_id, id, labels, key, old_value, new_value } => {
-                    if let Some(old) = old_value {
-                        for label in &labels {
-                            property_index.index_remove(label, &key, &old, id);
-                        }
-                    }
-                    for label in &labels {
-                        property_index.index_insert(label, &key, new_value.clone(), id);
-                    }
+                PropertySet { tenant_id, id, labels, key, old_value: _, new_value } => {
                     if let Some(vec) = new_value.to_vector() {
                         for label in &labels {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
                     }
-                    
                     // Auto-Embed check (#310)
                     if let PropertyValue::String(text) = &new_value {
                         if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
@@ -1510,8 +1510,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                         if let Some(vec) = value.to_vector() {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
                         }
-                        property_index.index_insert(&label, &key, value.clone(), id);
-                        
                         // Auto-Embed check (#310)
                         if let PropertyValue::String(text) = &value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
@@ -1690,9 +1688,36 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             self.incoming.resize(idx + 1, Vec::new());
         }
 
-        // Same as `create_node`: the local path only indexes properties, so
-        // building the event for a property-less node allocates to feed a loop
-        // that iterates zero times (#491).
+        // Index here, on the writing thread, whether or not a subscriber
+        // exists. The property index is read back by the very next operator --
+        // a per-row MERGE looks up the node the previous row created -- so an
+        // index maintained on a channel is an index that is not there yet, and
+        // the lookup misses and creates a duplicate (#1467). The subscriber
+        // still gets the event, and what it does with it is the HNSW insert,
+        // auto-embed and the agent trigger -- none of which a statement reads
+        // back. See `apply_property_set_readback` for the criterion.
+        //
+        // A property-less node indexes nothing, so the local call is skipped
+        // rather than allocating to feed a loop that iterates zero times (#491).
+        if !indexed_properties.is_empty() {
+            if self.index_sender.is_some() {
+                for (key, value) in &indexed_properties {
+                    for label in &node.labels {
+                        self.property_index.index_insert(label, key, value.clone(), node_id);
+                    }
+                }
+            } else {
+                self.handle_index_event(
+                    crate::graph::event::IndexEvent::NodeCreated {
+                        tenant_id: tenant_id.to_string(),
+                        id: node_id,
+                        labels: node.labels.iter().cloned().collect(),
+                        properties: indexed_properties.clone(),
+                    },
+                    None,
+                );
+            }
+        }
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(crate::graph::event::IndexEvent::NodeCreated {
                 tenant_id: tenant_id.to_string(),
@@ -1700,16 +1725,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 labels: node.labels.iter().cloned().collect(),
                 properties: indexed_properties,
             });
-        } else if !indexed_properties.is_empty() {
-            self.handle_index_event(
-                crate::graph::event::IndexEvent::NodeCreated {
-                    tenant_id: tenant_id.to_string(),
-                    id: node_id,
-                    labels: node.labels.iter().cloned().collect(),
-                    properties: indexed_properties,
-                },
-                None,
-            );
         }
 
         // `Vec` grows 0 -> capacity 4 on first push, and `Node` is 128 bytes, so
@@ -2038,6 +2053,28 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 .constraint_insert(label, &key_str, val.clone(), node_id);
         }
 
+        // Index on this thread, subscriber or not -- the read-back indexes, at
+        // least. The next operator of the same statement reads them:
+        // `MERGE (n:N {id: row.id})` per CSV row looks for the node the row
+        // before it wrote, so an index maintained on a channel is an index
+        // that has not been written yet. Every row missed, every row created,
+        // 500 rows made 1000 nodes, and nothing reported an error (#1467). The
+        // unique-constraint index a few lines above was already maintained
+        // here for exactly this reason; the plain index was not.
+        //
+        // Borrowed data, not a materialised event: the event exists only for
+        // the subscriber, which builds nothing else from it.
+        if let Some(labels) = self.nodes[idx].last().map(|n| &n.labels) {
+            if self.index_sender.is_some() {
+                self.apply_property_set_readback(node_id, labels, &key_str, old_val.as_ref(), &val);
+            } else {
+                // Nobody to hand the vector to; index everything here.
+                self.apply_property_set(node_id, labels, &key_str, old_val.as_ref(), &val);
+            }
+        }
+        // What is left for the subscriber is the HNSW insert, auto-embed and
+        // the agent trigger -- see `apply_property_set_readback` for why those
+        // three stay off the write path.
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(crate::graph::event::IndexEvent::PropertySet {
                 tenant_id: tenant_id.to_string(),
@@ -2050,12 +2087,6 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
                 old_value: old_val,
                 new_value: val,
             });
-        } else {
-            // No subscriber: index directly from borrowed data rather than
-            // materialising an event only to take it apart again.
-            if let Some(labels) = self.nodes[idx].last().map(|n| &n.labels) {
-                self.apply_property_set(node_id, labels, &key_str, old_val.as_ref(), &val);
-            }
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
@@ -2169,10 +2200,16 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             properties: latest_node.properties.clone(),
         };
 
+        // Removed from the property index here, not on a channel: a delete the
+        // index has not yet learned about hands the next lookup a node that is
+        // gone (#1467, the mirror of the missing insert).
+        for (key, value) in &latest_node.properties {
+            for label in &latest_node.labels {
+                self.property_index.index_remove(label, key, value, id);
+            }
+        }
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
-        } else {
-            self.handle_index_event(event, None);
         }
 
         // Clear the columnar row. The id goes on the free list just above and will be
@@ -2317,10 +2354,21 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
             properties: node.properties.clone(),
         };
 
+        // A label makes the node's properties indexable under that label, and
+        // the statement that added it may look the node up by it on the next
+        // row, so the property index lands here rather than on the channel
+        // (#1467). The vector index goes with the event.
+        if self.index_sender.is_some() {
+            if let crate::graph::event::IndexEvent::LabelAdded { properties, .. } = &event {
+                for (key, value) in properties {
+                    self.property_index.index_insert(&label, key, value.clone(), node_id);
+                }
+            }
+        } else {
+            self.handle_index_event(event.clone(), None);
+        }
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(event);
-        } else {
-            self.handle_index_event(event, None);
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
@@ -5149,6 +5197,42 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         old_value: Option<&PropertyValue>,
         new_value: &PropertyValue,
     ) {
+        self.apply_property_set_readback(id, labels, key, old_value, new_value);
+        if let Some(vec) = new_value.to_vector() {
+            for label in labels {
+                let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
+            }
+        }
+    }
+
+    /// The indexes a statement can read back **within itself**, maintained on
+    /// the writing thread.
+    ///
+    /// *This is the criterion for which side of the channel a new index belongs
+    /// on: can an operator in the same statement read it?* If it can, it is
+    /// maintained here, synchronously, or the statement answers from an index
+    /// that does not yet contain its own writes -- `MERGE` per CSV row read a
+    /// property index that was still empty and created a duplicate for every
+    /// row (#1467). If it cannot, it belongs on the channel, where its cost is
+    /// somebody else's thread.
+    ///
+    /// - **Property index** -- `MERGE` and an index-backed `MATCH` read it. Here.
+    /// - **Full-text** -- `db.index.fulltext.queryNodes` reads it, and nothing
+    ///   else maintains it at all: the channel never carried a full-text event,
+    ///   so on a store with a subscriber a search returned nothing for a
+    ///   document that existed. Here.
+    /// - **Vector (HNSW)** -- nothing reads it back mid-statement, and an insert
+    ///   is a graph descent with distance computations at every level: 10,000
+    ///   768-dimension writes ran 1.8x slower with it on the write path. On the
+    ///   channel.
+    fn apply_property_set_readback(
+        &self,
+        id: NodeId,
+        labels: &std::collections::HashSet<Label>,
+        key: &str,
+        old_value: Option<&PropertyValue>,
+        new_value: &PropertyValue,
+    ) {
         if let Some(old) = old_value {
             for label in labels {
                 self.property_index.index_remove(label, key, old, id);
@@ -5157,13 +5241,8 @@ NodeDeleted { tenant_id: _, id, labels, properties } => {
         for label in labels {
             self.property_index.index_insert(label, key, new_value.clone(), id);
         }
-        if let Some(vec) = new_value.to_vector() {
-            for label in labels {
-                let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
-            }
-        }
-        // Full-text maintenance on the same choke point as the property and
-        // vector indexes. A full-text index maintained from the callers of
+        // Full-text maintenance on the same choke point as the property
+        // index. A full-text index maintained from the callers of
         // this function instead would go stale at whichever caller was
         // forgotten, and a stale inverted index does not report anything --
         // it returns a document that no longer holds the word.
