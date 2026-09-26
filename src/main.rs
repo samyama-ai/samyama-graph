@@ -1173,6 +1173,27 @@ async fn start_server() {
         .map(|pm| pm.tenants_arc())
         .unwrap_or_else(|| Arc::new(samyama::persistence::TenantManager::new()));
 
+    // The default tenant's quotas, from the command line.
+    //
+    // They were `ResourceQuotas::default()` and nothing could change them: no
+    // flag, no environment variable, and `update_quotas` had no HTTP route. A
+    // stock server therefore stopped accepting writes at 1M nodes on any
+    // hardware, which is 1% of the node count PERF-12 is written against — so
+    // three scale requirements were unmeasurable for a reason that had nothing
+    // to do with the machine (#1483).
+    //
+    // Unset flags leave the shipped defaults exactly as they were. This adds a
+    // way to raise the ceiling; it does not move it.
+    if let Some(q) = quota_overrides_from_args() {
+        match shared_tenants.update_quotas("default", q) {
+            Ok(()) => tracing::info!("default tenant quotas overridden from the command line"),
+            Err(e) => {
+                eprintln!("error: could not apply quota overrides: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let global_embed_pipeline: Option<Arc<EmbedPipeline>> =
         if std::env::var("EMBED_ENABLED").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
             // Refused, not defaulted — and this is the path that matters most,
@@ -1286,4 +1307,51 @@ async fn start_server() {
     if let Err(e) = server.start().await {
         eprintln!("Server error: {}", e);
     }
+}
+
+/// A `--max-*` value: a number, or `unlimited`/`none` for no limit.
+///
+/// Returns `None` when the flag is absent, so an unset flag is distinguishable
+/// from one explicitly set to unlimited. `Some(None)` is "no ceiling".
+fn quota_arg(name: &str) -> Option<Option<usize>> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == name)?;
+    // A following token that is itself a flag means the value was omitted.
+    // Without this, `--max-nodes --http-port 8080` reports that `--http-port`
+    // is not a number, which sends the reader after the wrong argument.
+    let raw = match args.get(i + 1) {
+        Some(v) if !v.starts_with("--") => v,
+        _ => {
+            eprintln!("error: {name} requires a value (a number, or `unlimited`)");
+            std::process::exit(2);
+        }
+    };
+    if raw.eq_ignore_ascii_case("unlimited") || raw.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    match raw.replace('_', "").parse::<usize>() {
+        Ok(v) => Some(Some(v)),
+        Err(_) => {
+            eprintln!("error: {name} expects a number or `unlimited`, got {raw:?}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The default tenant's quotas with any `--max-*` flag applied, or `None` when
+/// no flag was given so the shipped defaults are left untouched.
+fn quota_overrides_from_args() -> Option<samyama::persistence::tenant::ResourceQuotas> {
+    let nodes = quota_arg("--max-nodes");
+    let edges = quota_arg("--max-edges");
+    let memory = quota_arg("--max-memory-bytes");
+    let storage = quota_arg("--max-storage-bytes");
+    if nodes.is_none() && edges.is_none() && memory.is_none() && storage.is_none() {
+        return None;
+    }
+    let mut q = samyama::persistence::tenant::ResourceQuotas::default();
+    if let Some(v) = nodes { q.max_nodes = v; }
+    if let Some(v) = edges { q.max_edges = v; }
+    if let Some(v) = memory { q.max_memory_bytes = v; }
+    if let Some(v) = storage { q.max_storage_bytes = v; }
+    Some(q)
 }
