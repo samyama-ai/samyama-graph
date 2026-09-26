@@ -12268,6 +12268,14 @@ pub struct CartesianProductOperator {
     /// Set once the left input has been drained through `next_mut`.
     /// Without it a second call would re-drain an already-consumed side.
     left_drained_mut: bool,
+    /// Whether the *right* side has been drained through `next_mut`.
+    ///
+    /// It had no counterpart: `next_mut` drained the left and then called
+    /// `self.next(store)`, which drives the right through the read path. A
+    /// mutating operator on the right — `CALL algo.or.solve(...)`, which the
+    /// clause pipeline joins in — therefore got the read executor's refusal
+    /// from inside a statement that was correctly routed as a write (#1479).
+    right_drained_mut: bool,
 }
 
 impl CartesianProductOperator {
@@ -12280,6 +12288,7 @@ impl CartesianProductOperator {
             current_right: None,
             left_materialized: false,
             left_drained_mut: false,
+            right_drained_mut: false,
         }
     }
 
@@ -12393,6 +12402,21 @@ impl PhysicalOperator for CartesianProductOperator {
             self.left = Box::new(MaterializedOperator::new(rows));
             self.left_drained_mut = true;
         }
+        if !self.right_drained_mut {
+            // Symmetric with the left. Without it the right side is driven by
+            // `next`, and a mutating child there never reaches `next_mut`.
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.right.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.right = Box::new(MaterializedOperator::new(rows));
+            self.right_drained_mut = true;
+        }
         self.next(store)
     }
 
@@ -12441,6 +12465,14 @@ pub struct JoinOperator {
     /// Set once the left input has been drained through `next_mut`.
     /// Without it a second call would re-drain an already-consumed side.
     left_drained_mut: bool,
+    /// Whether the *right* side has been drained through `next_mut`.
+    ///
+    /// It had no counterpart: `next_mut` drained the left and then called
+    /// `self.next(store)`, which drives the right through the read path. A
+    /// mutating operator on the right — `CALL algo.or.solve(...)`, which the
+    /// clause pipeline joins in — therefore got the read executor's refusal
+    /// from inside a statement that was correctly routed as a write (#1479).
+    right_drained_mut: bool,
 }
 
 impl JoinOperator {
@@ -12461,6 +12493,7 @@ impl JoinOperator {
             current_left_list_index: 0,
             materialized: false,
             left_drained_mut: false,
+            right_drained_mut: false,
         }
     }
 
@@ -12588,6 +12621,21 @@ impl PhysicalOperator for JoinOperator {
             self.left = Box::new(MaterializedOperator::new(rows));
             self.left_drained_mut = true;
         }
+        if !self.right_drained_mut {
+            // Symmetric with the left. Without it the right side is driven by
+            // `next`, and a mutating child there never reaches `next_mut`.
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.right.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.right = Box::new(MaterializedOperator::new(rows));
+            self.right_drained_mut = true;
+        }
         self.next(store)
     }
 
@@ -12643,6 +12691,14 @@ pub struct LeftOuterJoinOperator {
     /// Set once the left input has been drained through `next_mut`.
     /// Without it a second call would re-drain an already-consumed side.
     left_drained_mut: bool,
+    /// Whether the *right* side has been drained through `next_mut`.
+    ///
+    /// It had no counterpart: `next_mut` drained the left and then called
+    /// `self.next(store)`, which drives the right through the read path. A
+    /// mutating operator on the right — `CALL algo.or.solve(...)`, which the
+    /// clause pipeline joins in — therefore got the read executor's refusal
+    /// from inside a statement that was correctly routed as a write (#1479).
+    right_drained_mut: bool,
 }
 
 impl LeftOuterJoinOperator {
@@ -12666,6 +12722,7 @@ impl LeftOuterJoinOperator {
             any_match_for_left: false,
             materialized: false,
             left_drained_mut: false,
+            right_drained_mut: false,
         }
     }
 
@@ -12820,6 +12877,21 @@ impl PhysicalOperator for LeftOuterJoinOperator {
             }
             self.left = Box::new(MaterializedOperator::new(rows));
             self.left_drained_mut = true;
+        }
+        if !self.right_drained_mut {
+            // Symmetric with the left. Without it the right side is driven by
+            // `next`, and a mutating child there never reaches `next_mut`.
+            let mut rows = Vec::new();
+            let mut count = 0u64;
+            while let Some(record) = self.right.next_mut(store, tenant_id)? {
+                rows.push(record);
+                count += 1;
+                if count % 10000 == 0 {
+                    check_deadline()?;
+                }
+            }
+            self.right = Box::new(MaterializedOperator::new(rows));
+            self.right_drained_mut = true;
         }
         self.next(store)
     }
