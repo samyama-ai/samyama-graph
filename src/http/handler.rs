@@ -66,6 +66,38 @@ fn default_graph() -> String {
     "default".to_string()
 }
 
+/// Refuse a `graph` argument this build cannot honour, or `None` to proceed.
+///
+/// This build serves one graph. Three handlers already refused a foreign name
+/// with their own copy of the message; `/api/vector-search` had no check at all
+/// and served the default graph's contents for any value, including a tenant id
+/// that does not exist (#1476). A tenant that *does* exist read another
+/// tenant's data.
+///
+/// One implementation so the four cannot drift, and so the next handler that
+/// takes a `graph` has something to call. The refusal names both graphs: an
+/// operator who sees only "does not exist" cannot tell a typo from a build that
+/// serves one graph.
+pub(crate) fn reject_foreign_graph(graph: &str) -> Option<axum::response::Response> {
+    if graph == default_graph() {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "This build serves a single graph ('{}'); the requested graph '{}' does \
+                     not exist and the argument cannot be honoured.",
+                    default_graph(), graph
+                ),
+                "graph": graph,
+            })),
+        )
+            .into_response(),
+    )
+}
+
 /// Request for exporting a query result as Arrow or Parquet (#1097).
 #[derive(Deserialize)]
 pub struct ExportRequest {
