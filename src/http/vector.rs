@@ -182,7 +182,61 @@ pub async fn search_handler(
     }
 
     let tenant_id = &payload.graph;
-    let property_key = payload.property_key.as_deref().unwrap_or("embedding");
+
+    // Which property holds the vectors? Ask the index, do not guess.
+    //
+    // This defaulted to the literal "embedding". A vector index on any other
+    // property — `CREATE VECTOR INDEX vx FOR (n:V) ON (n.emb)` is perfectly
+    // ordinary — made this endpoint search a property that does not exist and
+    // return `200` with an empty result set, which reads as "nothing is
+    // similar" rather than "wrong property" (#1481). The manager knew the
+    // right answer the whole time; nobody asked it.
+    //
+    // An explicit `property_key` still wins, so a caller who names it keeps
+    // today's behaviour. Only the unnamed case changes, and only from a guess
+    // to either the index's own property or an error.
+    let resolved_property: String = match payload.property_key.as_deref() {
+        Some(p) => p.to_string(),
+        None => {
+            let label = payload.label.as_deref();
+            let candidates: Vec<String> = {
+                let store = state.store.read().await;
+                store
+                    .vector_index
+                    .list_indices()
+                    .into_iter()
+                    .filter(|k| label.is_none_or(|l| k.label == l))
+                    .map(|k| k.property_key)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            };
+            match candidates.len() {
+                // No index to consult. Keep the historical default rather than
+                // refusing: `search_all` and the no-label path still work, and
+                // an empty graph should not become an error.
+                0 => "embedding".to_string(),
+                1 => candidates.into_iter().next().unwrap(),
+                _ => {
+                    // Ambiguous, and a guess here is how the original defect
+                    // read as an empty result. Name the choices instead.
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!(
+                                "label {:?} has vector indexes on more than one property ({}); \
+                                 pass `property_key` to say which one to search",
+                                label.unwrap_or("<any>"),
+                                candidates.join(", ")
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+    let property_key = resolved_property.as_str();
 
     // Resolve query vector from query_text or query_vector
     let (query_vector, mode) = if let Some(text) = &payload.query_text {
