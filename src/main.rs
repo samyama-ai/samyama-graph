@@ -1254,9 +1254,40 @@ async fn start_server() {
 
     println!("\nServer starting on {}:{}", config.address, config.port);
 
-    // Start background indexer now that store is wrapped in Arc
+    // Start the background indexer, with or without persistence.
+    //
+    // It only ran under persistence. `main.rs` arms `index_sender` for every
+    // server, so on `--ephemeral` every index event was sent to a channel with
+    // nobody on the other end: the HNSW insert never happened, auto-embed and
+    // the agentic trigger never fired, and the events accumulated for the life
+    // of the process. `/api/vector-search` answered `200` with no rows for
+    // vectors that were in the graph, which reads as "nothing is similar"
+    // rather than "there is no index" (#1469).
+    //
+    // Nothing in the indexer needs persistence. It wants the store's two index
+    // handles and a `TenantManager`, and `shared_tenants` exists either way —
+    // `PersistenceManager::start_indexer` is a thin wrapper that supplies its
+    // own. So the no-persistence arm does the same work with the manager the
+    // rest of the process already shares.
     if let Some(ref pm) = persistence {
         pm.start_indexer(Arc::clone(&store), rx);
+    } else {
+        let indexer_store = Arc::clone(&store);
+        let indexer_tenants = Arc::clone(&shared_tenants);
+        tokio::spawn(async move {
+            let (vector_index, property_index) = {
+                let guard = indexer_store.read().await;
+                (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
+            };
+            samyama::graph::GraphStore::start_background_indexer_with_store(
+                rx,
+                vector_index,
+                property_index,
+                indexer_tenants,
+                Some(indexer_store),
+            )
+            .await;
+        });
     }
 
     // Start HTTP server for Visualizer API (port from --http-port, default 8080)
