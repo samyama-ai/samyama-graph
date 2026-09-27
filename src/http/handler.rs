@@ -3002,8 +3002,17 @@ mod tests {
         assert_eq!(json["nodes_created"], 1);
 
         let store = state.store.read().await;
-        let node = store.get_nodes_by_label(&"Person".into())[0];
-        let prop = |k: &str| node.properties.get(k).cloned();
+        let node_id = store.get_nodes_by_label(&"Person".into())[0].id;
+        // Through the merged view, not `node.properties` (#1505). Since #1188
+        // `set_node_property` writes the column and deliberately drops the row
+        // shadow, so a node written by any ordinary path has an empty
+        // `properties` map. This test read the map directly and passed only
+        // because CSV import was the outlier that still wrote row storage --
+        // it was asserting where the value was stored, not the column shift it
+        // is named for. `merged_node_properties` exists for exactly this
+        // reason (#333).
+        let merged = store.node_properties_full(node_id);
+        let prop = |k: &str| merged.get(k).cloned();
         // Compared as values, not as rendered strings: `PropertyValue`'s `Display`
         // quotes strings, so `to_string()` would pass on a shifted column too.
         assert_eq!(
