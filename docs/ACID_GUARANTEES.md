@@ -11,7 +11,7 @@ Samyama provides ACID guarantees for both single-statement Cypher and multi-stat
 | **Atomicity** | ✅ | RocksDB `WriteBatch` + WAL — see ADR-023 |
 | **Consistency** | ✅ | Schema-flexible with internal-identifier integrity. Single node only — the distributed claim is withdrawn, see §2 |
 | **Isolation** | ✅ | Session transactions (RESP, HTTP) hold the writer lock: serializable in effect. The Rust store API offers snapshot isolation with first-committer-wins. Anomaly table in §3 |
-| **Durability** | ⚠️ | Written, not **synced**: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. A write that fails to reach disk at all is now reported and stops further writes (#1274). See §4 |
+| **Durability** | ⚠️ | Written, not **synced** *by default*: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. `SAMYAMA_FSYNC=1` puts a real barrier on both the WAL and RocksDB, at two orders of magnitude in write throughput — measured, with the host it was measured on, in §4. A write that fails to reach disk at all is reported and stops further writes (#1274). See §4 |
 
 ---
 
@@ -85,7 +85,9 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 
 ### 4. Durability — "committed data survives"
 
-- **Nothing is fsynced by default.** A write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache. `WalWriter::sync_mode` defaults to false (`src/persistence/wal.rs:187`) and its setter has no callers anywhere in the repository, so it is false for the life of the process; even when true the call is `file.flush()` (`wal.rs:232`), which is not a durability barrier. `sync_all`/`sync_data` appear in `src/` only in the snapshot writer. RocksDB is opened without `WriteOptions::set_sync`, so its writes are unsynced too.
+- **Nothing is fsynced by default.** Without `SAMYAMA_FSYNC` a write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache, and RocksDB's `WriteOptions` carry `set_sync(false)`. `WalWriter::sync_mode` is read from the environment at construction (`WalWriter::sync_mode_from_env`) and is false unless the variable is set, so on a stock server both halves of the write path stop at the page cache.
+
+  *This bullet described a stronger claim until 2026-09-27: that the sync-mode setter had no callers, that the only call even when true was `flush()`, that `sync_data` appeared in `src/` solely in the snapshot writer, and that RocksDB was opened with no `WriteOptions` at all. All four were true when #1309 was written and none are true now — the barrier below fixed them — and the bullet contradicted the one directly under it for as long as it stood. A correction goes stale the same way the claim it corrected did.*
   - **What survives:** the Samyama process being killed. The data is in the page cache and the kernel writes it out.
   - **What may not:** power loss, a kernel panic, a hard host reset, or a container host failure. A write acknowledged seconds earlier can be gone.
   - **`SAMYAMA_FSYNC=1` turns it on**, and it is off by default — that is
