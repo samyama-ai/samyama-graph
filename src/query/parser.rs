@@ -423,7 +423,109 @@ fn parse_row_count_fixed(pair: pest::iterators::Pair<Rule>) -> ParseResult<Optio
     Ok(None)
 }
 
+
+/// How deeply a query may nest brackets before it is refused.
+///
+/// One `POST /api/query` used to end the process: `RETURN ((((…1…))))` at
+/// around 218 parentheses overflowed the stack of the tokio worker handling it
+/// and aborted, taking every other connection and tenant with it (#1475). With
+/// no authentication on the HTTP surface (#1328) the precondition was
+/// reachability and nothing else.
+///
+/// A Rust stack overflow **aborts rather than unwinds**, so no `catch_unwind`
+/// at the request boundary can contain it. It has to be refused before the
+/// recursion starts, which is what this does.
+///
+/// Three measurements set this, and the tightest one wins:
+///
+/// | | depth |
+/// |---|---|
+/// | deepest nesting in 4,265 query literals in this repo | **7** |
+/// | release build overflows at | ~218 |
+/// | **debug build overflows at** | **72** (71 still parses) |
+///
+/// The debug figure is the one that matters. CI runs `cargo test --workspace`
+/// in debug, frames are larger there, and a limit chosen against the release
+/// number is a limit that aborts the test binary — which is exactly what
+/// happened when this was first written at 100.
+///
+/// 32 is 4.6x the deepest query anyone here actually writes and leaves a 2.2x
+/// margin below the tightest floor measured. The margin is the point: the
+/// overflow depth is a property of the thread's stack size and build profile,
+/// so it differs on the aarch64 runner and inside a container, and a limit
+/// tuned to any single observation would encode that host.
+pub const MAX_NESTING_DEPTH: usize = 32;
+
+/// The nesting limit in force, from `SAMYAMA_MAX_NESTING_DEPTH` or the default.
+///
+/// Configurable for the same reason the row budget is: a generated workload may
+/// legitimately nest deeper than anything in this repository, and forking the
+/// engine to raise a constant is not a reasonable answer. An unparseable or
+/// zero value falls back to the default rather than to "no limit" — the whole
+/// point is that there is always one.
+pub fn nesting_limit() -> usize {
+    std::env::var("SAMYAMA_MAX_NESTING_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(MAX_NESTING_DEPTH)
+}
+
+/// The nesting depth of `(`, `[` and `{` in `input`, ignoring bracket
+/// characters inside string literals.
+///
+/// Iterative on purpose. A recursive depth check would be the defect it exists
+/// to prevent.
+///
+/// String awareness is not decoration: `RETURN '((((...'` is a perfectly good
+/// query whose brackets are data, and counting them would refuse it.
+fn max_nesting_depth(input: &str) -> usize {
+    let mut depth = 0usize;
+    let mut max = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    for c in input.chars() {
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => in_string = Some(c),
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth > max {
+                    max = depth;
+                }
+            }
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
 pub fn parse_query(input: &str) -> ParseResult<Query> {
+    // Before any recursion, including pest's own. See `MAX_NESTING_DEPTH`.
+    let depth = max_nesting_depth(input);
+    let limit = nesting_limit();
+    if depth > limit {
+        return Err(ParseError::Coded {
+            code: crate::query::error_code::SYNTAX,
+            message: format!(
+                "query nests brackets {depth} deep, which is beyond the limit of \
+                 {limit}. Deeply nested expressions are parsed recursively and \
+                 would exhaust the stack. Raise SAMYAMA_MAX_NESTING_DEPTH if a \
+                 workload genuinely needs more."
+            ),
+        });
+    }
+
     let pairs = match CypherParser::parse(Rule::query, input) {
         Ok(pairs) => pairs,
         // The established rules each encode one permitted clause order. A
