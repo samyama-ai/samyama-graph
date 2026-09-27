@@ -52,7 +52,7 @@ use crate::graph::{Edge, Node, PropertyMap, GraphStore};
 use std::path::Path;
 use std::sync::Arc;
 // warn removed - was unused import causing compiler warning
-use tracing::info;
+use tracing::{info, warn};
 
 /// Integrated persistence manager combining WAL, storage, and tenancy
 pub struct PersistenceManager {
@@ -378,6 +378,22 @@ impl PersistenceManager {
             )));
         }
 
+        // Index definitions, before the rows of the same statement (#1477).
+        //
+        // Here rather than in a DDL-specific persist path because `CREATE INDEX`
+        // produces no `Mutation` — the write log records rows — so a path that
+        // only ran when there were mutations would never fire for the statement
+        // that needs it. Every existing persist site calls this function, so all
+        // of them get index durability without a fourth mechanism beside them.
+        //
+        // The flag is cleared after the write, not before: a failed write that
+        // had already cleared it would lose the definition with nothing left to
+        // say so.
+        if store.index_catalog_is_dirty() {
+            self.storage.put_index_catalog(tenant, &store.index_catalog())?;
+            store.clear_index_catalog_dirty();
+        }
+
         // Last operation wins, in order of first appearance. Order matters only for
         // reading a WAL by eye; correctness comes from each entry carrying final state.
         let mut order: Vec<(bool, u64)> = Vec::new();
@@ -562,6 +578,71 @@ impl PersistenceManager {
         self.tenants.set_usage(tenant, "edges", edges.len())?;
 
         Ok((nodes, edges))
+    }
+
+    /// A tenant's index declarations, as last persisted.
+    ///
+    /// Empty for a database written before #1477, and empty is the pre-#1477
+    /// behaviour: no index is declared and every query still answers correctly,
+    /// just without an index.
+    pub fn load_index_catalog(
+        &self,
+        tenant: &str,
+    ) -> Result<crate::index::catalog::IndexCatalog, PersistenceError> {
+        Ok(self.storage.get_index_catalog(tenant)?)
+    }
+
+    /// Write a store's index declarations now, without waiting for a statement
+    /// that changes rows.
+    pub fn persist_index_catalog(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+    ) -> Result<(), PersistenceError> {
+        self.storage.put_index_catalog(tenant, &store.index_catalog())?;
+        store.clear_index_catalog_dirty();
+        Ok(())
+    }
+
+    /// Re-declare a tenant's indexes and build them from the rows already in
+    /// `store` (#1477).
+    ///
+    /// **Call this after the rows are in.** `insert_recovered_node` maintains
+    /// none of the three index registries, so declaring first leaves every index
+    /// empty — and an empty vector index answers every search with no rows and
+    /// no error, which is worse than the missing index it replaced.
+    pub fn restore_index_catalog(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+    ) -> Result<crate::index::catalog::RestoredIndexes, PersistenceError> {
+        let catalog = self.load_index_catalog(tenant)?;
+        Ok(store.restore_index_catalog(&catalog))
+    }
+
+    /// Recover a tenant into a store the way a restart does: rows first, then
+    /// the index definitions rebuilt from them (#1477).
+    ///
+    /// The one place that fixes the order. `recover` returns nodes and edges and
+    /// says nothing about indexes, so every caller that used it rebuilt a store
+    /// with no index in it; this is what they should call instead.
+    pub fn recover_into(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+    ) -> Result<(usize, usize, crate::index::catalog::RestoredIndexes), PersistenceError> {
+        let (nodes, edges) = self.recover(tenant)?;
+        let (node_count, edge_count) = (nodes.len(), edges.len());
+        for node in nodes {
+            store.insert_recovered_node(node);
+        }
+        for edge in edges {
+            if let Err(e) = store.insert_recovered_edge(edge) {
+                warn!("edge recovery error for tenant {tenant}: {e}");
+            }
+        }
+        let indexes = self.restore_index_catalog(tenant, store)?;
+        Ok((node_count, edge_count, indexes))
     }
 
     /// Create a checkpoint

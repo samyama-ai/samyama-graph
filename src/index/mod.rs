@@ -10,6 +10,8 @@ pub mod sketch;
 pub mod manager;
 pub mod fulltext;
 pub mod hierarchy;
+pub mod catalog;
 
 pub use property_index::PropertyIndex;
 pub use manager::{IndexManager, PropertyIndexKey};
+pub use catalog::{IndexCatalog, IndexDefinition, RestoredIndexes};

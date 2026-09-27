@@ -1115,7 +1115,36 @@ async fn start_server() {
                         Err(e) => eprintln!("  Error recovering tenant '{}': {}", tenant, e),
                     }
                 }
-                println!("Recovery complete. Total: {} nodes, {} edges in-memory", graph.node_count(), graph.edge_count());
+                // The index definitions, after every tenant's rows are in
+                // (#1477). A second pass rather than part of the loop above
+                // because all tenants share one `graph` here: an index restored
+                // at the end of tenant A's turn would not contain tenant B's
+                // rows, and nothing maintains it as they arrive.
+                //
+                // Definitions were lost entirely before this. `SHOW INDEXES`
+                // was empty on a directory that had three indexes in it, a
+                // B-tree predicate replanned as a scan, a full-text search
+                // errored, and a vector search returned an empty result set
+                // with no error to say why.
+                let mut restored_indexes = 0usize;
+                for tenant in &tenants {
+                    match pm.restore_index_catalog(tenant, &mut graph) {
+                        Ok(r) => {
+                            restored_indexes += r.total();
+                            if r.failed > 0 {
+                                eprintln!(
+                                    "  Warning: {} index definition(s) for '{}' could not be rebuilt",
+                                    r.failed, tenant
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("  Error restoring indexes for '{}': {}", tenant, e),
+                    }
+                }
+                println!(
+                    "Recovery complete. Total: {} nodes, {} edges, {} indexes in-memory",
+                    graph.node_count(), graph.edge_count(), restored_indexes
+                );
             }
             Ok(_) => println!("No persisted tenants found."),
             Err(e) => eprintln!("Error listing persisted tenants: {}", e),

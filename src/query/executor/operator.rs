@@ -13099,36 +13099,11 @@ impl PhysicalOperator for CreateIndexOperator {
             return Ok(None);
         }
 
-        store.property_index.create_index(self.label.clone(), self.property.clone());
-
-        // Backfill index
-        // Since we have mutable access to store, we can get nodes
-        // But we need to avoid borrowing store while mutating property_index if we accessed it differently
-        // Here we use get_nodes_by_label which borrows store.
-        // property_index is inside store. 
-        // IndexManager uses RwLock internally so it handles its own mutability.
-        
-        // We collect entries to release the borrow on nodes
-        // Check both Node HashMap AND ColumnStore (for stub-loaded graphs)
-        let mut entries = Vec::new();
-        let nodes = store.get_nodes_by_label(&self.label);
-
-        for node in nodes {
-            // Try Node HashMap first
-            if let Some(val) = node.get_property(&self.property) {
-                entries.push((node.id, val.clone()));
-            } else {
-                // Fall back to ColumnStore (create_node_stub + set_column_property path)
-                let col_val = store.node_columns.get_property(node.id.as_u64() as usize, &self.property);
-                if !col_val.is_null() {
-                    entries.push((node.id, col_val));
-                }
-            }
-        }
-
-        for (node_id, val) in entries {
-            store.property_index.index_insert(&self.label, &self.property, val, node_id);
-        }
+        // Declaring and backfilling both live on the store, so that the index
+        // is recorded in the catalog that survives a restart (#1477) and the
+        // two-tier backfill exists once rather than once here and once in
+        // `CompositeCreateIndexOperator`.
+        store.create_property_index(&self.label, &self.property);
 
         self.executed = true;
         Ok(Some(Record::new()))
@@ -13412,25 +13387,10 @@ impl PhysicalOperator for CompositeCreateIndexOperator {
         }
 
         // Create individual indexes for each property
-        for property in &self.properties {
-            store.property_index.create_index(self.label.clone(), property.clone());
-
-            // Backfill each index (check both HashMap and ColumnStore)
-            let mut entries = Vec::new();
-            let nodes = store.get_nodes_by_label(&self.label);
-            for node in nodes {
-                if let Some(val) = node.get_property(property) {
-                    entries.push((node.id, val.clone()));
-                } else {
-                    let col_val = store.node_columns.get_property(node.id.as_u64() as usize, property);
-                    if !col_val.is_null() {
-                        entries.push((node.id, col_val));
-                    }
-                }
-            }
-            for (node_id, val) in entries {
-                store.property_index.index_insert(&self.label, property, val, node_id);
-            }
+        // A composite index is N single-property indexes, which is how it is
+        // planned and how it is listed by `SHOW INDEXES`.
+        for property in self.properties.clone() {
+            store.create_property_index(&self.label, &property);
         }
 
         self.executed = true;
@@ -13479,39 +13439,13 @@ impl PhysicalOperator for CreateConstraintOperator {
             return Ok(None);
         }
 
-        // Check existing data for uniqueness violations
-        let nodes = store.get_nodes_by_label(&self.label);
-        let mut seen_values: std::collections::HashSet<PropertyValue> = std::collections::HashSet::new();
-        for node in nodes {
-            // Through the store: on a restored graph the row is empty, so this
-            // check saw no values and created a constraint over data that
-            // already violated it (#1187).
-            if let Some(val) = store.node_property(node.id, &self.property) {
-                if !val.is_null() && !seen_values.insert(val.clone()) {
-                    return Err(ExecutionError::RuntimeError(format!(
-                        "Cannot create unique constraint: duplicate value {:?} for :{}({})",
-                        val, self.label.as_str(), self.property
-                    )));
-                }
-            }
-        }
-
-        // Create the constraint
-        store.property_index.create_unique_constraint(self.label.clone(), self.property.clone());
-
-        // Backfill constraint index. Through the store, not `node.get_property`:
-        // on a restored graph the row is empty, the backfill saw no existing
-        // values, and the first duplicate of any of them went through (#1187).
-        let mut entries = Vec::new();
-        let nodes = store.get_nodes_by_label(&self.label);
-        for node in nodes {
-            if let Some(val) = store.node_property(node.id, &self.property) {
-                entries.push((node.id, val));
-            }
-        }
-        for (node_id, val) in entries {
-            store.property_index.constraint_insert(&self.label, &self.property, val, node_id);
-        }
+        // The duplicate check, the declaration and the backfill all live on
+        // the store, so the constraint is recorded in the catalog that survives
+        // a restart (#1477). An unpersisted constraint is not a slower query:
+        // the first duplicate after the restart goes in.
+        store
+            .create_unique_constraint(&self.label, &self.property)
+            .map_err(ExecutionError::RuntimeError)?;
 
         self.executed = true;
         Ok(Some(Record::new()))
@@ -13559,13 +13493,14 @@ impl PhysicalOperator for DropIndexOperator {
             return Ok(None);
         }
 
-        if !store.property_index.has_index(&self.label, &self.property) {
+        // Through the store, so the drop reaches the persisted catalog. A drop
+        // that only cleared memory came back on the next restart (#1477).
+        if !store.drop_property_index(&self.label, &self.property) {
             return Err(ExecutionError::RuntimeError(
                 format!("Index on :{}({}) does not exist", self.label.as_str(), self.property)
             ));
         }
 
-        store.property_index.drop_index(&self.label, &self.property);
         self.executed = true;
         Ok(Some(Record::new()))
     }

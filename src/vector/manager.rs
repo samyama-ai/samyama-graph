@@ -157,6 +157,35 @@ impl VectorIndexManager {
         Ok(Vec::new())
     }
 
+    /// Every index as a persistable declaration (#1477).
+    ///
+    /// Carries what `dump_all` drops: the **name** the DDL gave the index, and
+    /// its quantization. Neither was in `metadata.json`, so a dump/load round
+    /// trip restored an index that `db.index.vector.queryNodes('vidx', ...)`
+    /// could not resolve — `index_names()` came back empty and the error could
+    /// not even name the index that had in fact been loaded.
+    pub fn definitions(&self) -> Vec<crate::index::catalog::IndexDefinition> {
+        let names = self.names.read().unwrap();
+        let indices = self.indices.read().unwrap();
+        indices
+            .iter()
+            .map(|(key, index_lock)| {
+                let index = index_lock.read().unwrap();
+                crate::index::catalog::IndexDefinition::Vector {
+                    name: names
+                        .iter()
+                        .find(|(_, k)| *k == key)
+                        .map(|(n, _)| n.clone()),
+                    label: key.label.clone(),
+                    property: key.property_key.clone(),
+                    dimensions: index.dimensions(),
+                    metric: index.metric(),
+                    quantization: index.quantization(),
+                }
+            })
+            .collect()
+    }
+
     /// List all indices
     pub fn list_indices(&self) -> Vec<IndexKey> {
         let indices = self.indices.read().unwrap();
