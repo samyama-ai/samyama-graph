@@ -145,12 +145,49 @@ impl Poset {
             })
         };
 
-        for id in extra_nodes {
+        // Interned in ascending node id, not in arrival order (#1448's class).
+        //
+        // `intern` numbers a node the first time it is seen, so the dense index
+        // every structure below is built on was a function of the order the
+        // edges arrived in. `from_store` gets those from `get_edges_by_type`,
+        // which walks a `HashSet<EdgeId>`, and `std`'s hasher is keyed per
+        // `HashSet` instance. Measured: twelve stores built from identical data
+        // gave **twelve different edge orders and twelve different topological
+        // orders**, so the same hierarchy numbered its nodes differently in
+        // every process.
+        //
+        // A topological order is not unique and reachability answers were never
+        // wrong, but `idx()`, `node_at()` and everything derived from the
+        // numbering were unreproducible — which matters now that index
+        // definitions persist (#1477) and a rebuilt index has to agree with the
+        // one it replaced.
+        //
+        // Sorting here rather than at the call sites means every caller of
+        // `from_edges` gets it, not only `from_store`. It is one sort over the
+        // edge list, against a build that is already O(n log n) in its own
+        // sorting steps.
+        // Every node is interned up front, in ascending id, so the numbering
+        // depends on the *set* of nodes and not on the order anything arrives
+        // in. Interning as the edges are walked would still be deterministic
+        // once the edges are sorted, but it numbers by first appearance in the
+        // pair list -- with edges (1,2) and (1,25), node 25 gets index 2 -- and
+        // an index that is not the node's rank is harder to compare between two
+        // builds of the same hierarchy, which is the thing this is for.
+        let pairs: Vec<(NodeId, NodeId)> = edges.into_iter().collect();
+        let mut all: Vec<NodeId> = extra_nodes.into_iter().collect();
+        all.reserve(pairs.len() * 2);
+        for (c, p) in &pairs {
+            all.push(*c);
+            all.push(*p);
+        }
+        all.sort_unstable();
+        all.dedup();
+        for id in all {
             intern(id, &mut nodes, &mut index_of);
         }
 
-        let mut raw: Vec<(u32, u32)> = Vec::new();
-        for (child, parent) in edges {
+        let mut raw: Vec<(u32, u32)> = Vec::with_capacity(pairs.len());
+        for (child, parent) in pairs {
             let c = intern(child, &mut nodes, &mut index_of);
             let p = intern(parent, &mut nodes, &mut index_of);
             raw.push((c, p));
