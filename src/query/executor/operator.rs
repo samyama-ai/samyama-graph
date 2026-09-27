@@ -17444,8 +17444,25 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut record = Record::new();
             record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
             record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
-            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
-            
+            // The iterations the solver *ran*, not the cap it was given (#1443).
+            // This used to bind `max_iter`, so `YIELD iterations` echoed the
+            // request: ask for 50 and you got 50 whether the solver ran 50 or
+            // stopped at 12. Five solvers break out of their loop on
+            // convergence (fpa, motlbo, nsga2, tlbo, mo_bmwr_family), and early
+            // convergence is the case the number is most interesting in. It
+            // also made the field useless for comparing how hard two solvers
+            // worked on one problem: both reported the cap, so both looked
+            // identical.
+            //
+            // `history` holds one entry per iteration performed, which is what
+            // `/optimize/solve` has always reported over SSE. The two surfaces
+            // disagreed; this one was the wrong one.
+            let iterations_run = result.history.len();
+            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(iterations_run as i64)));
+            // The cap, as a separate column. Overloading one name would leave a
+            // caller unable to tell "ran 50 of 50" from "ran 50 of 200".
+            record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+
             // Yield history as an array for plotting
             let history_props: Vec<PropertyValue> = result.history.into_iter().map(PropertyValue::Float).collect();
             record.bind("history".to_string(), Value::Property(PropertyValue::Array(history_props)));
