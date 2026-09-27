@@ -1040,6 +1040,22 @@ pub struct GraphStore {
     /// Property indices manager
     pub property_index: Arc<IndexManager>,
 
+    /// Has any of the three index catalogs changed since it was last persisted
+    /// (#1477)?
+    ///
+    /// The definitions live in three registries with no on-disk form, so a
+    /// restart lost every one of them while the rows came back. They are now
+    /// written to the same RocksDB database as the rows, by the same
+    /// `apply_mutations` call — and that call takes `&GraphStore`, which is why
+    /// this is an atomic rather than a `bool`. Set by every DDL path, cleared
+    /// once the catalog has reached disk.
+    ///
+    /// A flag rather than a comparison because the persist site has no copy of
+    /// the previous catalog to compare against, and rewriting three registries
+    /// worth of definitions on every statement would put a RocksDB write on the
+    /// path of writes that changed no index at all.
+    index_catalog_dirty: std::sync::atomic::AtomicBool,
+
     /// Hierarchy (OEH) index registry — subsumption + index-resident roll-up (ADR-035)
     pub hierarchy_index: Arc<HierarchyIndexManager>,
 
@@ -1154,6 +1170,7 @@ impl GraphStore {
             vector_index: Arc::new(VectorIndexManager::new()),
             fulltext: Default::default(),
             property_index: Arc::new(IndexManager::new()),
+            index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
@@ -4332,6 +4349,11 @@ NodeDeleted { .. } => {
         for ((label, prop), dims) in &discovered {
             if self.vector_index.get_index(label, prop).is_none() {
                 let _ = self.vector_index.create_index(label, prop, *dims, DistanceMetric::Cosine);
+                // Discovery declares indexes nobody wrote DDL for, and those are
+                // as much a part of the catalog as the declared ones: without
+                // this, an index a snapshot import discovered would be gone
+                // again on the next restart (#1477).
+                self.mark_index_catalog_changed();
             }
         }
 
@@ -5438,6 +5460,274 @@ NodeDeleted { .. } => {
         }
     }
 
+    // ============================================================
+    // Index catalog: what the three index registries declare (#1477)
+    // ============================================================
+
+    /// Record that an index was created or dropped, so the next persist writes
+    /// the catalog.
+    ///
+    /// Takes `&self` because the vector registry is behind an `Arc` and is
+    /// mutated through a shared reference, and because the persist site reads
+    /// the store immutably.
+    pub fn mark_index_catalog_changed(&self) {
+        self.index_catalog_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Is there an index change that has not reached disk?
+    pub fn index_catalog_is_dirty(&self) -> bool {
+        self.index_catalog_dirty
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Clear the flag. Called only after the catalog has been written, never
+    /// before: clearing first and failing the write loses the definition with
+    /// nothing to say it happened.
+    pub fn clear_index_catalog_dirty(&self) {
+        self.index_catalog_dirty
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Every index declaration in the store, in the order `SHOW INDEXES` sorts
+    /// them.
+    ///
+    /// Read from the same three registries `ShowIndexesOperator` reads, so what
+    /// is persisted is by construction what the user was shown. The contents are
+    /// deliberately absent — see `crate::index::catalog`.
+    pub fn index_catalog(&self) -> crate::index::catalog::IndexCatalog {
+        use crate::index::catalog::{IndexCatalog, IndexDefinition};
+        let mut definitions: Vec<IndexDefinition> = self
+            .property_index
+            .list_indexes()
+            .into_iter()
+            .map(|(label, property)| IndexDefinition::Property {
+                label: label.as_str().to_string(),
+                property,
+            })
+            .collect();
+        definitions.extend(
+            self.property_index
+                .list_constraints()
+                .into_iter()
+                .map(|(label, property)| IndexDefinition::UniqueConstraint {
+                    label: label.as_str().to_string(),
+                    property,
+                }),
+        );
+        definitions.extend(self.fulltext.listing().into_iter().map(
+            |(name, label, property)| IndexDefinition::FullText { name, label, property },
+        ));
+        definitions.extend(self.vector_index.definitions());
+        // Sorted so two runs of the same DDL produce byte-identical records and
+        // a diff of the catalog is a diff of the indexes, not of hash order.
+        definitions.sort_by_key(|d| match d {
+            IndexDefinition::Property { label, property } => {
+                (0u8, label.clone(), property.clone(), String::new())
+            }
+            IndexDefinition::UniqueConstraint { label, property } => {
+                (1u8, label.clone(), property.clone(), String::new())
+            }
+            IndexDefinition::FullText { name, label, property } => {
+                (2u8, label.clone(), property.clone(), name.clone())
+            }
+            IndexDefinition::Vector { name, label, property, .. } => (
+                3u8,
+                label.clone(),
+                property.clone(),
+                name.clone().unwrap_or_default(),
+            ),
+        });
+        IndexCatalog { definitions }
+    }
+
+    /// `CREATE INDEX ON :Label(property)` — declare the index and fill it from
+    /// the nodes already present.
+    ///
+    /// Was inlined in `CreateIndexOperator` and again in
+    /// `CompositeCreateIndexOperator`, which is two places for the catalog flag
+    /// to be forgotten and two copies of the columnar fallback. Returns the
+    /// number of entries backfilled, as `create_fulltext_index` does.
+    pub fn create_property_index(&mut self, label: &Label, property: &str) -> usize {
+        // A new index changes the plan, not the answer — but `EXPLAIN` is a
+        // query whose result this does change, and the cost of a bump here is
+        // one statement's cache.
+        self.bump_epoch();
+        self.property_index
+            .create_index(label.clone(), property.to_string());
+        self.mark_index_catalog_changed();
+
+        // Both tiers: a node loaded from a snapshot holds its properties in the
+        // column store and has an empty row copy (#545), so reading only
+        // `node.properties` indexes a graph built by CREATE and misses one that
+        // was imported.
+        let mut entries = Vec::new();
+        for node in self.get_nodes_by_label(label) {
+            if let Some(val) = node.get_property(property) {
+                entries.push((node.id, val.clone()));
+            } else {
+                let col_val = self
+                    .node_columns
+                    .get_property(node.id.as_u64() as usize, property);
+                if !col_val.is_null() {
+                    entries.push((node.id, col_val));
+                }
+            }
+        }
+        let filled = entries.len();
+        for (node_id, val) in entries {
+            self.property_index.index_insert(label, property, val, node_id);
+        }
+        filled
+    }
+
+    /// `CREATE CONSTRAINT ... REQUIRE n.property IS UNIQUE` — check the rows
+    /// already present, declare the constraint, and fill it from them.
+    ///
+    /// Returns the number of values registered, or the duplicate that makes the
+    /// constraint impossible. Reads through `node_property`, not the row copy:
+    /// on a restored graph the row is empty, so the check saw no values and the
+    /// constraint was created over data that already violated it (#1187).
+    pub fn create_unique_constraint(
+        &mut self,
+        label: &Label,
+        property: &str,
+    ) -> Result<usize, String> {
+        let mut entries = Vec::new();
+        let mut seen: std::collections::HashSet<PropertyValue> = std::collections::HashSet::new();
+        for node in self.get_nodes_by_label(label) {
+            if let Some(val) = self.node_property(node.id, property) {
+                if val.is_null() {
+                    continue;
+                }
+                if !seen.insert(val.clone()) {
+                    return Err(format!(
+                        "Cannot create unique constraint: duplicate value {:?} for :{}({})",
+                        val,
+                        label.as_str(),
+                        property
+                    ));
+                }
+                entries.push((node.id, val));
+            }
+        }
+
+        self.bump_epoch();
+        self.property_index
+            .create_unique_constraint(label.clone(), property.to_string());
+        self.mark_index_catalog_changed();
+
+        let filled = entries.len();
+        for (node_id, val) in entries {
+            self.property_index
+                .constraint_insert(label, property, val.clone(), node_id);
+            // `create_unique_constraint` also creates the plain index; fill it
+            // too, or the constraint is enforced and the predicate still scans.
+            self.property_index.index_insert(label, property, val, node_id);
+        }
+        Ok(filled)
+    }
+
+    /// `DROP INDEX ON :Label(property)`.
+    pub fn drop_property_index(&mut self, label: &Label, property: &str) -> bool {
+        if !self.property_index.has_index(label, property) {
+            return false;
+        }
+        self.bump_epoch();
+        self.property_index.drop_index(label, property);
+        self.mark_index_catalog_changed();
+        true
+    }
+
+    /// Re-declare every index in `catalog` and build it from the rows already in
+    /// the store (#1477).
+    ///
+    /// **Rows first, definitions second.** `insert_recovered_node` maintains none
+    /// of the three registries, so a definition restored before the rows arrive
+    /// would be declared and empty — which for the vector index turns a missing
+    /// index into a plausible-looking one that answers every search with nothing.
+    /// Every branch below therefore populates from what is in the store at the
+    /// time it runs, and `recover_into` is ordered to match.
+    ///
+    /// Not idempotent-by-accident: re-declaring an index that already exists
+    /// rebuilds it from the rows, which is correct but not free, so callers run
+    /// this once per boot.
+    pub fn restore_index_catalog(
+        &mut self,
+        catalog: &crate::index::catalog::IndexCatalog,
+    ) -> crate::index::catalog::RestoredIndexes {
+        use crate::index::catalog::{IndexDefinition, RestoredIndexes};
+        let mut report = RestoredIndexes::default();
+        let mut any_vector = false;
+
+        for def in &catalog.definitions {
+            match def {
+                IndexDefinition::Property { label, property } => {
+                    self.create_property_index(&Label::new(label), property);
+                    report.property += 1;
+                }
+                IndexDefinition::UniqueConstraint { label, property } => {
+                    match self.create_unique_constraint(&Label::new(label), property) {
+                        Ok(_) => report.unique += 1,
+                        Err(e) => {
+                            // The rows on disk already violate it, which can
+                            // only happen if it was not being enforced. Declare
+                            // nothing: a constraint restored over data that
+                            // breaks it would reject the next legal write and
+                            // accept nothing about the duplicates already in.
+                            tracing::warn!("could not restore unique constraint on {label}.{property}: {e}");
+                            report.failed += 1;
+                        }
+                    }
+                }
+                IndexDefinition::FullText { name, label, property } => {
+                    // Declares and backfills in one call.
+                    self.create_fulltext_index(name, label, property);
+                    report.fulltext += 1;
+                }
+                IndexDefinition::Vector {
+                    name,
+                    label,
+                    property,
+                    dimensions,
+                    metric,
+                    quantization,
+                } => match self.create_vector_index_named(
+                    name.as_deref(),
+                    label,
+                    property,
+                    *dimensions,
+                    *metric,
+                    *quantization,
+                ) {
+                    Ok(()) => {
+                        report.vector += 1;
+                        any_vector = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "could not restore vector index on {label}.{property}: {e}"
+                        );
+                        report.failed += 1;
+                    }
+                },
+            }
+        }
+
+        // One pass for every vector index, after they are all declared: the
+        // rebuild walks the nodes of each indexed label, and doing it per
+        // definition would walk them once per index.
+        if any_vector {
+            self.rebuild_vector_index();
+        }
+
+        // Restoring is not a change to persist. Leaving the flag set would make
+        // the first write after every boot rewrite a catalog identical to the
+        // one it was just read from.
+        self.clear_index_catalog_dirty();
+        report
+    }
+
     /// Create a named full-text index and fill it from the nodes already
     /// present (NDS-06).
     ///
@@ -5452,6 +5742,7 @@ NodeDeleted { .. } => {
         // `every_mutator_bumps_the_epoch_or_is_listed`, which is the kind of
         // guard that pays for itself on exactly this sort of addition.
         self.bump_epoch();
+        self.mark_index_catalog_changed();
         self.fulltext.create(name, label, property);
         let docs: Vec<(NodeId, String)> = self
             .node_ids_by_label(&Label::new(label), None)
@@ -5470,7 +5761,11 @@ NodeDeleted { .. } => {
 
     pub fn drop_fulltext_index(&mut self, name: &str) -> bool {
         self.bump_epoch();
-        self.fulltext.drop_index(name)
+        let dropped = self.fulltext.drop_index(name);
+        if dropped {
+            self.mark_index_catalog_changed();
+        }
+        dropped
     }
 
     pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent, _tenant_manager: Option<Arc<crate::persistence::TenantManager>>) {
@@ -5533,7 +5828,9 @@ NodeDeleted { .. } => {
         dimensions: usize,
         metric: DistanceMetric,
     ) -> VectorResult<()> {
-        self.vector_index.create_index(label, property_key, dimensions, metric)
+        self.vector_index.create_index(label, property_key, dimensions, metric)?;
+        self.mark_index_catalog_changed();
+        Ok(())
     }
 
     /// Create a vector index under the name the DDL gave it (#1041).
@@ -5547,7 +5844,9 @@ NodeDeleted { .. } => {
         quantization: crate::vector::index::Quantization,
     ) -> VectorResult<()> {
         self.vector_index
-            .create_index_named(name, label, property_key, dimensions, metric, quantization)
+            .create_index_named(name, label, property_key, dimensions, metric, quantization)?;
+        self.mark_index_catalog_changed();
+        Ok(())
     }
 
     /// The (label, property) a vector index name refers to, and every known name.

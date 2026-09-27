@@ -66,7 +66,42 @@ Unique-constraint check is **two-phase**: `check_unique_constraint` returns `Err
 - **Range-predicate plan coverage is partial**: `BETWEEN` and chained `>`/`<` AST shapes don't always route to `PropertyIndex::range`.
 
 ### Neutral
-- Indexes are not persisted columnar to RocksDB; they rebuild on load from `GraphStore`. Same storage trade-off as the columnar property store.
+- Index **contents** are not persisted to RocksDB; they are rebuilt from the rows on recovery. Same storage trade-off as the columnar property store, plus one property a persisted posting list cannot have: a rebuilt index cannot disagree with the rows it describes.
+- Index **definitions** are persisted, as one record per tenant in the `indices` column family — see "Index catalog" below. Until 2026-09-27 they were not, and the sentence that used to stand here ("they rebuild on load from `GraphStore`") described something no code did: nothing wrote a definition and nothing read one, so a restart returned every row and no index (#1477).
+
+## Index catalog (2026-09-27, #1477)
+
+The three index registries — `IndexManager` (property + unique constraint),
+`FullTextIndexes`, `VectorIndexManager` — are in-memory. What survives a restart
+is a `crate::index::catalog::IndexCatalog`: one bincode record per tenant under
+`catalog:<tenant>` in the `indices` column family of the same RocksDB database
+the rows live in.
+
+- **Declarations only.** `IndexDefinition` carries what each registry needs to
+  be rebuilt and nothing it contains. For a vector index that is the name, label,
+  property, dimensions, metric and quantization; dimensions and metric because an
+  index rebuilt at the wrong dimension silently skips every vector, quantization
+  because NDS-09 makes it a stated choice.
+- **A snapshot, not a log.** The whole catalog is rewritten whenever it changes,
+  so a `DROP` takes effect by absence. A log of creates and drops would have to
+  be replayed to stay correct, and an index that comes back after being dropped
+  is worse than one that never persisted.
+- **Written by `apply_mutations`**, the same call that persists the rows, gated
+  on a dirty flag every DDL path sets. `CREATE INDEX` produces no `Mutation`, so
+  a persist path that only ran when there were row mutations would never fire for
+  the statement that needs it.
+- **Restored after the rows, never before.** `PersistenceManager::recover_into`
+  loads nodes and edges, then re-declares each definition and builds it from what
+  is now in the store. `insert_recovered_node` maintains none of the three
+  registries, so declaring first would leave every index empty — and an empty
+  vector index answers every search with no rows and no error, which is worse
+  than the missing index it replaces.
+
+Still not covered: a `.sgsnap` export/import carries no catalog. It rebuilds
+vector indexes by discovery (`rebuild_vector_index_full`) and rebuilds nothing
+else, so property, unique-constraint and full-text definitions do not cross a
+snapshot boundary. The RocksDB path and the snapshot path are separate, and only
+the first one is fixed.
 
 ## Alternatives Considered
 

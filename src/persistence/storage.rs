@@ -346,6 +346,51 @@ impl PersistentStorage {
         Ok(())
     }
 
+    /// Write a tenant's index declarations (#1477).
+    ///
+    /// Into the `indices` column family, which has existed since the database
+    /// was first laid out and held nothing: the three index registries were
+    /// in-memory only, so a restart returned every row and no index. One key per
+    /// tenant holding the whole catalog, because the catalog is written as a
+    /// snapshot — see `crate::index::catalog::IndexCatalog` for why it is not a
+    /// log of creates and drops.
+    ///
+    /// Same database and same `write_opts` as the rows, so a definition is
+    /// exactly as durable as the nodes it indexes and honours `SAMYAMA_FSYNC`
+    /// the same way.
+    pub fn put_index_catalog(
+        &self,
+        tenant: &str,
+        catalog: &crate::index::catalog::IndexCatalog,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("indices")
+            .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
+        let key = format!("catalog:{}", tenant);
+        let value = bincode::serialize(catalog)?;
+        self.db.put_cf_opt(&cf, key.as_bytes(), value, &self.write_opts)?;
+        debug!("Wrote {} index definitions for {}", catalog.len(), tenant);
+        Ok(())
+    }
+
+    /// Read a tenant's index declarations. An absent key is an empty catalog,
+    /// not an error: every database written before #1477 has no key at all.
+    pub fn get_index_catalog(
+        &self,
+        tenant: &str,
+    ) -> StorageResult<crate::index::catalog::IndexCatalog> {
+        let cf = self
+            .db
+            .cf_handle("indices")
+            .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
+        let key = format!("catalog:{}", tenant);
+        match self.db.get_cf(&cf, key.as_bytes())? {
+            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+            None => Ok(Default::default()),
+        }
+    }
+
     /// Get all nodes for a tenant (for recovery)
     pub fn scan_nodes(&self, tenant: &str) -> StorageResult<Vec<Node>> {
         let cf = self.db.cf_handle("nodes")
