@@ -86,6 +86,19 @@ pub const PLANNING: &str = "Samyama.ClientError.Statement.PlanningFailed";
 /// branch on it and retry with a narrower pattern.
 pub const ROW_BUDGET_EXCEEDED: &str = "Samyama.ClientError.Statement.RowBudgetExceeded";
 
+/// A write refused because it would take the tenant past a configured
+/// resource quota (#1483).
+///
+/// A client error, for the same reason `ROW_BUDGET_EXCEEDED` is one: the
+/// engine is working and the caller asked for more than they are allowed.
+/// Classifying it as a `DatabaseError` — which it was, because the refusal
+/// arrived as a generic graph error — is a distinction clients act on. A
+/// caller that treats `DatabaseError` as transient retries a quota breach
+/// forever, and one that surfaces it as "the database is broken" pages
+/// somebody for a configuration limit. Its own code so a caller can branch
+/// on it and raise the ceiling or delete something instead.
+pub const QUOTA_EXCEEDED: &str = "Samyama.ClientError.Statement.QuotaExceeded";
+
 pub const RUNTIME: &str = "Samyama.ClientError.Statement.RuntimeError";
 /// The store or the engine failed. The query is not necessarily wrong.
 pub const GRAPH_ACCESS: &str = "Samyama.DatabaseError.Statement.GraphAccessFailed";

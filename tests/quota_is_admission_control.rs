@@ -102,6 +102,23 @@ fn a_create_at_the_ceiling_is_a_failed_statement_and_not_a_failed_persist() {
         stmt.contains("nodes (3/3)"),
         "the refusal must name the quota it hit, got: {stmt}"
     );
+    // The class, not just the text. A quota breach is the caller asking for
+    // more than they are allowed; it arrived as
+    // `DatabaseError.Statement.GraphAccessFailed`, which says the server
+    // failed. A client that treats `DatabaseError` as transient retries this
+    // forever, and one that reads it as "the database is broken" pages
+    // somebody for a configuration limit. The row budget — the other resource
+    // limit a caller can hit — is already a `ClientError`, and two resource
+    // limits must not be classified two different ways.
+    assert!(
+        stmt.contains(samyama::query::error_code::QUOTA_EXCEEDED),
+        "the refusal must carry {}, got: {stmt}",
+        samyama::query::error_code::QUOTA_EXCEEDED
+    );
+    assert!(
+        !stmt.contains("DatabaseError"),
+        "a quota breach must not be classed as a database failure, got: {stmt}"
+    );
     assert_eq!(
         persist, None,
         "nothing was created, so there was nothing to persist and nothing to diverge"
@@ -186,6 +203,10 @@ fn an_edge_quota_is_enforced_before_the_edge_exists() {
         run(&pm, &engine, &mut store, "MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:R]->(b)");
     let stmt = stmt.expect("the edge past the ceiling must fail");
     assert!(stmt.contains("edges (2/2)"), "got: {stmt}");
+    assert!(
+        stmt.contains(samyama::query::error_code::QUOTA_EXCEEDED),
+        "the edge refusal must carry the same client-error class as the node one, got: {stmt}"
+    );
     assert_eq!(persist, None);
     assert_eq!(store.edge_count(), 2);
     assert!(!health::is_degraded());

@@ -76,6 +76,28 @@ use samyama_optimization::common::{Problem, SolverConfig, MultiObjectiveProblem}
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
+/// A store error on a write path, classified for the caller (#1483).
+///
+/// A quota breach is the caller asking for more than they are allowed, not the
+/// database failing, so it gets `ClientError.Statement.QuotaExceeded` rather
+/// than the generic `DatabaseError.Statement.GraphAccessFailed`. The
+/// distinction is one clients act on: a caller that treats `DatabaseError` as
+/// transient retries a quota breach forever, and one that surfaces it as "the
+/// database is broken" pages somebody for a configuration limit. The same
+/// reasoning already classifies the row budget (`ROW_BUDGET_EXCEEDED`), and two
+/// resource limits must not be classified two different ways.
+///
+/// Everything else keeps the class it had.
+fn write_error(e: crate::graph::GraphError) -> ExecutionError {
+    if matches!(e, crate::graph::GraphError::QuotaExceeded(_)) {
+        return ExecutionError::Coded {
+            code: crate::query::error_code::QUOTA_EXCEEDED,
+            message: e.to_string(),
+        };
+    }
+    ExecutionError::GraphError(e.to_string())
+}
+
 // Thread-local query deadline for cooperative timeout inside operator materialization loops.
 // Set by QueryExecutor before execution, checked by JoinOperator/AggregateOperator/SortOperator.
 thread_local! {
@@ -12969,7 +12991,7 @@ impl PhysicalOperator for CreateNodeOperator {
                 // created with `Label("")` (#625).
                 // Refused before the node exists, not after it fails to persist: a
                 // quota breach is a rejected write, not a durability failure (#1483).
-                store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                store.admit_node().map_err(write_error)?;
                 let node_id = store.create_node_with_labels(labels.iter().cloned());
 
                 // With no input row, only the nodes this CREATE has made so far are
@@ -14370,7 +14392,7 @@ impl PhysicalOperator for CreateEdgeOperator {
                         .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", target_var)))?;
 
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
-                        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                        .map_err(write_error)?;
 
                     // Set properties on edge via DS-07c sparse map
                     for (key, value) in properties {
@@ -14527,7 +14549,7 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 }
 
                 let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
-                    .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                    .map_err(write_error)?;
 
                 // Set properties on edge via DS-07c sparse map. The evaluated
                 // expressions go last so they overwrite the placeholders.
@@ -14670,7 +14692,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 for (handle, labels, properties, property_exprs) in &self.nodes_to_create {
                     // Refused before the node exists, not after it fails to persist: a
                     // quota breach is a rejected write, not a durability failure (#1483).
-                    store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                    store.admit_node().map_err(write_error)?;
                     let node_id = store.create_node_with_labels(labels.iter().cloned());
                     // Non-literal property values (`{id: row.id}`) are evaluated against
                     // this row, so each created node gets the value belonging to its own
@@ -14724,7 +14746,7 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
 
                     // Create the edge
                     let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
-                        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                        .map_err(write_error)?;
 
                     // Set properties on edge via DS-07c sparse map
                     for (key, value) in properties {
@@ -14966,7 +14988,7 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                     if existing_all.is_empty() {
                         // Nothing matched — create it + apply ON CREATE SET
                         let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
-                            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                            .map_err(write_error)?;
 
                         for (key, value) in properties {
                             let _ = store.set_edge_property(edge_id, key.clone(), value.clone());
@@ -19361,7 +19383,7 @@ impl MergeOperator {
             // node a label the query never wrote (#625).
             // Refused before the node exists, not after it fails to persist: a
             // quota breach is a rejected write, not a durability failure (#1483).
-            store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            store.admit_node().map_err(write_error)?;
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
             if let Some(required) = node_props[i].as_ref() {
                 for (k, v) in required {
@@ -19382,7 +19404,7 @@ impl MergeOperator {
         for (from, to, edge_type, props, var, _undirected) in &pattern_rels {
             let edge_id = store
                 .create_edge(created[*from], created[*to], edge_type.clone())
-                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+                .map_err(write_error)?;
             for (k, v) in props {
                 store.set_edge_property_sparse(edge_id, k.clone(), v.clone());
             }
@@ -19677,7 +19699,7 @@ impl PhysicalOperator for MergeOperator {
         } else {
             // Refused before the node exists, not after it fails to persist: a
             // quota breach is a rejected write, not a durability failure (#1483).
-            store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            store.admit_node().map_err(write_error)?;
             node_id = store.create_node_with_labels(labels.iter().cloned());
 
             if let Some(required_props) = props {
