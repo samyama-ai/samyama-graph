@@ -395,7 +395,7 @@ into a public-health trifecta.* [Browse the catalogue →](case_studies)
 | What | How |
 |------|-----|
 | **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge; that run cost about $2.50 at the spot price of the day, which is a fact about one run and not a price list |
-| **96/100 queries pass** | Point lookups, multi-hop traversals, cross-KG aggregations — [all verified](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
+| **96 of 100 queries return real data** | Point lookups, multi-hop traversals, cross-KG aggregations, measured 2026-04-02 on one r6a.8xlarge and not re-measured since — no harness suite runs this benchmark, so nothing here would notice it going stale — [all 100 queries and their timings](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | **Four algorithms scale with cores** | PageRank, LCC, CDLP and triangle counting are Rayon-parallel, as are scan, filter and compaction. Measured at 16 cores: 3 of 7 frontier algorithms reach ≥0.6 efficiency, and `wcc`, `betweenness` and `closeness` are sequential at 0.06 — one thread on sixteen (`CH-ALGO-PARALLEL`, ALGO-09) |
 | **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 12/12 against the LDBC reference answers |
 | **200 resident bytes per edge** | Measured on LDBC SNB SF10 (176M edges) by `CH-MEM-01`, against a 256 B/edge target |
@@ -498,9 +498,11 @@ optimization, and micro/MVCC suites are self-contained; LDBC needs a data downlo
 hierarchical roll-up over time, geography and ontology — the workload the LDBC and FinBench
 suites do not contain. Every query is checked against an unindexed run of the same
 question, so a speedup is only reported alongside an identical answer. Latest: **108/108
-agree**; roll-up is flat at 15–20 ns from a 1-node subtree to a 137,257-node one. Against
-Neo4j on an identical graph it is **94× faster across the 58 queries expressible on both**,
-with no class losing — though without the index Samyama is 1.6× *slower* than Neo4j, so the
+agree** — `benchmarks/hier/results/PROVENANCE.json`, engine commit `30d0731` on vm-1,
+committed 2026-09-21; 4 further corpus queries are specified but uncontrolled and are
+not in that denominator. Roll-up is flat at 15–20 ns from a 1-node subtree to a
+137,257-node one. Against Neo4j on an identical graph it is
+**94× faster across the 58 queries expressible on both**, with no class losing — though without the index Samyama is 1.6× *slower* than Neo4j, so the
 index is the differentiator rather than the engine. That 94× is the ratio of the two
 *medians* over the 58 queries, which is not an average speedup and should not be read as
 one; the geometric mean of the per-query ratios is 88×. Both are recomputed from the
@@ -552,7 +554,9 @@ speedup over the wrong answer. Re-measuring needs both engines on one host.
 | Pathways | Reactome | 119K | 835K |
 | Drug Interactions | DrugBank + ChEMBL + SIDER | 245K | 388K |
 
-Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all four KGs. [Full results →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
+Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all
+four KGs, measured 2026-04-02 on one r6a.8xlarge and not re-measured since.
+[Full results →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
 
 ### Cross-KG Query Highlights
 
@@ -675,7 +679,7 @@ samyama
 | Resource | Link |
 |----------|------|
 | **The Book** | [graph.samyama.cloud/book](https://graph.samyama.cloud/book/) |
-| Biomedical Benchmark | [100 queries, 96 pass](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
+| Biomedical Benchmark | [**96 of 100 queries return real data**, measured 2026-04-02](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
 | Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
 | LDBC Results | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | Algorithm Conventions | [docs/ALGORITHM-CONVENTIONS.md](docs/ALGORITHM-CONVENTIONS.md) — directedness, weights, self-loops, disconnected components, tie-breaking and normalisation, per algorithm |
