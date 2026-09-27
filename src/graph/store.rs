@@ -3937,26 +3937,36 @@ NodeDeleted { .. } => {
         let Some(set) = self.label_index.get(label) else {
             return Vec::new();
         };
-        let Some(n) = limit else {
-            return set.iter().copied().collect();
-        };
-        if n == 0 {
+        if limit == Some(0) {
             return Vec::new();
         }
+        // Both paths walk the bitset (#1507). The unlimited one used to return
+        // `set.iter().copied().collect()` -- hash-set order -- while the doc
+        // above promised ascending ids "with or without a limit". Nothing had
+        // broken, because `NodeScanOperator` sorts the unlimited result
+        // afterwards and says so; but the guarantee was the caller's, not this
+        // function's, and the three other unlimited callers were relying on a
+        // sentence rather than on code.
+        //
+        // Reading the bitset is not a cost added to buy the ordering. On the
+        // sibling `get_nodes_by_label` it measured 13.3 ms -> 4.8 ms on a
+        // 1M-node label, 2.8x, because it skips the hash iteration entirely
+        // (#1448). One branch fewer here, not one more.
+        //
         // No bitset means no node carries the label; `label_bitset` builds one
         // otherwise, and it is the same structure the expand's membership test
         // uses, so this shares that cost rather than adding one.
         let Some(bits) = self.label_bitset(label) else {
             return Vec::new();
         };
-        let mut out = Vec::with_capacity(n.min(set.len()));
+        let mut out = Vec::with_capacity(limit.unwrap_or(usize::MAX).min(set.len()));
         for (w, word) in bits.iter().enumerate() {
             let mut word = *word;
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 word &= word - 1;
                 out.push(NodeId::new((w * 64 + bit) as u64));
-                if out.len() == n {
+                if Some(out.len()) == limit {
                     return out;
                 }
             }
