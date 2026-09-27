@@ -3858,16 +3858,46 @@ NodeDeleted { .. } => {
         }
     }
 
+    /// Every node carrying `label`, **in ascending node id**.
+    ///
+    /// Read off the label bitset, not the `HashSet<NodeId>` in `label_index`.
+    /// `std`'s default hasher is keyed per `HashSet` instance, so the hash set
+    /// iterates in a different order on every store — measured: twelve stores
+    /// built from identical data gave **twelve different orders**, while
+    /// `all_nodes()` (a flattened `Vec`) gave one (#1448).
+    ///
+    /// That is the same defect `node_ids_by_label` was given an ordering
+    /// guarantee for in #1364, and this sibling did not inherit it. Downstream,
+    /// `samyama-sdk`'s PCA built its feature matrix by position in this vector,
+    /// so the same data produced a different row order per process, and the
+    /// graph-sample handler strided across it, so the same graph sampled twice
+    /// returned different nodes.
+    ///
+    /// Bits are in ascending id order by construction, so this is ordered
+    /// without a sort. Sorting the hash-set result instead costs 11.4 ms on a
+    /// 1M-node label against a 13.3 ms scan — 86% — which is why the ordering
+    /// comes from the structure rather than from a `sort_unstable` at the end.
+    /// The bitset is cached and is the same one the expand's membership test
+    /// builds, so this shares that cost rather than adding one.
     pub fn get_nodes_by_label(&self, label: &Label) -> Vec<&Node> {
-        self.label_index
-            .get(label)
-            .map(|node_ids| {
-                node_ids
-                    .iter()
-                    .filter_map(|&id| self.get_node(id))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Some(set) = self.label_index.get(label) else {
+            return Vec::new();
+        };
+        let Some(bits) = self.label_bitset(label) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(set.len());
+        for (w, word) in bits.iter().enumerate() {
+            let mut word = *word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                if let Some(node) = self.get_node(NodeId::new((w * 64 + bit) as u64)) {
+                    out.push(node);
+                }
+            }
+        }
+        out
     }
 
     /// Get NodeIds for a label without resolving each `&Node`. Optionally takes
