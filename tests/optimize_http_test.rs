@@ -590,3 +590,86 @@ async fn seeded_multi_objective_run_reproduces_its_front() {
         "seeds 11 and 12 gave the identical front — the seed changes nothing"
     );
 }
+
+// #1478: an unknown field is a 400 that names it, not a silent 200.
+//
+// Before `deny_unknown_fields`, `no_such_field_qqq` returned 200 and a job id,
+// which is why nothing on this surface could tell an accepted field from an
+// honoured one — the probe for `constraints` got the same 200 as the control.
+// ---------------------------------------------------------------------------
+
+async fn solve_status_and_body(body: Value) -> (StatusCode, String) {
+    let res = router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/optimize/solve")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn solve_rejects_an_unknown_field_and_names_it() {
+    let (status, text) = solve_status_and_body(json!({
+        "algorithm": "jaya",
+        "benchmark": "sphere",
+        "no_such_field_qqq": 1
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body was: {text}");
+    assert!(
+        text.contains("no_such_field_qqq"),
+        "the 400 must name the offending field; got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn solve_rejects_the_near_miss_names_a_caller_would_reach_for() {
+    // These read like real parameters and are not. Each one silently ran a
+    // different problem than the caller asked for (#1478): `dim` is honoured,
+    // its three plausible synonyms were not.
+    for field in ["n_var", "dimensions", "num_variables", "constraints"] {
+        let (status, text) = solve_status_and_body(json!({
+            "algorithm": "jaya",
+            "benchmark": "sphere",
+            "population_size": 8,
+            "iterations": 5,
+            field: 3
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: body was {text}");
+        assert!(text.contains(field), "the 400 must name {field}; got: {text}");
+    }
+}
+
+#[tokio::test]
+async fn solve_still_accepts_every_declared_field() {
+    // The guard must not cost a field the endpoint really has.
+    let (status, text) = solve_status_and_body(json!({
+        "algorithm": "jaya",
+        "benchmark": "sphere",
+        "population_size": 8,
+        "iterations": 5,
+        "dim": 2,
+        "seed": 424242
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "body was: {text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert!(v["job_id"].as_str().is_some(), "no job id: {text}");
+}
+
+#[tokio::test]
+async fn solve_rejects_a_malformed_body_with_400_not_422() {
+    // Taking the rejection by hand changes axum's default 422 to the 400 the
+    // rest of this handler already answers a bad request with.
+    let (status, _) = solve_status_and_body(json!({"algorithm": "jaya"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing `benchmark`");
+}
