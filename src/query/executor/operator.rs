@@ -15246,6 +15246,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "NSGA2", "MORaoDE", "SAPHR",
     ];
 
+    /// The subset of `SOLVERS` that optimise more than one objective.
+    ///
+    /// A multi-objective algorithm is routed to the Pareto branch whatever the
+    /// caller's cost count, which is what the two hardcoded names in the route
+    /// condition used to do for `NSGA2` and `MOTLBO` alone (#1499). Naming the
+    /// set once means a new multi-objective solver is routed by being added
+    /// here rather than by remembering to edit an `||` chain — the omission
+    /// that made `MOBMWR` and `MORaoDE` report a dispatch bug.
+    const MULTI_OBJECTIVE_SOLVERS: &'static [&'static str] =
+        &["MOTLBO", "MOBMWR", "NSGA2", "MORaoDE"];
+
     /// Procedures that need `&mut GraphStore`, and the refusal the read path owes
     /// a caller who asks for one there.
     ///
@@ -17327,17 +17338,26 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             for node in nodes {
                 node_ids.push(node.id);
                 
-                // Single cost (for single objective solvers)
-                if cost_props.len() == 1 {
-                    let cost = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
-                    single_costs.push(cost);
-                } else if !cost_props.is_empty() {
+                // Both shapes, always (#1499). `multi_costs` is allocated with
+                // one row per cost property; it used to be filled only when
+                // there was more than one, so a single `cost_property` left one
+                // EMPTY row behind. `MultiObjectiveProblem::objectives` then
+                // indexed `costs[i]` for `i in 0..dim` into that empty row and
+                // panicked — on an unauthenticated query, since NSGA2 and
+                // MOTLBO are routed to the multi branch by name whatever the
+                // cost count.
+                //
+                // Filling both costs a vector push per node and removes the
+                // branch that made the two disagree.
+                if cost_props.is_empty() {
+                    single_costs.push(1.0);
+                } else {
+                    let first = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
+                    single_costs.push(first);
                     for (i, cp) in cost_props.iter().enumerate() {
                         let cost = store.node_property(node.id, cp).and_then(|v| v.as_float()).unwrap_or(1.0);
                         multi_costs[i].push(cost);
                     }
-                } else {
-                    single_costs.push(1.0);
                 }
             }
         }
@@ -17363,7 +17383,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
 
         // 3. Run Solver
-        if algorithm == "NSGA2" || algorithm == "MOTLBO" || cost_props.len() > 1 {
+        // One list, not two names in a condition (#1499). `MOBMWR` and
+        // `MORaoDE` are multi-objective and were missing from it, so with a
+        // single cost property they fell through to the single-objective
+        // branch, which has no arm for them, and hit the #1341 "no
+        // implementation wired" guard — a dispatch bug that did not exist.
+        // They are implemented; they were unroutable.
+        if Self::MULTI_OBJECTIVE_SOLVERS.contains(&algorithm) || cost_props.len() > 1 {
             let res = match algorithm {
                 "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
                 "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
