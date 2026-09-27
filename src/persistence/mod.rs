@@ -142,6 +142,36 @@ impl PersistenceManager {
         Arc::clone(&self.tenants)
     }
 
+    /// The ceiling a statement against `tenant` is admitted under (#1483).
+    ///
+    /// The quota used to be checked here, inside `apply_mutations`, which runs
+    /// after the statement has already written to the store. That made a breach
+    /// a durability failure rather than a rejected write: the rows were in
+    /// memory and not on disk, so `mark_degraded` fired and the whole process
+    /// stopped accepting writes — including writes for labels and tenants that
+    /// had nothing to do with the quota. It also made the ceiling soft by one
+    /// batch, because the rows were counted only once they reached disk.
+    ///
+    /// Handing the numbers to the store before the statement runs turns the same
+    /// limit into admission control. This call is two `O(1)` map reads and is
+    /// made once per write statement, not once per row.
+    ///
+    /// `None` when the tenant is unknown or has no node or edge ceiling, which
+    /// is the "admit everything" case and costs the store nothing.
+    pub fn write_admission(&self, tenant: &str) -> Option<crate::graph::WriteAdmission> {
+        let quotas = self.tenants.get_tenant(tenant).ok()?.quotas;
+        if quotas.max_nodes.is_none() && quotas.max_edges.is_none() {
+            return None;
+        }
+        let usage = self.tenants.get_usage(tenant).ok()?;
+        Some(crate::graph::WriteAdmission {
+            nodes_used: usage.node_count as u64,
+            max_nodes: quotas.max_nodes.map(|v| v as u64),
+            edges_used: usage.edge_count as u64,
+            max_edges: quotas.max_edges.map(|v| v as u64),
+        })
+    }
+
     /// Start the background indexer for a store.
     ///
     /// Takes the shared handle rather than a borrow so auto-embed can write the

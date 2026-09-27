@@ -591,14 +591,48 @@ impl AppState {
         }
     }
 
+    /// Would `nodes` new nodes and `edges` new edges take the tenant past its
+    /// quota? Asked before the import starts (#1483).
+    ///
+    /// `mutate` hands the store a ceiling and the store charges each row against
+    /// it, which covers every write that goes through the query engine. A bulk
+    /// import does not: it calls `create_node` in a loop, and `create_node`
+    /// cannot refuse — it returns a `NodeId`. So an import asks here instead,
+    /// with the count it already knows, and refuses whole. That matches what
+    /// these handlers already do with a ragged CSV row: validate the file, then
+    /// write it, so a limit reached on line 900 does not leave 899 nodes behind.
+    ///
+    /// `None` means it fits, or that no ceiling is configured.
+    pub fn quota_refuses(&self, graph: &str, nodes: u64, edges: u64) -> Option<String> {
+        let a = self.persistence.as_ref()?.write_admission(graph)?;
+        if let Some(max) = a.max_nodes {
+            let total = a.nodes_used.saturating_add(nodes);
+            if total > max {
+                return Some(format!("quota exceeded: nodes ({total}/{max})"));
+            }
+        }
+        if let Some(max) = a.max_edges {
+            let total = a.edges_used.saturating_add(edges);
+            if total > max {
+                return Some(format!("quota exceeded: edges ({total}/{max})"));
+            }
+        }
+        None
+    }
+
     pub async fn mutate<T>(
         &self,
         graph: &str,
         body: impl FnOnce(&mut GraphStore) -> T,
     ) -> T {
         let mut store = self.store.write().await;
-        if self.persistence.is_some() {
+        if let Some(pm) = &self.persistence {
             store.enable_write_log();
+            // The quota, resolved before the body runs. Checked here it is
+            // admission control; checked where it used to be — after the rows
+            // were in the store — a breach was a durability divergence and took
+            // the process read-only (#1483).
+            store.set_write_admission(pm.write_admission(graph));
         }
         let out = body(&mut store);
         if let Some(pm) = &self.persistence {

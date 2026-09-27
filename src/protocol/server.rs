@@ -605,13 +605,16 @@ mod tests {
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn).await;
         assert!(!is_error(&r), "{r:?}");
         let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
-        // One node persisted; a quota of one refuses the next new node at commit.
-        let quotas = crate::persistence::tenant::ResourceQuotas { max_nodes: Some(1), ..crate::persistence::tenant::ResourceQuotas::unlimited() };
-        pm.tenants().update_quotas("default", quotas).unwrap();
-
+        // The failure is injected, not provoked with a `max_nodes: Some(1)`
+        // quota as it was. A quota is checked before the row is created now, so
+        // it refuses the statement rather than the commit and this test would be
+        // measuring admission control instead of the durability path it is for
+        // (#1483). `fail_next_apply_for_test` fires once, so the commit's apply
+        // fails and the repair that follows it succeeds.
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn).await;
         assert!(!is_error(&r), "{r:?}");
+        pm.fail_next_apply_for_test();
         let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await;
         assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
 

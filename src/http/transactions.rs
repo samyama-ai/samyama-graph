@@ -68,8 +68,11 @@ pub async fn begin_handler(State(state): State<AppState>) -> Response {
         Ok(v) => v,
         Err(e) => return error(StatusCode::CONFLICT, e.to_string()),
     };
-    if state.persistence.is_some() {
+    if let Some(pm) = &state.persistence {
         guard.enable_write_log();
+        // Set once for the whole transaction: the quota counter does not move
+        // until the commit, so the store's own tally is what bounds it (#1483).
+        guard.set_write_admission(pm.write_admission("default"));
     }
     let id = uuid::Uuid::new_v4().to_string();
     let limit = GraphStore::session_transaction_timeout();
@@ -231,15 +234,17 @@ mod tests {
 
     /// #1274: a commit that could not be persisted used to answer
     /// `{"committed": true}`. It must be refused and rolled back.
+    ///
+    /// The failure is injected with `fail_next_apply_for_test`, not with a
+    /// `max_nodes: Some(0)` quota as it was. A quota is no longer a way to make
+    /// a persist fail — it is checked before the row is created, so the CREATE
+    /// below would be refused and the commit would have nothing to fail on
+    /// (#1483). Using a quota to stand in for a disk failure was always testing
+    /// the wrong thing; the hook exists for exactly this.
     #[tokio::test]
     async fn a_commit_that_cannot_be_persisted_is_refused_and_rolled_back() {
         let dir = tempfile::TempDir::new().unwrap();
         let pm = Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
-        let quotas = crate::persistence::tenant::ResourceQuotas {
-            max_nodes: Some(0),
-            ..crate::persistence::tenant::ResourceQuotas::unlimited()
-        };
-        pm.tenants().update_quotas("default", quotas).unwrap();
         let (_, mut state) = app();
         state.persistence = Some(Arc::clone(&pm));
         let app = Router::new()
@@ -250,6 +255,7 @@ mod tests {
 
         let tx = begin(&app).await;
         post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        pm.fail_next_apply_for_test();
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_ne!(status, StatusCode::OK, "a commit that was not persisted reported success: {body}");
         let guard = state.store.read().await;

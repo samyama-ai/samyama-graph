@@ -145,9 +145,48 @@ pub enum GraphError {
 
     #[error("Constraint violation: {0}")]
     ConstraintViolation(String),
+
+    /// The write would take the tenant past a configured resource quota, and
+    /// is refused before it reaches the store (#1483).
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(String),
 }
 
 pub type GraphResult<T> = Result<T, GraphError>;
+
+/// How much a statement may add before its writes are refused (#1483).
+///
+/// # Why this is here and not in the quota checker
+///
+/// The tenant quota used to be checked inside `PersistenceManager::apply_mutations`,
+/// which runs *after* the statement has already written to the store. A breach was
+/// therefore not a rejected write: the rows were in memory and not on disk, the
+/// durability invariant really was broken, and the process went read-only for every
+/// write it served — including writes that had nothing to do with the quota. The
+/// ceiling was also soft by one batch: 1,200,000 nodes were admitted against a
+/// stated 1,000,000.
+///
+/// A quota is an admission decision, so it is taken before the row exists. The store
+/// is the one place every write passes through, but it knows nothing about tenants.
+/// So the caller resolves the tenant's numbers once per statement — one `O(1)` read
+/// of the usage counter — and hands the store an absolute ceiling. The store then
+/// charges each birth against it, which is a `u64` compare per row.
+///
+/// `used` is what the quota counter held when the statement began; the store adds
+/// what the statement has created since. Splitting it this way keeps the message
+/// honest — it reports the real total against the real limit, not a per-statement
+/// budget nobody configured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteAdmission {
+    /// Nodes already counted against the quota when the statement began.
+    pub nodes_used: u64,
+    /// The node ceiling, or `None` for no limit.
+    pub max_nodes: Option<u64>,
+    /// Edges already counted against the quota when the statement began.
+    pub edges_used: u64,
+    /// The edge ceiling, or `None` for no limit.
+    pub max_edges: Option<u64>,
+}
 
 /// Statistics about graph contents for **cost-based query optimization**.
 ///
@@ -1018,6 +1057,15 @@ pub struct GraphStore {
     /// pays neither the allocation nor the push.
     write_log: Option<Vec<crate::graph::event::Mutation>>,
 
+    /// The ceiling this statement's writes are admitted against (#1483).
+    /// `None` — the default — admits everything, so an embedded store, a
+    /// benchmark and every test behave exactly as before.
+    admission: Option<WriteAdmission>,
+
+    /// Nodes and edges born since `set_write_admission` last ran, i.e. within
+    /// the current statement. Charged against `admission`.
+    admission_births: (u64, u64),
+
     /// Next node ID
     next_node_id: u64,
 
@@ -1111,6 +1159,8 @@ impl GraphStore {
             edge_columns: ColumnStore::new(),
             index_sender: None,
             write_log: None,
+            admission: None,
+            admission_births: (0, 0),
             next_node_id: 1,
             next_edge_id: 1,
             catalog: GraphCatalog::new(),
@@ -1139,10 +1189,63 @@ impl GraphStore {
 
     /// Take the changes recorded since the last take, leaving recording on.
     pub fn take_write_log(&mut self) -> Vec<crate::graph::event::Mutation> {
+        // The statement is over, so what it created is about to be counted by
+        // the quota counter itself. Leaving the tally standing would charge the
+        // next statement for this one's rows twice (#1483).
+        self.admission_births = (0, 0);
         match &mut self.write_log {
             Some(log) => std::mem::take(log),
             None => Vec::new(),
         }
+    }
+
+    /// Set the ceiling this statement's writes are admitted against, and start
+    /// a fresh tally (#1483).
+    ///
+    /// Called once per write statement by whatever holds the tenant's quota —
+    /// the HTTP and RESP write paths — immediately before the statement runs.
+    /// `None` admits everything, which is the default and what every caller
+    /// that does not set it gets.
+    ///
+    /// Deliberately does **not** clear the tally. `take_write_log` does that,
+    /// because that is the point at which the statement's rows pass to the
+    /// quota counter and stop needing to be tracked here. A session transaction
+    /// runs many statements before one `take_write_log`, and the counter does
+    /// not move until it commits — clearing per statement would let a
+    /// transaction create an unbounded number of rows a statement at a time.
+    pub fn set_write_admission(&mut self, admission: Option<WriteAdmission>) {
+        self.admission = admission;
+    }
+
+    /// The ceiling in force, for a caller that needs to report it.
+    pub fn write_admission(&self) -> Option<WriteAdmission> {
+        self.admission
+    }
+
+    /// May one more node be created?
+    ///
+    /// Asked *before* the node exists. A creation path that does not ask is not
+    /// bounded by the quota — see the module note on `WriteAdmission`.
+    pub fn admit_node(&self) -> GraphResult<()> {
+        let Some(a) = self.admission else { return Ok(()) };
+        let Some(max) = a.max_nodes else { return Ok(()) };
+        let total = a.nodes_used.saturating_add(self.admission_births.0);
+        if total >= max {
+            return Err(GraphError::QuotaExceeded(format!("nodes ({total}/{max})")));
+        }
+        Ok(())
+    }
+
+    /// May one more edge be created? Enforced inside `create_edge*`, which is
+    /// fallible, so every edge path is covered.
+    pub fn admit_edge(&self) -> GraphResult<()> {
+        let Some(a) = self.admission else { return Ok(()) };
+        let Some(max) = a.max_edges else { return Ok(()) };
+        let total = a.edges_used.saturating_add(self.admission_births.1);
+        if total >= max {
+            return Err(GraphError::QuotaExceeded(format!("edges ({total}/{max})")));
+        }
+        Ok(())
     }
 
     #[inline]
@@ -2385,6 +2488,8 @@ NodeDeleted { .. } => {
         target: NodeId,
         edge_type: impl Into<EdgeType>,
     ) -> GraphResult<EdgeId> {
+        // Before the edge exists, not after it is persisted (#1483).
+        self.admit_edge()?;
         self.invalidate_statistics_cache();
         let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
             id
@@ -2427,6 +2532,8 @@ NodeDeleted { .. } => {
         target: NodeId,
         edge_type: impl Into<EdgeType>,
     ) -> GraphResult<EdgeId> {
+        // Before the edge exists, not after it is persisted (#1483).
+        self.admit_edge()?;
         self.invalidate_statistics_cache();
         // Validate nodes exist
         if !self.has_node(source) {
@@ -2529,6 +2636,8 @@ NodeDeleted { .. } => {
         edge_type: impl Into<EdgeType>,
         properties: PropertyMap,
     ) -> GraphResult<EdgeId> {
+        // Before the edge exists, not after it is persisted (#1483).
+        self.admit_edge()?;
         self.invalidate_statistics_cache();
         // Validate nodes exist
         if !self.has_node(source) {
@@ -2760,6 +2869,7 @@ NodeDeleted { .. } => {
     /// An edge created after the first version did not exist at earlier ones.
     /// Also drops whatever history a reused id still carried.
     fn note_edge_created(&mut self, edge_id: EdgeId) {
+        self.admission_births.1 += 1;
         let current = self.current_version;
         if current != Self::FIRST_VERSION {
             let born = Some(current);
@@ -4601,6 +4711,10 @@ NodeDeleted { .. } => {
     /// A node created now did not exist at any earlier version. Also drops
     /// whatever history a reused id still carried.
     fn note_node_birth(&mut self, id: NodeId) {
+        // Every node creation path funnels through here, so this is where the
+        // statement's tally is kept (#1483). The *check* is at the call sites,
+        // because `create_node*` returns a `NodeId` and cannot refuse.
+        self.admission_births.0 += 1;
         if self.current_version > 1 {
             let born = Some(self.current_version);
             self.node_history.insert(id, NodeHistory { born, ..NodeHistory::default() });
@@ -5714,6 +5828,7 @@ mod tests {
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
+            ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
             ("log_edge_write", "records what an edge write replaces for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("log_edge_map", "records an edge's whole map for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("note_edge_created", "records a new edge's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),

@@ -106,8 +106,12 @@ impl CommandHandler {
     pub fn begin_transaction_on(&self, store: &mut GraphStore) -> RespValue {
         match store.begin_session_transaction() {
             Ok(version) => {
-                if self.persistence.is_some() {
+                if let Some(pm) = &self.persistence {
                     store.enable_write_log();
+                    // Set once for the whole transaction: the quota counter does
+                    // not move until COMMIT, so the store's own tally is what
+                    // bounds the transaction's creates (#1483).
+                    store.set_write_admission(pm.write_admission("default"));
                 }
                 RespValue::Integer(version as i64)
             }
@@ -295,8 +299,12 @@ impl CommandHandler {
 
             // Record what the statement changes, so persistence does not depend on
             // what it returns (#1094).
-            if self.persistence.is_some() {
+            if let Some(ref persist_mgr) = self.persistence {
                 store_guard.enable_write_log();
+                // The quota, resolved before the statement runs, so a breach is
+                // a rejected statement rather than rows in memory that are not
+                // on disk (#1483).
+                store_guard.set_write_admission(persist_mgr.write_admission(&graph_name));
             }
 
             // Set current tenant for indexing events

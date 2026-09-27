@@ -12967,6 +12967,9 @@ impl PhysicalOperator for CreateNodeOperator {
                 // The whole label set at once, which for `CREATE ({...})` is
                 // empty. Passing a "primary" label meant an unlabelled node was
                 // created with `Label("")` (#625).
+                // Refused before the node exists, not after it fails to persist: a
+                // quota breach is a rejected write, not a durability failure (#1483).
+                store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
                 let node_id = store.create_node_with_labels(labels.iter().cloned());
 
                 // With no input row, only the nodes this CREATE has made so far are
@@ -14665,6 +14668,9 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 // edge wiring below then treats it exactly like a matched variable.
                 let mut record = record;
                 for (handle, labels, properties, property_exprs) in &self.nodes_to_create {
+                    // Refused before the node exists, not after it fails to persist: a
+                    // quota breach is a rejected write, not a durability failure (#1483).
+                    store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
                     let node_id = store.create_node_with_labels(labels.iter().cloned());
                     // Non-literal property values (`{id: row.id}`) are evaluated against
                     // this row, so each created node gets the value belonging to its own
@@ -19353,6 +19359,9 @@ impl MergeOperator {
             }
             // `MERGE ({...})` has no labels, and defaulting to "Node" gave the
             // node a label the query never wrote (#625).
+            // Refused before the node exists, not after it fails to persist: a
+            // quota breach is a rejected write, not a durability failure (#1483).
+            store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
             if let Some(required) = node_props[i].as_ref() {
                 for (k, v) in required {
@@ -19666,6 +19675,9 @@ impl PhysicalOperator for MergeOperator {
                 self.pending.push_back(r);
             }
         } else {
+            // Refused before the node exists, not after it fails to persist: a
+            // quota breach is a rejected write, not a durability failure (#1483).
+            store.admit_node().map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             node_id = store.create_node_with_labels(labels.iter().cloned());
 
             if let Some(required_props) = props {

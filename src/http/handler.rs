@@ -1291,6 +1291,17 @@ pub async fn import_csv_handler(
         }
     }
 
+    // Whole file or none, the same stance the ragged-row check above takes. A
+    // bulk load used to be admitted into memory and refused at persist time,
+    // which took the process read-only rather than returning an error (#1483).
+    if let Some(e) = state.quota_refuses(&graph, records.len() as u64, 0) {
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": e, "nodes_created": 0 })),
+        )
+            .into_response();
+    }
+
     let mut count = 0usize;
     state
         .mutate(&graph, |store_guard| {
@@ -1367,6 +1378,14 @@ pub async fn import_json_handler(
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Missing 'label' field" })),
+        )
+            .into_response();
+    }
+
+    if let Some(e) = state.quota_refuses(&payload.graph, payload.nodes.len() as u64, 0) {
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": e, "nodes_created": 0 })),
         )
             .into_response();
     }
