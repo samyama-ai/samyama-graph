@@ -1324,7 +1324,16 @@ pub async fn import_csv_handler(
                     }
                 }
 
-                if let Some(node) = store_guard.get_node_mut(node_id) {
+                // Collected first, then written through `set_node_property`
+                // (#1505). Setting them on the `&mut Node` from `get_node_mut`
+                // maintains nothing: the full-text index is updated from
+                // `apply_property_set_readback`, which only the setter runs, so
+                // a corpus imported here was searchable by `MATCH` and returned
+                // nothing from `db.index.fulltext.queryNodes` — no error, no
+                // warning. The two-step exists because `get_node_mut` borrows
+                // the store mutably and `set_node_property` needs it again.
+                let mut props: Vec<(String, PropertyValue)> = Vec::new();
+                {
                     for (i, header) in headers.iter().enumerate() {
                         if let Some(value) = record.get(i) {
                             let trimmed = value.trim();
@@ -1348,9 +1357,12 @@ pub async fn import_csv_handler(
                                 PropertyValue::String(trimmed.to_string())
                             };
 
-                            node.set_property(header.as_str(), prop_val);
+                            props.push((header.to_string(), prop_val));
                         }
                     }
+                }
+                for (k, v) in props {
+                    let _ = store_guard.set_node_property(&graph, node_id, k, v);
                 }
                 count += 1;
             }
@@ -1404,9 +1416,10 @@ pub async fn import_json_handler(
             for node_json in &payload.nodes {
                 let node_id = store_guard.create_node(payload.label.as_str());
 
-                if let (Some(node), Some(obj)) =
-                    (store_guard.get_node_mut(node_id), node_json.as_object())
-                {
+                // Through `set_node_property`, not the `&mut Node` (#1505) —
+                // see the CSV handler above for why.
+                let mut props: Vec<(String, PropertyValue)> = Vec::new();
+                if let Some(obj) = node_json.as_object() {
                     for (key, val) in obj {
                         let prop_val = match val {
                             serde_json::Value::String(s) => PropertyValue::String(s.clone()),
@@ -1422,8 +1435,11 @@ pub async fn import_json_handler(
                             serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
                             _ => continue,
                         };
-                        node.set_property(key, prop_val);
+                        props.push((key.to_string(), prop_val));
                     }
+                }
+                for (k, v) in props {
+                    let _ = store_guard.set_node_property(&payload.graph, node_id, k, v);
                 }
                 count += 1;
             }
