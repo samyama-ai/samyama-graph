@@ -426,3 +426,167 @@ async fn nsga2_uc2_dosing_produces_three_objective_pareto() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1478: `seed` was parsed and dropped (`let _ = req.seed;`), so two identical
+// requests gave different answers and a different seed was indistinguishable
+// from the same one. Both directions are asserted below: without the
+// "different seeds differ" half, a handler that always returned a constant
+// would pass.
+// ---------------------------------------------------------------------------
+
+/// Run one solve to completion and return the parsed `done` payload.
+async fn solve_done(app: &axum::Router, body: Value) -> Value {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/optimize/solve")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "solve request rejected");
+    let job_id = body_to_json(res.into_body()).await["job_id"]
+        .as_str()
+        .expect("job_id")
+        .to_string();
+
+    let stream_res = tokio::time::timeout(Duration::from_secs(60), async {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/optimize/solve/{}/stream", job_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("stream request timed out");
+    assert_eq!(stream_res.status(), StatusCode::OK);
+
+    let bytes = stream_res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    let done_line = text
+        .lines()
+        .skip_while(|l| !l.starts_with("event: done"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no done event in stream: {text}"));
+    serde_json::from_str(done_line.trim_start_matches("data: ")).unwrap()
+}
+
+#[tokio::test]
+async fn same_seed_reproduces_the_same_answer_and_a_different_seed_does_not() {
+    let app = router();
+    let req = |seed: u64| {
+        json!({
+            "algorithm": "jaya",
+            "benchmark": "sphere",
+            "population_size": 8,
+            "iterations": 15,
+            "dim": 5,
+            "seed": seed
+        })
+    };
+
+    let a = solve_done(&app, req(424242)).await;
+    let b = solve_done(&app, req(424242)).await;
+    let c = solve_done(&app, req(999)).await;
+
+    let fa = a["final_fitness"].as_f64().unwrap();
+    let fb = b["final_fitness"].as_f64().unwrap();
+    let fc = c["final_fitness"].as_f64().unwrap();
+
+    // Direction 1: the same request twice is the same answer, bit for bit.
+    assert_eq!(
+        fa.to_bits(),
+        fb.to_bits(),
+        "same seed gave different answers: {fa} vs {fb}"
+    );
+
+    // Direction 2: a different seed is a different draw. Without this, a
+    // handler that ignored the problem and returned a constant would pass.
+    assert_ne!(
+        fa.to_bits(),
+        fc.to_bits(),
+        "seed 424242 and seed 999 gave the identical answer {fa} — the seed is \
+         reaching the RNG but not changing the run, or the run is not random"
+    );
+}
+
+#[tokio::test]
+async fn done_event_echoes_the_seed_that_produced_the_result() {
+    let app = router();
+    let done = solve_done(
+        &app,
+        json!({
+            "algorithm": "de",
+            "benchmark": "sphere",
+            "population_size": 8,
+            "iterations": 10,
+            "dim": 3,
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(
+        done["seed"].as_u64(),
+        Some(7),
+        "done payload must carry the seed that produced it: {done}"
+    );
+
+    // No seed supplied -> the result says so rather than inventing one.
+    let unseeded = solve_done(
+        &app,
+        json!({
+            "algorithm": "de",
+            "benchmark": "sphere",
+            "population_size": 8,
+            "iterations": 10,
+            "dim": 3
+        }),
+    )
+    .await;
+    assert!(
+        unseeded["seed"].is_null(),
+        "an unseeded run must not report a seed: {unseeded}"
+    );
+}
+
+#[tokio::test]
+async fn seeded_multi_objective_run_reproduces_its_front() {
+    // The MO path builds its solvers at a different call site from the SO path,
+    // so seeding one does not seed the other.
+    let app = router();
+    let req = |seed: u64| {
+        json!({
+            "algorithm": "nsga2",
+            "benchmark": "zdt1",
+            "population_size": 12,
+            "iterations": 10,
+            "seed": seed
+        })
+    };
+
+    let a = solve_done(&app, req(11)).await;
+    let b = solve_done(&app, req(11)).await;
+    let c = solve_done(&app, req(12)).await;
+
+    assert_eq!(
+        a["final_pareto"], b["final_pareto"],
+        "same seed gave a different Pareto front"
+    );
+    assert!(
+        !a["final_pareto"].as_array().unwrap().is_empty(),
+        "empty front makes the comparison vacuous"
+    );
+    assert_ne!(
+        a["final_pareto"], c["final_pareto"],
+        "seeds 11 and 12 gave the identical front — the seed changes nothing"
+    );
+}

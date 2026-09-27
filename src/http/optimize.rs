@@ -366,7 +366,7 @@ struct CancelHandle {
 #[derive(Debug, Clone)]
 enum SseEvent {
     Iteration { iter: usize, best_fitness: f64, pareto_front: Option<Vec<Vec<f64>>> },
-    Done { final_fitness: f64, iterations: usize, final_pareto: Option<Vec<Vec<f64>>> },
+    Done { final_fitness: f64, iterations: usize, final_pareto: Option<Vec<Vec<f64>>>, seed: Option<u64> },
     Error { message: String },
 }
 
@@ -438,8 +438,10 @@ async fn start_solve(
     };
     let dim = req.dim.unwrap_or(bench.dim);
 
-    // Seed (not currently propagated into solvers, which use thread_rng).
-    let _ = req.seed;
+    // Seed: threaded into the solver's RNG (#1478). `None` keeps the previous
+    // behaviour (entropy) — an absent seed and a supplied one are different
+    // requests, so there is no default here.
+    let seed = req.seed;
 
     // Run in a blocking task so we don't stall the async runtime.
     // AtomicBool cancel flag — polled between the compute future and emit loop.
@@ -460,7 +462,7 @@ async fn start_solve(
 
     tokio::task::spawn(async move {
         let compute = tokio::task::spawn_blocking(move || {
-            run_solver(&algo.id, algo.multi_objective, &bench.id, bench.num_objectives, dim, cfg)
+            run_solver(&algo.id, algo.multi_objective, &bench.id, bench.num_objectives, dim, cfg, seed)
         });
 
         match compute.await {
@@ -485,7 +487,7 @@ async fn start_solve(
                     }
                 }
                 let _ = event_tx
-                    .send(SseEvent::Done { final_fitness, iterations, final_pareto })
+                    .send(SseEvent::Done { final_fitness, iterations, final_pareto, seed })
                     .await;
             }
             Ok(Err(e)) => {
@@ -508,6 +510,22 @@ struct SolverOutcome {
     final_pareto: Option<Vec<Vec<f64>>>,
 }
 
+/// Apply the request's seed to a solver, if one was given.
+///
+/// Each solver has its own type and its own inherent `with_seed`, so there is
+/// no trait to be generic over; the macro is the cheapest way to say "seed it
+/// if we have a seed, otherwise leave it on entropy" at each construction
+/// site without repeating the `match` 23 times.
+macro_rules! seeded {
+    ($ctor:expr, $seed:expr) => {{
+        let solver = $ctor;
+        match $seed {
+            Some(s) => solver.with_seed(s),
+            None => solver,
+        }
+    }};
+}
+
 fn run_solver(
     algo_id: &str,
     multi_objective: bool,
@@ -515,6 +533,7 @@ fn run_solver(
     _num_obj: usize,
     bench_dim: usize,
     cfg: SolverConfig,
+    seed: Option<u64>,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
         let (hist, final_f, pareto) = match bench_id {
@@ -522,11 +541,11 @@ fn run_solver(
                 let v = bench_id.chars().last().unwrap().to_digit(10).unwrap() as u8;
                 let problem = ZDT { variant: v, dim: 30 };
                 let r = match algo_id {
-                    "mo_bmr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR).solve(&problem),
-                    "mo_bwr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR).solve(&problem),
-                    "mo_bmwr"   => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR).solve(&problem),
-                    "mo_rao_de" => MORaoDESolver::new(cfg).solve(&problem),
-                    "nsga2"     => NSGA2Solver::new(cfg).solve(&problem),
+                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
+                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
+                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
+                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
+                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
                     _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
                 };
                 let final_first = r.pareto_front.iter()
@@ -544,11 +563,11 @@ fn run_solver(
             "uc2_dosing" => {
                 let problem = super::uc_problems::UC2DosingProblem::new();
                 let r = match algo_id {
-                    "mo_bmr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR).solve(&problem),
-                    "mo_bwr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR).solve(&problem),
-                    "mo_bmwr"   => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR).solve(&problem),
-                    "mo_rao_de" => MORaoDESolver::new(cfg).solve(&problem),
-                    "nsga2"     => NSGA2Solver::new(cfg).solve(&problem),
+                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
+                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
+                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
+                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
+                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
                     _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
                 };
                 let final_first = r.pareto_front.iter()
@@ -563,11 +582,11 @@ fn run_solver(
             "dtlz1" => {
                 let problem = DTLZ1 { dim: 7, m: 3 };
                 let r = match algo_id {
-                    "mo_bmr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR).solve(&problem),
-                    "mo_bwr"    => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR).solve(&problem),
-                    "mo_bmwr"   => MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR).solve(&problem),
-                    "mo_rao_de" => MORaoDESolver::new(cfg).solve(&problem),
-                    "nsga2"     => NSGA2Solver::new(cfg).solve(&problem),
+                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
+                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
+                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
+                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
+                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
                     _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
                 };
                 let final_first = r.pareto_front.iter()
@@ -592,24 +611,24 @@ fn run_solver(
         let problem = single_obj(bench.id, dim, bench.lower, bench.upper);
 
         let result = match algo_id {
-            "jaya"      => JayaSolver::new(cfg).solve(&problem),
-            "rao1"      => RaoSolver::new(cfg, RaoVariant::Rao1).solve(&problem),
-            "rao2"      => RaoSolver::new(cfg, RaoVariant::Rao2).solve(&problem),
-            "rao3"      => RaoSolver::new(cfg, RaoVariant::Rao3).solve(&problem),
-            "tlbo"      => TLBOSolver::new(cfg).solve(&problem),
-            "itlbo"     => ITLBOSolver::new(cfg).solve(&problem),
-            "qojaya"    => QOJayaSolver::new(cfg).solve(&problem),
-            "gotlbo"    => GOTLBOSolver::new(cfg).solve(&problem),
-            "bmr"       => BMRSolver::new(cfg).solve(&problem),
-            "bwr"       => BWRSolver::new(cfg).solve(&problem),
-            "bmwr"      => BMWRSolver::new(cfg).solve(&problem),
-            "samp_jaya" => SAMPJayaSolver::new(cfg).solve(&problem),
-            "qo_rao"    => QORaoSolver::new(cfg, RaoVariant::Rao1).solve(&problem),
-            "ehrjaya"   => EHRJayaSolver::new(cfg).solve(&problem),
-            "saphr"     => SAPHRSolver::new(cfg).solve(&problem),
-            "pso"       => PSOSolver::new(cfg).solve(&problem),
-            "de"        => DESolver::new(cfg).solve(&problem),
-            "ga"        => GASolver::new(cfg).solve(&problem),
+            "jaya"      => seeded!(JayaSolver::new(cfg), seed).solve(&problem),
+            "rao1"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
+            "rao2"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao2), seed).solve(&problem),
+            "rao3"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao3), seed).solve(&problem),
+            "tlbo"      => seeded!(TLBOSolver::new(cfg), seed).solve(&problem),
+            "itlbo"     => seeded!(ITLBOSolver::new(cfg), seed).solve(&problem),
+            "qojaya"    => seeded!(QOJayaSolver::new(cfg), seed).solve(&problem),
+            "gotlbo"    => seeded!(GOTLBOSolver::new(cfg), seed).solve(&problem),
+            "bmr"       => seeded!(BMRSolver::new(cfg), seed).solve(&problem),
+            "bwr"       => seeded!(BWRSolver::new(cfg), seed).solve(&problem),
+            "bmwr"      => seeded!(BMWRSolver::new(cfg), seed).solve(&problem),
+            "samp_jaya" => seeded!(SAMPJayaSolver::new(cfg), seed).solve(&problem),
+            "qo_rao"    => seeded!(QORaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
+            "ehrjaya"   => seeded!(EHRJayaSolver::new(cfg), seed).solve(&problem),
+            "saphr"     => seeded!(SAPHRSolver::new(cfg), seed).solve(&problem),
+            "pso"       => seeded!(PSOSolver::new(cfg), seed).solve(&problem),
+            "de"        => seeded!(DESolver::new(cfg), seed).solve(&problem),
+            "ga"        => seeded!(GASolver::new(cfg), seed).solve(&problem),
             other       => return Err(format!("algorithm {} not supported on single-objective benchmarks", other)),
         };
         Ok(SolverOutcome {
@@ -647,13 +666,16 @@ async fn stream_solve(
                     "pareto_front": pareto_front,
                 }))
                 .unwrap(),
-            SseEvent::Done { final_fitness, iterations, final_pareto } => Event::default()
+            SseEvent::Done { final_fitness, iterations, final_pareto, seed } => Event::default()
                 .event("done")
                 .json_data(serde_json::json!({
                     "final_fitness": final_fitness,
                     "iterations": iterations,
                     "total_time_ms": 0,
                     "final_pareto": final_pareto,
+                    // Echo the seed that produced this result: a published number
+                    // should carry what is needed to re-derive it (#1478).
+                    "seed": seed,
                 }))
                 .unwrap(),
             SseEvent::Error { message } => Event::default()

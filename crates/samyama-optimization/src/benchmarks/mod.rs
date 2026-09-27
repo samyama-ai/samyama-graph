@@ -9,9 +9,9 @@
 //!     seeds and emits a record per (solver, problem, seed) cell.
 //!
 //! CSV emission and statistical analysis (Wilcoxon, HV, IGD) are wired in
-//! `examples/run_baseline_suite.rs`. Non-determinism note: solvers currently
-//! use `rand::thread_rng()` internally; replicate variance is reported in
-//! mean/std/min/max but a fixed-seed mode is a planned follow-up.
+//! `examples/run_baseline_suite.rs`. Determinism note: every solver takes
+//! `with_seed(u64)` and is reproducible given one; with no seed it draws from
+//! entropy and replicate variance is reported in mean/std/min/max.
 //!
 //! CEC2017/CEC2022 shifted+rotated functions require data files distributed
 //! with the official CEC test packages. Loader stubs live in
