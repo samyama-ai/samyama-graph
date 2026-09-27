@@ -419,6 +419,40 @@ paths:
       description: >
         Starts a run and returns its id. The run is asynchronous; follow it on
         `/optimize/solve/{id}/stream`.
+
+
+        The body is closed: a field not listed below is a 400 naming it, not a
+        silently discarded field on a run that still starts (#1478).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [algorithm, benchmark]
+              properties:
+                algorithm:
+                  type: string
+                  description: An id from `/optimize/algorithms`.
+                benchmark:
+                  type: string
+                  description: An id from `/optimize/benchmarks`.
+                population_size:
+                  type: integer
+                  default: 50
+                iterations:
+                  type: integer
+                  default: 200
+                dim:
+                  type: integer
+                  description: >
+                    Problem dimension; defaults to the benchmark's own. The only
+                    spelling accepted — `n_var`, `dimensions` and
+                    `num_variables` are rejected, not silently ignored.
+                seed:
+                  type: integer
+                  format: int64
       responses:
         '200':
           description: The run's id
@@ -427,7 +461,9 @@ paths:
               schema:
                 type: object
         '400':
-          description: Unknown algorithm or benchmark
+          description: >
+            Unknown algorithm or benchmark, or a body carrying a field the
+            request does not declare. The message names the offending field.
   /optimize/solve/{id}/stream:
     get:
       operationId: streamSolve

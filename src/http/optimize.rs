@@ -5,7 +5,7 @@
 //! Contracts are specified in `samyama-cloud/wiki/decisions/optimization-in-insight.md`.
 
 use axum::{
-    extract::{Path, State},
+    extract::{rejection::JsonRejection, Path, State},
     http::StatusCode,
     response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Json},
     routing::{get, post},
@@ -387,7 +387,16 @@ async fn list_benchmarks() -> Json<Vec<BenchmarkInfo>> {
     Json(benchmark_catalog())
 }
 
+/// A solve request.
+///
+/// `deny_unknown_fields` is load-bearing, not tidiness (#1478). Without it a
+/// mistyped or unsupported field — `n_var`, `num_variables`, `constraints` —
+/// was dropped and the caller still got a job id, so nothing on this surface
+/// could tell an **accepted** field from an **honoured** one: a nonsense field
+/// returned 200 exactly as a real one did. An unknown field is now a 400 that
+/// names it.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SolveReq {
     algorithm: String,
     benchmark: String,
@@ -406,10 +415,39 @@ fn default_iter() -> usize { 200 }
 #[derive(Serialize)]
 struct SolveResp { job_id: String }
 
+/// The innermost message of a JSON rejection.
+///
+/// `JsonRejection`'s own `Display` is the generic wrapper ("Failed to
+/// deserialize the JSON body into the target type"); the serde error that
+/// names the field is one level down in the source chain.
+fn rejection_detail(e: &JsonRejection) -> String {
+    use std::error::Error;
+    let mut src: Option<&(dyn Error + 'static)> = e.source();
+    let mut deepest: Option<String> = None;
+    while let Some(s) = src {
+        deepest = Some(s.to_string());
+        src = s.source();
+    }
+    deepest.unwrap_or_else(|| e.body_text())
+}
+
 async fn start_solve(
     State(state): State<Arc<OptimizeState>>,
-    Json(req): Json<SolveReq>,
+    body: Result<Json<SolveReq>, JsonRejection>,
 ) -> Result<Json<SolveResp>, (StatusCode, String)> {
+    // Take the rejection by hand rather than letting axum render it: the
+    // default is a 422, and this surface answers a bad body with 400 (see the
+    // unknown-algorithm and unknown-benchmark arms below). The serde message is
+    // passed through verbatim because it is the part that names the offending
+    // field — "unknown field `n_var`, expected one of ...". A 400 that does not
+    // say which field is barely better than the silence it replaces.
+    let Json(req) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid solve request: {}", rejection_detail(&e)),
+        )
+    })?;
+
     // Validate benchmark + algorithm exist up-front.
     let bench = benchmark_catalog()
         .into_iter()
