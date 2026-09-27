@@ -1236,6 +1236,36 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Would `nodes` more nodes and `edges` more edges fit under the ceiling?
+    ///
+    /// `admit_node`/`admit_edge` charge one row at a time, which is what the
+    /// query engine needs. A bulk import knows its size before it starts and
+    /// cannot use them: `create_node` is infallible, so the loop has nowhere to
+    /// refuse, and a limit reached on row 900 would leave 899 nodes behind.
+    /// This asks the whole question once (#1495).
+    pub fn admits_bulk(&self, nodes: u64, edges: u64) -> GraphResult<()> {
+        let Some(a) = self.admission else { return Ok(()) };
+        if let Some(max) = a.max_nodes {
+            let total = a
+                .nodes_used
+                .saturating_add(self.admission_births.0)
+                .saturating_add(nodes);
+            if total > max {
+                return Err(GraphError::QuotaExceeded(format!("nodes ({total}/{max})")));
+            }
+        }
+        if let Some(max) = a.max_edges {
+            let total = a
+                .edges_used
+                .saturating_add(self.admission_births.1)
+                .saturating_add(edges);
+            if total > max {
+                return Err(GraphError::QuotaExceeded(format!("edges ({total}/{max})")));
+            }
+        }
+        Ok(())
+    }
+
     /// May one more edge be created? Enforced inside `create_edge*`, which is
     /// fallible, so every edge path is covered.
     pub fn admit_edge(&self) -> GraphResult<()> {

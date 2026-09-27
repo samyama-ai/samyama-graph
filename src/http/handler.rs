@@ -320,6 +320,14 @@ pub async fn import_parquet_handler(
             Json(json!({ "status": "ok", "stats": stats })),
         )
             .into_response(),
+        // A quota refusal is not a malformed request: the file is fine and the
+        // graph is full. 429 is what the other three import paths answer with,
+        // and a 400 here would send the caller looking at their file (#1495).
+        Err(e @ crate::export::ExportError::QuotaExceeded(_)) => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": e.to_string(), "stats": null })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -1536,6 +1544,32 @@ pub async fn restore_snapshot_handler(
                 .into_response()
         }
     };
+
+    // #1495: this handler takes the store lock directly rather than going
+    // through `AppState::mutate`, so the admission ceiling `mutate` installs
+    // was never set on the store, and the import loop calls `create_node`,
+    // which cannot refuse. Until here nothing on this path had a ceiling of
+    // any kind — a 64 GB body was the only limit on how much a caller could
+    // add. The header declares the counts, so the file is refused whole
+    // before any of it is written.
+    //
+    // A header that cannot be read is left to the import below to report: the
+    // peek's checks are a subset of the import's, so anything that fails here
+    // fails there too, and nothing is written either way.
+    if let Ok(header) = crate::snapshot::peek_header_maybe_encrypted(
+        std::io::Cursor::new(&data),
+        state.snapshot_key.as_deref(),
+    ) {
+        if let Some(e) =
+            state.quota_refuses(&default_graph(), header.node_count, header.edge_count)
+        {
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": e, "nodes_imported": 0, "edges_imported": 0 })),
+            )
+                .into_response();
+        }
+    }
 
     // persistence: the snapshot bytes are committed to `data_path/snapshots` below
     // and reloaded by `restore_persisted_snapshots` at boot (HA-08), so this path

@@ -455,6 +455,61 @@ pub fn import_tenant_maybe_encrypted(
     import_tenant_with_dedup(store, dec, &[])
 }
 
+/// Read only line 0 of a snapshot and return its header.
+///
+/// The header declares `node_count` and `edge_count`, so a caller can ask
+/// whether the file fits before any of it is written. `/api/snapshot/import`
+/// needs that: it takes the store lock directly rather than going through
+/// `AppState::mutate`, so the admission ceiling `mutate` installs was never
+/// set, and `create_node` cannot refuse in any case (#1495). Checking after
+/// the import is not equivalent — the graph is already over the limit by then,
+/// and undoing it is the rollback path, not admission control.
+///
+/// Reads one line and stops; the rest of a hundred-million-node file is never
+/// decompressed.
+pub fn peek_header(reader: impl Read) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
+    let decoder = GzDecoder::new(reader);
+    let mut buf_reader = BufReader::new(decoder);
+    let mut header_line = String::new();
+    if buf_reader.read_line(&mut header_line)? == 0 {
+        return Err("empty snapshot file: missing header".into());
+    }
+    let header: SnapshotHeader = serde_json::from_str(header_line.trim_end())?;
+    if header.format != "sgsnap" {
+        return Err(format!(
+            "invalid snapshot format: expected \"sgsnap\", got \"{}\"",
+            header.format
+        )
+        .into());
+    }
+    Ok(header)
+}
+
+/// `peek_header` for a file that may be encrypted, sniffed the same way
+/// `import_tenant_maybe_encrypted` sniffs it.
+pub fn peek_header_maybe_encrypted(
+    mut reader: impl Read,
+    key: Option<&[u8; encryption::KEY_BYTES]>,
+) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
+    let mut head = [0u8; 12];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match reader.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    let head = &head[..filled];
+
+    if !encryption::looks_encrypted(head) {
+        return peek_header(head.chain(reader));
+    }
+    let key = key.ok_or(
+        "this snapshot is encrypted and no key was given: pass --snapshot-key",
+    )?;
+    peek_header(encryption::DecryptingReader::new(reader, key, head)?)
+}
+
 /// Import with entity deduplication on specified property keys.
 pub fn import_tenant_with_dedup(
     store: &mut GraphStore,

@@ -56,6 +56,12 @@ pub enum ExportError {
     /// Parquet writing failed.
     #[error("parquet: {0}")]
     Parquet(String),
+    /// The file would take the graph past its tenant quota (#1495). Raised
+    /// before a single row is written, from the row count the file declares:
+    /// a bulk import calls `create_node`, which is infallible and so cannot be
+    /// charged against the admission ceiling one row at a time.
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
 }
 
 /// The Arrow type a single value would need, before unification.
@@ -618,8 +624,20 @@ pub mod import {
     ) -> Result<ImportStats, ExportError> {
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
-            .map_err(|e| ExportError::Parquet(e.to_string()))?
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+            .map_err(|e| ExportError::Parquet(e.to_string()))?;
+
+        // Refuse the file whole, before any of it is written (#1495). The
+        // footer declares its row count, so this costs nothing, and it is the
+        // only ceiling this path has: `create_node` returns a `NodeId` and
+        // cannot refuse, so the admission the caller's `mutate` installed
+        // charges nothing here.
+        let declared_rows = builder.metadata().file_metadata().num_rows().max(0) as u64;
+        store
+            .admits_bulk(declared_rows, 0)
+            .map_err(|e| ExportError::QuotaExceeded(e.to_string()))?;
+
+        let reader = builder
             .build()
             .map_err(|e| ExportError::Parquet(e.to_string()))?;
 
