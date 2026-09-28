@@ -10,7 +10,7 @@ Most architectural and design information now lives outside this directory:
 |---|---|
 | **[The book](https://graph.samyama.cloud/book)** | Narrative architecture, benchmarks, papers, deployment. Sources in `samyama-cloud/book/src/`. |
 | **[Engineering Compendium](https://graph.samyama.cloud/book/) → `samyama-cloud/wiki/topics/engineering-compendium.md`** | 38-topic master technical reference (storage, in-memory layout, indexing, query engine, concurrency, distributed, compute). Each entry: where used → how it works → alternatives → honest evaluation → ADR linkage. |
-| **[ADR/](./ADR/)** | 30 Architecture Decision Records — the "why" behind every architectural choice (numbered, dated, status-tracked). |
+| **[ADR/](./ADR/)** | Architecture Decision Records — the "why" behind every architectural choice (numbered, dated, status-tracked). |
 
 If you're new to the codebase, start with the book; if you're touching a subsystem, read its ADR and the matching Engineering Compendium topic.
 

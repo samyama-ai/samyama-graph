@@ -231,21 +231,48 @@ Good first contributions, roughly easiest to hardest:
 ## Project Layout
 
 ```
-src/
-├── graph/         # Property graph model (store, node, edge, property)
-├── query/         # OpenCypher engine (parser, planner, executor)
-├── protocol/      # RESP (Redis-compatible) protocol server
-├── persistence/   # RocksDB storage, WAL, multi-tenancy
-├── raft/          # High availability (openraft)
-├── nlq/           # Natural-language-to-Cypher pipeline
-├── vector/        # HNSW vector index
-├── snapshot/      # Portable .sgsnap export/import
-└── sharding/      # Tenant-level sharding
+src/                  # The server engine — the `samyama` library crate and its server binary
+├── agent/            # Agentic enrichment: tool-using agents that plan and write graph updates
+├── algo/             # Adapter exposing GraphStore to the samyama-graph-algorithms crate (GraphView)
+├── embed/            # Auto-embed pipelines: text splitting + embedding generation for RAG
+├── export/           # Result export: Arrow/Parquet, CSV, GraphML
+├── graph/            # Property graph model (node, edge, property, catalog, CSR store)
+├── http/             # HTTP/REST API and Web UI (tenants, transactions, vector, optimize)
+├── index/            # Property, unique, composite, full-text and hierarchy (OEH) indexes; cardinality sketches
+├── migrate/          # Importers for other engines' export formats (Neo4j APOC JSON)
+├── nlq/              # Natural-language-to-Cypher pipeline (LLM-backed)
+├── optimization/     # CypherProblem — graph-grounded problems for the samyama-optimization crate
+├── persistence/      # RocksDB storage, WAL, multi-tenancy, health checks
+├── protocol/         # RESP (Redis-compatible) protocol server
+├── query/            # OpenCypher engine (PEG grammar, parser, binder, validator, planner, executor)
+├── raft/             # High availability via openraft (cluster, network, state machine, storage)
+├── rdf/              # RDF triple/quad store, namespace and schema mapping, serialization
+├── sharding/         # Tenant-level sharding (router, proxy)
+├── snapshot/         # Portable .sgsnap export/import, encryption, verification, publish gate
+├── sparql/           # SPARQL 1.1 parser, algebra, optimizer, executor
+├── vector/           # HNSW vector index and index manager
+├── allocator.rs      # Names the allocator the server binary installs (ADR-038); does not install it
+├── compat.rs         # Reports which queries of a corpus this engine accepts, and why the rest fail
+├── pii.rs            # Scans a snapshot for personal identifiers before it is published
+├── provenance.rs     # Where a fact came from, under what licence, and what it was derived from
+├── schema_doc.rs     # Derives a schema from a snapshot and renders it as a diagram
+├── lib.rs            # Library crate root — re-exports the modules above
+└── main.rs           # Server binary entry point
 
-benches/           # Criterion + domain benchmarks
-examples/          # Runnable demos and data loaders
-tests/             # Integration tests
+api/               # OpenAPI 3 specification for the HTTP/REST surface (openapi.yaml)
+benches/           # Criterion microbenchmarks and LDBC / FinBench / Graphalytics harnesses
+benchmarks/        # Benchmark inputs and corpora (LDBC parameter files, Neo4j idiom and APOC export
+                   #   fixtures, hierarchy corpus generator) — data, not code; the harnesses are in benches/
+case_studies/      # End-to-end domain datasets with loaders and queries (health, legal, sport, finance, …)
+cli/               # `samyama-cli` binary crate — connects to a running server via samyama-sdk
+crates/            # Workspace member crates: samyama-graph-algorithms, samyama-optimization,
+                   #   samyama-gpu, samyama-sdk
 docs/              # Architecture docs, ADRs, compatibility notes
+examples/          # Runnable demos and data loaders
+ops/               # Operational assets (Grafana dashboard JSON)
+scripts/           # CI gates, coverage, release checks, dataset downloads
+sdk/               # Python and TypeScript client SDKs (outside the cargo workspace)
+tests/             # Integration tests
 ```
 
 ## Releasing
