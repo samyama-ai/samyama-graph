@@ -1017,7 +1017,7 @@ async fn start_server() {
     // Credentials for the HTTP API (REL-08, #1328). A path, not a token: a
     // secret passed on the command line is visible in `ps` to every user on the
     // box, and one in the environment is inherited by every child process.
-    let credentials: Vec<samyama::http::server::Credential> = {
+    let credentials: Vec<samyama::auth::Credential> = {
         let args: Vec<String> = std::env::args().collect();
         let path = args
             .iter()
@@ -1030,7 +1030,7 @@ async fn start_server() {
             // anyway would publish an unauthenticated API to an operator who
             // had just asked for the opposite, and the log line saying so would
             // scroll past.
-            Some(p) => match samyama::http::server::read_credentials(std::path::Path::new(&p)) {
+            Some(p) => match samyama::auth::read_credentials(std::path::Path::new(&p)) {
                 Ok(c) => {
                     println!("HTTP API: {} credential(s) loaded from {p}", c.len());
                     c

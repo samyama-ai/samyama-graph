@@ -5,6 +5,7 @@ use crate::http::server::AppState;
 use crate::query::Value;
 use axum::http::StatusCode;
 use axum::{
+    extract::Extension,
     extract::{Json, Multipart, Query, State},
     response::IntoResponse,
 };
@@ -398,8 +399,34 @@ fn merged_node_properties(
 
 pub async fn query_handler(
     State(state): State<AppState>,
+    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    
+    // Role & Tenant checks
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if let Some(t) = &user.tenant {
+            if *t != payload.graph {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": format!("unauthorized: credential is bound to tenant '{}'", t)
+                    })),
+                ).into_response();
+            }
+        }
+        let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
+        if is_write && !user.roles.contains(&crate::auth::Role::Write) && !user.roles.contains(&crate::auth::Role::Admin) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "unauthorized: missing Write role"}))).into_response();
+        }
+        if !is_write && !user.roles.contains(&crate::auth::Role::Read) && !user.roles.contains(&crate::auth::Role::Admin) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "unauthorized: missing Read role"}))).into_response();
+        }
+    }
+
+    // OSS serves exactly one graph...
+
     // OSS serves exactly one graph. The `graph` argument used to be accepted and then
     // ignored: every read and write landed in the same store, so two datasets loaded into
     // what looked like separate graphs silently merged, and the merge was only discoverable
@@ -1867,6 +1894,7 @@ mod tests {
     use crate::graph::GraphStore;
     use crate::query::QueryEngine;
     use axum::{
+    extract::Extension,
         body::Body,
         http::{Request, StatusCode},
         routing::{get, post},

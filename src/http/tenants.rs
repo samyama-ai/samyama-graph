@@ -10,7 +10,7 @@
 //! command because the same `Arc<TenantManager>` backs both paths.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State, Extension},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, patch, post},
@@ -74,8 +74,20 @@ fn embed_config_to_json(c: &AutoEmbedConfig) -> serde_json::Value {
 
 pub async fn create_tenant(
     State(state): State<TenantState>,
+    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
     Json(body): Json<CreateTenantBody>,
 ) -> impl IntoResponse {
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if !user.roles.contains(&crate::auth::Role::Admin) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "unauthorized: missing Admin role" })),
+            )
+                .into_response();
+        }
+    }
+
     match state.tenants.create_tenant(body.id.clone(), body.name.clone(), body.quotas) {
         Ok(()) => match state.tenants.get_tenant(&body.id) {
             Ok(t) => (StatusCode::CREATED, Json(tenant_to_json(&t))).into_response(),
@@ -98,7 +110,18 @@ pub async fn create_tenant(
     }
 }
 
-pub async fn list_tenants(State(state): State<TenantState>) -> impl IntoResponse {
+pub async fn list_tenants(State(state): State<TenantState>, subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>) -> impl IntoResponse {
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if !user.roles.contains(&crate::auth::Role::Admin) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "unauthorized: missing Admin role" })),
+            )
+                .into_response();
+        }
+    }
+
     let mut tenants = state.tenants.list_tenants();
     tenants.sort_by(|a, b| a.id.cmp(&b.id));
     let body = json!({
@@ -109,8 +132,20 @@ pub async fn list_tenants(State(state): State<TenantState>) -> impl IntoResponse
 
 pub async fn get_tenant(
     State(state): State<TenantState>,
+    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if !user.roles.contains(&crate::auth::Role::Admin) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "unauthorized: missing Admin role" })),
+            )
+                .into_response();
+        }
+    }
+
     match state.tenants.get_tenant(&id) {
         Ok(t) => (StatusCode::OK, Json(tenant_to_json(&t))).into_response(),
         Err(TenantError::NotFound(_)) => (
@@ -128,8 +163,20 @@ pub async fn get_tenant(
 
 pub async fn delete_tenant(
     State(state): State<TenantState>,
+    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if !user.roles.contains(&crate::auth::Role::Admin) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "unauthorized: missing Admin role" })),
+            )
+                .into_response();
+        }
+    }
+
     match state.tenants.delete_tenant(&id) {
         Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
         Err(TenantError::NotFound(_)) => (
@@ -186,9 +233,22 @@ where
 
 pub async fn patch_tenant(
     State(state): State<TenantState>,
+    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
     Path(id): Path<String>,
     body: Result<Json<PatchTenantBody>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
+    
+    if let Some(axum::extract::Extension(subject)) = subject_opt {
+        let user = subject.0;
+        if !user.roles.contains(&crate::auth::Role::Admin) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "unauthorized: missing Admin role" })),
+            )
+                .into_response();
+        }
+    }
+
     // Taking the rejection by hand turns axum's default 422 into the 400 the
     // rest of this handler answers a bad request with, and lets the body name
     // the field serde refused — which is the whole value of

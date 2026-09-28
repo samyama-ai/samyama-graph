@@ -9,6 +9,7 @@ use axum::{
 use crate::embed::EmbedPipeline;
 use crate::graph::GraphStore;
 use crate::persistence::TenantManager;
+use crate::auth::{Credential, Secret};
 use crate::query::QueryEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,116 +100,7 @@ async fn allow_private_network(
 /// The digest is what is stored, so the file does not hold anything usable
 /// against another service if it leaks, and the server never holds the token in
 /// cleartext after start-up.
-#[derive(Clone)]
-pub struct Credential {
-    /// Who this credential belongs to. Not used for authorisation -- there are
-    /// no roles yet (REL-08 asks for them and this is not that) -- but it is
-    /// what the audit log records, and what an operator revokes one line of.
-    pub name: String,
-    pub secret: Secret,
-}
 
-/// What a credential line holds, and therefore how it is checked.
-///
-/// The two are told apart by the stored form, not by a flag: an argon2 PHC
-/// string starts with `$argon2`, and a token digest is 64 hex characters.
-/// Nothing in the file says which kind a line is, because the hash already
-/// does, and a flag that disagreed with the hash would be a way to check a
-/// password with a fast hash.
-#[derive(Clone)]
-pub enum Secret {
-    /// SHA-256 of a machine token. Fast is correct here: a 32-byte token from
-    /// `samyama auth-token` has nothing to guess, so the cost of a guess buys
-    /// nothing, and the check is on every request.
-    Token([u8; 32]),
-    /// An argon2 PHC string for a human-chosen password. Slow on purpose:
-    /// against a stolen file the cost of each guess *is* the defence.
-    Password(String),
-}
-
-impl Credential {
-    /// Parse one `name:sha256-hex` line. Blank lines and `#` comments are skipped.
-    fn parse(line: &str) -> Option<Result<Self, String>> {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-        let (name, hex) = match line.rsplit_once(':') {
-            Some(p) => p,
-            None => return Some(Err(format!("no `:` in {line:?}"))),
-        };
-        let hex = hex.trim();
-        let name = name.trim().to_string();
-
-        // A password. `rsplit_once(':')` above split the PHC string at its last
-        // colon, so the whole field has to be reassembled -- argon2 strings are
-        // `$argon2id$v=..$m=..,t=..,p=..$salt$hash` and contain none, but a
-        // future scheme might.
-        if line.contains("$argon2") {
-            let (name, phc) = match line.split_once(':') {
-                Some((n, p)) => (n.trim().to_string(), p.trim().to_string()),
-                None => return Some(Err(format!("no `:` in {line:?}"))),
-            };
-            return Some(Ok(Credential { name, secret: Secret::Password(phc) }));
-        }
-
-        if hex.len() != 64 {
-            return Some(Err(format!(
-                "expected a 64-character sha256 digest or an argon2 hash for {name:?}, \
-                 got {} characters",
-                hex.len()
-            )));
-        }
-        let mut digest = [0u8; 32];
-        for (i, b) in digest.iter_mut().enumerate() {
-            *b = match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
-                Ok(v) => v,
-                Err(_) => return Some(Err(format!("{hex:?} is not hexadecimal"))),
-            };
-        }
-        Some(Ok(Credential { name, secret: Secret::Token(digest) }))
-    }
-}
-
-/// Read a credential file: one `name:sha256-hex` per line.
-///
-/// A malformed line is an error rather than a skipped line. Skipping is how a
-/// typo in a credential file becomes a server that starts cleanly and accepts
-/// one fewer token than the operator believes it does.
-pub fn read_credentials(path: &std::path::Path) -> Result<Vec<Credential>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        match Credential::parse(line) {
-            None => continue,
-            Some(Ok(c)) => out.push(c),
-            Some(Err(e)) => return Err(format!("{}:{}: {e}", path.display(), n + 1)),
-        }
-    }
-    if out.is_empty() {
-        return Err(format!(
-            "{} names no credentials; a file that authenticates nobody would refuse \
-             every request, which is not what an operator who configured one meant",
-            path.display()
-        ));
-    }
-    Ok(out)
-}
-
-/// Compare two digests without letting the time taken depend on where they differ.
-///
-/// `a == b` on a slice returns as soon as a byte differs, so the time it takes
-/// leaks how long a common prefix was, and a token can be recovered one byte at
-/// a time. Writing the loop out keeps it constant-time without taking a
-/// dependency for four lines.
-fn digests_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
 
 /// Which credential, if any, an `Authorization` header satisfies.
 ///
@@ -217,7 +109,7 @@ fn digests_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// credential is only ever checked against the scheme that matches its stored
 /// form, so a password can never be verified with the fast hash and a token can
 /// never be dragged through argon2.
-fn authenticate(credentials: &[Credential], header: &str) -> Option<String> {
+fn authenticate(credentials: &[Credential], header: &str) -> Option<Credential> {
     let (scheme, rest) = header.split_once(' ')?;
     let rest = rest.trim();
 
@@ -227,7 +119,7 @@ fn authenticate(credentials: &[Credential], header: &str) -> Option<String> {
         // Every token credential is compared even after one matches, so the
         // time taken does not depend on the position of the matching line.
         return credentials.iter().fold(None, |acc, c| match &c.secret {
-            Secret::Token(d) if digests_match(d, &got) => Some(c.name.clone()),
+            Secret::Token(d) if crate::auth::digests_match(d, &got) => Some(c.clone()),
             _ => acc,
         });
     }
@@ -247,7 +139,7 @@ fn authenticate(credentials: &[Credential], header: &str) -> Option<String> {
         argon2::Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .ok()
-            .map(|()| c.name.clone())
+            .map(|()| c.clone())
     } else {
         None
     }
@@ -318,16 +210,16 @@ async fn require_credential(
     // decided by the stored form rather than by the caller.
     let matched = header.as_deref().and_then(|h| authenticate(&credentials, h));
 
-    if let Some(name) = matched {
+    if let Some(matched_cred) = matched {
         let mut req = req;
-        req.extensions_mut().insert(Subject(name.clone()));
+        req.extensions_mut().insert(Subject(matched_cred.clone()));
         let mut res = next.run(req).await;
         // Also on the response. The audit layer is outermost, so it sees the
         // request *before* this one has run and can only learn the subject on
         // the way back out -- a middleware sees the request going in and the
         // response coming out, and an outer layer cannot read what an inner one
         // put in the request.
-        res.extensions_mut().insert(Subject(name));
+        res.extensions_mut().insert(Subject(matched_cred));
         return res;
     }
 
@@ -411,7 +303,7 @@ async fn serve_tls(
 /// has no subject to record, and writing "anonymous" as though it were an
 /// identity would make the log look more informative than it is.
 #[derive(Clone, Debug)]
-pub struct Subject(pub String);
+pub struct Subject(pub crate::auth::Credential);
 
 /// Append-only record of every request that can change state (REL-08).
 ///
@@ -497,7 +389,7 @@ async fn audit(
     let subject = res
         .extensions()
         .get::<Subject>()
-        .map(|s| s.0.clone())
+        .map(|s| s.0.name.clone())
         .unwrap_or_else(|| "unauthenticated".to_string());
     log.record(&subject, method.as_str(), &path, res.status().as_u16());
     res

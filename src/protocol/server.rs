@@ -56,6 +56,7 @@ pub struct RespServer {
     proxy: Option<Arc<Proxy>>,
     /// Optional cluster manager for resolving node addresses
     cluster_manager: Option<Arc<ClusterManager>>,
+    credentials: Option<Arc<Vec<crate::auth::Credential>>>,
 }
 
 impl RespServer {
@@ -70,6 +71,7 @@ impl RespServer {
             router: None,
             proxy: None,
             cluster_manager: None,
+            credentials: None,
         }
     }
 
@@ -89,6 +91,7 @@ impl RespServer {
             router: None,
             proxy: None,
             cluster_manager: None,
+            credentials: None,
         }
     }
 
@@ -112,6 +115,7 @@ impl RespServer {
             router: None,
             proxy: None,
             cluster_manager: None,
+            credentials: None,
         }
     }
 
@@ -134,6 +138,12 @@ impl RespServer {
     }
 
     /// Start the server
+
+    pub fn with_credentials(mut self, credentials: Arc<Vec<crate::auth::Credential>>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = format!("{}:{}", self.config.address, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
@@ -149,10 +159,11 @@ impl RespServer {
             let router = self.router.clone();
             let proxy = self.proxy.clone();
             let cluster = self.cluster_manager.clone();
+            let creds = self.credentials.clone();
 
             // Spawn a new task for each connection
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(socket, store, handler, router, proxy, cluster).await {
+                if let Err(e) = handle_connection(socket, store, handler, router, proxy, cluster, creds).await {
                     error!("Error handling connection from {}: {}", peer_addr, e);
                 }
             });
@@ -177,6 +188,7 @@ struct ConnTxn {
     open: Option<OpenTxn>,
     /// The last transaction ended by its deadline, so a later COMMIT can say so.
     timed_out: bool,
+    authenticated_as: Option<crate::auth::Credential>,
 }
 
 /// Answer one command, routing the transaction commands and anything run
@@ -186,6 +198,7 @@ async fn respond(
     value: &RespValue,
     store: &Arc<RwLock<GraphStore>>,
     txn: &mut ConnTxn,
+    credentials: Option<&[crate::auth::Credential]>,
 ) -> RespValue {
     let name = value
         .as_array()
@@ -194,7 +207,39 @@ async fn respond(
         .and_then(|v| v.as_string().ok().flatten())
         .map(|s| s.to_uppercase());
     let limit = GraphStore::session_transaction_timeout();
+    
+    // REL-08: Check authentication before allowing commands
+    if let Some(creds) = credentials {
+        if txn.authenticated_as.is_none() {
+            let is_auth = name.as_deref() == Some("AUTH");
+            let is_ping = name.as_deref() == Some("PING") || name.as_deref() == Some("INFO");
+            if !is_auth && !is_ping {
+                return RespValue::Error("NOAUTH Authentication required.".to_string());
+            }
+        }
+    }
+
     match (name.as_deref(), txn.open.as_mut()) {
+        (Some("AUTH"), _) => {
+            if let Some(creds) = credentials {
+                let args = value.as_array().unwrap_or(&[]);
+                if args.len() != 3 {
+                    return RespValue::Error("ERR wrong number of arguments for 'auth' command".to_string());
+                }
+                let username = args[1].as_string().unwrap_or(None).unwrap_or_default();
+                let password = args[2].as_string().unwrap_or(None).unwrap_or_default();
+
+                if let Some(user) = crate::auth::authenticate_user(creds, &username, &password) {
+                    txn.authenticated_as = Some(user);
+                    return RespValue::SimpleString("OK".to_string());
+                } else {
+                    return RespValue::Error("ERR invalid username-password pair".to_string());
+                }
+            } else {
+                return RespValue::Error("ERR Client sent AUTH, but no password is set".to_string());
+            }
+        }
+
         (Some("GRAPH.BEGIN"), Some(_)) => {
             RespValue::Error("ERR a transaction is already open on this connection".to_string())
         }
@@ -225,16 +270,16 @@ async fn respond(
         }),
         (Some("GRAPH.QUERY"), Some(open)) => {
             let args = value.as_array().unwrap_or(&[]);
-            handler.query_in_transaction(args, &mut open.guard, false)
+            handler.query_in_transaction(args, &mut open.guard, false, txn.authenticated_as.as_ref())
         }
         (Some("GRAPH.RO_QUERY"), Some(open)) => {
             let args = value.as_array().unwrap_or(&[]);
-            handler.query_in_transaction(args, &mut open.guard, true)
+            handler.query_in_transaction(args, &mut open.guard, true, txn.authenticated_as.as_ref())
         }
         // These never touch the store, so they cannot wait on the lock this
         // connection itself holds.
         (Some("PING") | Some("ECHO") | Some("INFO"), Some(_)) => {
-            handler.handle_command(value, store).await
+            handler.handle_command(value, store, txn.authenticated_as.as_ref()).await
         }
         // Anything else would take the store's lock, which this connection
         // already holds, and wait on itself for good.
@@ -243,7 +288,7 @@ async fn respond(
              GRAPH.ROLLBACK, PING, ECHO and INFO are accepted"
                 .to_string(),
         ),
-        (_, None) => handler.handle_command(value, store).await,
+        (_, None) => handler.handle_command(value, store, txn.authenticated_as.as_ref()).await,
     }
 }
 
@@ -255,10 +300,11 @@ async fn handle_connection(
     router: Option<Arc<Router>>,
     proxy: Option<Arc<Proxy>>,
     cluster: Option<Arc<ClusterManager>>,
+    credentials: Option<Arc<Vec<crate::auth::Credential>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = ConnTxn::default();
     let result =
-        serve_connection(&mut socket, &store, &handler, router, proxy, cluster, &mut txn).await;
+        serve_connection(&mut socket, &store, &handler, router, proxy, cluster, &mut txn, credentials).await;
     // However the connection ends -- a clean close, a protocol error, a failed
     // write -- a transaction still open is rolled back, or its partial writes
     // would stay and the lock it held would be gone with no one to finish it.
@@ -283,6 +329,7 @@ async fn serve_connection(
     proxy: Option<Arc<Proxy>>,
     cluster: Option<Arc<ClusterManager>>,
     txn: &mut ConnTxn,
+    credentials: Option<Arc<Vec<crate::auth::Credential>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = BytesMut::with_capacity(4096);
 
@@ -363,7 +410,7 @@ async fn serve_connection(
 
                     if !forwarded {
                         // Process command locally
-                        let response = respond(handler, &value, store, txn).await;
+                        let response = respond(handler, &value, store, txn, credentials.as_deref().map(|v| v.as_slice())).await;
 
                         // Encode and send response
                         let mut response_buf = Vec::new();

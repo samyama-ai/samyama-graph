@@ -115,6 +115,7 @@
 #![allow(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod auth;
 pub mod allocator;
 pub mod graph;
 pub mod query;
@@ -141,6 +142,7 @@ pub mod nlq;
 pub mod agent;
 pub mod migrate;
 pub mod snapshot;
+pub use auth::{Credential, Secret, Role, read_credentials};
 pub mod optimization;
 
 // Re-export main types for convenience
