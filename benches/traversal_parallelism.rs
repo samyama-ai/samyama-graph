@@ -46,6 +46,24 @@
 //! regression wearing a requirement's colours, and no core count on its own can
 //! tell you that happened.
 //!
+//! What this does *not* do is fail on it. Throughput is reported, not gated:
+//! the floor #1461 asks for (parallel throughput >= 1.0x serial on the same
+//! fixture, in the same process) needs a runtime toggle on parallel expansion,
+//! and there is no parallel expansion to toggle until #1460 lands. Until then
+//! a reader has to compare the two numbers by eye.
+//!
+//! # Which expansion operator this exercises
+//!
+//! The traversal arm is `[:NEXT*1..{depth}]`, a variable-length pattern, and
+//! the planner routes every variable-length segment to
+//! `VarLengthExpandOperator`. `ExpandOperator` -- the fixed-hop path -- is
+//! **not exercised here at all**. That is correct for PERF-06 (a var-length
+//! traversal is a deep traversal), but anyone using this bench to evaluate a
+//! change to `ExpandOperator` will see no movement and must not conclude the
+//! change did nothing; measure it with a fixed-hop pattern such as
+//! `(a)-[:NEXT]->(b)-[:NEXT]->(c)` instead (the draft #1460 carries a probe
+//! that does this).
+//!
 //! Usage: cargo bench --bench traversal_parallelism -- [--scale N] [--depth D]
 
 use std::time::Instant;
