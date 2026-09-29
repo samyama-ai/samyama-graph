@@ -354,6 +354,19 @@ measurement**, and it says there is a great deal left.
 
 Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/benchmarks/snb/) read workload (IS1–IS7 short reads, IC1–IC14 complex reads), at two scale factors. In-process (embedded) timing, 1 warm-up + 3 timed runs, median latency. Provenance: commit `31a7e77`, id-indexes built on all anchor labels.
 
+> **1 warm-up does not warm every query up (#752).** Measured at SF10 with `--runs 21 --print-runs`,
+> the first *timed* run is the slowest in ~15 of 21 reads, and IC4 needs three runs to settle
+> (27.7, 22.5, 19.9 ms against a steady ~19.3). So a 3-run median after 1 warm-up is biased
+> **high** (against Samyama), unevenly: about +17% on IC4, +9% on IS3, +4% on IC11, 0% on IC6. Any
+> max or max/min spread from these runs is mostly that warm-up ramp, not variance.
+>
+> The bench default stays at `--warmup 1` so new runs remain comparable with every figure below
+> until the series is re-run on a new basis. Every run now says so: the header prints
+> `Runs per query: N (M warm-up, discarded)` plus a `Warm-up:` warning when M < 3, and the summary
+> prints `Cold first run: X/Y queries had run 1 as their slowest`. `--print-runs` marks each such
+> series with `<- run 1 slowest`. For steady-state numbers use
+> `cargo bench --bench ldbc_benchmark -- --warmup 3 --runs 5`.
+
 > **SF1 is verified. SF10 is not.**
 >
 > The SF1 column below was re-run under the fixed harness (#450), which reports an `EMPTY` status and

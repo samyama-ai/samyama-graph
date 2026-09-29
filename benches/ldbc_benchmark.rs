@@ -12,6 +12,17 @@
 //!   cargo bench --bench ldbc_benchmark -- --runs 10
 //!   cargo bench --bench ldbc_benchmark -- --query IS1
 //!   cargo bench --bench ldbc_benchmark -- --data-dir /path/to/data
+//!   cargo bench --bench ldbc_benchmark -- --warmup 3 --runs 5 --print-runs
+//!
+//! Warm-up: `--warmup N` discarded runs before timing (default **1**; updates
+//! warm up once at most). The default is 1 because every published figure was
+//! taken with 1, not because 1 is enough: at SF10 the first *timed* run is the
+//! slowest in ~15 of 21 reads and IC4 needs three runs to settle (#752). With
+//! the default, the reported max and max/min spread include that cold run, and
+//! a 3-run median is biased high by up to 17% on IC4. The bench discloses this
+//! on every run: the header states the warm-up count, and the summary prints a
+//! `Cold first run:` line counting the reads whose first timed run was their
+//! slowest. Use `--warmup 3` for steady-state numbers.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -605,6 +616,17 @@ struct BenchResult {
     error: Option<String>,
 }
 
+/// True when the first timed run is strictly the slowest of two or more.
+///
+/// The signature of an unabsorbed warm-up (#752): under genuine per-execution
+/// variance run 1 is the slowest about 1/n of the time, not in ~15 of 21.
+fn first_run_slowest(series: &[Duration]) -> bool {
+    match series.split_first() {
+        Some((first, rest)) if !rest.is_empty() => rest.iter().all(|d| first > d),
+        _ => false,
+    }
+}
+
 fn format_ms(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     if ms < 1.0 {
@@ -989,7 +1011,20 @@ Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on
         format_duration(idx_start.elapsed())
     );
 
-    eprintln!("Runs per query: {} ({} warm-up, discarded)", runs, warmup_runs);
+    // `run_benchmark` always warms up at least once, so report what it does
+    // rather than what was asked for: `--warmup 0` still runs one.
+    let effective_warmup = warmup_runs.max(1);
+    eprintln!("Runs per query: {} ({} warm-up, discarded)", runs, effective_warmup);
+    if effective_warmup < 3 {
+        // Disclose the cold-run bias up front: a log read without it takes a
+        // warm-up ramp for variance (#752).
+        eprintln!(
+            "Warm-up: {} is the published-series default and does not settle every query \
+(IC4 needs 3 at SF10, #752) -- max, spread and short-run medians include a cold \
+first run; pass --warmup 3 for steady state",
+            effective_warmup
+        );
+    }
     eprintln!(
         "Params: personId={} person2Id={} postId={} messageId={} firstName=\"{}\" tagName=\"{}\"",
         params.person_id, params.person2_id, params.post_id, params.message_id,
@@ -1043,6 +1078,9 @@ Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on
     let mut passed = 0usize;
     let mut errors = 0usize;
     let mut empty_reads = 0usize;
+    // Reads timed at least twice, and how many of them had run 1 slowest (#752).
+    let mut multi_run = 0usize;
+    let mut cold_first = 0usize;
     let mut last_category = "";
     let bench_start = Instant::now();
     // Only collected when asked for, so the default path allocates nothing.
@@ -1120,6 +1158,15 @@ Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on
         }
 
         let result = run_benchmark(&client, query, &cypher, runs, warmup_runs).await;
+        // Cold-run bias (#752): the first timed run strictly the slowest.
+        // Counted always, not only under --print-runs, because the summary
+        // line is the disclosure and must not depend on a flag.
+        if result.error.is_none() && result.series.len() >= 2 {
+            multi_run += 1;
+            if first_run_slowest(&result.series) {
+                cold_first += 1;
+            }
+        }
         if print_runs {
             all_results.push(result.clone());
         }
@@ -1191,13 +1238,30 @@ Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on
             // and a line beginning `  IS3   …` is one format change away from
             // being ingested as a result row. A leading word that is not
             // `Running` and not a query id cannot match at all.
-            println!("  runs {:<6} spread {:>5.2}x  {}", r.id, spread, runs.join(" "));
+            let mark = if first_run_slowest(&r.series) { "  <- run 1 slowest" } else { "" };
+            println!("  runs {:<6} spread {:>5.2}x  {}{}", r.id, spread, runs.join(" "), mark);
         }
     }
 
     println!();
     println!("Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
         passed, queries.len(), empty_reads, errors, format_duration(bench_time));
+    // Starts with a word that is neither `Running` nor a query id, so the
+    // result-row regex in `ch_bench_ldbc.py` / `analyse_noise.py` cannot match it.
+    if multi_run > 0 {
+        println!(
+            "Cold first run: {}/{} queries had run 1 as their slowest ({} warm-up){}",
+            cold_first,
+            multi_run,
+            effective_warmup,
+            if cold_first * 2 > multi_run {
+                " -- max and max/min spread are dominated by warm-up, not variance; \
+re-run with --warmup 3 before reading spread (#752)"
+            } else {
+                ""
+            }
+        );
+    }
     if empty_reads > 0 {
         println!();
         println!("WARNING: {empty_reads} read(s) returned 0 rows. LDBC reads return rows by");
