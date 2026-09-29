@@ -46,6 +46,8 @@
 
 use crate::graph::NodeId;
 use half::f16;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use hnsw_rs::prelude::*;
 use thiserror::Error;
 
@@ -246,6 +248,20 @@ pub struct VectorIndex {
     /// held at the index's own precision so this copy is halved too.
     stored_f32: Vec<StoredVector>,
     stored_f16: Vec<(u64, Vec<f16>)>,
+    /// Stored vectors by the hash of their exact bits, as positions into
+    /// `stored_f32` / `stored_f16`, so a query with a vector that is in the
+    /// index finds it whether or not the graph can reach it (#1498).
+    exact: HashMap<u64, Vec<usize>>,
+}
+
+/// Hash of a vector's exact bit pattern. Equal bits, equal hash; a hit is
+/// confirmed by comparing the stored values, so collisions cost a compare.
+fn bits_key<T: Copy>(values: &[T], to_bits: impl Fn(T) -> u64) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in values {
+        to_bits(*v).hash(&mut h);
+    }
+    h.finish()
 }
 
 // Implement Debug manually because Hnsw doesn't implement it
@@ -298,6 +314,7 @@ impl VectorIndex {
             backend,
             stored_f32: Vec::new(),
             stored_f16: Vec::new(),
+            exact: HashMap::new(),
         }
     }
 
@@ -334,6 +351,8 @@ impl VectorIndex {
         match &mut self.backend {
             Backend::F32(h) => {
                 h.insert((vector, node_id.0 as usize));
+                let key = bits_key(vector, |v: f32| v.to_bits() as u64);
+                self.exact.entry(key).or_default().push(self.stored_f32.len());
                 self.stored_f32.push(StoredVector {
                     node_id: node_id.0,
                     vector: vector.clone(),
@@ -346,6 +365,8 @@ impl VectorIndex {
                 // vectors and answer from another.
                 let q: Vec<f16> = vector.iter().map(|v| f16::from_f32(*v)).collect();
                 h.insert((&q, node_id.0 as usize));
+                let key = bits_key(&q, |v: f16| v.to_bits() as u64);
+                self.exact.entry(key).or_default().push(self.stored_f16.len());
                 self.stored_f16.push((node_id.0, q));
             }
         }
@@ -417,6 +438,23 @@ impl VectorIndex {
             neighbors.push((NodeId::new(res.d_id as u64), res.distance));
         }
 
+        // HNSW can build a graph in which a stored vector has no path from the
+        // entry point, and then no search width finds it: measured, every miss
+        // of a vector queried with itself was absent even at k = ef = n
+        // (#1498). A query that IS a stored vector is the "more like this"
+        // case, so answer it exactly: the stored copy is merged in at its true
+        // distance and the list re-sorted, rather than trusting the graph.
+        let present = self.exact_matches(query);
+        if !present.is_empty() {
+            neighbors.retain(|(id, _)| !present.iter().any(|(p, _)| p == id));
+            let mut merged = present;
+            merged.extend(neighbors);
+            // Stable, so an exact match stays ahead of a tie.
+            merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            merged.truncate(k.min(n));
+            neighbors = merged;
+        }
+
         // An empty result from a non-empty index is not an answer, it is a failure of the
         // approximation — and unlike a panic it is silent. Fall back rather than report
         // "no matches" for data that is present.
@@ -428,6 +466,30 @@ impl VectorIndex {
         }
 
         Ok(neighbors)
+    }
+
+    /// The stored vectors bit-identical to `query` (after quantizing it to the
+    /// stored precision), with their distance to it.
+    fn exact_matches(&self, query: &[f32]) -> Vec<(NodeId, f32)> {
+        match self.quantization {
+            Quantization::None => {
+                let key = bits_key(query, |v: f32| v.to_bits() as u64);
+                self.exact.get(&key).into_iter().flatten()
+                    .map(|&i| &self.stored_f32[i])
+                    .filter(|sv| sv.vector.as_slice() == query)
+                    .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                    .collect()
+            }
+            Quantization::Fp16 => {
+                let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
+                let key = bits_key(&q, |v: f16| v.to_bits() as u64);
+                self.exact.get(&key).into_iter().flatten()
+                    .map(|&i| &self.stored_f16[i])
+                    .filter(|(_, v)| v.iter().zip(&q).all(|(a, b)| a.to_bits() == b.to_bits()))
+                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .collect()
+            }
+        }
     }
 
     /// Every stored vector, at f32, whichever precision the index holds.

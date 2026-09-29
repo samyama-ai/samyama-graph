@@ -30,7 +30,7 @@
 //! catches the failure it exists for without catching the weather.
 
 use samyama::graph::types::NodeId;
-use samyama::vector::index::{DistanceMetric, VectorIndex};
+use samyama::vector::index::{DistanceMetric, Quantization, VectorIndex};
 use std::collections::HashSet;
 
 const N: usize = 2000;
@@ -96,26 +96,67 @@ fn hnsw_recall_stays_above_the_floor() {
     );
 }
 
-#[test]
-fn a_vector_in_the_index_is_its_own_nearest_neighbour() {
+/// Independent builds per case. HNSW assigns layers at random, so one build
+/// says little: measured on the 200-vector corpus below, a build left 0 to ~5
+/// of its vectors unreachable from the entry point (62 misses in 60 builds on
+/// one run, 1 in 60 on the next), and an unreachable vector is not found at
+/// any search width -- not even at k = ef = n (#1498).
+const BUILDS: usize = 20;
+
+fn corpus(n: usize, seed: u64) -> Vec<Vec<f32>> {
+    let mut seed = seed;
+    (0..n).map(|_| (0..DIM).map(|_| lcg(&mut seed)).collect()).collect()
+}
+
+fn assert_every_vector_finds_itself(quantization: Quantization) {
     // The control. Recall is a ratio, and a ratio can look healthy while the
     // index is answering a subtly different question; an exact-match query has
-    // one right answer and no tolerance.
-    let mut seed = 99u64;
-    let vectors: Vec<Vec<f32>> = (0..200)
-        .map(|_| (0..DIM).map(|_| lcg(&mut seed)).collect())
-        .collect();
+    // one right answer and no tolerance. 200 is above the 128-vector exact
+    // search threshold, so this goes through the graph.
+    let vectors = corpus(200, 99);
+    for build in 0..BUILDS {
+        let mut index = VectorIndex::with_quantization(DIM, DistanceMetric::Cosine, quantization);
+        for (i, v) in vectors.iter().enumerate() {
+            index.add(NodeId(i as u64), v).expect("add");
+        }
+        for (i, v) in vectors.iter().enumerate() {
+            let got = index.search(v, 1).expect("search");
+            assert_eq!(
+                got[0].0,
+                NodeId(i as u64),
+                "build {build}: querying with vector {i} returned {:?} ({quantization:?})",
+                got[0].0
+            );
+        }
+    }
+}
+
+#[test]
+fn a_vector_in_the_index_is_its_own_nearest_neighbour() {
+    assert_every_vector_finds_itself(Quantization::None);
+}
+
+#[test]
+fn a_vector_in_a_quantized_index_is_its_own_nearest_neighbour() {
+    assert_every_vector_finds_itself(Quantization::Fp16);
+}
+
+#[test]
+fn two_nodes_with_the_same_vector_are_both_found_and_k_is_respected() {
+    let vectors = corpus(300, 5);
     let mut index = VectorIndex::new(DIM, DistanceMetric::Cosine);
     for (i, v) in vectors.iter().enumerate() {
         index.add(NodeId(i as u64), v).expect("add");
     }
-    for (i, v) in vectors.iter().enumerate().take(25) {
-        let got = index.search(v, 1).expect("search");
-        assert_eq!(
-            got[0].0,
-            NodeId(i as u64),
-            "querying with vector {i} returned {:?}",
-            got[0].0
-        );
-    }
+    index.add(NodeId(1000), &vectors[7]).expect("add duplicate");
+
+    let got = index.search(&vectors[7], 5).expect("search");
+    assert_eq!(got.len(), 5);
+    let top: HashSet<u64> = got[..2].iter().map(|(id, _)| id.0).collect();
+    assert_eq!(top, HashSet::from([7, 1000]), "{got:?}");
+    let ids: HashSet<u64> = got.iter().map(|(id, _)| id.0).collect();
+    assert_eq!(ids.len(), 5, "a node was returned twice: {got:?}");
+
+    let one = index.search(&vectors[7], 1).expect("search");
+    assert_eq!(one.len(), 1);
 }
