@@ -546,15 +546,17 @@ async fn query_in_transaction(
     params: &crate::query::BoundParams,
 ) -> axum::response::Response {
     let mut sessions = state.transactions.lock().await;
-    let Some(txn) = sessions.get_mut(tx) else {
-        return crate::http::transactions::not_open(tx);
+    let past_deadline = match sessions.get_mut(tx) {
+        None => return sessions.refused(tx),
+        Some(txn) => (std::time::Instant::now() > txn.deadline).then_some(txn.limit),
     };
-    if std::time::Instant::now() > txn.deadline {
-        if let Some(expired) = sessions.remove(tx) {
+    if let Some(limit) = past_deadline {
+        if let Some(expired) = sessions.expire(tx, limit) {
             crate::http::transactions::roll_back(expired);
         }
-        return crate::http::transactions::not_open(tx);
+        return sessions.refused(tx);
     }
+    let txn = sessions.get_mut(tx).expect("checked above");
     let store: &mut crate::graph::GraphStore = &mut txn.guard;
     let is_write = state
         .engine
