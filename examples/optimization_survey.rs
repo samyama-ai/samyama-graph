@@ -13,10 +13,11 @@
 //!
 //! **The statistics are real and the corpus is not CEC.** OPT-01 wants
 //! CEC2017/CEC2022 with thirty seeds; `data/cec/` is empty and the loaders in
-//! `benchmarks/cec_data.rs` say so themselves. What runs here is the ten
-//! classic functions in `benchmarks/single_objective.rs`, with thirty seeds
-//! each, and it is reported as what it is. Publishing these numbers against
-//! OPT-01 would be a different benchmark wearing its name.
+//! `crates/samyama-optimization/src/benchmarks/cec_data.rs` say so themselves.
+//! What runs here is the ten classic functions in
+//! `crates/samyama-optimization/src/benchmarks/single_objective.rs`, with
+//! thirty seeds each, and it is reported as what it is. Publishing these
+//! numbers against OPT-01 would be a different benchmark wearing its name.
 //!
 //! ```text
 //! cargo run --release --example optimization_survey -- --json opt.json
@@ -386,7 +387,7 @@ fn main() {
         "reachable_count": n_reachable,
         "target_families_not_shipped": TARGET_FAMILIES,
         "corpus": {
-            "name": "classic single-objective suite (benchmarks/single_objective.rs)",
+            "name": "classic single-objective suite (crates/samyama-optimization/src/benchmarks/single_objective.rs)",
             "functions": suite.iter().map(|s| s.name).collect::<Vec<_>>(),
             "dim": DIM, "seeds": seeds, "population": POP, "iterations": ITERS,
             "is_cec": false,
