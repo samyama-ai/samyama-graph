@@ -166,7 +166,7 @@ Validate node count, relationship count, property values, index-entry count, ind
 
 ## Out of Scope
 
-* Multi-hop query optimization — see [ADR-035](./ADR-035-multi-hop-query-optimization.md)
+* Multi-hop query optimization — see [ADR-040](./ADR-040-multi-hop-query-optimization.md) (filed as ADR-035; renumbered in #1515)
 * Query-planner changes
 * Hardware scaling
 * Distributed ingestion

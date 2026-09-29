@@ -1,4 +1,6 @@
-# ADR-035: Multi-Hop Query Optimization
+# ADR-040: Multi-Hop Query Optimization
+
+> Renumbered from ADR-035 (#1515): it shared that number with the OEH hierarchy index record, which keeps 035.
 
 ## Status
 **Proposed**

@@ -64,21 +64,21 @@ Links to related ADRs
 | [029](./ADR-029-index-manager.md) | Index Manager — Property, Unique, Composite Indexes | Shipped (v1.0.0) | 2026-05-05 |
 | [030](./ADR-030-bandwidth-and-observability.md) | Bandwidth Accounting and Operator Observability | Proposed | 2026-05-05 |
 | [034](./ADR-034-unified-memory-seam.md) | Unified-memory buffer seam for zero-ETL CPU/GPU graph sharing | Proposed / scaffolded | 2026-07-22 |
-| [035](./ADR-035-multi-hop-query-optimization.md) | Multi-Hop Query Optimization † | Proposed | 2026-07-31 |
-| [035](./ADR-035-oeh-hierarchy-index.md) | OEH — Order-Embedded Hierarchy Index (Subsumption + Index-Resident Roll-up) † | Partially shipped (v0.9.x) | 2026-08-13 |
+| [035](./ADR-035-oeh-hierarchy-index.md) | OEH — Order-Embedded Hierarchy Index (Subsumption + Index-Resident Roll-up) | Partially shipped (v0.9.x) | 2026-08-13 |
 | [036](./ADR-036-data-load-time-to-ready-optimization.md) | Data Load and Time-to-Ready Optimization | Proposed | 2026-07-31 |
 | [037](./ADR-037-bolt-protocol-feasibility.md) | Bolt Protocol — Feasibility and Decision | Accepted, with a correction | 2026-08-30 |
 | [038](./ADR-038-memory-allocator.md) | Memory Allocator for the Server Binary | Accepted | 2026-09-17 |
 | [039](./ADR-039-streaming-query-results.md) | Streaming query results | Proposed | 2026-09-22 |
+| [040](./ADR-040-multi-hop-query-optimization.md) | Multi-Hop Query Optimization † | Proposed | 2026-07-31 |
 
-> **† Two records share the number 035.** `ADR-035-multi-hop-query-optimization.md`
-> and `ADR-035-oeh-hierarchy-index.md` were both filed as ADR-035; both are listed
-> above. Other documents citing "ADR-035" (for example `benchmarks/hier/README.md`)
-> mean the OEH one. **This is unresolved** — which record keeps 035, and which is
-> renumbered, is a maintainer decision (#1515). No ADR content has been changed.
+> **† Renumbered from ADR-035.** `ADR-040-multi-hop-query-optimization.md` was filed
+> as ADR-035, the same number as `ADR-035-oeh-hierarchy-index.md`. The OEH record
+> keeps 035 because the code, benchmarks and other docs cite "ADR-035" to mean it;
+> the multi-hop record took the next free number (#1515). Its content is unchanged
+> apart from a one-line renumbering note.
 
 > **Number gaps.** 018, 019, 031, 032 and 033 were never used. 35 records are on
-> disk and all 35 are indexed above.
+> disk, all 35 are indexed above, and no two share a number.
 
 ## Decision Process
 
@@ -90,4 +90,4 @@ Links to related ADRs
 ---
 
 **Maintained by**: Samyama Graph Database Team
-**Last Updated**: 2026-09-28
+**Last Updated**: 2026-09-29
