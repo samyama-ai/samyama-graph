@@ -317,13 +317,22 @@ ORDER BY trials DESC LIMIT 5
 
 | Drug | Trials |
 |------|--------|
-| Placebo | 521 |
-| **Pembrolizumab** | **137** |
+| **Placebo** | **521** |
+| Pembrolizumab | 137 |
 | Carboplatin | 106 |
 | Paclitaxel | 106 |
 | Cyclophosphamide | 98 |
 
-**5.2 seconds.** One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
+**10.3 seconds.** One query. Four databases. 74 million nodes. 1 billion edges. A single machine.
+
+That is query `XK02` in
+[`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv):
+10,250.2 ms, 10 rows, first row `Placebo, 521`, measured 2026-04-02 on one
+r6a.8xlarge and not re-measured since. The CSV records only the first row of
+each result; rows 2–5 above are from the query listing on the benchmark page,
+not from the CSV. The 5.2 s this line used to quote came from an earlier run
+that day and is not what the CSV records
+([#1503](https://github.com/samyama-ai/samyama-graph/issues/1503)).
 
 [See all 100 benchmark queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
 
@@ -560,14 +569,19 @@ four KGs, measured 2026-04-02 on one r6a.8xlarge and not re-measured since.
 
 ### Cross-KG Query Highlights
 
-| Query | Time | Result |
-|-------|------|--------|
-| Cancer → Trial interventions | 5.2s | Pembrolizumab #1 (137 trials) |
-| Diabetes → Trial interventions | 2.4s | Metformin #1 (70 trials) |
-| Metformin → Trial adverse events | 2.1s | Diarrhoea (185 trials) — known side effect confirmed |
-| Cancer trial sites by country | 3.8s | US 4,062 · China 1,170 · France 827 |
-| NCI-funded → Trial drugs | 19.4s | Cyclophosphamide (517) · Radiation (362) |
-| Aspirin articles → Trials | 1.5s | NCT00000491 "Aspirin MI study" |
+Times and first rows are the `time_ms` and `sample_result` columns of
+[`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv)
+(2026-04-02, one r6a.8xlarge). The CSV keeps only the first row of each result,
+so that is all this table quotes.
+
+| ID | Query | Time | First row (CSV) |
+|----|-------|------|-----------------|
+| XK02 | Cancer → Trial interventions | 10.3s | Placebo (521 trials) |
+| XK03 | Diabetes → Trial interventions | 2.7s | Placebo (324 trials) |
+| XK06 | Metformin → Trial adverse events | 2.1s | Headache (215 trials) |
+| XK07 | Cancer trial sites by country | 4.2s | United States (4,062) |
+| XK08 | NCI-funded → Trial interventions | 20.5s | Placebo (933) |
+| XK05 | Aspirin articles → Trials | 1.5s | NCT04908982 "Aspirin and congenital malformations." |
 
 ### LDBC suites
 
