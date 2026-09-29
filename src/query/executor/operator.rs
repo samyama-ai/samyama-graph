@@ -583,6 +583,14 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         return Ok(Value::Property(PropertyValue::Null));
     }
 
+    // Two strings under a comparison: the same function the borrowed fast
+    // path uses (`borrowed_str_comparison`), so the two cannot disagree.
+    if let (PropertyValue::String(l), PropertyValue::String(r)) = (&left_prop, &right_prop) {
+        if let Some(b) = str_comparison(op, l, r) {
+            return Ok(Value::Property(PropertyValue::Boolean(b)));
+        }
+    }
+
     let result = match op {
         // Three-valued, because a null *inside* a list makes the comparison
         // unknown rather than false. The guard above only catches a null
@@ -1057,6 +1065,99 @@ fn unbound(record: &Record, name: &str) -> ExecutionError {
     }
 }
 
+/// `op` applied to two strings, for the operators whose answer on two strings
+/// is a boolean decided by the strings alone. `None` for any other operator.
+///
+/// The one definition of those rules for strings: `eval_binary_op` answers a
+/// string pair through it, and so does the borrowed path below.
+fn str_comparison(op: &BinaryOp, l: &str, r: &str) -> Option<bool> {
+    Some(match op {
+        BinaryOp::Eq => l == r,
+        BinaryOp::Ne => l != r,
+        BinaryOp::Lt => l < r,
+        BinaryOp::Le => l <= r,
+        BinaryOp::Gt => l > r,
+        BinaryOp::Ge => l >= r,
+        BinaryOp::StartsWith => l.starts_with(r),
+        BinaryOp::EndsWith => l.ends_with(r),
+        BinaryOp::Contains => l.contains(r),
+        _ => return None,
+    })
+}
+
+/// `expr` as a string borrowed from where it already lives: a string literal
+/// in the plan, or a node / relationship property held in a string column.
+///
+/// `None` whenever that is not the case -- another type, an absent value, a
+/// value only in row storage, a deleted entity, a variable that is not a node
+/// or relationship -- and the caller evaluates normally. A `Some` is the value
+/// `read_property` would have returned: every read path consults the column
+/// first, and a string column holds no nulls.
+fn borrowed_str<'a>(expr: &'a Expression, record: &'a Record, store: &'a GraphStore) -> Option<&'a str> {
+    match expr {
+        Expression::Literal(PropertyValue::String(s)) => Some(s.as_str()),
+        Expression::Property { variable, property } => match record.get(variable)? {
+            Value::NodeRef(id) | Value::Node(id, _) => {
+                // A deleted node is an error in `read_property`, not a value.
+                store.get_node(*id)?;
+                let column = store.node_columns.column_id(property)?;
+                // Asked first so a number column is not read twice: once here
+                // for nothing, then again by the ordinary path.
+                if !store.node_columns.is_str_column(column) {
+                    return None;
+                }
+                store.node_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                if !store.has_edge(*id) {
+                    return None;
+                }
+                let column = store.edge_columns.column_id(property)?;
+                if !store.edge_columns.is_str_column(column) {
+                    return None;
+                }
+                store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `left op right` without copying either string, when both sides are strings
+/// that `borrowed_str` can reach and `op` is a string comparison.
+///
+/// `WHERE p.name = 'x'` copied the property out of its column and the literal
+/// out of the plan, two allocator calls per row, only to compare them and drop
+/// both (#750). `None` means "evaluate it the ordinary way".
+fn borrowed_str_comparison(
+    op: &BinaryOp,
+    left: &Expression,
+    right: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> Option<bool> {
+    if !matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+            | BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains
+    ) {
+        return None;
+    }
+    // Only a string literal or a property can be borrowed; anything else
+    // (`n.p > 500`, a parameter, a function) goes straight to the ordinary
+    // path without touching a column.
+    let borrowable = |e: &Expression| {
+        matches!(e, Expression::Literal(PropertyValue::String(_)) | Expression::Property { .. })
+    };
+    if !borrowable(left) || !borrowable(right) {
+        return None;
+    }
+    let l = borrowed_str(left, record, store)?;
+    let r = borrowed_str(right, record, store)?;
+    str_comparison(op, l, r)
+}
+
 fn read_property(
     record: &Record,
     variable: &str,
@@ -1116,6 +1217,9 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
         }
         Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
         Expression::Binary { left, op, right } => {
+            if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                return Ok(Value::Property(PropertyValue::Boolean(b)));
+            }
             let l = eval_expression(left, record, store)?;
             let r = eval_expression(right, record, store)?;
             eval_binary_op(op, l, r)
@@ -6688,6 +6792,17 @@ impl FilterOperator {
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
+                // Borrowed, unless a side is the property this filter keeps for
+                // its consumer (#593): that read has to produce the value.
+                let retained_side = |e: &Expression| match (&self.retain, e) {
+                    (Some((v, p)), Expression::Property { variable, property }) => v == variable && p == property,
+                    _ => false,
+                };
+                if !retained_side(left) && !retained_side(right) {
+                    if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                        return Ok(Value::Property(PropertyValue::Boolean(b)));
+                    }
+                }
                 let left_val = self.evaluate_expression(left, record, store)?;
                 let right_val = self.evaluate_expression(right, record, store)?;
                 self.evaluate_binary_op(op, left_val, right_val)
@@ -9554,6 +9669,9 @@ impl ProjectOperator {
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
+                if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                    return Ok(Value::Property(PropertyValue::Boolean(b)));
+                }
                 let left_val = self.evaluate_expression(left, record, store)?;
                 let right_val = self.evaluate_expression(right, record, store)?;
                 eval_binary_op(op, left_val, right_val)
@@ -10286,6 +10404,9 @@ impl AggregateOperator {
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
+                if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                    return Ok(Value::Property(PropertyValue::Boolean(b)));
+                }
                 let left_val = Self::evaluate_expression(left, record, store)?;
                 let right_val = Self::evaluate_expression(right, record, store)?;
                 eval_binary_op(op, left_val, right_val)
@@ -11739,6 +11860,9 @@ impl SortOperator {
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
+                if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                    return Ok(Value::Property(PropertyValue::Boolean(b)));
+                }
                 let left_val = Self::evaluate_expression(left, record, store)?;
                 let right_val = Self::evaluate_expression(right, record, store)?;
                 eval_binary_op(op, left_val, right_val)
@@ -20567,6 +20691,9 @@ impl WithBarrierOperator {
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
+                if let Some(b) = borrowed_str_comparison(op, left, right, record, store) {
+                    return Ok(Value::Property(PropertyValue::Boolean(b)));
+                }
                 let left_val = Self::evaluate_expression(left, record, store)?;
                 let right_val = Self::evaluate_expression(right, record, store)?;
                 eval_binary_op(op, left_val, right_val)
