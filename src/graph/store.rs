@@ -6136,6 +6136,20 @@ fn spawn_auto_embed(
     // `Person.headline`, so indexing under the source key put every vector in an index
     // nobody queried (#310).
     let target_key = config.embedding_property.clone();
+    // The first model to write into an index with no recorded model is the
+    // one that built it (#275), so a later text query embedded by a different
+    // model can be refused instead of searching the wrong space.
+    if let Some(bound) =
+        vector_index.bind_model_if_unset(&label, &target_key, &config.embedding_model)
+    {
+        if bound != config.embedding_model.trim() {
+            tracing::warn!(
+                "auto-embed: {}.{} was built by embedding model '{}' but is being written by '{}'; \
+                 vectors from different models are not comparable -- reindex with one model",
+                label, target_key, bound, config.embedding_model
+            );
+        }
+    }
     tokio::spawn(async move {
         let pipeline = match crate::embed::EmbedPipeline::new(config) {
             Ok(p) => p,

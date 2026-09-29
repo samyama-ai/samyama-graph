@@ -27,6 +27,16 @@ pub struct VectorIndexManager {
     /// how Neo4j's form of `db.index.vector.queryNodes` addresses an index, so it has to
     /// survive creation.
     names: RwLock<HashMap<String, IndexKey>>,
+    /// Index -> the embedding model that produced its vectors (#275).
+    ///
+    /// Vectors from different models are not comparable, even at the same
+    /// dimension: a query embedded by model B against an index built by model A
+    /// returns confident, wrong neighbours and no error. Recording the build
+    /// model is what lets a text query be checked before it searches. An index
+    /// with no entry has an unknown model (created by DDL or a raw-vector
+    /// caller, or loaded from a `metadata.json` written before this field), and
+    /// is never refused on that account.
+    model_ids: RwLock<HashMap<IndexKey, String>>,
 }
 
 impl VectorIndexManager {
@@ -35,6 +45,7 @@ impl VectorIndexManager {
         Self {
             indices: RwLock::new(HashMap::new()),
             names: RwLock::new(HashMap::new()),
+            model_ids: RwLock::new(HashMap::new()),
         }
     }
 
@@ -98,9 +109,54 @@ impl VectorIndexManager {
         
         let index = VectorIndex::with_quantization(dimensions, metric, quantization);
         let mut indices = self.indices.write().unwrap();
+        // A (re)created index starts empty, so whatever model built the one it
+        // replaces says nothing about it.
+        self.model_ids.write().unwrap().remove(&key);
         indices.insert(key, Arc::new(RwLock::new(index)));
         
         Ok(())
+    }
+
+    /// Record the embedding model that builds this index (#275).
+    ///
+    /// Returns `false` (and records nothing) when no index exists for the key.
+    /// An empty `model_id` clears the record, making the model unknown again.
+    pub fn set_model_id(&self, label: &str, property_key: &str, model_id: &str) -> bool {
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
+        if !self.indices.read().unwrap().contains_key(&key) {
+            return false;
+        }
+        let model_id = model_id.trim();
+        let mut ids = self.model_ids.write().unwrap();
+        if model_id.is_empty() {
+            ids.remove(&key);
+        } else {
+            ids.insert(key, model_id.to_string());
+        }
+        true
+    }
+
+    /// Record `model_id` only if the index has no model recorded yet, and
+    /// return the model the index is bound to afterwards (`None` when there is
+    /// no such index). Used by auto-embed: the first model to write vectors
+    /// into an unbound index is the one that built it.
+    pub fn bind_model_if_unset(&self, label: &str, property_key: &str, model_id: &str) -> Option<String> {
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
+        if !self.indices.read().unwrap().contains_key(&key) {
+            return None;
+        }
+        let model_id = model_id.trim();
+        let mut ids = self.model_ids.write().unwrap();
+        if model_id.is_empty() {
+            return ids.get(&key).cloned();
+        }
+        Some(ids.entry(key).or_insert_with(|| model_id.to_string()).clone())
+    }
+
+    /// The embedding model recorded for an index, if any (#275).
+    pub fn model_id(&self, label: &str, property_key: &str) -> Option<String> {
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
+        self.model_ids.read().unwrap().get(&key).cloned()
     }
 
     /// Get an index
@@ -300,6 +356,7 @@ impl VectorIndexManager {
         }
 
         let indices = self.indices.read().unwrap();
+        let model_ids = self.model_ids.read().unwrap();
         let mut metadata = Vec::new();
 
         for (key, index_lock) in indices.iter() {
@@ -308,13 +365,19 @@ impl VectorIndexManager {
             let index_path = path.join(&index_filename);
             index.dump(&index_path)?;
 
-            metadata.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "label": key.label,
                 "property_key": key.property_key,
                 "dimensions": index.dimensions(),
                 "metric": index.metric(),
                 "filename": index_filename,
-            }));
+            });
+            // Written only when known, so an index whose model is unknown
+            // round-trips as unknown rather than as some placeholder (#275).
+            if let Some(model_id) = model_ids.get(key) {
+                entry["model_id"] = serde_json::Value::String(model_id.clone());
+            }
+            metadata.push(entry);
         }
 
         let metadata_path = path.join("metadata.json");
@@ -341,6 +404,7 @@ impl VectorIndexManager {
             .map_err(|e| crate::vector::VectorError::IndexError(e.to_string()))?;
 
         let mut indices = self.indices.write().unwrap();
+        let mut model_ids = self.model_ids.write().unwrap();
         for item in metadata {
             let label = item["label"].as_str().unwrap();
             let property_key = item["property_key"].as_str().unwrap();
@@ -356,6 +420,17 @@ impl VectorIndexManager {
                 label: label.to_string(),
                 property_key: property_key.to_string(),
             };
+            // Optional: metadata written before #275 has no `model_id`, and an
+            // index loaded from it has an unknown model -- searchable, never
+            // refused.
+            match item.get("model_id").and_then(|v| v.as_str()).map(str::trim) {
+                Some(m) if !m.is_empty() => {
+                    model_ids.insert(key.clone(), m.to_string());
+                }
+                _ => {
+                    model_ids.remove(&key);
+                }
+            }
             indices.insert(key, Arc::new(RwLock::new(index)));
         }
 

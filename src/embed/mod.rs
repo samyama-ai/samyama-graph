@@ -55,6 +55,14 @@ impl EmbedPipeline {
         Ok(Self { config, client })
     }
 
+    /// The embedding model this pipeline embeds with (`AutoEmbedConfig::embedding_model`).
+    ///
+    /// Recorded on a vector index as its build model, and compared against it
+    /// before a text query searches that index (#275).
+    pub fn model_id(&self) -> &str {
+        &self.config.embedding_model
+    }
+
     /// Process text into one or more chunks with embeddings
     pub async fn process_text(&self, text: &str) -> EmbedResult<Vec<TextChunk>> {
         // 1. Split text into chunks
