@@ -15,6 +15,12 @@ impl Individual {
 }
 
 /// Defines the optimization problem.
+///
+/// This is a black-box model: an objective function, an optional scalar penalty,
+/// a dimension and box bounds. There is no coefficient row, constraint matrix,
+/// constraint senses or integrality here, so a problem defined through this
+/// trait cannot be written as an MPS or LP file. That export (OPT-14) needs a
+/// separate structured linear/MILP representation first; see the crate README.
 pub trait Problem: Send + Sync {
     /// The objective function to minimize.
     fn objective(&self, variables: &Array1<f64>) -> f64;

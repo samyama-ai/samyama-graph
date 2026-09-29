@@ -62,6 +62,36 @@ We support 15+ algorithms across various families:
 - **Constraints**: Support for penalty-based constraint handling (`min_total`, `budget`).
 - **History Tracking**: Solvers yield convergence history for visualization.
 
+## What a problem is here, and why there is no MPS/LP export
+
+The problem model is a **black box**. `Problem` (`src/common.rs`) is an objective
+function from a variable vector to a scalar, an optional scalar penalty, a dimension, and
+box bounds. That is all a solver sees. Every solver in this crate is a population
+metaheuristic that samples that function. Every implementor has the same shape, including
+the engine's `GraphOptimizationProblem` (`src/query/executor/operator.rs`) and
+`CypherProblem` (`src/optimization/cypher_problem.rs`), whose objective runs a Cypher query.
+
+MPS and LP are file formats for a linear or mixed-integer program. They hold an objective
+coefficient row, a constraint matrix, constraint senses, right-hand sides and integrality
+markers. **None of that exists in this crate, and none of it can be recovered from a
+function.** So the missing part of MPS/LP export (requirement OPT-14) is not a serializer.
+It is a **structured linear/MILP problem representation**, and this crate does not have
+one. An MPS or LP writer depends on that representation. Writing one over the black-box
+trait would mean inventing a linear model that is not the problem being solved, so the
+exported file would lead to a different optimum.
+
+What that work would involve, none of which exists today:
+
+- a linear model type (objective coefficients, constraint matrix, senses, right-hand
+  sides, bounds, integrality) alongside the black-box `Problem` trait;
+- a way for callers, including the Cypher `algo.or.solve` path, to build one (today
+  constraints become a penalty term);
+- MPS/LP writers over that type, and importing results back;
+- a decision about problems with no linear form. That is most of the problems here: the
+  objectives call the database, which is why this crate uses metaheuristics at all.
+
+Until that representation exists, OPT-14 is blocked on the model, not on a file writer.
+
 ## Usage
 
 ### Single-Objective (Rust)
