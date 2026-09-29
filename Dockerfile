@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build stage
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.90-bookworm AS builder
 
 # Install build dependencies for RocksDB
 RUN apt-get update && apt-get install -y \

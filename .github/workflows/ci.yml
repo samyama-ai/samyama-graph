@@ -117,6 +117,13 @@ jobs:
         # author should see every failure in one run, not one per push.
         run: cargo test --workspace --no-fail-fast
 
+      # The image is pinned; CI is not. v1.10.0 shipped with no container
+      # because the Dockerfile still said rust:1.85 while the resolved tree had
+      # moved to 1.88 -- and nothing compared the two until the release build
+      # failed. Reads the lockfile, not a container: seconds, not minutes.
+      - name: The Dockerfile's Rust is new enough for the lockfile
+        run: python3 scripts/check_dockerfile_rust_pin.py
+
       - name: Examples and benches compile
         # The sweep runs these; here we only prove they still build, which is
         # what actually breaks when a signature changes.
