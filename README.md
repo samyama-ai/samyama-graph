@@ -626,6 +626,8 @@ every example, starts a server, and runs each in turn with a pass/fail summary
 demos: `grid_dispatch_demo`, `amr_stewardship_demo`, `healthcare_allocation_demo`,
 `wildfire_evac_demo`, `pca_demo`, `sdk_demo`, …*
 
+**Guide to all 122 programs:** [`examples/README.md`](examples/README.md) — demos, loaders, tools, and which ones are internal probes.
+
 ### Data Loaders
 
 | Dataset | Command | Scale |
