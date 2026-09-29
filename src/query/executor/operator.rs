@@ -14138,6 +14138,17 @@ impl PhysicalOperator for SchemaVisualizationOperator {
                     }
                 }
             }
+            // Sorted by (source, type, target). The walk above visits types in
+            // name order and edges in id order, but a node's labels are a
+            // `HashSet`, so a multi-label endpoint still emitted its triples in
+            // a per-instance order (#1509). The sort is over distinct triples,
+            // nothing next to the full edge walk that produced them.
+            records.sort_by_cached_key(|r| {
+                ["source_label", "relationship_type", "target_label"].map(|k| match r.get(k) {
+                    Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                    _ => String::new(),
+                })
+            });
             self.results = Some(records.into_iter());
         }
         Ok(self.results.as_mut().unwrap().next())

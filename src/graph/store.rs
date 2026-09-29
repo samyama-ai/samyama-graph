@@ -4513,31 +4513,68 @@ NodeDeleted { .. } => {
         self.label_index.keys().collect()
     }
 
-    /// Get all edge type names in the graph
+    /// Get all edge type names in the graph, sorted by name.
+    ///
+    /// The order is part of the contract (#1509). `edge_type_index` is a
+    /// `HashMap`, whose key order is keyed per instance, so collecting its keys
+    /// gave a different type order on every store and in every process. With
+    /// `get_edges_by_type` ascending by edge id (#1519), walking the types in
+    /// this order and each type's edges in turn is reproducible end to end.
+    /// The sort is over the distinct types only -- a handful of names, not a
+    /// per-edge cost.
     pub fn all_edge_types(&self) -> Vec<&EdgeType> {
-        self.edge_type_index.keys().collect()
+        let mut types: Vec<&EdgeType> = self.edge_type_index.keys().collect();
+        types.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        types
     }
 
     /// Generate a schema summary for NLQ pipeline
     pub fn schema_summary(&self) -> String {
+        // Every choice below is made by name or by lowest id, never by hash
+        // order: `label_index`, `edge_type_index` and `Node::labels` are all
+        // hash-keyed per instance, so reading "the first" of any of them gave a
+        // different summary for the same graph on every start (#1509). This
+        // text is the NLQ prompt's schema; an unstable one cannot be cached or
+        // diffed.
+        let mut labels: Vec<(&Label, usize)> =
+            self.label_index.iter().map(|(l, ids)| (l, ids.len())).collect();
+        labels.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+
         let mut summary = String::new();
         summary.push_str("Node Labels:\n");
-        for (label, node_ids) in &self.label_index {
-            summary.push_str(&format!("  :{} ({} nodes)\n", label.as_str(), node_ids.len()));
+        for (label, count) in &labels {
+            summary.push_str(&format!("  :{} ({} nodes)\n", label.as_str(), count));
         }
 
-        // Discover relationship patterns by sampling edges
+        // A node's label for a pattern: the smallest by name.
+        let label_of = |id: NodeId| -> String {
+            self.get_node(id)
+                .and_then(|n| n.labels.iter().map(|l| l.as_str()).min().map(str::to_string))
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
+
+        // Discover relationship patterns by sampling edges: the lowest-id
+        // readable edge of each type. Up to five candidates are kept in case
+        // the lowest are unreadable; `select_nth_unstable` finds them in O(n)
+        // rather than sorting the whole type.
         use std::collections::BTreeMap;
         let mut patterns: BTreeMap<String, usize> = BTreeMap::new();
-        for (edge_type, edge_ids) in &self.edge_type_index {
-            for edge_id in edge_ids.iter().take(5) {
+        for edge_type in self.all_edge_types() {
+            let edge_ids = &self.edge_type_index[edge_type];
+            let mut candidates: Vec<EdgeId> = edge_ids.iter().copied().collect();
+            let k = candidates.len().min(5);
+            if k == 0 {
+                continue;
+            }
+            if k < candidates.len() {
+                candidates.select_nth_unstable_by_key(k - 1, |id| id.as_u64());
+                candidates.truncate(k);
+            }
+            candidates.sort_unstable_by_key(|id| id.as_u64());
+            for edge_id in &candidates {
                 if let Some(edge) = self.get_edge(*edge_id) {
-                    let src_label = self.get_node(edge.source)
-                        .and_then(|n| n.labels.iter().next().map(|l| l.as_str().to_string()))
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    let tgt_label = self.get_node(edge.target)
-                        .and_then(|n| n.labels.iter().next().map(|l| l.as_str().to_string()))
-                        .unwrap_or_else(|| "Unknown".to_string());
+                    let src_label = label_of(edge.source);
+                    let tgt_label = label_of(edge.target);
                     let key = format!("({})-[:{}]->({})", src_label, edge_type.as_str(), tgt_label);
                     patterns.entry(key).or_insert(edge_ids.len());
                     break;
@@ -4560,8 +4597,9 @@ NodeDeleted { .. } => {
         // Sorted before `take`: a HashMap's key order changes per process, so the
         // same graph produced a different five-key sample on each start.
         summary.push_str("\nKey Properties:\n");
-        for (label, node_ids) in &self.label_index {
-            if let Some(first_id) = node_ids.iter().next() {
+        for (label, _) in &labels {
+            // The label's lowest node id, via the ascending bitset path.
+            if let Some(first_id) = self.node_ids_by_label(label, Some(1)).first() {
                 let mut keys: Vec<String> =
                     self.node_properties_full(*first_id).into_keys().collect();
                 keys.sort();
