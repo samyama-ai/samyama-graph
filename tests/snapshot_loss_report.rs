@@ -1,8 +1,8 @@
 //! An export says what it did not carry (INT-06).
 //!
 //! INT-06 asks for full-fidelity export **plus an explicit loss report**. The
-//! `.sgsnap` format has always dropped things — index declarations, edge
-//! timestamps — and a user had no way to learn that except by comparing the two
+//! `.sgsnap` format has always dropped things — edge timestamps, and index
+//! declarations until #1506 put a catalog in the file — and a user had no way to learn that except by comparing the two
 //! graphs afterwards and noticing. An export silent about its losses is the
 //! shape of a backup somebody discovers is incomplete during a restore.
 //!
@@ -58,57 +58,28 @@ fn a_graph_of_nodes_only_reports_no_edge_loss() {
 }
 
 #[test]
-fn an_index_declaration_is_reported_with_the_statement_that_restores_it() {
-    // Not just "an index was dropped": the row carries the DDL, because the
-    // person reading it is trying to make the restored graph equivalent.
+fn index_declarations_are_no_longer_reported_as_lost() {
+    // They were, until #1506: the file had no catalog, so property indexes,
+    // unique constraints and vector-index declarations each produced a row
+    // naming the DDL that would restore them. The file carries them now and
+    // import re-declares them (`tests/snapshot_index_catalog.rs`), so a row
+    // saying they were dropped would be false -- and a loss report that cries
+    // wolf is one nobody reads.
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:Person {email: 'a@b.c'})");
-    run(&mut store, "CREATE INDEX ON :Person(email)");
-    let rows = export(&store);
-    let d = find(&rows, "property_indexes").expect("{rows:?}");
-    assert_eq!(d.count, 1);
-    assert!(
-        d.detail.contains("CREATE INDEX ON :Person(email)"),
-        "the row does not say how to restore it: {}",
-        d.detail
-    );
-}
-
-#[test]
-fn a_unique_constraint_is_reported_as_a_correctness_loss_not_a_speed_one() {
-    // An index costs speed. A constraint that does not come back lets the
-    // restored graph accept duplicates the original refused, which is a
-    // different kind of problem and has to read as one.
-    let mut store = GraphStore::new();
-    run(&mut store, "CREATE (:Person {email: 'a@b.c'})");
+    run(&mut store, "CREATE INDEX ON :Person(name)");
     run(
         &mut store,
         "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE",
     );
-    let rows = export(&store);
-    let d = find(&rows, "unique_constraints").expect("{rows:?}");
-    assert_eq!(d.count, 1);
-    assert!(
-        d.detail.contains("Uniqueness is not enforced"),
-        "{}",
-        d.detail
-    );
-}
-
-#[test]
-fn a_vector_index_declaration_is_reported_and_the_vectors_are_not() {
-    // The distinction matters: the embeddings are node properties and survive,
-    // so "the vector index was dropped" would read as data loss when it is a
-    // declaration loss.
-    let mut store = GraphStore::new();
     run(
         &mut store,
         "CREATE VECTOR INDEX vidx FOR (n:Doc) ON (n.embedding) OPTIONS {dimensions: 3}",
     );
     let rows = export(&store);
-    let d = find(&rows, "vector_index_declarations").expect("{rows:?}");
-    assert_eq!(d.count, 1);
-    assert!(d.detail.contains("survive"), "{}", d.detail);
+    for what in ["property_indexes", "unique_constraints", "vector_index_declarations"] {
+        assert!(find(&rows, what).is_none(), "{what} reported as lost: {rows:?}");
+    }
 }
 
 #[test]
@@ -121,7 +92,6 @@ fn the_report_travels_inside_the_file() {
 
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:A)-[:R]->(:B)");
-    run(&mut store, "CREATE INDEX ON :A(name)");
 
     let mut buf = Vec::new();
     export_tenant(&store, &mut buf).expect("export");
@@ -131,7 +101,6 @@ fn the_report_travels_inside_the_file() {
         serde_json::from_str(&lines.next().expect("header").expect("read")).expect("json");
     let dropped = header["dropped"].as_array().expect("dropped in the header");
     let kinds: Vec<&str> = dropped.iter().filter_map(|d| d["what"].as_str()).collect();
-    assert!(kinds.contains(&"property_indexes"), "{kinds:?}");
     assert!(kinds.contains(&"edge_creation_timestamps"), "{kinds:?}");
 }
 

@@ -1,7 +1,8 @@
 //! Snapshot format types for `.sgsnap` files.
 //!
 //! Format: gzip-compressed JSON-lines (one JSON object per line).
-//! Line 0 is the header, lines 1..N are nodes, lines N+1..M are edges.
+//! Line 0 is the header, then the index catalog (`"t":"i"`, #1506) and any
+//! hierarchy declarations (`"t":"h"`), then nodes, then edges.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -134,6 +135,30 @@ pub struct SnapshotHierarchyIndex {
     pub ops: Vec<String>,
 }
 
+/// The index catalog in the snapshot (#1506): every property index, unique
+/// constraint, full-text index and vector index the exporting store declared.
+///
+/// One line, written right after the header, and written **even when the list
+/// is empty**. Presence is the signal: a file with this line says exactly which
+/// indexes exist, including "none", so import declares those and nothing else.
+/// A file without it (written before #1506, or by another tool) says nothing,
+/// and import keeps the old behaviour of rediscovering vector indexes from the
+/// Vector properties.
+///
+/// Declarations only, the same `IndexDefinition` the RocksDB catalog persists
+/// (#1477). Contents are rebuilt from the imported rows, which cannot disagree
+/// with them; a posting list carried in the file could.
+///
+/// Additive in the same way as `SnapshotHierarchyIndex`: readers that predate it
+/// skip the `"t":"i"` line, and so behave exactly as they did before, which is
+/// why the format version does not move.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SnapshotIndexCatalog {
+    pub t: String, // Always "i"
+    #[serde(default)]
+    pub definitions: Vec<crate::index::catalog::IndexDefinition>,
+}
+
 /// Stats returned from import
 #[derive(Debug)]
 pub struct ImportStats {
@@ -144,4 +169,18 @@ pub struct ImportStats {
     pub edge_types: Vec<String>,
     /// Hierarchy indexes rebuilt from declarations in the snapshot.
     pub hierarchy_count: u64,
+    /// Index definitions re-declared from the snapshot's catalog (#1506).
+    ///
+    /// `None` when the file carries no catalog line, which is the signal for a
+    /// caller to fall back to rediscovering vector indexes. `Some` -- even with
+    /// every count zero -- means the file said which indexes exist and import
+    /// declared exactly those.
+    pub indexes: Option<crate::index::catalog::RestoredIndexes>,
+    /// Definitions in the snapshot that collided with a *different* definition
+    /// already on the target (same vector key at another dimension, metric,
+    /// quantization or name; same full-text name over another label or
+    /// property). The target's definition is kept and the snapshot's is skipped:
+    /// the rows already there were indexed under it, and replacing it would
+    /// change answers for data this import did not bring.
+    pub index_conflicts: u64,
 }

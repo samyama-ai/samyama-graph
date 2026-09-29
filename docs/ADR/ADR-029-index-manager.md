@@ -97,11 +97,12 @@ the rows live in.
   vector index answers every search with no rows and no error, which is worse
   than the missing index it replaces.
 
-Still not covered: a `.sgsnap` export/import carries no catalog. It rebuilds
-vector indexes by discovery (`rebuild_vector_index_full`) and rebuilds nothing
-else, so property, unique-constraint and full-text definitions do not cross a
-snapshot boundary. The RocksDB path and the snapshot path are separate, and only
-the first one is fixed.
+The `.sgsnap` path carries the same catalog since #1506: export writes
+`GraphStore::index_catalog()` as a `"t":"i"` line and import hands it to
+`restore_index_catalog` after the rows are in, so property, unique-constraint,
+full-text and vector definitions cross a snapshot boundary with their names,
+dimensions, metric and quantization. Discovery (`rebuild_vector_index_full`)
+now runs only for a snapshot that carries no catalog line. See ADR-022.
 
 ## Alternatives Considered
 

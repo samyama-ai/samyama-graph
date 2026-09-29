@@ -2,7 +2,9 @@
 //!
 //! The `.sgsnap` format is gzip-compressed JSON-lines:
 //! - Line 0: SnapshotHeader with metadata
-//! - Lines 1..N: SnapshotNode records
+//! - Line 1: SnapshotIndexCatalog (`"t":"i"`, #1506), then any
+//!   SnapshotHierarchyIndex declarations (`"t":"h"`)
+//! - Lines ..N: SnapshotNode records
 //! - Lines N+1..M: SnapshotEdge records
 //!
 //! On import, old node IDs are remapped to new IDs via a HashMap.
@@ -26,8 +28,8 @@ use crate::graph::property::PropertyValue;
 use crate::graph::store::GraphStore;
 use crate::graph::types::NodeId;
 use format::{
-    ExportStats, ImportStats, SnapshotEdge, SnapshotHeader, SnapshotHierarchyIndex, SnapshotNode,
-    SNAPSHOT_VERSION,
+    ExportStats, ImportStats, SnapshotEdge, SnapshotHeader, SnapshotHierarchyIndex,
+    SnapshotIndexCatalog, SnapshotNode, SNAPSHOT_VERSION,
 };
 
 /// Export all nodes and edges from the store into a gzip-compressed .sgsnap stream.
@@ -154,7 +156,7 @@ pub fn export_tenant_with_compression(
     let node_count = nodes.len() as u64;
     let total_edge_count = full_edges.len() as u64 + adjacency_edge_count;
 
-    let dropped = losses(store, total_edge_count);
+    let dropped = losses(total_edge_count);
 
     // Create gzip encoder
     let mut gz = GzEncoder::new(writer, Compression::new(compression_level.min(9)));
@@ -174,6 +176,18 @@ pub fn export_tenant_with_compression(
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
+    gz.write_all(b"\n")?;
+
+    // Write the index catalog (#1506): what `SHOW INDEXES` lists, as the same
+    // declarations the RocksDB catalog persists (#1477). Always written, empty
+    // or not -- its presence is what tells import "these and no others", so a
+    // store with no vector index does not get one invented by rediscovery.
+    let catalog = SnapshotIndexCatalog {
+        t: "i".to_string(),
+        definitions: store.index_catalog().definitions,
+    };
+    let json = serde_json::to_string(&catalog)?;
+    gz.write_all(json.as_bytes())?;
     gz.write_all(b"\n")?;
 
     // Write hierarchy index declarations (ADR-035). Declarations only — the structures
@@ -309,69 +323,21 @@ pub fn export_tenant_with_compression(
 
 /// What this export will not carry, for this graph (INT-06).
 ///
-/// Only things that are actually there: a graph with no vector index produces
-/// no vector-index row. A standing list of everything the format *could* drop
+/// Only things that are actually there: a graph with no edges produces no
+/// edge-timestamp row. A standing list of everything the format *could* drop
 /// is a disclaimer, and nobody reads those; a list of what happened to this
 /// graph is a finding.
 ///
 /// Each row says what it means for the restored graph rather than naming an
 /// internal structure, because the reader of this is deciding whether the
 /// restore is good enough.
-fn losses(store: &GraphStore, edge_count: u64) -> Vec<crate::snapshot::format::Dropped> {
+fn losses(edge_count: u64) -> Vec<crate::snapshot::format::Dropped> {
     use crate::snapshot::format::Dropped;
     let mut out = Vec::new();
 
-    let indexes = store.property_index.list_indexes();
-    if !indexes.is_empty() {
-        out.push(Dropped {
-            what: "property_indexes".to_string(),
-            count: indexes.len() as u64,
-            detail: format!(
-                "Index declarations are not in the file. After import the data is \
-                 complete and unindexed, so queries that relied on them scan. \
-                 Re-create: {}",
-                indexes
-                    .iter()
-                    .map(|(l, p)| format!("CREATE INDEX ON :{}({p})", l.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        });
-    }
-
-    let constraints = store.property_index.list_constraints();
-    if !constraints.is_empty() {
-        out.push(Dropped {
-            what: "unique_constraints".to_string(),
-            count: constraints.len() as u64,
-            // Worse than a missing index: an index costs speed, a missing
-            // constraint lets the restored graph accept duplicates the original
-            // refused.
-            detail: format!(
-                "Uniqueness is not enforced on the restored graph until these are \
-                 re-created: {}",
-                constraints
-                    .iter()
-                    .map(|(l, p)| format!("CREATE CONSTRAINT ON (n:{}) ASSERT n.{p} IS UNIQUE",
-                                          l.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        });
-    }
-
-    let vectors = store.vector_index.list_indices();
-    if !vectors.is_empty() {
-        out.push(Dropped {
-            what: "vector_index_declarations".to_string(),
-            count: vectors.len() as u64,
-            detail: "The vectors themselves are node properties and survive. The \
-                     index declaration -- its name, dimensions and metric -- does \
-                     not, so vector search finds nothing until the index is \
-                     re-created."
-                .to_string(),
-        });
-    }
+    // Index, constraint, full-text and vector declarations used to be reported
+    // here. They travel in the file's index catalog now (#1506) and are
+    // re-declared on import, so they are no longer a loss.
 
     if edge_count > 0 {
         out.push(Dropped {
@@ -572,6 +538,7 @@ fn import_tenant_inner(
     let mut imported_labels: HashSet<String> = HashSet::new();
     let mut imported_edge_types: HashSet<String> = HashSet::new();
     let mut hierarchy_decls: Vec<SnapshotHierarchyIndex> = Vec::new();
+    let mut index_catalog: Option<SnapshotIndexCatalog> = None;
 
     // Normalize dedup values: lowercase + trim for case-insensitive matching
     let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
@@ -895,6 +862,19 @@ fn import_tenant_inner(
 
             imported_edge_types.insert(snap_edge.edge_type.clone());
             imported_edge_count += 1;
+        } else if line.contains("\"t\":\"i\"") {
+            // Index catalog (#1506). Deferred like the hierarchy declarations:
+            // every definition is built from the rows, so it has to wait for
+            // them. Checked after nodes and edges so a property that happens to
+            // be spelled `"t":"i"` cannot divert one of those.
+            let catalog: SnapshotIndexCatalog = serde_json::from_str(&line)?;
+            index_catalog
+                .get_or_insert_with(|| SnapshotIndexCatalog {
+                    t: "i".to_string(),
+                    definitions: Vec::new(),
+                })
+                .definitions
+                .extend(catalog.definitions);
         }
         // Skip unrecognized lines
     }
@@ -962,6 +942,44 @@ fn import_tenant_inner(
         }
     }
 
+    // Re-declare the snapshot's indexes (#1506), after the rows so each one is
+    // built from what was imported plus whatever the target already held.
+    // Declaring and rebuilding rather than trusting contents in the file: the
+    // file has none, so the index cannot disagree with the rows.
+    let mut index_conflicts: u64 = 0;
+    let indexes = match index_catalog {
+        None => None,
+        Some(snap) => {
+            let existing = store.index_catalog().definitions;
+            let mut accepted = crate::index::catalog::IndexCatalog::default();
+            for def in snap.definitions {
+                if let Some(theirs) = conflicting_definition(&existing, &def) {
+                    eprintln!(
+                        "[snapshot] kept the target's index {:?}; skipped the snapshot's {:?}",
+                        theirs, def
+                    );
+                    index_conflicts += 1;
+                } else if !accepted.definitions.contains(&def) {
+                    accepted.definitions.push(def);
+                }
+            }
+            if accepted.is_empty() {
+                // Not a call with an empty catalog: `restore_index_catalog`
+                // clears the dirty flag, which would drop a DDL change the
+                // target had not persisted yet.
+                Some(crate::index::catalog::RestoredIndexes::default())
+            } else {
+                let restored = store.restore_index_catalog(&accepted);
+                // `restore_index_catalog` clears the dirty flag because on boot
+                // the definitions were just read from disk. Here they came from
+                // a file, so they are new to this data directory and must be
+                // persisted.
+                store.mark_index_catalog_changed();
+                Some(restored)
+            }
+        }
+    };
+
     Ok(ImportStats {
         node_count: imported_node_count,
         edge_count: imported_edge_count,
@@ -969,6 +987,36 @@ fn import_tenant_inner(
         labels,
         edge_types,
         hierarchy_count,
+        indexes,
+        index_conflicts,
+    })
+}
+
+/// The target's definition that `incoming` would silently replace, if any.
+///
+/// Identical definitions are not conflicts: re-declaring one rebuilds it over
+/// every row, including the ones just imported. Property indexes and unique
+/// constraints have no parameters beyond their key, so they never conflict.
+fn conflicting_definition<'a>(
+    existing: &'a [crate::index::catalog::IndexDefinition],
+    incoming: &crate::index::catalog::IndexDefinition,
+) -> Option<&'a crate::index::catalog::IndexDefinition> {
+    use crate::index::catalog::IndexDefinition as D;
+    existing.iter().find(|ours| {
+        if *ours == incoming {
+            return false;
+        }
+        match (ours, incoming) {
+            (D::FullText { name: a, .. }, D::FullText { name: b, .. }) => a == b,
+            (
+                D::Vector { name: na, label: la, property: pa, .. },
+                D::Vector { name: nb, label: lb, property: pb, .. },
+            ) => {
+                (la == lb && pa == pb)
+                    || (na.is_some() && na == nb)
+            }
+            _ => false,
+        }
     })
 }
 

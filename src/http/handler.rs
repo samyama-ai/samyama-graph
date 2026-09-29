@@ -1656,10 +1656,20 @@ pub async fn restore_snapshot_handler(
                 }
             }
 
-            // Automatically rebuild HNSW indices from any Vector properties in the snapshot.
-            // Snapshot import bypasses the add_vector event loop, so without this call
-            // vector search would return empty results even when embeddings are present.
-            let vector_indices_rebuilt = store_guard.rebuild_vector_index_full();
+            // A snapshot that carries its index catalog (#1506) has already had
+            // exactly those indexes declared and built by the import. Rediscovery
+            // would add a Cosine, full-precision, unnamed index over any other
+            // embedding-shaped property -- an index the source never had.
+            //
+            // A snapshot without one (written before #1506, or by another tool)
+            // says nothing about its indexes, so the old behaviour stands:
+            // rebuild HNSW indices from the Vector properties, because import
+            // bypasses the add_vector event loop and vector search would
+            // otherwise return nothing.
+            let (vector_indices_rebuilt, indexes_restored) = match stats.indexes {
+                Some(r) => (r.vector, Some(r)),
+                None => (store_guard.rebuild_vector_index_full(), None),
+            };
 
             Json(json!({
                 "status": "ok",
@@ -1669,6 +1679,14 @@ pub async fn restore_snapshot_handler(
                 "labels": stats.labels,
                 "edge_types": stats.edge_types,
                 "vector_indices_rebuilt": vector_indices_rebuilt,
+                "indexes_restored": indexes_restored.map(|r| json!({
+                    "property": r.property,
+                    "unique": r.unique,
+                    "fulltext": r.fulltext,
+                    "vector": r.vector,
+                    "failed": r.failed,
+                    "conflicts": stats.index_conflicts,
+                })),
             }))
             .into_response()
         }

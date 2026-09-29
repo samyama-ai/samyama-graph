@@ -88,19 +88,20 @@ curl -X POST http://localhost:8080/api/snapshot/export -o graph.sgsnap
 line:
 
 ```json
-[{"what": "property_indexes", "count": 2,
-  "detail": "... Re-create: CREATE INDEX ON :Person(email); ..."},
- {"what": "unique_constraints", "count": 1,
-  "detail": "Uniqueness is not enforced on the restored graph until ..."},
- {"what": "edge_creation_timestamps", "count": 41203,
+[{"what": "edge_creation_timestamps", "count": 41203,
   "detail": "... Node timestamps do survive."}]
 ```
+
+Index declarations are not a loss: property indexes, unique constraints,
+full-text and vector indexes travel in the snapshot's index catalog and are
+re-declared and rebuilt on import (#1506).
 
 A row appears only when there was something to lose, so an empty list means
 this export took everything the format can take.
 
 To read a snapshot without Samyama at all: it is gzipped JSON-lines. Line 0 is
-the header, then one object per node (`"t":"n"`) and per relationship
+the header, then the index catalog (`"t":"i"`), any hierarchy declarations
+(`"t":"h"`), and one object per node (`"t":"n"`) and per relationship
 (`"t":"e"`).
 
 ```bash
