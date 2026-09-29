@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { HttpTransport } from "../src/http-client.js";
+import { SamyamaClient } from "../src/client.js";
 
 /**
  * A server that accepts the connection and never replies (API-06, #1326).
@@ -80,6 +81,23 @@ describe("connection management", () => {
     setTimeout(() => controller.abort(), 50);
     await assert.rejects(() => promise);
     assert.equal(s.connections(), 1, "the caller's abort was retried");
+    s.close();
+  });
+
+  test("the public client passes its deadline to the transport", async () => {
+    // The transport tests above prove the deadline fires. This proves a caller
+    // who only ever touches `SamyamaClient` gets it: the options have to
+    // survive the constructor and the factory, not just exist on the type.
+    const s = await blackHole();
+    for (const client of [
+      new SamyamaClient({ url: s.url, timeoutMs: 200, maxRetries: 0 }),
+      SamyamaClient.connectHttp(s.url, { timeoutMs: 200, maxRetries: 0 }),
+    ]) {
+      const started = Date.now();
+      await assert.rejects(() => client.query("RETURN 1"));
+      assert.ok(Date.now() - started < 5000, "the timeout did not fire");
+    }
+    assert.equal(s.connections(), 2, "maxRetries: 0 was not passed through");
     s.close();
   });
 

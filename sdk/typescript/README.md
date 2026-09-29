@@ -36,6 +36,8 @@ Or the factory, when the URL is all you need:
 
 ```ts
 const client = SamyamaClient.connectHttp("http://localhost:8080");
+// or, with connection settings:
+const quick = SamyamaClient.connectHttp("http://localhost:8080", { timeoutMs: 5000 });
 ```
 
 ## First query

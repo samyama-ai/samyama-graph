@@ -50,9 +50,16 @@ export class SamyamaClient {
   /**
    * Connect to a Samyama server via HTTP.
    * Factory method for a more readable API.
+   *
+   * `options` takes the same connection settings as the constructor
+   * (`timeoutMs`, `maxRetries`, `retryBaseDelayMs`). Leaving them out keeps
+   * the defaults, which include a 30 s request deadline (#1326).
    */
-  static connectHttp(url: string = DEFAULT_URL): SamyamaClient {
-    return new SamyamaClient({ url });
+  static connectHttp(
+    url: string = DEFAULT_URL,
+    options?: Omit<ClientOptions, "url">,
+  ): SamyamaClient {
+    return new SamyamaClient({ ...options, url });
   }
 
   /** Execute a read-write Cypher query */
