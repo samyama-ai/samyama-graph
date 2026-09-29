@@ -252,6 +252,7 @@ src/                  # The server engine — the `samyama` library crate and it
 ├── sparql/           # SPARQL 1.1 parser, algebra, optimizer, executor
 ├── vector/           # HNSW vector index and index manager
 ├── allocator.rs      # Names the allocator the server binary installs (ADR-038); does not install it
+├── auth.rs           # Credentials, roles and tenant binding for the HTTP and RESP listeners
 ├── compat.rs         # Reports which queries of a corpus this engine accepts, and why the rest fail
 ├── pii.rs            # Scans a snapshot for personal identifiers before it is published
 ├── provenance.rs     # Where a fact came from, under what licence, and what it was derived from
@@ -265,8 +266,11 @@ benchmarks/        # Benchmark inputs and corpora (LDBC parameter files, Neo4j i
                    #   fixtures, hierarchy corpus generator) — data, not code; the harnesses are in benches/
 case_studies/      # End-to-end domain datasets with loaders and queries (health, legal, sport, finance, …)
 cli/               # `samyama-cli` binary crate — connects to a running server via samyama-sdk
-crates/            # Workspace member crates: samyama-graph-algorithms, samyama-optimization,
-                   #   samyama-gpu, samyama-sdk
+crates/            # Workspace member crates (the algorithm and optimization code lives here, not in src/)
+├── samyama-graph-algorithms/  # Graph algorithms (PageRank, WCC, BFS, Dijkstra, …)
+├── samyama-optimization/      # Metaheuristic optimizers (Jaya, Rao, TLBO, BMR/BWR, NSGA-II, …)
+├── samyama-gpu/               # GPU-accelerated graph algorithms and vector operations
+└── samyama-sdk/               # Rust client SDK — embedded and remote modes
 docs/              # Architecture docs, ADRs, compatibility notes
 examples/          # Runnable demos and data loaders
 ops/               # Operational assets (Grafana dashboard JSON)

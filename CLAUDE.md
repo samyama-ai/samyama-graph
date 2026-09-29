@@ -81,7 +81,7 @@ src/
 │   ├── property.rs  # PropertyValue (String, Integer, Float, Boolean, DateTime, Array, Map, Null)
 │   └── types.rs     # NodeId, EdgeId, Label, EdgeType
 │
-├── query/           # OpenCypher Query Engine (~90% coverage)
+├── query/           # OpenCypher Query Engine (conformance: see the TCK figure under Project Overview)
 │   ├── parser.rs    # Pest-based OpenCypher parser
 │   ├── cypher.pest  # PEG grammar (atomic keyword rules for word boundaries)
 │   ├── ast.rs       # Query AST
@@ -112,9 +112,32 @@ src/
 │   └── client.rs    # NLQClient (OpenAI, Gemini, Ollama, Claude Code providers)
 │
 ├── vector/          # HNSW Vector Index
-├── snapshot/        # Portable .sgsnap export/import
-└── sharding/        # Tenant-level sharding
+├── snapshot/        # Portable .sgsnap export/import, encryption, verification, publish gate
+├── sharding/        # Tenant-level sharding (router, proxy)
+├── index/           # Property, unique, composite, full-text, hierarchy (OEH) indexes
+├── http/            # HTTP/REST API and Web UI
+├── rdf/             # RDF triple/quad store and mapping
+├── sparql/          # SPARQL 1.1 parser, algebra, optimizer, executor
+├── algo/            # GraphStore adapter for the samyama-graph-algorithms crate
+├── optimization/    # CypherProblem — graph-grounded problems for samyama-optimization
+├── agent/           # Agentic enrichment (tool-using agents that write to the graph)
+├── embed/           # Auto-embed pipelines (text splitting + embeddings for RAG)
+├── export/          # Arrow / Parquet / CSV / GraphML result export
+├── migrate/         # Importers for other engines' exports (Neo4j APOC JSON)
+├── allocator.rs     # Names the server's allocator (ADR-038); does not install it
+├── auth.rs          # Credentials, roles and tenant binding for HTTP and RESP
+├── compat.rs        # Which queries of a corpus this engine accepts, and why not
+├── pii.rs           # Scans a snapshot for personal identifiers before publishing
+├── provenance.rs    # Source, licence and derivation of facts
+├── schema_doc.rs    # Derives a schema from a snapshot and renders it as a diagram
+├── lib.rs           # Library crate root
+└── main.rs          # Server binary entry point
 ```
+
+Outside `src/`: `crates/` (samyama-graph-algorithms, samyama-optimization,
+samyama-gpu, samyama-sdk), `sdk/` (Python, TypeScript), `cli/`, `api/`,
+`case_studies/`, `benchmarks/` (data) vs `benches/` (harnesses), `examples/`,
+`tests/`, `docs/`, `scripts/`, `ops/` — see CONTRIBUTING.md's Project Layout.
 
 ### Key Architectural Patterns
 
