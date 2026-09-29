@@ -100,13 +100,58 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 | Failure | Why it is not written down |
 |---|---|
 | **Disk full, or any IO error on a write path** | Only row 33 injects a real `io::Error` (a directory where the snapshot's tmp file goes). Nothing injects `ENOSPC` or a read-only directory on the WAL or RocksDB paths. The two commit-refused tests in row 16 call `pm.fail_next_apply_for_test()`: injection at the apply layer, not real IO. They pin the rollback, not what a filesystem error does on the way to it |
-| **Process killed mid-write (SIGKILL)** | No test spawns and kills a process. Rows 7 and 20 are the nearest proxies and neither is a real crash |
+| **Process killed mid-write (SIGKILL)** | No `cargo test` spawns and kills a process. Rows 7 and 20 are the nearest proxies and neither is a real crash. A separate harness, `scripts/crash_consistency.py`, does `kill -9` a real server mid-write; it is run by hand, not in CI, and its measured result is below the table (#1355) |
 | **WAL replay after a crash** | Every WAL test replays a WAL the same process just wrote and flushed. Row 32 truncates one deliberately, which is not the same as replaying one a killed process left behind |
 | **A WAL record damaged after being written in full** | The three tests in `tests/wal_torn_tail.rs` cut a record's body, cut its length prefix, and leave one intact. None flips a byte inside a complete record, so nothing observes a checksum failure |
 | **A query deadline exceeded** | `with_deadline` and `check_deadline` exist and nothing drives a query past one. The *transaction* timeout is row 21; the query deadline is still untested |
 | **`max_query_time_ms` enforcement** | The field exists (`src/persistence/tenant.rs:55`) and four tests serialise it (`:918, :1355, :1618, :1700`). Nothing reads it to stop a query, so there is no behaviour to record |
 | **Out of memory** | The memory quota checks a bookkeeping counter, not process memory, and no test exercises an allocation failure |
 | **Replica lag, or a node losing leadership** | Neither exists to test: `RaftNode::write` applies locally and `initialize` makes the node leader unconditionally (#1309) |
+
+### Measured outside the test suite: `kill -9` mid-write (REL-04, #1355)
+
+`scripts/crash_consistency.py` (#1352) starts the server binary with
+`--data-path` on a fresh directory, runs a writer on its own thread (`CREATE`,
+a `SET` on every fifth write, a read on every seventh), sends `SIGKILL` to the
+server's process group after a random delay, restarts it on the same
+directory and asks which writes survived. It is a Python harness run by hand,
+not a `cargo test`, so it is not a row above and CI does not run it.
+
+The run recorded in #1355 — binary pinned at `f8c0300`, kill delay uniform in
+[0.05, 0.8] s:
+
+| mode (what counts as an acknowledgement) | kill points | acknowledged writes | lost |
+|---|---|---|---|
+| `auto` — the 200 on the statement | 500 | 587,488 | 0 |
+| `tx` — the 200 on `POST /api/tx/:id/commit` | 500 | 318,419 | 0 |
+| **total** | **1000** | **905,907** | **0** |
+
+No recovery had a gap (a surviving write with an earlier issued write missing),
+no write was present that had not been acknowledged, and no cycle failed to
+run. A write in flight when the signal landed is neither acknowledged nor
+refused and is excluded: that happened 908 times, and 176 of those had reached
+disk anyway. Median 796 writes per cycle, maximum 2,710.
+
+What it does not say:
+
+- **Shallow kill points.** Nothing here crashes a server holding a large graph.
+- **A process kill, not a power cut or host reset.** Row 6 is unchanged: the
+  script does not set `SAMYAMA_FSYNC`, and a killed process leaves the page
+  cache to the kernel.
+- **Single node.** Raft is not in the loop, and #1309 is a separate question.
+- REL-04's H2 and H3 — 10,000 kill points, torn-write simulation,
+  fault-injected fsync failures — are not attempted.
+- Survival is checked by the `seq` of each `CREATE`d node; the `SET` the
+  workload also issues is not checked after restart.
+
+Reproduce (build first with `cargo build --release --bin samyama`; copy the
+binary and pass `--binary` for a long sweep, because a rebuild replaces
+`target/release/samyama` in place):
+
+```bash
+python3 scripts/crash_consistency.py --cycles 1000 --mode both \
+    --min-delay 0.05 --max-delay 0.8 --binary /path/to/pinned/samyama --json out.json
+```
 
 ## A note on what counts as a row here
 
