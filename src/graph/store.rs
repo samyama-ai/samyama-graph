@@ -3974,17 +3974,27 @@ NodeDeleted { .. } => {
         out
     }
 
-    /// Get all edges of a specific type
+    /// Get all edges of a specific type, in ascending edge id.
+    ///
+    /// The order is part of the contract (#1509). `edge_type_index` is a
+    /// `HashMap<EdgeType, HashSet<EdgeId>>` and `std`'s hasher is keyed per
+    /// `HashSet` instance, so collecting straight from the set gave a different
+    /// order on every store and in every process — the same class as #1448 on
+    /// the node side. The node side reads the label bitset, which is ascending
+    /// by construction; there is no such bitset per edge type, so this sorts.
+    ///
+    /// No wrong answer came out of it: the two order-sensitive consumers,
+    /// `type_adjacency_from_type_index` and `Poset::from_edges`, each sort for
+    /// themselves. What was missing was the guarantee for every other caller —
+    /// the HTTP handler and three sites in the executor walk this vector
+    /// directly, so before this their row order was unpinnable.
     pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<Edge> {
-        self.edge_type_index
-            .get(edge_type)
-            .map(|edge_ids| {
-                edge_ids
-                    .iter()
-                    .filter_map(|&id| self.get_edge(id))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Some(edge_ids) = self.edge_type_index.get(edge_type) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<EdgeId> = edge_ids.iter().copied().collect();
+        ids.sort_unstable_by_key(|id| id.as_u64());
+        ids.into_iter().filter_map(|id| self.get_edge(id)).collect()
     }
 
     /// Get total number of nodes
