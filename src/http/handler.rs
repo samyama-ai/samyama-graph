@@ -389,11 +389,10 @@ pub struct QueryResponse {
 /// `Send`, so awaiting anything after the query has run would make the handler's future
 /// non-`Send`.
 fn merged_node_properties(
-    batch: &crate::query::RecordBatch,
+    records: &[crate::query::Record],
     store: &crate::graph::GraphStore,
 ) -> HashMap<u64, HashMap<String, PropertyValue>> {
-    batch
-        .records
+    records
         .iter()
         .flat_map(|r| r.values())
         .filter_map(|v| match v {
@@ -408,6 +407,7 @@ fn merged_node_properties(
 pub async fn query_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
     // Tenant binding and the statement's role (#1328). The route itself was
@@ -453,6 +453,13 @@ pub async fn query_handler(
         }
     };
 
+    // Streaming is opt-in by content negotiation (API-07, #1393): a client
+    // that does not send `Accept: application/x-ndjson` gets the buffered JSON
+    // envelope it always got. See `stream_query` for what the stream promises.
+    if accepts_ndjson(&headers) {
+        return stream_query(&state, payload, params).await;
+    }
+
     if let Some(tx) = payload.tx.as_deref() {
         return query_in_transaction(&state, tx, &payload, &params).await;
     }
@@ -497,7 +504,7 @@ pub async fn query_handler(
                     .execute_mut_with_params(&payload.query, store, &payload.graph, &params);
                 let props = result
                     .as_ref()
-                    .map(|b| merged_node_properties(b, store))
+                    .map(|b| merged_node_properties(&b.records, store))
                     .unwrap_or_default();
                 (result, store.current_version, props)
             })
@@ -528,12 +535,247 @@ pub async fn query_handler(
         snapshot_version = store_guard.current_version;
         let props = result
             .as_ref()
-            .map(|b| merged_node_properties(b, &store_guard))
+            .map(|b| merged_node_properties(&b.records, &store_guard))
             .unwrap_or_default();
         (result, props)
     };
 
     render_query_result(result, &full_props, served_from_cache, snapshot_version)
+}
+
+/// The media type a client sends in `Accept` to ask for a streamed result.
+pub const NDJSON: &str = "application/x-ndjson";
+
+/// Rows per streamed chunk: the unit the executor is pulled in and the unit
+/// of one channel send.
+const STREAM_CHUNK_ROWS: usize = 256;
+
+/// Rendered chunks allowed in flight between the query and the socket. With
+/// `STREAM_CHUNK_ROWS` this bounds what the server holds for a stream at
+/// about `(STREAM_CHANNEL_CHUNKS + 1) * STREAM_CHUNK_ROWS` rendered rows, plus
+/// whatever the transport buffers, however large the result.
+const STREAM_CHANNEL_CHUNKS: usize = 4;
+
+/// How long a streamed query waits for the consumer to take one chunk before
+/// it gives up and releases the read lock. `SAMYAMA_STREAM_STALL_MS`,
+/// default 5000; read per request so a test (or an operator) can change it
+/// without a restart.
+fn stream_stall_budget() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("SAMYAMA_STREAM_STALL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000),
+    )
+}
+
+/// Did the client ask for `application/x-ndjson`?
+fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|m| m.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(NDJSON))
+}
+
+/// What the query thread hands the response body.
+enum StreamMsg {
+    /// Encoded NDJSON lines.
+    Data(bytes::Bytes),
+    /// The query failed before its first row: the handler answers 400 with
+    /// the same envelope the buffered path uses.
+    Failed(String),
+}
+
+/// `POST /api/query` with `Accept: application/x-ndjson` (API-07, #1393).
+///
+/// **What it does.** The query runs on a blocking thread under the store's
+/// read lock and hands rows to the response *as the pipeline pulls them*,
+/// `STREAM_CHUNK_ROWS` at a time, through a channel `STREAM_CHANNEL_CHUNKS`
+/// deep. When the consumer stops reading, the channel fills, the send blocks,
+/// and the executor stops pulling: that is the backpressure. Nothing collects
+/// the result -- no `RecordBatch`, no `nodes`/`edges` index -- so peak memory
+/// is bounded by the channel, not by the result.
+///
+/// **What it promises.** One consistent read. The read lock is held from the
+/// first row to the last, so every row comes from the store as it was at
+/// `snapshot_version` in the header line. This is the property ADR-039 option
+/// B gives up, and the reason this path does not release and re-take the lock.
+///
+/// **What it costs, and the bound on it.** Writers wait while a stream is
+/// running, as they already wait while a buffered query runs. Two limits keep
+/// that from being "for as long as the client likes":
+///
+/// - a consumer that does not accept a chunk within `SAMYAMA_STREAM_STALL_MS`
+///   (default 5 s) ends the stream: the lock is released and the body ends
+///   with an `error` trailer, not a `done` one;
+/// - the query deadline (`SAMYAMA_QUERY_TIMEOUT`) covers time spent waiting on
+///   the consumer, so a slow-but-live consumer holds the lock no longer than a
+///   slow query already can.
+///
+/// The lock is dropped *before* the trailer is sent, so waiting for the
+/// consumer to take the last line holds nothing.
+///
+/// **Wire format.** One JSON object per line: a header
+/// `{"columns", "snapshot_version", "engine_version"}`, then one `{"row": [...]}`
+/// per result row (graph elements inline, as in `records` of the buffered
+/// response), then exactly one trailer, `{"done": true, "rows", ...}` or
+/// `{"error", "rows"}`. A body without a trailer was cut off and is not a
+/// complete result. Errors found before the first row (parse, plan) are a 400
+/// with the buffered envelope, as without streaming.
+///
+/// **Scope.** Autocommit reads only. A write, or a statement in a transaction,
+/// is refused with 406: both run under the writer's lock, which is exactly the
+/// lock a stream must not hand to the client's read speed. The result cache is
+/// not consulted.
+async fn stream_query(
+    state: &AppState,
+    payload: QueryRequest,
+    params: crate::query::BoundParams,
+) -> axum::response::Response {
+    let refuse = |why: &str| {
+        (
+            StatusCode::NOT_ACCEPTABLE,
+            Json(json!({
+                "error": format!(
+                    "{why} cannot be streamed: only autocommit reads are served as {NDJSON}. \
+                     Send the request without `Accept: {NDJSON}` for the buffered JSON response."
+                )
+            })),
+        )
+            .into_response()
+    };
+    if payload.tx.is_some() {
+        return refuse("A statement inside a transaction");
+    }
+    if state.engine.statement_is_write(&payload.query).unwrap_or(false) {
+        return refuse("A write");
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
+    let guard = std::sync::Arc::clone(&state.store).read_owned().await;
+    let engine = std::sync::Arc::clone(&state.engine);
+    let runtime = tokio::runtime::Handle::current();
+    let stall = stream_stall_budget();
+    let query = payload.query;
+
+    tokio::task::spawn_blocking(move || {
+        // A send that waits at most `stall` for room in the channel.
+        let send = |msg: StreamMsg| -> Result<(), String> {
+            match runtime.block_on(tokio::time::timeout(stall, tx.send(msg))) {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err("the client went away; stream aborted".to_string()),
+                Err(_) => Err(format!(
+                    "the client did not read for {} ms; stream aborted to release the read \
+                     lock (SAMYAMA_STREAM_STALL_MS)",
+                    stall.as_millis()
+                )),
+            }
+        };
+        let snapshot_version = guard.current_version;
+        let header = |columns: &[String]| {
+            let mut line = serde_json::to_vec(&json!({
+                "columns": columns,
+                "snapshot_version": snapshot_version,
+                "engine_version": crate::VERSION,
+            }))
+            .unwrap_or_default();
+            line.push(b'\n');
+            line
+        };
+
+        let mut started = false;
+        let mut sent_rows = 0usize;
+        let outcome = engine.execute_streaming_with_params(
+            &query,
+            &guard,
+            &params,
+            STREAM_CHUNK_ROWS,
+            &mut |columns, records| {
+                let mut buf = if started { Vec::new() } else { header(columns) };
+                started = true;
+                let props = merged_node_properties(&records, &guard);
+                let (mut nodes, mut edges) = (HashMap::new(), HashMap::new());
+                for record in &records {
+                    let row = render_row(record, columns, &props, &mut nodes, &mut edges);
+                    nodes.clear();
+                    edges.clear();
+                    serde_json::to_writer(&mut buf, &json!({ "row": row }))
+                        .map_err(|e| e.to_string())?;
+                    buf.push(b'\n');
+                }
+                // Rendered, so the rows can go; the chunk is all that is held.
+                let n = records.len();
+                drop(records);
+                send(StreamMsg::Data(buf.into()))?;
+                sent_rows += n;
+                Ok(())
+            },
+        );
+        let notifications = crate::query::executor::operator::notifications::take();
+        // The last row has been handed over: nothing the trailer says needs
+        // the store, so writers may go before the consumer reads it.
+        drop(guard);
+
+        match outcome {
+            Ok(done) => {
+                let mut buf = if started { Vec::new() } else { header(&done.columns) };
+                let _ = serde_json::to_writer(
+                    &mut buf,
+                    &json!({
+                        "done": true,
+                        "rows": done.rows,
+                        "cached": false,
+                        "notifications": notifications,
+                        "plan_hash": done.plan_hash.map(|h| format!("{h:016x}")),
+                    }),
+                );
+                buf.push(b'\n');
+                let _ = send(StreamMsg::Data(buf.into()));
+            }
+            Err(e) if !started => {
+                let _ = send(StreamMsg::Failed(e.to_string()));
+            }
+            Err(e) => {
+                let mut buf =
+                    serde_json::to_vec(&json!({ "error": e.to_string(), "rows": sent_rows }))
+                    .unwrap_or_default();
+                buf.push(b'\n');
+                let _ = send(StreamMsg::Data(buf.into()));
+            }
+        }
+    });
+
+    // The status line waits for the first chunk, so an error found before any
+    // row -- a parse or planning failure -- is still a 400.
+    let first = match rx.recv().await {
+        Some(StreamMsg::Data(bytes)) => bytes,
+        Some(StreamMsg::Failed(e)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response()
+        }
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "the query thread ended without a result" })),
+            )
+                .into_response()
+        }
+    };
+    let rest = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = futures::StreamExt::map(
+        futures::StreamExt::chain(futures::stream::iter([StreamMsg::Data(first)]), rest),
+        |msg| match msg {
+            StreamMsg::Data(bytes) => Ok::<_, std::convert::Infallible>(bytes),
+            // Only ever sent before the first chunk.
+            StreamMsg::Failed(_) => Ok(bytes::Bytes::new()),
+        },
+    );
+    (
+        [(axum::http::header::CONTENT_TYPE, NDJSON)],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response()
 }
 
 /// A statement inside an open HTTP transaction, run against the writer's lock
@@ -571,10 +813,127 @@ async fn query_in_transaction(
     };
     let props = result
         .as_ref()
-        .map(|b| merged_node_properties(b, store))
+        .map(|b| merged_node_properties(&b.records, store))
         .unwrap_or_default();
     let version = store.current_version;
     render_query_result(result, &props, false, version)
+}
+
+/// One result row as JSON, in column order.
+///
+/// Graph elements are also recorded in `nodes` / `edges`, which the buffered
+/// response lists separately for visualisation. The streamed response passes
+/// maps it throws away: collecting them across the result is exactly the
+/// whole-result state a stream must not hold.
+fn render_row(
+    record: &crate::query::Record,
+    columns: &[String],
+    full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
+    nodes: &mut HashMap<String, serde_json::Value>,
+    edges: &mut HashMap<String, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut row = Vec::new();
+    for col in columns {
+        let val = record.get(col).unwrap_or(&Value::Null);
+
+        // Extract graph elements for visualization
+        match val {
+            Value::Map(entries) => {
+                row.push(json!(entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                    .collect::<std::collections::BTreeMap<_, _>>()));
+            }
+            Value::List(items) => {
+                row.push(serde_json::Value::Array(
+                    items.iter().map(|i| json!(format!("{i:?}"))).collect(),
+                ));
+            }
+            Value::Node(id, node) => {
+                let mut properties = serde_json::Map::new();
+                if let Some(merged) = full_props.get(&id.as_u64()) {
+                    for (k, v) in merged {
+                        properties.insert(k.clone(), v.to_json());
+                    }
+                }
+                // fall back to whatever the value itself carries if the node is
+                // no longer in the store (e.g. one returned by a DELETE)
+                if properties.is_empty() {
+                    for (k, v) in &node.properties {
+                        properties.insert(k.clone(), v.to_json());
+                    }
+                }
+                let node_json = json!({
+                    "id": id.as_u64().to_string(),
+                    // Sorted: a node's labels are a set, and
+                    // serialising the hash order made the same
+                    // node come back as ["Employee","Person"] on
+                    // one call and ["Person","Employee"] on the
+                    // next. Cypher's `labels()` has sorted since
+                    // it was written; this is the same contract
+                    // (#1353).
+                    "labels": sorted_label_strs(&node.labels),
+                    "properties": properties,
+                });
+                nodes.insert(id.as_u64().to_string(), node_json.clone());
+                row.push(node_json);
+            }
+            Value::NodeRef(id) => {
+                // Lazy ref — minimal JSON (no properties available without store)
+                let node_json = json!({
+                    "id": id.as_u64().to_string(),
+                    "labels": [],
+                    "properties": {},
+                });
+                nodes.insert(id.as_u64().to_string(), node_json.clone());
+                row.push(node_json);
+            }
+            Value::Edge(id, edge) => {
+                let mut properties = serde_json::Map::new();
+                for (k, v) in &edge.properties {
+                    properties.insert(k.clone(), v.to_json());
+                }
+                let edge_json = json!({
+                    "id": id.as_u64().to_string(),
+                    "source": edge.source.as_u64().to_string(),
+                    "target": edge.target.as_u64().to_string(),
+                    "type": edge.edge_type.as_str(),
+                    "properties": properties,
+                });
+                edges.insert(id.as_u64().to_string(), edge_json.clone());
+                row.push(edge_json);
+            }
+            Value::EdgeRef(id, src, tgt, et) => {
+                let edge_json = json!({
+                    "id": id.as_u64().to_string(),
+                    "source": src.as_u64().to_string(),
+                    "target": tgt.as_u64().to_string(),
+                    "type": et.as_str(),
+                    "properties": {},
+                });
+                edges.insert(id.as_u64().to_string(), edge_json.clone());
+                row.push(edge_json);
+            }
+            Value::Property(p) => {
+                row.push(p.to_json());
+            }
+            Value::Path {
+                nodes: path_nodes,
+                edges: path_edges,
+            } => {
+                let path_json = json!({
+                    "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
+                    "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
+                    "length": path_edges.len(),
+                });
+                row.push(path_json);
+            }
+            Value::Null => {
+                row.push(serde_json::Value::Null);
+            }
+        }
+    }
+    row
 }
 
 fn render_query_result(
@@ -597,108 +956,7 @@ fn render_query_result(
             // late materialization.
 
             for record in &batch.records {
-                let mut row = Vec::new();
-                for col in &batch.columns {
-                    let val = record.get(col).unwrap_or(&Value::Null);
-
-                    // Extract graph elements for visualization
-                    match val {
-                        Value::Map(entries) => {
-                            row.push(json!(entries
-                                .iter()
-                                .map(|(k, v)| (k.clone(), format!("{v:?}")))
-                                .collect::<std::collections::BTreeMap<_, _>>()));
-                        }
-                        Value::List(items) => {
-                            row.push(serde_json::Value::Array(
-                                items.iter().map(|i| json!(format!("{i:?}"))).collect(),
-                            ));
-                        }
-                        Value::Node(id, node) => {
-                            let mut properties = serde_json::Map::new();
-                            if let Some(merged) = full_props.get(&id.as_u64()) {
-                                for (k, v) in merged {
-                                    properties.insert(k.clone(), v.to_json());
-                                }
-                            }
-                            // fall back to whatever the value itself carries if the node is
-                            // no longer in the store (e.g. one returned by a DELETE)
-                            if properties.is_empty() {
-                                for (k, v) in &node.properties {
-                                    properties.insert(k.clone(), v.to_json());
-                                }
-                            }
-                            let node_json = json!({
-                                "id": id.as_u64().to_string(),
-                                // Sorted: a node's labels are a set, and
-                                // serialising the hash order made the same
-                                // node come back as ["Employee","Person"] on
-                                // one call and ["Person","Employee"] on the
-                                // next. Cypher's `labels()` has sorted since
-                                // it was written; this is the same contract
-                                // (#1353).
-                                "labels": sorted_label_strs(&node.labels),
-                                "properties": properties,
-                            });
-                            nodes.insert(id.as_u64().to_string(), node_json.clone());
-                            row.push(node_json);
-                        }
-                        Value::NodeRef(id) => {
-                            // Lazy ref — minimal JSON (no properties available without store)
-                            let node_json = json!({
-                                "id": id.as_u64().to_string(),
-                                "labels": [],
-                                "properties": {},
-                            });
-                            nodes.insert(id.as_u64().to_string(), node_json.clone());
-                            row.push(node_json);
-                        }
-                        Value::Edge(id, edge) => {
-                            let mut properties = serde_json::Map::new();
-                            for (k, v) in &edge.properties {
-                                properties.insert(k.clone(), v.to_json());
-                            }
-                            let edge_json = json!({
-                                "id": id.as_u64().to_string(),
-                                "source": edge.source.as_u64().to_string(),
-                                "target": edge.target.as_u64().to_string(),
-                                "type": edge.edge_type.as_str(),
-                                "properties": properties,
-                            });
-                            edges.insert(id.as_u64().to_string(), edge_json.clone());
-                            row.push(edge_json);
-                        }
-                        Value::EdgeRef(id, src, tgt, et) => {
-                            let edge_json = json!({
-                                "id": id.as_u64().to_string(),
-                                "source": src.as_u64().to_string(),
-                                "target": tgt.as_u64().to_string(),
-                                "type": et.as_str(),
-                                "properties": {},
-                            });
-                            edges.insert(id.as_u64().to_string(), edge_json.clone());
-                            row.push(edge_json);
-                        }
-                        Value::Property(p) => {
-                            row.push(p.to_json());
-                        }
-                        Value::Path {
-                            nodes: path_nodes,
-                            edges: path_edges,
-                        } => {
-                            let path_json = json!({
-                                "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
-                                "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
-                                "length": path_edges.len(),
-                            });
-                            row.push(path_json);
-                        }
-                        Value::Null => {
-                            row.push(serde_json::Value::Null);
-                        }
-                    }
-                }
-                records.push(row);
+                records.push(render_row(record, &batch.columns, full_props, &mut nodes, &mut edges));
             }
 
             // Sorted by numeric id, not `HashMap` order. Rust seeds its hasher

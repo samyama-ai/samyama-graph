@@ -227,6 +227,18 @@ fn canonical_params(params: &std::collections::HashMap<String, crate::graph::Pro
 /// promises, and one that nobody can see is one nobody fixes (REL-10).
 const DEFAULT_SLOW_QUERY_MS: u64 = 1000;
 
+/// What `execute_streaming_with_params` returns once the last row has been
+/// handed over: the rows themselves are already gone, to the sink.
+#[derive(Debug, Clone)]
+pub struct StreamedResult {
+    /// Output columns, in order.
+    pub columns: Vec<String>,
+    /// Rows handed to the sink.
+    pub rows: usize,
+    /// The plan's structural hash, when the engine records one (TRUST-06).
+    pub plan_hash: Option<u64>,
+}
+
 impl QueryEngine {
     /// Create a new query engine with the default cache capacity (1024 entries)
     pub fn new() -> Self {
@@ -442,6 +454,55 @@ impl QueryEngine {
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
+    }
+
+    /// The read path with rows handed to `sink` while the query is still
+    /// running, at most `chunk_rows` per call (API-07, #1393).
+    ///
+    /// Same planning, parameters, deadline, row budget, slow-query log and
+    /// error spans as `execute_with_params` -- that method is this one with a
+    /// collecting sink, at the executor level. What differs is that nothing
+    /// here holds the result: the rows are the sink's once it is called, and
+    /// a sink that returns an error stops the pull at the next batch boundary.
+    ///
+    /// The result cache is not consulted: a cached answer is by definition
+    /// already materialised, and caching a streamed one would mean holding it.
+    pub fn execute_streaming_with_params(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        chunk_rows: usize,
+        sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
+    ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
+        let query = self.cached_parse(query_str)?;
+
+        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+            QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
+                executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
+            ))
+        } else {
+            QueryExecutor::new(store)
+        };
+        if self.query_timeout_secs > 0 {
+            executor = executor.with_deadline(
+                std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
+            );
+        }
+        let executor = executor
+            .with_row_budget(self.row_budget)
+            .with_plan_hash(self.plan_hash)
+            .with_params(params.clone());
+
+        let started = std::time::Instant::now();
+        let mut rows = 0usize;
+        let outcome = executor.execute_each(&query, chunk_rows, &mut |columns, records| {
+            rows += records.len();
+            sink(columns, records).map_err(executor::ExecutionError::RuntimeError)
+        });
+        self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok());
+        let (columns, plan_hash) = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
+        Ok(StreamedResult { columns, rows, plan_hash })
     }
 
     /// Result-cache statistics, separate from the AST cache's.

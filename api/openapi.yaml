@@ -51,8 +51,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueryResponse'
+            application/x-ndjson:
+              schema:
+                type: string
+              description: |
+                Sent only when the request carries `Accept: application/x-ndjson`
+                (autocommit reads only; ADR-039, #1393). Rows are sent while the
+                query runs, with backpressure. One JSON object per line: a header
+                `{"columns", "snapshot_version", "engine_version"}`, one
+                `{"row": [...]}` per result row, then exactly one trailer --
+                `{"done": true, "rows", "cached", "notifications", "plan_hash"}`
+                or `{"error", "rows"}`. A body without a trailer is incomplete.
+                Every row comes from one consistent read at `snapshot_version`.
+                A consumer that does not read for `SAMYAMA_STREAM_STALL_MS`
+                (default 5000) ends the stream with an `error` trailer.
         '400':
           description: Query error (parse error, execution error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '406':
+          description: |
+            `Accept: application/x-ndjson` on a write or on a statement inside a
+            transaction; those are only served as buffered JSON.
           content:
             application/json:
               schema:

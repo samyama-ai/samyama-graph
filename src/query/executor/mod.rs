@@ -432,6 +432,45 @@ impl<'a> QueryExecutor<'a> {
     }
 
     pub fn execute(&self, query: &Query) -> ExecutionResult<RecordBatch> {
+        let mut records = Vec::new();
+        let (columns, plan_hash) =
+            self.execute_each(query, COLLECT_BATCH_ROWS, &mut |_, mut rows| {
+                records.append(&mut rows);
+                Ok(())
+            })?;
+        Ok(RecordBatch { records, columns, plan_hash })
+    }
+
+    /// Run a read-only query and hand its rows to `sink` **as the pipeline
+    /// produces them**, at most `chunk_rows` at a time (API-07, #1393).
+    ///
+    /// `execute` is this with a sink that collects. The difference that
+    /// matters is when the sink is called: from inside the pull loop, between
+    /// one `next_batch` and the next, so a caller can ship the first rows
+    /// before the operator tree has produced the last one, and a sink that
+    /// blocks (a slow HTTP client) stops the pull rather than letting rows pile
+    /// up. A sink error ends the query at the next batch boundary and is
+    /// returned as the query's error.
+    ///
+    /// Blocking operators stay blocking: a Sort or an aggregate has to see its
+    /// whole input before its first output row, and this does not change that.
+    /// EXPLAIN, PROFILE, UNION and CALL subqueries are computed whole and
+    /// handed over in one call.
+    ///
+    /// Returns the output columns and the plan hash (when recorded).
+    pub fn execute_each(
+        &self,
+        query: &Query,
+        chunk_rows: usize,
+        sink: &mut dyn FnMut(&[String], Vec<Record>) -> ExecutionResult<()>,
+    ) -> ExecutionResult<(Vec<String>, Option<u64>)> {
+        let whole = |batch: RecordBatch,
+                     sink: &mut dyn FnMut(&[String], Vec<Record>) -> ExecutionResult<()>|
+         -> ExecutionResult<(Vec<String>, Option<u64>)> {
+            let RecordBatch { records, columns, plan_hash } = batch;
+            sink(&columns, records)?;
+            Ok((columns, plan_hash))
+        };
         // "now" is fixed for the whole statement, so two `datetime()` calls in
         // one query return the same instant (#793). The guard clears it on the
         // way out, including on an early return.
@@ -450,7 +489,7 @@ impl<'a> QueryExecutor<'a> {
         let query = &query;
 
         if let Some(inner) = &query.call_subquery {
-            return self.execute_call_subquery(query, inner);
+            return whole(self.execute_call_subquery(query, inner)?, sink);
         }
 
         // UNION / UNION ALL.
@@ -461,7 +500,7 @@ impl<'a> QueryExecutor<'a> {
         // answered `1`. EXPLAIN is deliberately left to the first branch —
         // describing one branch is more useful than refusing.
         if !query.union_queries.is_empty() && !query.explain {
-            return self.execute_union(query);
+            return whole(self.execute_union(query)?, sink);
         }
 
         // Plan the query
@@ -475,7 +514,7 @@ impl<'a> QueryExecutor<'a> {
         if query.explain {
             let mut batch = Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget);
             batch.plan_hash = plan_hash;
-            return Ok(batch);
+            return whole(batch, sink);
         }
 
         // Check if this is a write query - if so, error out
@@ -534,13 +573,15 @@ impl<'a> QueryExecutor<'a> {
 
             let mut record = Record::new();
             record.bind("plan".to_string(), Value::Property(PropertyValue::String(profile_text)));
-            return Ok(RecordBatch { records: vec![record], columns: vec!["plan".to_string()], plan_hash });
+            return whole(
+                RecordBatch { records: vec![record], columns: vec!["plan".to_string()], plan_hash },
+                sink,
+            );
         }
 
-        // Execute the plan
-        let mut batch = self.execute_plan(plan)?;
-        batch.plan_hash = plan_hash;
-        Ok(batch)
+        // Execute the plan, handing rows over as they are pulled.
+        let columns = self.execute_plan_into(plan, chunk_rows, sink)?;
+        Ok((columns, plan_hash))
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
@@ -616,25 +657,45 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-    fn execute_plan(&self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
+    fn execute_plan(&self, plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
+        let mut records = Vec::new();
+        let columns = self.execute_plan_into(plan, COLLECT_BATCH_ROWS, &mut |_, mut rows| {
+            records.append(&mut rows);
+            Ok(())
+        })?;
+        Ok(RecordBatch { records, columns, plan_hash: None })
+    }
+
+    /// Pull the plan to exhaustion, handing each batch to `sink` as it
+    /// arrives. Returns the output columns.
+    fn execute_plan_into(
+        &self,
+        mut plan: ExecutionPlan,
+        batch_size: usize,
+        sink: &mut dyn FnMut(&[String], Vec<Record>) -> ExecutionResult<()>,
+    ) -> ExecutionResult<Vec<String>> {
         // Set thread-local deadline so operators can check it during materialization
         operator::set_query_deadline(self.deadline);
 
         // A no-op at budget 0, so the ordinary path allocates nothing.
         budget::enforce(&mut plan.root, self.row_budget);
 
-        let mut records = Vec::new();
-        let batch_size = 1024;
+        let batch_size = batch_size.max(1);
+        let columns = plan.output_columns;
+        let mut produced = 0usize;
 
         // Pull records from the root operator in batches (Vectorized Execution)
         let result = (|| {
             while let Some(batch) = plan.root.next_batch(self.store, batch_size)? {
-                records.extend(batch.records);
-                // Cooperative timeout check every batch
+                produced += batch.records.len();
+                sink(&columns, batch.records)?;
+                // Cooperative timeout check every batch. It also bounds how
+                // long a sink that waits on a consumer can keep the query --
+                // and whatever lock the caller holds for it -- alive.
                 if let Some(deadline) = self.deadline {
                     if std::time::Instant::now() > deadline {
                         return Err(ExecutionError::RuntimeError(
-                            format!("Query timed out after {} rows", records.len())
+                            format!("Query timed out after {} rows", produced)
                         ));
                     }
                 }
@@ -646,13 +707,12 @@ impl<'a> QueryExecutor<'a> {
         operator::set_query_deadline(None);
         result?;
 
-        Ok(RecordBatch {
-            records,
-            columns: plan.output_columns,
-            plan_hash: None,
-        })
+        Ok(columns)
     }
 }
+
+/// Rows pulled per `next_batch` when the caller collects the whole result.
+const COLLECT_BATCH_ROWS: usize = 1024;
 
 /// Query executor for write queries (CREATE, DELETE, SET, etc.)
 /// Takes mutable reference to GraphStore to allow modifications

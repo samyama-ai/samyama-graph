@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Proposed — amended 2026-09-29 (`#1393`): option E, below, is implemented for
+`Accept: application/x-ndjson`; the cursor (C) is not built.
 
 ## Date
 
@@ -129,6 +130,58 @@ Rejected. It changes the measured property and nothing else: the same peak
 memory, the same time-to-first-byte, the same lock behaviour. `#1393` exists
 partly to stop API-07 being closed this way, and this ADR records the refusal
 so the next person does not have to rediscover it.
+
+## Amendment (2026-09-29): stream under one bounded read (option E)
+
+The Decision above treats the read lock as something a stream either holds
+unboundedly or gives up. There is a third position, and it is the one
+implemented for `#1393`: **hold the read for the whole stream, and bound how
+long a consumer can make it last.**
+
+`POST /api/query` with `Accept: application/x-ndjson`:
+
+1. Takes the read lock (owned guard) and runs the query on a blocking thread.
+   The executor's pull loop hands each batch of at most 256 rows to a sink
+   (`QueryExecutor::execute_each`) which renders it and sends it down a
+   channel four chunks deep. Nothing collects the result: no `RecordBatch`,
+   and no whole-result `nodes`/`edges` index (rows carry graph elements
+   inline). Blocker 1 is resolved by resolving merged properties per chunk.
+2. **Backpressure is real**: when the consumer stops reading the channel
+   fills, the send blocks, and the executor stops pulling.
+3. **One consistent read**: the lock is held from the first row to the last,
+   so every row comes from the store at the `snapshot_version` in the header.
+   This is what option B gives up; E never releases and re-takes the lock
+   mid-stream.
+4. **The hold is bounded**, which is what makes E acceptable where "just hold
+   the lock" was not:
+   - a send that waits longer than `SAMYAMA_STREAM_STALL_MS` (default 5 s)
+     aborts the query and releases the lock; the body ends with an `error`
+     trailer, never a `done` one, so the client can tell;
+   - the query deadline (`SAMYAMA_QUERY_TIMEOUT`, default 120 s) counts time
+     spent waiting on the consumer, so a slow-but-live consumer holds the lock
+     no longer than a slow query already can today.
+   The lock is dropped before the trailer is sent.
+5. Writes and statements inside a transaction are refused with 406: both run
+   under the writer's lock. Errors found before the first row are the usual
+   400. Without the header, the buffered envelope is unchanged.
+
+**The cost, stated.** A stream holds the read for (execution time + time the
+consumer takes to read), where today a buffered query holds it for execution
+time only. Writers wait for that, and because tokio's `RwLock` is fair, *new
+readers queue behind a waiting writer*, so one long stream can delay reads as
+well as writes. The bounds above cap it — one stalled consumer costs at most
+the stall budget — but they do not remove it. Operators that must see their
+whole input (Sort, aggregates) still materialise it inside the executor;
+streaming bounds what the *response* holds, not what such an operator holds.
+Each open stream occupies a thread of tokio's blocking pool.
+
+**Why not wait for A.** A (snapshot pin) removes the cost above entirely and
+remains the destination. E is the same client-visible shape — a header with
+`snapshot_version`, rows, a trailer — so moving the server from "hold the
+read" to "read at a pinned version" does not change the wire format again.
+
+**What E does not deliver.** SDK support (API-07 says "on HTTP and in all
+SDKs"): the Rust, Python and TypeScript SDKs still use the buffered response.
 
 ## Related Decisions
 
