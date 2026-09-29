@@ -689,7 +689,7 @@ samyama/
 │   ├── embed/          Auto-embed pipelines for RAG
 │   ├── export/         Arrow / Parquet / CSV / GraphML result export
 │   ├── migrate/        Importers for other engines' exports (Neo4j APOC JSON)
-│   └── *.rs            allocator, compat, pii, provenance, schema_doc, lib, main
+│   └── *.rs            allocator, auth, compat, pii, provenance, schema_doc, lib, main
 ├── crates/             samyama-graph-algorithms, samyama-optimization, samyama-gpu, samyama-sdk
 ├── sdk/                Python and TypeScript client SDKs
 ├── cli/                `samyama-cli` command-line client
