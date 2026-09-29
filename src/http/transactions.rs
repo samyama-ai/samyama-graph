@@ -25,19 +25,69 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard};
 
 /// One open HTTP transaction: the writer's lock, and when it expires.
 pub struct HttpTxn {
     pub guard: OwnedRwLockWriteGuard<GraphStore>,
     pub deadline: Instant,
+    pub limit: Duration,
 }
 
-/// Open transactions by id.
-pub type TxnSessions = Arc<Mutex<HashMap<String, HttpTxn>>>;
+/// How many timed-out transaction ids are remembered, so a late COMMIT,
+/// ROLLBACK or query can be told its transaction expired rather than that it
+/// never existed (#1518). Bounded: the oldest are forgotten first, and a
+/// forgotten one gets the 404 it would have got before.
+const EXPIRED_REMEMBERED: usize = 1024;
+
+/// Open transactions by id, and the ids of the ones that timed out.
+#[derive(Default)]
+pub struct Sessions {
+    open: HashMap<String, HttpTxn>,
+    expired: VecDeque<(String, Duration)>,
+}
+
+impl Sessions {
+    pub fn insert(&mut self, id: String, txn: HttpTxn) {
+        self.open.insert(id, txn);
+    }
+
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut HttpTxn> {
+        self.open.get_mut(id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<HttpTxn> {
+        self.open.remove(id)
+    }
+
+    /// Take a transaction out because it timed out, leaving a tombstone.
+    /// Returns it to be rolled back; `None` if it had already finished.
+    pub fn expire(&mut self, id: &str, limit: Duration) -> Option<HttpTxn> {
+        let txn = self.open.remove(id)?;
+        self.remember_expired(id, limit);
+        Some(txn)
+    }
+
+    fn remember_expired(&mut self, id: &str, limit: Duration) {
+        if self.expired.len() == EXPIRED_REMEMBERED {
+            self.expired.pop_front();
+        }
+        self.expired.push_back((id.to_string(), limit));
+    }
+
+    /// The response for an id that is not open: 409 if it timed out, else 404.
+    pub fn refused(&self, id: &str) -> Response {
+        match self.expired.iter().find(|(e, _)| e == id) {
+            Some((_, limit)) => timed_out(id, *limit),
+            None => not_open(id),
+        }
+    }
+}
+
+pub type TxnSessions = Arc<Mutex<Sessions>>;
 
 /// Undo everything the transaction did, drop what it logged for persistence,
 /// and release the lock.
@@ -55,11 +105,27 @@ fn error(status: StatusCode, message: String) -> Response {
 pub fn not_open(id: &str) -> Response {
     error(
         StatusCode::NOT_FOUND,
+        format!("no open transaction '{id}': it was committed, rolled back, or never begun"),
+    )
+}
+
+fn timed_out(id: &str, limit: Duration) -> Response {
+    error(
+        StatusCode::CONFLICT,
         format!(
-            "no open transaction '{id}': it was committed, rolled back, or timed out \
-             and was rolled back"
+            "transaction '{id}' was open longer than {}s and was rolled back",
+            limit.as_secs()
         ),
     )
+}
+
+/// Roll back a transaction that outlived `limit`, remembering that it did.
+pub async fn expire(sessions: &TxnSessions, id: &str, limit: Duration) {
+    let txn = sessions.lock().await.expire(id, limit);
+    if let Some(txn) = txn {
+        tracing::warn!("transaction {id} was open for {}s; rolled back", limit.as_secs());
+        roll_back(txn);
+    }
 }
 
 pub async fn begin_handler(State(state): State<AppState>) -> Response {
@@ -80,31 +146,36 @@ pub async fn begin_handler(State(state): State<AppState>) -> Response {
         .transactions
         .lock()
         .await
-        .insert(id.clone(), HttpTxn { guard, deadline: Instant::now() + limit });
+        .insert(id.clone(), HttpTxn { guard, deadline: Instant::now() + limit, limit });
 
     // An abandoned transaction would hold the lock for good.
     let sessions = Arc::clone(&state.transactions);
     let expiring = id.clone();
     tokio::spawn(async move {
         tokio::time::sleep(limit).await;
-        let txn = sessions.lock().await.remove(&expiring);
-        if let Some(txn) = txn {
-            tracing::warn!("transaction {expiring} was open for {}s; rolled back", limit.as_secs());
-            roll_back(txn);
-        }
+        expire(&sessions, &expiring, limit).await;
     });
 
     Json(json!({ "tx": id, "version": version, "timeout_seconds": limit.as_secs() })).into_response()
 }
 
 pub async fn commit_handler(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let Some(mut txn) = state.transactions.lock().await.remove(&id) else {
-        return not_open(&id);
+    let mut txn = {
+        let mut sessions = state.transactions.lock().await;
+        let past_deadline = match sessions.get_mut(&id) {
+            None => return sessions.refused(&id),
+            Some(txn) => (Instant::now() > txn.deadline).then_some(txn.limit),
+        };
+        // Past the deadline but not yet reaped: expire it here, the same way
+        // the background task would have.
+        if let Some(limit) = past_deadline {
+            if let Some(txn) = sessions.expire(&id, limit) {
+                roll_back(txn);
+            }
+            return sessions.refused(&id);
+        }
+        sessions.remove(&id).expect("checked above")
     };
-    if Instant::now() > txn.deadline {
-        roll_back(txn);
-        return error(StatusCode::CONFLICT, format!("transaction '{id}' timed out and was rolled back"));
-    }
     // Persisted before the reply; refused and rolled back if it cannot be (#1274).
     let version = match &state.persistence {
         Some(pm) => match pm.commit_session_transaction("default", &mut txn.guard) {
@@ -120,8 +191,12 @@ pub async fn commit_handler(State(state): State<AppState>, Path(id): Path<String
 }
 
 pub async fn rollback_handler(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let Some(txn) = state.transactions.lock().await.remove(&id) else {
-        return not_open(&id);
+    let txn = {
+        let mut sessions = state.transactions.lock().await;
+        match sessions.remove(&id) {
+            Some(txn) => txn,
+            None => return sessions.refused(&id),
+        }
     };
     roll_back(txn);
     Json(json!({ "tx": id, "rolled_back": true })).into_response()
@@ -230,6 +305,61 @@ mod tests {
         let (status, _) =
             post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "a query ran in a finished transaction");
+    }
+
+    /// #1518: the background task used to remove a timed-out transaction
+    /// without a trace, so a late COMMIT got the 404 meant for an id that never
+    /// existed, and the 409 branch was reachable only in a microsecond race.
+    /// The expiry is driven directly rather than by waiting out a real timeout.
+    #[tokio::test]
+    async fn a_timed_out_transaction_is_reported_as_timed_out_not_unknown() {
+        let (app, state) = app();
+        let tx = begin(&app).await;
+        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        expire(&state.transactions, &tx, Duration::from_secs(7)).await;
+
+        assert_eq!(state.store.read().await.node_count(), 0, "the expired CREATE survived");
+        let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let message = body["error"].as_str().unwrap();
+        assert!(message.contains("longer than 7s and was rolled back"), "{message}");
+        let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) =
+            post_json(&app, "/api/query", json!({ "query": "MATCH (n) RETURN n", "tx": tx })).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // An id that never existed is still 404.
+        let (status, _) = post_json(&app, "/api/tx/nope/commit", json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A commit that arrives after the deadline but before the background task
+    /// has run is expired on the spot and answered the same way.
+    #[tokio::test]
+    async fn a_commit_past_the_deadline_is_refused_as_timed_out() {
+        let (app, state) = app();
+        let tx = begin(&app).await;
+        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        state.transactions.lock().await.get_mut(&tx).unwrap().deadline =
+            Instant::now() - Duration::from_millis(1);
+
+        let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(state.store.read().await.node_count(), 0, "a late commit kept its write");
+        assert!(state.store.try_read().is_ok(), "the lock was not released");
+    }
+
+    #[test]
+    fn the_tombstones_are_bounded() {
+        let mut sessions = Sessions::default();
+        for i in 0..EXPIRED_REMEMBERED + 10 {
+            sessions.remember_expired(&i.to_string(), Duration::from_secs(1));
+        }
+        assert_eq!(sessions.expired.len(), EXPIRED_REMEMBERED);
+        assert_eq!(sessions.refused("0").status(), StatusCode::NOT_FOUND, "the oldest was kept");
+        let newest = (EXPIRED_REMEMBERED + 9).to_string();
+        assert_eq!(sessions.refused(&newest).status(), StatusCode::CONFLICT);
     }
 
     /// #1274: a commit that could not be persisted used to answer
