@@ -589,8 +589,6 @@ three FinBench queries are pinned to ids the generated data does not
 guarantee, so they answer nothing while reporting `OK`
 ([#918](https://github.com/samyama-ai/samyama-graph/issues/918)).
 
-![LDBC benchmark results](ldbc-benchmark-results.png)
-
 ### Concurrent performance
 
 **Not published, because it is not measured.** The numbers that stood here were
@@ -624,7 +622,7 @@ every example, starts a server, and runs each in turn with a pass/fail summary
 | Agentic (GAK) | `cargo run --example agentic_enrichment_demo` | Generation-augmented enrichment (needs `claude` CLI) |
 | Raft Cluster | `cargo run --example cluster_demo` | 3-node HA consensus |
 
-*19 demo examples + 11 data loaders in [`examples/`](examples); optimization/use-case
+*19 demo examples + 15 data loaders in [`examples/`](examples); optimization/use-case
 demos: `grid_dispatch_demo`, `amr_stewardship_demo`, `healthcare_allocation_demo`,
 `wildfire_evac_demo`, `pca_demo`, `sdk_demo`, …*
 
@@ -653,18 +651,43 @@ samyama-graph is the engine. Per-domain KGs and companion projects live separate
 ## Architecture
 
 ```
-samyama
-├── graph/         Property graph model (Node, Edge, GraphStore, CSR adjacency)
-├── query/         OpenCypher engine
-│   ├── cypher.pest    PEG grammar
-│   ├── executor/      Volcano iterator + WCO LeapFrog TrieJoin
-│   └── planner.rs     Cost-based graph-native query planner
-├── protocol/      RESP3 server (Redis-compatible, Tokio async)
-├── persistence/   RocksDB + WAL + multi-tenancy
-├── vector/        HNSW vector index
-├── snapshot/      Portable .sgsnap v2 (CSR + ColumnStore)
-├── raft/          Distributed consensus (openraft)
-└── nlq/           Natural language → Cypher (OpenAI, Gemini, Ollama, Claude)
+samyama/
+├── src/
+│   ├── graph/          Property graph model (Node, Edge, GraphStore, CSR adjacency)
+│   ├── query/          OpenCypher engine
+│   │   ├── cypher.pest     PEG grammar
+│   │   ├── executor/       Volcano iterator + WCO LeapFrog TrieJoin
+│   │   └── planner.rs      Cost-based graph-native query planner
+│   ├── protocol/       RESP3 server (Redis-compatible, Tokio async)
+│   ├── http/           HTTP/REST API and Web UI
+│   ├── persistence/    RocksDB + WAL + multi-tenancy
+│   ├── index/          Property, unique, composite, full-text, hierarchy (OEH) indexes
+│   ├── vector/         HNSW vector index
+│   ├── snapshot/       Portable .sgsnap v2 (CSR + ColumnStore)
+│   ├── raft/           Distributed consensus (openraft)
+│   ├── sharding/       Tenant-level sharding (router, proxy)
+│   ├── rdf/            RDF triple/quad store and mapping
+│   ├── sparql/         SPARQL 1.1 parser, algebra, optimizer, executor
+│   ├── algo/           Adapter to the samyama-graph-algorithms crate
+│   ├── optimization/   Graph-grounded problems for the samyama-optimization crate
+│   ├── nlq/            Natural language → Cypher (OpenAI, Gemini, Ollama, Claude)
+│   ├── agent/          Agentic enrichment (tool-using agents that write to the graph)
+│   ├── embed/          Auto-embed pipelines for RAG
+│   ├── export/         Arrow / Parquet / CSV / GraphML result export
+│   ├── migrate/        Importers for other engines' exports (Neo4j APOC JSON)
+│   └── *.rs            allocator, compat, pii, provenance, schema_doc, lib, main
+├── crates/             samyama-graph-algorithms, samyama-optimization, samyama-gpu, samyama-sdk
+├── sdk/                Python and TypeScript client SDKs
+├── cli/                `samyama-cli` command-line client
+├── api/                OpenAPI 3 specification
+├── benches/            Criterion + LDBC / FinBench / Graphalytics harnesses
+├── benchmarks/         Benchmark inputs and corpora
+├── case_studies/       End-to-end domain datasets with loaders and queries
+├── examples/           Runnable demos and data loaders
+├── tests/              Integration tests
+├── scripts/            CI gates, coverage, release checks, dataset downloads
+├── ops/                Grafana dashboards
+└── docs/               Architecture docs, ADRs, compatibility notes
 ```
 
 **Companion crates:**
