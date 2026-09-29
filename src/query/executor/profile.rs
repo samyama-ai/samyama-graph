@@ -166,6 +166,16 @@ impl PhysicalOperator for ProfiledOperator {
         self.inner.hint_early_stop(n)
     }
 
+    /// Forwarded, so a profiled `WHERE p ... ORDER BY p` reads `p` as often
+    /// as the unprofiled one does (#593).
+    fn retain_property_reads(&mut self, variable: &str, property: &str) -> bool {
+        self.inner.retain_property_reads(variable, property)
+    }
+
+    fn take_retained_reads(&mut self) -> Option<Vec<Option<crate::graph::PropertyValue>>> {
+        self.inner.take_retained_reads()
+    }
+
     fn reset(&mut self) {
         self.inner.reset()
     }

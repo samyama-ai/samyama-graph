@@ -5770,6 +5770,25 @@ pub trait PhysicalOperator: Send {
         None
     }
 
+    /// Ask this operator to keep the value of `variable.property` it reads
+    /// while deciding each row, so the consumer does not read it again (#593).
+    ///
+    /// `WHERE m.d < $x ... ORDER BY m.d` read `m.d` once in the filter and
+    /// again for the sort key: 389,461 rows, 778,922 column reads on LDBC IC9.
+    /// Returns whether this operator will offer the values; see
+    /// `take_retained_reads`. The default keeps nothing.
+    fn retain_property_reads(&mut self, _variable: &str, _property: &str) -> bool {
+        false
+    }
+
+    /// The values kept for the batch the last `next_batch` returned: one entry
+    /// per row, in row order, `None` where this operator did not read the
+    /// value for that row. `None` when nothing was kept for that batch, and
+    /// the caller then reads every value itself.
+    fn take_retained_reads(&mut self) -> Option<Vec<Option<PropertyValue>>> {
+        None
+    }
+
     /// The operators this one pulls from, in the order `describe()` lists
     /// them.
     ///
@@ -6556,13 +6575,74 @@ pub struct FilterOperator {
     /// not vary at all, and an unbounded cache keyed on row values would grow
     /// with the scan it is trying to make cheap.
     invariant_call: std::sync::Mutex<Option<(String, Vec<u64>, Value)>>,
+    /// `(variable, property)` the consumer asked this filter to keep, through
+    /// `retain_property_reads` (#593). Only accepted when the predicate reads
+    /// that property itself.
+    retain: Option<(String, String)>,
+    /// The retained property's value for the row being evaluated, when the
+    /// predicate read it.
+    captured: std::cell::Cell<Option<PropertyValue>>,
+    /// One entry per row of the batch last returned, for `take_retained_reads`.
+    retained: Option<Vec<Option<PropertyValue>>>,
+}
+
+/// Whether `FilterOperator::evaluate_expression` reads `variable.property`
+/// itself -- as opposed to through a delegated evaluator (a comprehension, a
+/// subquery, a list literal), which does not report what it read and may bind
+/// `variable` to something else.
+fn filter_reads_property_directly(expr: &Expression, variable: &str, property: &str) -> bool {
+    let reads = |e: &Expression| filter_reads_property_directly(e, variable, property);
+    match expr {
+        Expression::Property { variable: v, property: p } => v == variable && p == property,
+        Expression::Binary { left, right, .. } => reads(left) || reads(right),
+        Expression::Unary { expr, .. } => reads(expr),
+        Expression::Function { args, .. } => args.iter().any(reads),
+        Expression::Case { operand, when_clauses, else_result } => {
+            operand.as_deref().is_some_and(reads)
+                || when_clauses.iter().any(|(w, t)| reads(w) || reads(t))
+                || else_result.as_deref().is_some_and(reads)
+        }
+        Expression::Index { expr, index } => reads(expr) || reads(index),
+        Expression::ListSlice { expr, start, end } => {
+            reads(expr) || start.as_deref().is_some_and(reads) || end.as_deref().is_some_and(reads)
+        }
+        _ => false,
+    }
+}
+
+/// Values a filter hands to its consumer instead of the consumer reading them
+/// again (#593): those whose copy does not allocate. A string is left alone --
+/// a sort key borrows it from the column without copying, so handing over an
+/// owned copy would trade a read for an allocation.
+fn retained_copy(value: &PropertyValue) -> Option<PropertyValue> {
+    match value {
+        PropertyValue::Integer(_)
+        | PropertyValue::Float(_)
+        | PropertyValue::Boolean(_)
+        | PropertyValue::DateTime(_)
+        | PropertyValue::Date(_)
+        | PropertyValue::LocalTime(_)
+        | PropertyValue::Time { .. }
+        | PropertyValue::LocalDateTime { .. }
+        | PropertyValue::Duration { .. }
+        | PropertyValue::Null => Some(value.clone()),
+        _ => None,
+    }
 }
 
 impl FilterOperator {
     /// Create a new filter operator
     pub fn new(input: OperatorBox, predicate: Expression) -> Self {
         let parallel = Self::predicate_is_parallel(&predicate);
-        Self { input, predicate, parallel, invariant_call: std::sync::Mutex::new(None) }
+        Self {
+            input,
+            predicate,
+            parallel,
+            invariant_call: std::sync::Mutex::new(None),
+            retain: None,
+            captured: std::cell::Cell::new(None),
+            retained: None,
+        }
     }
 
     /// Whether this predicate is worth filtering across threads.
@@ -6607,9 +6687,21 @@ impl FilterOperator {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
             Expression::Property { variable, property } => {
-                return read_property(record, variable, property, store, false);
-                #[allow(unreachable_code)]
-                Ok(Value::Null)
+                let value = read_property(record, variable, property, store, false)?;
+                // Kept only for a node or relationship reference: there this
+                // read and the sort key's `PropertyCursor::read` are the same
+                // read of the same store (#593).
+                if let (Some((v, p)), Value::Property(pv)) = (&self.retain, &value) {
+                    if v == variable
+                        && p == property
+                        && matches!(record.get(variable), Some(Value::NodeRef(_) | Value::EdgeRef(..)))
+                    {
+                        if let Some(copy) = retained_copy(pv) {
+                            self.captured.set(Some(copy));
+                        }
+                    }
+                }
+                Ok(value)
             }
             Expression::Literal(lit) => Ok(Value::Property(lit.clone())),
             Expression::Binary { left, op, right } => {
@@ -6759,6 +6851,23 @@ impl PhysicalOperator for FilterOperator {
         Some(&self.predicate)
     }
 
+    /// Accepted when the predicate reads `variable.property` itself, and only
+    /// for one property: the case this exists for is `WHERE p ... ORDER BY p`.
+    fn retain_property_reads(&mut self, variable: &str, property: &str) -> bool {
+        if let Some((v, p)) = &self.retain {
+            return v == variable && p == property;
+        }
+        if !filter_reads_property_directly(&self.predicate, variable, property) {
+            return false;
+        }
+        self.retain = Some((variable.to_string(), property.to_string()));
+        true
+    }
+
+    fn take_retained_reads(&mut self) -> Option<Vec<Option<PropertyValue>>> {
+        self.retained.take()
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next(store)? {
             if self.evaluate_predicate(&record, store)? {
@@ -6784,6 +6893,11 @@ impl PhysicalOperator for FilterOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         let mut filtered_records = Vec::new();
+        // The values the predicate read, one per surviving row, when asked to
+        // keep them (#593). Dropped for the batch if any of it went through
+        // the parallel path, which evaluates elsewhere and keeps nothing.
+        let mut retained: Option<Vec<Option<PropertyValue>>> = self.retain.as_ref().map(|_| Vec::new());
+        self.retained = None;
 
         while filtered_records.len() < batch_size {
             if let Some(batch) = self.input.next_batch(store, batch_size)? {
@@ -6799,6 +6913,17 @@ impl PhysicalOperator for FilterOperator {
                         })
                         .collect();
                     filtered_records.extend(passed);
+                    retained = None;
+                } else if let Some(kept) = retained.as_mut() {
+                    for record in records {
+                        self.captured.set(None);
+                        let passed = self.evaluate_predicate(&record, store)?;
+                        let value = self.captured.take();
+                        if passed {
+                            filtered_records.push(record);
+                            kept.push(value);
+                        }
+                    }
                 } else {
                     for record in records {
                         if self.evaluate_predicate(&record, store)? {
@@ -6814,6 +6939,7 @@ impl PhysicalOperator for FilterOperator {
         if filtered_records.is_empty() {
             Ok(None)
         } else {
+            self.retained = retained;
             Ok(Some(RecordBatch {
                 records: filtered_records,
                 columns: Vec::new(), // Filter doesn't change columns
@@ -6824,6 +6950,7 @@ impl PhysicalOperator for FilterOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+        self.retained = None;
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -11492,25 +11619,35 @@ impl SortOperator {
     /// back in input order -- right count, right contents, wrong answer, no
     /// error (#987). A *missing* property is not an error: it evaluates to
     /// null, which is what `ORDER BY` over an absent value means.
+    ///
+    /// `known` is `(key index, value)` for a key whose value the input already
+    /// read for this row -- the filter underneath a `WHERE p ... ORDER BY p`
+    /// (#593) -- and is used instead of reading it again.
     fn key_of_cached<'s>(
         readers: &mut [PropertyCursor],
         sort_items: &[(Expression, bool)],
         record: &Record,
         store: &'s GraphStore,
+        known: Option<(usize, PropertyValue)>,
     ) -> ExecutionResult<SortKey<'s>> {
         let n = sort_items.len();
         let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
         let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
         let mut cursor = readers.iter_mut();
+        let mut known = known;
         for (i, (expr, _)) in sort_items.iter().enumerate() {
             let value = match expr {
                 // A property is always a `PropertyValue`; the cursor stays. A
                 // string in a column is borrowed rather than copied.
                 Expression::Property { .. } => {
                     let c = cursor.next().expect("one cursor per property key");
-                    match c.read_str(record, store) {
-                        Some(s) => KeyPart::Str(s),
-                        None => KeyPart::Value(Value::Property(c.read(record, store))),
+                    if let Some((_, v)) = known.take_if(|(k, _)| *k == i) {
+                        KeyPart::Value(Value::Property(v))
+                    } else {
+                        match c.read_str(record, store) {
+                            Some(s) => KeyPart::Str(s),
+                            None => KeyPart::Value(Value::Property(c.read(record, store))),
+                        }
                     }
                 }
                 other => KeyPart::Value(Self::evaluate_expression(other, record, store)?),
@@ -11826,6 +11963,26 @@ impl SortOperator {
             })
             .collect();
 
+        // The first property key the input reads for itself -- the filter of
+        // `WHERE m.d < $x ... ORDER BY m.d` -- is taken from the input rather
+        // than read a second time (#593). Rows the input did not read it for,
+        // and batches it kept nothing for, are read here as before.
+        let retained_key: Option<usize> = {
+            let input = &mut self.input;
+            self.sort_items.iter().enumerate().find_map(|(i, (expr, _))| match expr {
+                Expression::Property { variable, property } => {
+                    input.retain_property_reads(variable, property).then_some(i)
+                }
+                _ => None,
+            })
+        };
+        let known_values = |input: &mut OperatorBox, rows: usize| -> std::vec::IntoIter<Option<PropertyValue>> {
+            match (retained_key, input.take_retained_reads()) {
+                (Some(_), Some(values)) if values.len() == rows => values.into_iter(),
+                _ => Vec::new().into_iter(),
+            }
+        };
+
         // Without a LIMIT reaching this operator, every row is sorted. The rows
         // and their keys stay where they are and only 4-byte row indices are
         // sorted, compared through the keys; the index breaks ties, so the
@@ -11839,8 +11996,10 @@ impl SortOperator {
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 keys.reserve(batch.records.len());
                 rows.reserve(batch.records.len());
+                let mut known = known_values(&mut self.input, batch.records.len());
                 for record in batch.records {
-                    keys.push(Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?);
+                    let k = retained_key.zip(known.next().flatten());
+                    keys.push(Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?);
                     rows.push(record);
                 }
             }
@@ -11876,8 +12035,10 @@ impl SortOperator {
         let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             keyed.reserve(batch.records.len());
+            let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
+                let k = retained_key.zip(known.next().flatten());
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?;
                 keyed.push((key, record));
             }
             if let (Some(k), Some(threshold)) = (bound, trim_at) {
@@ -11925,7 +12086,7 @@ impl SortOperator {
         let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::with_capacity(self.records.len() - start);
         for slot in self.records[start..].iter_mut() {
             let record = std::mem::take(slot);
-            let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store)?;
+            let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, None)?;
             keyed.push((key, record));
         }
         let sort_items = &self.sort_items;
@@ -23556,5 +23717,186 @@ mod tests {
         let contains_on_null = Value::Property(PropertyValue::Null); // CONTAINS on null returns null
         let r = eval_binary_op(&BinaryOp::And, is_not_null, contains_on_null).unwrap();
         assert_eq!(r, prop(PropertyValue::Boolean(false)));
+    }
+}
+
+/// `WHERE p ... ORDER BY p` reads `p` once per row, not once in the filter and
+/// again for the sort key (#593).
+#[cfg(test)]
+mod filter_sort_single_read {
+    use super::*;
+    use crate::graph::storage::columnar::COLUMN_READS;
+    use crate::query::executor::QueryExecutor;
+    use crate::query::parser::parse_query;
+
+    const N: usize = 2_000;
+
+    fn reads<T>(f: impl FnOnce() -> T) -> (T, u64) {
+        let before = COLUMN_READS.with(|c| c.get());
+        let out = f();
+        (out, COLUMN_READS.with(|c| c.get()) - before)
+    }
+
+    /// `N` nodes whose `p` is a scattered integer, every seventh without one.
+    fn int_store() -> GraphStore {
+        let mut store = GraphStore::new();
+        for i in 0..N {
+            let n = store.create_node("L");
+            if i % 7 != 0 {
+                store.set_node_property("default", n, "p", ((i * 7919) % N) as i64).unwrap();
+            }
+            store.set_node_property("default", n, "q", (i % 13) as i64).unwrap();
+        }
+        store
+    }
+
+    /// Node ids of `n` in result order, and the column reads the query made.
+    fn run(store: &GraphStore, cypher: &str) -> (Vec<u64>, u64) {
+        let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
+        // Warm once: plan caches are not what is counted.
+        QueryExecutor::new(store).execute(&q).unwrap();
+        let (out, n) = reads(|| QueryExecutor::new(store).execute(&q).unwrap());
+        let ids = out
+            .records
+            .iter()
+            .map(|r| value_node_id(r.get("n").expect("n")).expect("n is a node").as_u64())
+            .collect();
+        (ids, n)
+    }
+
+    #[test]
+    fn filter_then_sort_reads_the_property_once_per_surviving_row() {
+        let store = int_store();
+        // The same filter without the sort: every row read once.
+        let (unsorted, filter_only) = run(&store, "MATCH (n:L) WHERE n.p > 500 RETURN n");
+        let (sorted, with_sort) = run(&store, "MATCH (n:L) WHERE n.p > 500 RETURN n ORDER BY n.p");
+        let survivors = sorted.len() as u64;
+        assert_eq!(survivors, unsorted.len() as u64);
+        assert!(survivors > N as u64 / 2, "{survivors} of {N} rows survive");
+        // The filter's own reads are the same with or without the sort, so the
+        // difference is what the sort read: 0 per row when it reuses the
+        // filter's value, 1 when it reads again.
+        let per_survivor = 1.0 + (with_sort - filter_only) as f64 / survivors as f64;
+        eprintln!(
+            "filter only: {filter_only} reads; with ORDER BY: {with_sort}; \
+             {per_survivor} reads of n.p per surviving row"
+        );
+        assert_eq!(
+            with_sort, filter_only,
+            "ORDER BY n.p under WHERE n.p re-read n.p: {per_survivor} reads per surviving row, want 1"
+        );
+    }
+
+    #[test]
+    fn a_sort_on_another_property_still_reads_it() {
+        let store = int_store();
+        let (unsorted, filter_only) = run(&store, "MATCH (n:L) WHERE n.p > 500 RETURN n");
+        let (_, with_sort) = run(&store, "MATCH (n:L) WHERE n.p > 500 RETURN n ORDER BY n.q");
+        assert_eq!(with_sort, filter_only + unsorted.len() as u64);
+    }
+
+    /// Rows binding `n` to nodes whose `p` covers integers, floats (NaN too),
+    /// strings, booleans, dates, lists, and absent.
+    fn mixed() -> (GraphStore, Vec<Record>) {
+        let mut store = GraphStore::new();
+        let mut rows = Vec::new();
+        for i in 0..600usize {
+            let n = store.create_node("L");
+            let k = (i * 37) % 600;
+            let p = match k % 9 {
+                0 => None,
+                1 | 2 => Some(PropertyValue::Integer(k as i64 % 50 - 20)),
+                3 => Some(PropertyValue::Float(k as f64 / 7.0 - 20.0)),
+                4 => Some(PropertyValue::String(format!("s{:03}", k % 40))),
+                5 => Some(PropertyValue::Boolean(k % 2 == 0)),
+                6 => Some(PropertyValue::Date(k as i32 % 30)),
+                7 => Some(PropertyValue::Array(vec![PropertyValue::Integer(k as i64 % 4)])),
+                _ => Some(if k % 4 == 0 { PropertyValue::Float(f64::NAN) } else { PropertyValue::Integer(3) }),
+            };
+            if let Some(p) = p {
+                store.set_node_property("default", n, "p", p).unwrap();
+            }
+            store.set_node_property("default", n, "q", (k % 11) as i64).unwrap();
+            let mut r = Record::new();
+            r.bind("n", Value::NodeRef(n));
+            rows.push(r);
+        }
+        (store, rows)
+    }
+
+    fn drain(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<Record> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            out.push(r);
+        }
+        out
+    }
+
+    fn ids(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<u64> {
+        drain(op, store)
+            .iter()
+            .map(|r| value_node_id(r.get("n").unwrap()).unwrap().as_u64())
+            .collect()
+    }
+
+    fn cypher_expr(text: &str) -> Expression {
+        let q = parse_query(&format!("MATCH (n), (m) RETURN {text} AS x")).unwrap();
+        q.return_clause.expect("RETURN").items.into_iter().next().unwrap().expression
+    }
+
+    #[test]
+    fn keeping_the_filters_read_changes_no_result() {
+        let (store, rows) = mixed();
+        let predicates = [
+            "n.p > 3",
+            "n.p < 3.5",
+            "n.p IS NULL OR n.p > 0",
+            "n.p IS NOT NULL",
+            "NOT (n.p = 3)",
+            "n.p >= 's010' OR n.p = true",
+            "coalesce(n.p, 0) = 0 OR n.q > 5",
+            "CASE WHEN n.q > 5 THEN n.p > 1 ELSE true END",
+            "n.q > 4",
+        ];
+        let orders: [Vec<(&str, bool)>; 4] = [
+            vec![("n.p", true)],
+            vec![("n.p", false)],
+            vec![("n.q", true), ("n.p", false)],
+            vec![("n.p", true), ("n.q", false), ("id(n)", true)],
+        ];
+        for pred in predicates {
+            for order in &orders {
+                let items: Vec<(Expression, bool)> =
+                    order.iter().map(|(e, asc)| (cypher_expr(e), *asc)).collect();
+                for limit in [None, Some(7)] {
+                    let filter = || {
+                        FilterOperator::new(Box::new(MaterializedOperator::new(rows.clone())), cypher_expr(pred))
+                    };
+                    // The old path: the sort cannot see the filter, and reads
+                    // every key itself.
+                    let filtered = drain(&mut filter(), &store);
+                    let mut old = SortOperator::new(Box::new(MaterializedOperator::new(filtered)), items.clone());
+                    let mut new = SortOperator::new(Box::new(filter()), items.clone());
+                    if let Some(k) = limit {
+                        old.try_push_limit(k);
+                        new.try_push_limit(k);
+                    }
+                    let old = ids(&mut old, &store);
+                    let new = ids(&mut new, &store);
+                    assert_eq!(new, old, "WHERE {pred} ORDER BY {order:?} LIMIT {limit:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_filter_keeps_only_what_its_predicate_reads() {
+        let input = || Box::new(MaterializedOperator::new(Vec::new())) as OperatorBox;
+        assert!(FilterOperator::new(input(), cypher_expr("n.p > 1")).retain_property_reads("n", "p"));
+        assert!(!FilterOperator::new(input(), cypher_expr("n.q > 1")).retain_property_reads("n", "p"));
+        assert!(!FilterOperator::new(input(), cypher_expr("m.p > 1")).retain_property_reads("n", "p"));
+        // Read inside a comprehension, where `n` may be bound to something else.
+        assert!(!FilterOperator::new(input(), cypher_expr("any(n IN [1] WHERE n.p > 1)"))
+            .retain_property_reads("n", "p"));
     }
 }

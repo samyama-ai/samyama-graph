@@ -361,6 +361,13 @@ fn clear_bit(words: &mut [u64], slot: usize) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Value reads through `Column::get` and `Column::get_str`, for tests that
+    /// pin how many times a plan reads a property per row (#593).
+    pub(crate) static COLUMN_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A single property column. Only rows that are explicitly set are readable;
 /// everything else reads as [`PropertyValue::Null`].
 ///
@@ -512,6 +519,8 @@ impl Column {
     }
 
     pub fn get(&self, idx: usize) -> PropertyValue {
+        #[cfg(test)]
+        COLUMN_READS.with(|c| c.set(c.get() + 1));
         match self {
             Column::Int(m) => m.get(idx).map(|&v| PropertyValue::Integer(v)).unwrap_or(PropertyValue::Null),
             Column::DateTime(m) => m.get(idx).map(|&v| PropertyValue::DateTime(v)).unwrap_or(PropertyValue::Null),
@@ -526,6 +535,8 @@ impl Column {
     /// one. `get` hands back an owned copy, which a caller that only compares
     /// the value does not need (#750).
     pub fn get_str(&self, idx: usize) -> Option<&str> {
+        #[cfg(test)]
+        COLUMN_READS.with(|c| c.set(c.get() + 1));
         match self {
             Column::String(m) => m.get(idx).map(|s| s.as_str()),
             _ => None,
