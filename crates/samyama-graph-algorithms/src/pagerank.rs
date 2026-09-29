@@ -47,10 +47,7 @@ pub fn page_rank(
     // that is requested (CPU path stays the source of truth).
     #[cfg(feature = "gpu")]
     {
-        if n > crate::gpu_dispatch::min_gpu_nodes()
-            && !config.dangling_redistribution
-            && samyama_gpu::gpu_available()
-        {
+        if !config.dangling_redistribution && crate::gpu_dispatch::should_dispatch_gpu(n) {
             {
                 let gpu_config = samyama_gpu::pagerank::GpuPageRankConfig {
                     damping_factor: config.damping_factor,

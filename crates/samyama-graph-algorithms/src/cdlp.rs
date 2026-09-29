@@ -44,7 +44,7 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
     #[cfg(feature = "gpu")]
     {
-        if n > crate::gpu_dispatch::min_gpu_nodes() && samyama_gpu::gpu_available() {
+        if crate::gpu_dispatch::should_dispatch_gpu(n) {
             {
                 // Pass actual NodeIds as initial labels so tie-breaking matches the LDBC spec.
                 let node_ids: Vec<u32> = (0..n).map(|i| view.index_to_node[i] as u32).collect();

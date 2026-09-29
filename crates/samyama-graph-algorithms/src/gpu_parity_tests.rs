@@ -7,7 +7,7 @@
 //! This is a single serial test because it toggles the process-global `SAMYAMA_GPU`
 //! kill-switch to obtain a CPU reference and a GPU result over one graph. No other
 //! test in this crate reads that env var or dispatches to the GPU (all use tiny graphs
-//! below `MIN_GPU_NODES`), so the toggle does not race them.
+//! below 1000 nodes), so the toggle does not race them.
 
 use crate::common::{GraphView, NodeId};
 use crate::{cdlp, count_triangles, local_clustering_coefficient, page_rank, CdlpConfig, PageRankConfig};
@@ -75,7 +75,10 @@ fn cpu_gpu_parity_all_ops() {
         return;
     }
 
-    // n > MIN_GPU_NODES (1000) so the dispatch routes to the GPU.
+    // n = 2000 is below the Metal default threshold (1M, #1402), so pin the threshold
+    // to 1000 for this test; otherwise a Metal host would compare CPU against CPU.
+    // Other tests in this crate use graphs well under 1000 nodes, so this is race-free.
+    std::env::set_var("SAMYAMA_GPU_MIN_NODES", "1000");
     let view = build_graph(2000, 10);
 
     // Force the CPU path with the kill-switch and capture references.
@@ -96,6 +99,7 @@ fn cpu_gpu_parity_all_ops() {
     let lcc_gpu = local_clustering_coefficient(&view);
     let tri_gpu = count_triangles(&view);
     let cdlp_gpu = cdlp(&view, &CdlpConfig { max_iterations: 20 });
+    std::env::remove_var("SAMYAMA_GPU_MIN_NODES");
 
     // PageRank — LDBC 6-dp tolerance (parallel reduction order differs; not bit-exact).
     for (id, &c) in &pr_cpu {

@@ -188,7 +188,7 @@ pub fn local_clustering_coefficient_with(
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
     #[cfg(feature = "gpu")]
     {
-        if n > crate::gpu_dispatch::min_gpu_nodes() && samyama_gpu::gpu_available() {
+        if crate::gpu_dispatch::should_dispatch_gpu(n) {
             {
                 match samyama_gpu::gpu_lcc(
                     n,

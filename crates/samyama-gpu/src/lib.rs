@@ -25,6 +25,7 @@ pub mod pagerank;
 pub mod pca;
 pub mod runtime;
 pub mod sort;
+pub mod threshold;
 pub mod topology;
 pub mod unified;
 pub mod vector;
@@ -57,7 +58,11 @@ pub use sort::gpu_argsort_f64;
 pub use topology::gpu_count_triangles;
 pub use vector::{gpu_batch_cosine, gpu_batch_inner_product, GpuVectorIndex, VectorMetric};
 
-/// Minimum node count to use GPU acceleration (below this, CPU is faster)
+/// Historical minimum node count for GPU dispatch, tuned on an RTX 4050 laptop GPU.
+///
+/// This is no longer the effective default on every backend: see
+/// [`threshold::default_min_gpu_nodes`], which keeps it for CUDA and for backends
+/// that have not been measured, and uses ~1M nodes for wgpu on Metal (#1402).
 pub const MIN_GPU_NODES: usize = 1000;
 
 /// Minimum vector batch size to use GPU (below this, CPU is faster)
