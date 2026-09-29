@@ -45,13 +45,13 @@ impl Server {
 
     async fn query(&self, q: &str) -> RespValue {
         self.handler
-            .handle_command(&cmd(&["GRAPH.QUERY", "default", q]), &self.store)
+            .handle_command(&cmd(&["GRAPH.QUERY", "default", q]), &self.store, None)
             .await
     }
 
     async fn delete(&self, graph: &str) -> RespValue {
         self.handler
-            .handle_command(&cmd(&["GRAPH.DELETE", graph]), &self.store)
+            .handle_command(&cmd(&["GRAPH.DELETE", graph]), &self.store, None)
             .await
     }
 

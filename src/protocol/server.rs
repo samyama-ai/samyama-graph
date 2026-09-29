@@ -452,21 +452,95 @@ mod tests {
         matches!(v, RespValue::Error(_))
     }
 
+    /// sha256("test"), as a credential file stores it.
+    const TEST_DIGEST: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    fn creds(lines: &[&str]) -> Vec<crate::auth::Credential> {
+        lines
+            .iter()
+            .map(|l| crate::auth::Credential::parse(l).unwrap().unwrap())
+            .collect()
+    }
+
+    /// #1328: with credentials configured, nothing but AUTH and PING answers
+    /// before a connection authenticates.
+    #[tokio::test]
+    async fn an_unauthenticated_connection_gets_only_auth_and_ping() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let c = creds(&[&format!("svc:{TEST_DIGEST}")]);
+        let mut txn = ConnTxn::default();
+        for q in [
+            cmd(&["GRAPH.QUERY", "default", "RETURN 1"]),
+            cmd(&["GRAPH.LIST"]),
+            cmd(&["INFO"]),
+            cmd(&["GRAPH.BEGIN"]),
+        ] {
+            let r = respond(&handler, &q, &store, &mut txn, Some(&c)).await;
+            assert!(matches!(&r, RespValue::Error(e) if e.starts_with("NOAUTH")), "{q:?} answered {r:?}");
+        }
+        assert!(!is_error(&respond(&handler, &cmd(&["PING"]), &store, &mut txn, Some(&c)).await));
+    }
+
+    /// #1328: the file stores sha256(token). Presenting that digest must not
+    /// log in, or reading the file is as good as holding the token.
+    #[tokio::test]
+    async fn auth_takes_the_token_not_the_digest_stored_for_it() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = CommandHandler::new(None);
+        let c = creds(&[&format!("svc:{TEST_DIGEST}")]);
+        let mut txn = ConnTxn::default();
+        let r = respond(&handler, &cmd(&["AUTH", "svc", TEST_DIGEST]), &store, &mut txn, Some(&c)).await;
+        assert!(is_error(&r), "the stored digest was accepted as a password");
+        assert!(txn.authenticated_as.is_none());
+        let r = respond(&handler, &cmd(&["AUTH", "svc", "test"]), &store, &mut txn, Some(&c)).await;
+        assert!(!is_error(&r), "{r:?}");
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]), &store, &mut txn, Some(&c)).await;
+        assert!(!is_error(&r), "a role-less (admin) credential could not write: {r:?}");
+    }
+
+    /// #1328: a Read credential runs reads, and is refused a write on every
+    /// path a write can take -- a query, a transaction, and GRAPH.DELETE.
+    #[tokio::test]
+    async fn a_read_credential_cannot_write_by_any_command() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        store.write().await.create_node("Keep");
+        let handler = CommandHandler::new(None);
+        let c = creds(&[&format!("ro:{TEST_DIGEST}:roles=read")]);
+        let mut txn = ConnTxn::default();
+        assert!(!is_error(&respond(&handler, &cmd(&["AUTH", "ro", "test"]), &store, &mut txn, Some(&c)).await));
+
+        let read = cmd(&["GRAPH.QUERY", "default", "MATCH (n) RETURN count(n)"]);
+        assert!(!is_error(&respond(&handler, &read, &store, &mut txn, Some(&c)).await));
+        for w in [
+            cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]),
+            cmd(&["GRAPH.DELETE", "default"]),
+        ] {
+            let r = respond(&handler, &w, &store, &mut txn, Some(&c)).await;
+            assert!(matches!(&r, RespValue::Error(e) if e.contains("Write")), "{w:?} answered {r:?}");
+        }
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, Some(&c)).await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]), &store, &mut txn, Some(&c)).await;
+        assert!(is_error(&r), "a write ran inside a transaction: {r:?}");
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, Some(&c)).await;
+        assert_eq!(store.read().await.node_count(), 1, "the store changed under a read-only credential");
+    }
+
     #[tokio::test]
     async fn a_rolled_back_transaction_leaves_nothing_and_a_committed_one_stays() {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
 
-        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await));
-        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn).await;
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await));
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
-        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await));
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
         assert_eq!(store.read().await.node_count(), 0, "a rolled-back CREATE survived");
 
-        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
-        respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn).await;
-        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await));
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
+        respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await));
         assert_eq!(store.read().await.node_count(), 1, "a committed CREATE was lost");
     }
 
@@ -475,9 +549,9 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
-        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
         assert!(store.try_read().is_err(), "another reader got in during a transaction");
-        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
         assert!(store.try_read().is_ok(), "the lock was not released");
     }
 
@@ -488,17 +562,17 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
-        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
         let r = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            respond(&handler, &cmd(&["GRAPH.LIST"]), &store, &mut txn),
+            respond(&handler, &cmd(&["GRAPH.LIST"]), &store, &mut txn, None),
         )
         .await
         .expect("GRAPH.LIST inside a transaction deadlocked");
         assert!(is_error(&r));
-        let pong = respond(&handler, &cmd(&["PING"]), &store, &mut txn).await;
+        let pong = respond(&handler, &cmd(&["PING"]), &store, &mut txn, None).await;
         assert!(!is_error(&pong), "PING was refused inside a transaction");
-        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
     }
 
     #[tokio::test]
@@ -506,13 +580,13 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
-        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await));
-        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
-        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await));
-        let r = respond(&handler, &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:T)"]), &store, &mut txn).await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await));
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await));
+        let r = respond(&handler, &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:T)"]), &store, &mut txn, None).await;
         assert!(is_error(&r), "RO_QUERY ran a write inside a transaction");
-        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await;
-        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn).await));
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
     }
 
     #[tokio::test]
@@ -524,7 +598,7 @@ mod tests {
         let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let _ = handle_connection(socket, s, h, None, None, None).await;
+            let _ = handle_connection(socket, s, h, None, None, None, None).await;
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         let send = |parts: &[&str]| {
@@ -573,7 +647,7 @@ mod tests {
         let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let _ = handle_connection(socket, s, h, None, None, None).await;
+            let _ = handle_connection(socket, s, h, None, None, None, None).await;
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -649,7 +723,7 @@ mod tests {
         let handler = CommandHandler::new(Some(Arc::clone(&pm)));
         let mut txn = ConnTxn::default();
 
-        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn).await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
         let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
         // The failure is injected, not provoked with a `max_nodes: Some(1)`
@@ -658,11 +732,11 @@ mod tests {
         // measuring admission control instead of the durability path it is for
         // (#1483). `fail_next_apply_for_test` fires once, so the commit's apply
         // fails and the repair that follows it succeeds.
-        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn).await;
-        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn).await;
+        respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
         pm.fail_next_apply_for_test();
-        let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn).await;
+        let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await;
         assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
 
         let guard = store.read().await;
@@ -843,7 +917,7 @@ mod tests {
         });
 
         let (socket, _peer) = listener.accept().await.unwrap();
-        let result = handle_connection(socket, store, handler, None, None, None).await;
+        let result = handle_connection(socket, store, handler, None, None, None, None).await;
         assert!(result.is_ok());
 
         client_task.await.unwrap();
@@ -872,7 +946,7 @@ mod tests {
         });
 
         let (socket, _peer) = listener.accept().await.unwrap();
-        let result = handle_connection(socket, store, handler, None, None, None).await;
+        let result = handle_connection(socket, store, handler, None, None, None, None).await;
         assert!(result.is_ok());
 
         client_task.await.unwrap();
@@ -925,7 +999,7 @@ mod tests {
         });
 
         let (socket, _peer) = listener.accept().await.unwrap();
-        let result = handle_connection(socket, store, handler, None, None, None).await;
+        let result = handle_connection(socket, store, handler, None, None, None, None).await;
         // Connection may close after error, which is still OK
         assert!(result.is_ok());
 
@@ -991,7 +1065,7 @@ mod tests {
         });
 
         let (socket, _peer) = listener.accept().await.unwrap();
-        let result = handle_connection(socket, store, handler, None, None, None).await;
+        let result = handle_connection(socket, store, handler, None, None, None, None).await;
         assert!(result.is_ok());
 
         client_task.await.unwrap();
@@ -1011,7 +1085,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let (socket, _peer) = listener.accept().await.unwrap();
             // handle_connection returns Ok on clean disconnect (n=0)
-            let _result = handle_connection(socket, server_store, server_handler, None, None, None).await;
+            let _result = handle_connection(socket, server_store, server_handler, None, None, None, None).await;
         });
 
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();

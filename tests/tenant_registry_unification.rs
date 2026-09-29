@@ -55,7 +55,7 @@ fn resp_graph_list(handler: &CommandHandler, store: &Arc<RwLock<GraphStore>>) ->
         RespValue::BulkString(Some(b"GRAPH.LIST".to_vec())),
     ]);
     let result = tokio::task::block_in_place(|| {
-        rt.block_on(handler.handle_command(&cmd, store))
+        rt.block_on(handler.handle_command(&cmd, store, None))
     });
     match result {
         RespValue::Array(items) => items

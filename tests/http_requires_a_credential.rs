@@ -387,3 +387,90 @@ fn a_malformed_credential_file_is_an_error_not_a_skipped_line() {
     assert_eq!(ok[0].name, "ops");
     assert_eq!(ok[1].name, "ci");
 }
+
+// ---- Roles and tenant binding (#1328) ----
+
+fn role_credentials(line_suffix: &str) -> Vec<Credential> {
+    let body = format!("ops:{}{line_suffix}\n", digest_of(TOKEN));
+    read_credentials(&creds_file(&body)).expect("parse")
+}
+
+fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+fn query(q: &str) -> Request<Body> {
+    post_json("/api/query", serde_json::json!({ "query": q }))
+}
+
+#[tokio::test]
+async fn a_line_with_no_roles_can_still_do_everything() {
+    // Files written before roles existed have no `roles=`. They must keep the
+    // access they had, or the upgrade refuses every request they send.
+    let creds = role_credentials("");
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds), query("MATCH (n) RETURN n")).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_read_credential_reads_and_is_refused_a_write() {
+    let creds = role_credentials(":roles=read");
+    assert_eq!(status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::FORBIDDEN);
+    let export = post_json(
+        "/api/query/export",
+        serde_json::json!({ "query": "CREATE (:T) RETURN 1", "format": "csv" }),
+    );
+    assert_eq!(status_of(app(creds), export).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn every_mutating_route_needs_more_than_read() {
+    // The role floor is by route, before any handler runs. A read credential
+    // gets 403 on each of these whatever the body says.
+    let creds = role_credentials(":roles=read");
+    for path in [
+        "/api/import/csv",
+        "/api/import/json",
+        "/api/import/parquet",
+        "/api/snapshot/import",
+        "/api/enrich",
+        "/api/enrich/policy",
+        "/api/vector/indexes",
+        "/api/tenants",
+    ] {
+        let s = status_of(app(creds.clone()), post_json(path, serde_json::json!({}))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path} let a read credential through");
+    }
+    let s = status_of(app(creds), get("/api/tenants", Some(TOKEN))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "tenant listing is admin-only");
+}
+
+#[tokio::test]
+async fn a_write_credential_writes_but_cannot_manage_tenants() {
+    let creds = role_credentials(":roles=write");
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await, StatusCode::OK);
+    let s = status_of(app(creds), post_json("/api/snapshot/import", serde_json::json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_tenant_bound_credential_cannot_address_another_graph() {
+    let creds = role_credentials(":tenant=acme");
+    let r = post_json("/api/query", serde_json::json!({ "query": "RETURN 1", "graph": "default" }));
+    assert_eq!(status_of(app(creds), r).await, StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn a_misspelt_role_stops_the_server_from_starting() {
+    let body = format!("ops:{}:roles=writ\n", digest_of(TOKEN));
+    let e = read_credentials(&creds_file(&body)).expect_err("a typo must not parse");
+    assert!(e.contains("writ"), "{e}");
+}

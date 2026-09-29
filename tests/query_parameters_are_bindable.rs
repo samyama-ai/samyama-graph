@@ -265,7 +265,7 @@ async fn graph_query(
         args.push(bulk(v));
     }
     handler
-        .handle_command(&RespValue::Array(args), store)
+        .handle_command(&RespValue::Array(args), store, None)
         .await
 }
 
@@ -326,7 +326,7 @@ async fn resp_rejects_an_odd_trailing_argument() {
         bulk("RETURN $x AS x"),
         bulk("x"),
     ];
-    let reply = h.handle_command(&RespValue::Array(args), &store).await;
+    let reply = h.handle_command(&RespValue::Array(args), &store, None).await;
     match reply {
         RespValue::Error(e) => assert!(
             e.contains("pair"),
