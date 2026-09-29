@@ -187,6 +187,57 @@ impl RemoteClient {
         }
     }
 
+    /// Translate a natural-language question into Cypher (`POST /api/nlq`, #438).
+    ///
+    /// Returns the generated query; it does **not** run it. The server keeps
+    /// translation side-effect free and leaves execution to the caller, so a
+    /// caller that wants results passes the returned Cypher to
+    /// [`SamyamaClient::query_readonly`]. The server refuses any generated
+    /// query that contains a write operation before it is returned.
+    ///
+    /// The LLM provider is chosen by the server (`NLQ_PROVIDER`), not the
+    /// client. A server with no provider configured, or one whose model
+    /// produced an unsafe query, answers with an error, which arrives here as
+    /// [`SamyamaError::QueryError`] carrying the server's message.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use samyama_sdk::{RemoteClient, SamyamaClient};
+    /// # async fn f(client: RemoteClient) -> samyama_sdk::SamyamaResult<()> {
+    /// let cypher = client.nlq("Who does Alice know?").await?;
+    /// let result = client.query_readonly("default", &cypher).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn nlq(&self, question: &str) -> SamyamaResult<String> {
+        let url = format!("{}/api/nlq", self.http_base_url);
+        let body = serde_json::json!({ "question": question });
+
+        // Translation has no side effects on the server, so the retry policy
+        // that applies to queries (connection and timeout failures only) is
+        // safe here too.
+        let response = self
+            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .await?;
+
+        let status = response.status();
+        let payload: serde_json::Value = response.json().await
+            .unwrap_or_else(|_| serde_json::json!({"error": "Unknown error"}));
+        if status.is_success() {
+            payload.get("cypher")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| SamyamaError::ProtocolError(
+                    "/api/nlq response has no `cypher` string".to_string()
+                ))
+        } else {
+            let msg = payload.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            Err(SamyamaError::QueryError(msg))
+        }
+    }
+
     /// Execute a POST request to /api/query
     async fn post_query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);

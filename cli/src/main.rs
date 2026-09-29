@@ -46,6 +46,23 @@ enum Commands {
         #[arg(long)]
         readonly: bool,
     },
+    /// Translate a natural-language question into Cypher (NLQ)
+    ///
+    /// Prints the generated query. With `--execute` it is then run read-only
+    /// and the results printed too. The server picks the LLM provider
+    /// (`NLQ_PROVIDER`) and refuses any generated query that writes.
+    Nlq {
+        /// The question, in plain language
+        question: String,
+
+        /// Run the generated Cypher (read-only) and print its results
+        #[arg(long)]
+        execute: bool,
+
+        /// Graph name, used with --execute
+        #[arg(long, default_value = "default")]
+        graph: String,
+    },
     /// Get server status
     Status,
     /// Ping the server
@@ -80,6 +97,9 @@ async fn main() {
     let result = match cli.command {
         Commands::Query { cypher, graph, readonly } => {
             run_query(&client, &graph, &cypher, readonly, &cli.format).await
+        }
+        Commands::Nlq { question, execute, graph } => {
+            run_nlq(&client, &graph, &question, execute, &cli.format).await
         }
         Commands::Status => run_status(&client, &cli.format).await,
         Commands::Ping => run_ping(&client, &cli.format).await,
@@ -165,6 +185,41 @@ async fn run_query(
 
             println!("{}", table);
             println!("{} row(s)", result.records.len());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_nlq(
+    client: &RemoteClient,
+    graph: &str,
+    question: &str,
+    execute: bool,
+    format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cypher = client.nlq(question).await?;
+
+    match format {
+        // One JSON document, not the Cypher followed by a second document for
+        // the results: a script parsing stdout gets exactly one value.
+        OutputFormat::Json => {
+            let mut out = serde_json::json!({ "question": question, "cypher": cypher });
+            if execute {
+                let result = client.query_readonly(graph, &cypher).await?;
+                out["result"] = serde_json::to_value(&result)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        _ => {
+            if execute {
+                // The query goes to stderr so that the results on stdout stay
+                // valid CSV (or a clean table) for whatever reads them.
+                eprintln!("Cypher: {}", cypher);
+                run_query(client, graph, &cypher, true, format).await?;
+            } else {
+                println!("{}", cypher);
+            }
         }
     }
 
@@ -458,6 +513,42 @@ mod cli_tests {
     }
 
     #[test]
+    fn nlq_takes_a_question_and_defaults_to_translate_only() {
+        let cli = Cli::try_parse_from(["samyama", "nlq", "Who knows Alice?"]).expect("parse");
+        match cli.command {
+            Commands::Nlq { question, execute, graph } => {
+                assert_eq!(question, "Who knows Alice?");
+                // Running generated Cypher is opt-in.
+                assert!(!execute);
+                assert_eq!(graph, "default");
+            }
+            _ => panic!("parsed as a different subcommand"),
+        }
+    }
+
+    #[test]
+    fn nlq_accepts_execute_and_graph() {
+        let cli = Cli::try_parse_from([
+            "samyama", "--format", "json", "nlq", "--execute", "--graph", "social", "top people",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.format, OutputFormat::Json));
+        match cli.command {
+            Commands::Nlq { question, execute, graph } => {
+                assert_eq!(question, "top people");
+                assert!(execute);
+                assert_eq!(graph, "social");
+            }
+            _ => panic!("parsed as a different subcommand"),
+        }
+    }
+
+    #[test]
+    fn nlq_requires_a_question() {
+        assert!(Cli::try_parse_from(["samyama", "nlq"]).is_err());
+    }
+
+    #[test]
     fn every_subcommand_is_reachable_by_name() {
         // A subcommand that exists in the enum but is not registered would be
         // invisible; `doctor` and `completions` are the new ones and the two
@@ -466,7 +557,7 @@ mod cli_tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        for want in ["query", "status", "ping", "shell", "doctor", "completions"] {
+        for want in ["query", "nlq", "status", "ping", "shell", "doctor", "completions"] {
             assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
     }

@@ -39,3 +39,5 @@ ndarray = "0.15"
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
+# Serves the engine's own HTTP router in-process for the NLQ round-trip test.
+axum = "0.7"

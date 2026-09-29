@@ -4103,6 +4103,7 @@ name = "samyama-sdk"
 version = "1.10.0"
 dependencies = [
  "async-trait",
+ "axum",
  "ndarray",
  "reqwest",
  "samyama",
