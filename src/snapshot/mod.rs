@@ -476,6 +476,125 @@ pub fn peek_header_maybe_encrypted(
     peek_header(encryption::DecryptingReader::new(reader, key, head)?)
 }
 
+/// The dedup keys a store node already carries, as `(key, normalized value)` in the order
+/// the index has always inserted them: per key, the row property and then the column.
+fn existing_dedup_entries(
+    store: &GraphStore,
+    id: NodeId,
+    dedup_keys: &[&str],
+) -> Vec<(String, String)> {
+    let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
+    let mut out = Vec::new();
+    let Some(node) = store.get_node(id) else { return out };
+    for &key in dedup_keys {
+        match node.get_property(key) {
+            Some(PropertyValue::String(s)) => out.push((key.to_string(), normalize_dedup(s))),
+            Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
+            _ => {}
+        }
+        match store.node_columns.get_property(id.as_u64() as usize, key) {
+            PropertyValue::String(s) if !s.is_empty() => {
+                out.push((key.to_string(), normalize_dedup(&s)))
+            }
+            PropertyValue::Integer(i) => out.push((key.to_string(), i.to_string())),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::Cell;
+    thread_local! {
+        /// Store nodes the dedup pre-populate visited on this thread (#316).
+        pub static PREPOPULATE_VISITS: Cell<u64> = const { Cell::new(0) };
+        /// Pre-populate by walking every node under every label: the behaviour before the
+        /// scan was scoped, kept as the reference the differential tests compare against.
+        pub static FORCE_FULL_SCAN: Cell<bool> = const { Cell::new(false) };
+    }
+}
+
+/// Builds an import's dedup index from the store one label at a time, and only for labels
+/// the snapshot carries (#316).
+///
+/// The result must equal indexing every pre-import node under every label it carried,
+/// because that is what decides which nodes merge. A label is indexed at the latest when
+/// the first incoming node carrying it is reached, and at that moment the store's members
+/// of that label are exactly its pre-import members: a created node's labels are all
+/// indexed when it is created, and a merge only adds the incoming node's labels, which were
+/// indexed just before. What *can* have moved is a value: a merge through another label may
+/// have given a dedup key to a node that had none before the import. Such nodes are
+/// remembered as they were (`before_merge`) and indexed from that record.
+///
+/// Insertion order is preserved too: within a label nodes go in ascending id, the order the
+/// full scan visited them, and entries under different labels never collide.
+#[derive(Default)]
+struct DedupPrepopulate {
+    indexed: HashSet<String>,
+    before_merge: HashMap<NodeId, Vec<(String, String)>>,
+}
+
+impl DedupPrepopulate {
+    fn ensure_label_indexed(
+        &mut self,
+        store: &GraphStore,
+        label: &str,
+        dedup_keys: &[&str],
+        dedup_index: &mut HashMap<(String, String, String), NodeId>,
+    ) {
+        if !self.indexed.insert(label.to_string()) {
+            return;
+        }
+        for id in store.node_ids_by_label(&Label::new(label), None) {
+            #[cfg(test)]
+            test_hooks::PREPOPULATE_VISITS.with(|c| c.set(c.get() + 1));
+            let entries = match self.before_merge.get(&id) {
+                Some(e) => e.clone(),
+                None => existing_dedup_entries(store, id, dedup_keys),
+            };
+            for (key, val) in entries {
+                dedup_index.insert((label.to_string(), key, val), id);
+            }
+        }
+    }
+
+    /// Record `eid`'s dedup values before a merge changes them. Only needed while it has a
+    /// label not indexed yet; with a complete header those are labels the snapshot does not
+    /// carry, which are never indexed, so the record is small and usually skipped.
+    fn remember_before_merge(&mut self, store: &GraphStore, eid: NodeId, dedup_keys: &[&str]) {
+        if self.before_merge.contains_key(&eid) {
+            return;
+        }
+        let Some(node) = store.get_node(eid) else { return };
+        if node.labels.iter().all(|l| self.indexed.contains(l.as_str())) {
+            return;
+        }
+        let entries = existing_dedup_entries(store, eid, dedup_keys);
+        self.before_merge.insert(eid, entries);
+    }
+
+    /// Every node under every label, marking all of them indexed. Test reference only.
+    #[cfg(test)]
+    fn index_everything(
+        &mut self,
+        store: &GraphStore,
+        dedup_keys: &[&str],
+        dedup_index: &mut HashMap<(String, String, String), NodeId>,
+    ) {
+        for node in store.all_nodes() {
+            test_hooks::PREPOPULATE_VISITS.with(|c| c.set(c.get() + 1));
+            let entries = existing_dedup_entries(store, node.id, dedup_keys);
+            for label in &node.labels {
+                self.indexed.insert(label.as_str().to_string());
+                for (key, val) in &entries {
+                    dedup_index.insert((label.as_str().to_string(), key.clone(), val.clone()), node.id);
+                }
+            }
+        }
+    }
+}
+
 /// Import with entity deduplication on specified property keys.
 pub fn import_tenant_with_dedup(
     store: &mut GraphStore,
@@ -549,61 +668,38 @@ fn import_tenant_inner(
 
     // Pre-populate dedup index from existing store nodes (only if dedup requested).
     //
-    // Only the labels this snapshot actually contains are indexed, and they are reached
-    // through the label index rather than by walking the whole store. A node whose label
-    // does not appear in the incoming file can never merge with anything in it, so
-    // indexing it is pure cost -- and that cost was O(store) on *every* import, which for
-    // a federation growing 66M -> 266M nodes means re-scanning a store that gets larger
-    // each time and indexing hundreds of millions of nodes that can never match (#316).
+    // Only labels this snapshot actually carries are indexed, reached through the label
+    // index rather than by walking the whole store. A node whose label does not appear in
+    // the incoming file can never merge with anything in it, so indexing it is pure cost
+    // -- and that cost was O(store) on *every* import, which for a federation growing
+    // 66M -> 266M nodes means re-scanning a store that gets larger each time and indexing
+    // hundreds of millions of nodes that can never match (#316).
     //
-    // The header is an exact inventory: `export_tenant` materialises `labels` by scanning
-    // the data it writes, so it cannot drift from the file's contents.
+    // Each node is indexed under every label it carries, not "whichever label iterated
+    // first": a dual-labelled :ChemblTarget:Protein must match on either (#317).
+    //
+    // The header's `labels` is the pre-pass: `export_tenant` materialises it by scanning
+    // the data it writes, so for our own exports it is exact. It is a *hint*, though, not
+    // something correctness rests on. `/api/snapshot/import` accepts any uploaded file, and
+    // a header written by another tool -- or hand-edited, or with `labels: []` -- can omit
+    // a label its nodes carry. Trusting it silently skipped merges the full scan made. So a
+    // label first met in the body that the header did not list is indexed on the spot; see
+    // `DedupPrepopulate` for why that is exactly what the up-front scan would have built.
+    let mut prepop = DedupPrepopulate::default();
     if !dedup_keys.is_empty() {
-    let snapshot_labels: Vec<crate::graph::Label> = header
-        .labels
-        .iter()
-        .map(|l| crate::graph::Label::new(l.as_str()))
-        .collect();
-    for snapshot_label in &snapshot_labels {
-        let label = snapshot_label.as_str().to_string();
-        let node_ids: Vec<NodeId> = store
-            .get_nodes_by_label(snapshot_label)
-            .iter()
-            .map(|n| n.id)
-            .collect();
-        for node_id in node_ids {
-        let Some(node) = store.get_node(node_id) else { continue };
-        // Indexed under this label specifically, not "whichever label iterated first":
-        // `labels` is a set, so "first" is not a stable contract, and a dual-labelled node
-        // such as :ChemblTarget + :Protein could be indexed under either. If the two sides
-        // disagreed the lookup missed and the merge silently did not happen (#317).
-        // Matching now depends on label *intersection*, which is order-independent.
-        {
-        for &key in dedup_keys {
-            // Check node HashMap properties
-            if let Some(val) = node.get_property(key) {
-                let val_str = match val {
-                    PropertyValue::String(s) => normalize_dedup(s),
-                    PropertyValue::Integer(i) => i.to_string(),
-                    _ => continue,
-                };
-                dedup_index.insert((label.clone(), key.to_string(), val_str), node.id);
-            }
-            // Also check ColumnStore
-            let col_val = store.node_columns.get_property(node.id.as_u64() as usize, key);
-            match &col_val {
-                PropertyValue::String(s) if !s.is_empty() => {
-                    dedup_index.insert((label.clone(), key.to_string(), normalize_dedup(s)), node.id);
-                }
-                PropertyValue::Integer(i) => {
-                    dedup_index.insert((label.clone(), key.to_string(), i.to_string()), node.id);
-                }
-                _ => {}
+        #[cfg(test)]
+        let full_scan = test_hooks::FORCE_FULL_SCAN.with(|f| f.get());
+        #[cfg(not(test))]
+        let full_scan = false;
+        if full_scan {
+            // Reference behaviour for the differential tests: every node, every label.
+            #[cfg(test)]
+            prepop.index_everything(store, dedup_keys, &mut dedup_index);
+        } else {
+            for label in &header.labels {
+                prepop.ensure_label_indexed(store, label, dedup_keys, &mut dedup_index);
             }
         }
-        }
-        }
-    }
     } // end if !dedup_keys.is_empty()
 
     for line_result in lines {
@@ -633,6 +729,13 @@ fn import_tenant_inner(
             // is not a label it carries, and using it as one would let two
             // unrelated unlabelled nodes dedup against each other.
             let snap_labels: Vec<String> = snap_node.labels.clone();
+            if !dedup_keys.is_empty() {
+                // A label the header did not list: index its existing nodes now, before
+                // this node can match against (or be registered under) it.
+                for label in &snap_labels {
+                    prepop.ensure_label_indexed(store, label, dedup_keys, &mut dedup_index);
+                }
+            }
             let mut existing_id: Option<NodeId> = None;
             'dedup: for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
@@ -655,6 +758,12 @@ fn import_tenant_inner(
                 // Reuse existing node — remap the ID AND merge properties
                 id_remap.insert(snap_node.id, eid);
                 merged_node_count += 1;
+                // The merge below may add dedup-key values to `eid`. If `eid` also
+                // carries a label not indexed yet, a later on-the-spot index of that label
+                // must see it as it was before this import, not with those additions.
+                if !dedup_keys.is_empty() {
+                    prepop.remember_before_merge(store, eid, dedup_keys);
+                }
 
                 // Merge properties from snapshot into existing node (additive only)
                 for (key, json_val) in &snap_node.props {
@@ -2383,5 +2492,188 @@ mod temporal_snapshot_tests {
     fn a_malformed_temporal_tag_does_not_become_a_plausible_value() {
         let broken = serde_json::json!({"__type": "Date"});          // no `days`
         assert_ne!(json_to_property(&broken), P::Date(0), "must not default to the epoch");
+    }
+}
+
+/// The dedup pre-populate is scoped to the snapshot's labels (#316). These pin that the
+/// scoping changes *how much* is scanned and nothing about *what merges*: every import is
+/// run twice, once scoped and once against the reference full scan, and the resulting
+/// graphs must be identical.
+#[cfg(test)]
+mod dedup_scoped_scan_tests {
+    use super::*;
+    use crate::graph::PropertyValue;
+
+    const KEYS: [&str; 3] = ["k1", "k2", "name"];
+
+    fn node(store: &mut GraphStore, labels: &[&str], props: &[(&str, PropertyValue)]) -> NodeId {
+        let id = store.create_node_with_labels(labels.iter().map(|l| Label::new(*l)));
+        let n = store.get_node_mut(id).unwrap();
+        for (k, v) in props {
+            n.set_property(k.to_string(), v.clone());
+        }
+        id
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.to_string())
+    }
+
+    /// Export `store`, optionally replacing the header's `labels` with `header_labels`.
+    fn snapshot(store: &GraphStore, header_labels: Option<&[&str]>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        export_tenant(store, &mut buf).unwrap();
+        let Some(labels) = header_labels else { return buf };
+        let mut plain = String::new();
+        GzDecoder::new(&buf[..]).read_to_string(&mut plain).unwrap();
+        let (head, rest) = plain.split_once('\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_str(head).unwrap();
+        header["labels"] = serde_json::json!(labels);
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(format!("{header}\n{rest}").as_bytes()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// A graph as data: every node's sorted labels and dedup-relevant properties (row and
+    /// column), and every edge by endpoints and type.
+    fn canon(store: &GraphStore) -> Vec<String> {
+        let mut out = Vec::new();
+        for n in store.all_nodes() {
+            let mut labels: Vec<&str> = n.labels.iter().map(|l| l.as_str()).collect();
+            labels.sort();
+            let mut props = Vec::new();
+            for k in KEYS.iter().chain(["src"].iter()) {
+                let row = n.get_property(k).cloned();
+                let col = store.node_columns.get_property(n.id.as_u64() as usize, k);
+                props.push(format!("{k}={row:?}/{col:?}"));
+            }
+            out.push(format!("n{} {labels:?} {props:?}", n.id.as_u64()));
+            for (_, src, tgt, ty) in store.get_outgoing_edge_targets(n.id) {
+                out.push(format!("e{}-{}->{}", src.as_u64(), ty.as_str(), tgt.as_u64()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn import(store: &mut GraphStore, snap: &[u8], keys: &[&str], full: bool) -> (u64, u64) {
+        test_hooks::FORCE_FULL_SCAN.with(|f| f.set(full));
+        test_hooks::PREPOPULATE_VISITS.with(|c| c.set(0));
+        let stats = import_tenant_with_dedup(store, snap, keys).unwrap();
+        test_hooks::FORCE_FULL_SCAN.with(|f| f.set(false));
+        (stats.merged_count, test_hooks::PREPOPULATE_VISITS.with(|c| c.get()))
+    }
+
+    /// The target store: Proteins, a dual-labelled target, a Gene sharing an accession,
+    /// and a pile of unrelated Articles that also carry the dedup keys.
+    fn base() -> GraphStore {
+        let mut st = GraphStore::new();
+        node(&mut st, &["Protein"], &[("k1", s("P1")), ("src", s("uniprot"))]);
+        node(&mut st, &["Protein", "ChemblTarget"], &[("k1", s(" p2 ")), ("src", s("chembl"))]);
+        // Has k1 but no k2: a merge through :Protein gives it a k2, which the :Target index
+        // must not see, because the full scan would not have (see `DedupPrepopulate`).
+        node(&mut st, &["Protein", "Target"], &[("k1", s("P3"))]);
+        node(&mut st, &["Gene"], &[("k1", s("P1")), ("k2", PropertyValue::Integer(7))]);
+        node(&mut st, &["Country"], &[("name", s("India"))]);
+        for i in 0..200 {
+            node(&mut st, &["Article"], &[("k1", s(&format!("P{i}"))), ("name", s("India"))]);
+        }
+        st
+    }
+
+    /// The incoming snapshot, exercising every label shape the scoping could get wrong.
+    fn incoming() -> GraphStore {
+        let mut st = GraphStore::new();
+        let a = node(&mut st, &["Protein"], &[("k1", s("p1")), ("src", s("snap"))]);
+        let b = node(&mut st, &["ChemblTarget"], &[("k1", s("P2"))]);
+        node(&mut st, &["Protein"], &[("k1", s("P3")), ("k2", s("v"))]);
+        node(&mut st, &["Target"], &[("k2", s("v"))]);
+        node(&mut st, &["Gene"], &[("k2", PropertyValue::Integer(7))]);
+        let c = node(&mut st, &["Country"], &[("name", s(" INDIA"))]);
+        node(&mut st, &["Disease"], &[("name", s("India"))]);
+        node(&mut st, &[], &[("name", s("India"))]);
+        // an intra-snapshot duplicate
+        node(&mut st, &["Disease"], &[("name", s("india"))]);
+        st.create_edge(a, c, "IN").unwrap();
+        st.create_edge(b, a, "SAME_AS").unwrap();
+        st
+    }
+
+    #[test]
+    fn scoped_prepopulate_merges_exactly_like_the_full_scan() {
+        let src = incoming();
+        let all = ["Protein", "ChemblTarget", "Target", "Gene", "Country", "Disease"];
+        let headers: [(&str, Option<&[&str]>); 5] = [
+            ("as exported", None),
+            ("empty (foreign writer)", Some(&[])),
+            ("missing the dual-labelled side", Some(&["Protein", "Gene", "Country", "Disease"])),
+            ("missing :Target", Some(&["Protein", "ChemblTarget", "Gene", "Country", "Disease"])),
+            ("over-inclusive", Some(&[&all[..], &["Article", "Nope"]].concat())),
+        ];
+        let key_sets: [&[&str]; 3] = [&["k1"], &["k1", "k2"], &KEYS];
+        for (what, header) in headers {
+            let snap = snapshot(&src, header);
+            for keys in key_sets {
+                let mut scoped = base();
+                let mut full = base();
+                let (m_scoped, _) = import(&mut scoped, &snap, keys, false);
+                let (m_full, _) = import(&mut full, &snap, keys, true);
+                assert_eq!(m_scoped, m_full, "header {what}, keys {keys:?}: merged count");
+                assert_eq!(canon(&scoped), canon(&full), "header {what}, keys {keys:?}: graph");
+                // and a second import on top, as federation does
+                let (m_scoped, _) = import(&mut scoped, &snap, keys, false);
+                let (m_full, _) = import(&mut full, &snap, keys, true);
+                assert_eq!(m_scoped, m_full, "header {what}, keys {keys:?}: re-import merges");
+                assert_eq!(canon(&scoped), canon(&full), "header {what}, keys {keys:?}: re-import");
+            }
+        }
+    }
+
+    #[test]
+    fn a_merge_does_not_leak_into_a_label_indexed_later() {
+        // The case `before_merge` exists for, pinned on its own: header missing :Target, so
+        // :Target is indexed only when the body reaches it -- after the :Protein merge gave
+        // the shared node a k2 it did not have before the import.
+        let snap = snapshot(&incoming(), Some(&["Protein"]));
+        let mut scoped = base();
+        let mut full = base();
+        let (m_scoped, _) = import(&mut scoped, &snap, &["k1", "k2"], false);
+        let (m_full, _) = import(&mut full, &snap, &["k1", "k2"], true);
+        assert_eq!(m_scoped, m_full);
+        let targets = |st: &GraphStore| st.get_nodes_by_label(&Label::new("Target")).len();
+        assert_eq!(targets(&scoped), targets(&full));
+        assert_eq!(targets(&scoped), 2, "the incoming :Target {{k2:v}} must not merge");
+    }
+
+    #[test]
+    fn the_prepopulate_visits_only_labels_the_snapshot_carries() {
+        // One :Country in the snapshot; the store holds a :Country and thousands of nodes
+        // under labels the snapshot does not carry. Before #316 every one of them was
+        // visited on every import.
+        let big = || {
+            let mut st = base();
+            for i in 0..5_000 {
+                node(&mut st, &["Occurrence"], &[("name", s(&format!("o{i}")))]);
+            }
+            st
+        };
+        let mut st = big();
+        let total = st.all_nodes().len() as u64;
+        let mut src = GraphStore::new();
+        node(&mut src, &["Country"], &[("name", s("India"))]);
+        let snap = snapshot(&src, None);
+
+        let mut reference = big();
+        let (_, full_visits) = import(&mut reference, &snap, &["name"], true);
+        let (merged, visits) = import(&mut st, &snap, &["name"], false);
+
+        assert_eq!(merged, 1);
+        assert_eq!(full_visits, total, "the reference walks the whole store");
+        assert_eq!(visits, 1, "only the one existing :Country should be visited");
+
+        // Same bound when the header does not name the label and it is found in the body.
+        let mut st2 = base();
+        let (merged, visits) = import(&mut st2, &snapshot(&src, Some(&[])), &["name"], false);
+        assert_eq!((merged, visits), (1, 1));
     }
 }

@@ -161,3 +161,36 @@ fn labels_absent_from_the_snapshot_are_not_indexed_or_merged() {
         .len();
     assert_eq!(articles, 5001);
 }
+
+/// Replace the header's `labels` array, leaving the body as exported.
+fn with_header_labels(snapshot: &[u8], labels: &[&str]) -> Vec<u8> {
+    let mut plain = String::new();
+    flate2::read::GzDecoder::new(snapshot)
+        .read_to_string(&mut plain)
+        .expect("decode");
+    let (head, rest) = plain.split_once('\n').expect("header line");
+    let mut header: serde_json::Value = serde_json::from_str(head).expect("header json");
+    header["labels"] = serde_json::json!(labels);
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(format!("{header}\n{rest}").as_bytes()).expect("encode");
+    enc.finish().expect("finish")
+}
+
+#[test]
+fn a_header_that_omits_a_label_still_merges_on_it() {
+    // The pre-populate is scoped to the header's `labels` (#316). `export_tenant` writes
+    // that list exactly, but `/api/snapshot/import` takes any uploaded file, and a header
+    // from another writer can leave labels out -- `[]` included. The label is then met in
+    // the body, and must be indexed there rather than silently never merging.
+    let exported = snapshot_with_label_order("[\"ChemblTarget\",\"Protein\"]");
+    for header in [&["ChemblTarget"][..], &[][..]] {
+        let snapshot = with_header_labels(&exported, header);
+        let mut store = uniprot_side();
+
+        let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"])
+            .expect("import");
+
+        assert_eq!(stats.merged_count, 1, "header {header:?}: must merge on :Protein");
+        assert_eq!(store.all_nodes().len(), 1, "header {header:?}: no duplicate");
+    }
+}
