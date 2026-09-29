@@ -15,12 +15,35 @@
 //! record a "safe point" — all data before the checkpoint is known to be persisted to
 //! RocksDB, so the WAL can be truncated to prevent unbounded growth.
 //!
-//! ## CRC32 checksums
+//! ## Record format and checksums
 //!
-//! Each WAL record includes a CRC32 checksum computed over its payload. This detects
-//! corruption from hardware errors (bit flips in storage or memory). During recovery,
-//! if a checksum mismatch is found, the corrupt entry is detected and skipped — this
-//! is safer than silently applying corrupted data.
+//! Every record on disk is a 4-byte little-endian length word followed by the
+//! record body. There are two body formats, told apart by the top bit of the
+//! length word (#1311):
+//!
+//! - **Format 1** (top bit set; everything this code writes). The low 31 bits
+//!   are the body length. The body is
+//!   `[format: u8 = 1][sequence: u64 LE][bincode(entry)][crc: u32 LE]`, and
+//!   `crc` is CRC-32 (IEEE, via `crc32fast`) over every body byte before it —
+//!   the format byte, the sequence number and the entry. The CRC is checked
+//!   **before** the entry is decoded.
+//! - **Legacy** (top bit clear; written before #1311). The body is
+//!   `bincode(WalRecord { sequence, entry, checksum })`, where `checksum` is
+//!   an XOR of the entry's bytes: it keeps only 8 bits, does not cover the
+//!   sequence number, and cannot see the same bit flipped in two bytes. It is
+//!   still verified, so old WALs replay exactly as they did.
+//!
+//! A single file may hold both: a process that restarts on an old WAL appends
+//! format-1 records after the legacy ones.
+//!
+//! During replay a checksum mismatch **stops** the replay with
+//! [`WalError::Corruption`] carrying the byte offset of the damaged record in
+//! its file. Records before it have already been handed to the callback; the
+//! damaged record and everything after it are not. It is not skipped: a record
+//! written in full and then damaged means a damaged disk, and applying the
+//! records after a hole could apply a write whose predecessor was lost. A
+//! record that is *short* (the file ends inside it) is a torn tail from a
+//! write that never finished, and replay stops there cleanly instead.
 //!
 //! ## Sequence numbers
 //!
@@ -56,7 +79,8 @@ pub enum WalError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] bincode::Error),
 
-    /// Corruption detected
+    /// A record written in full failed its checksum. The value is the byte
+    /// offset of the record's length word within its WAL file.
     #[error("WAL corruption detected at offset {0}")]
     Corruption(u64),
 
@@ -121,38 +145,83 @@ pub enum WalEntry {
     },
 }
 
-/// WAL record with metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WalRecord {
-    /// Sequence number (monotonically increasing)
+/// Top bit of the length word: set on format-1 records, clear on legacy ones.
+const FORMAT_FLAG: u32 = 0x8000_0000;
+/// The body-format byte of records written by this code.
+const FORMAT_V1: u8 = 1;
+/// Format byte + sequence number.
+const V1_HEADER_LEN: usize = 1 + 8;
+/// Trailing CRC-32.
+const V1_CRC_LEN: usize = 4;
+
+/// A record as written before #1311: read-only, kept so old WALs replay.
+#[derive(Debug, Deserialize)]
+struct LegacyWalRecord {
     sequence: u64,
-    /// Entry data
     entry: WalEntry,
-    /// CRC32 checksum for corruption detection
+    /// XOR of the entry's bincode bytes -- not a CRC, despite what the docs
+    /// used to say. Only the low 8 bits can ever be set.
     checksum: u32,
 }
 
-impl WalRecord {
-    fn new(sequence: u64, entry: WalEntry) -> Self {
-        let mut record = Self {
-            sequence,
-            entry,
-            checksum: 0,
-        };
-        // Calculate checksum
-        record.checksum = record.calculate_checksum();
-        record
-    }
-
-    fn calculate_checksum(&self) -> u32 {
-        // Simple checksum: XOR all bytes
-        let bytes = bincode::serialize(&self.entry).unwrap_or_default();
-        bytes.iter().fold(0u32, |acc, &b| acc ^ (b as u32))
-    }
-
+impl LegacyWalRecord {
     fn verify_checksum(&self) -> bool {
-        self.checksum == self.calculate_checksum()
+        let bytes = bincode::serialize(&self.entry).unwrap_or_default();
+        self.checksum == bytes.iter().fold(0u32, |acc, &b| acc ^ (b as u32))
     }
+}
+
+/// Encode a format-1 record body (without the length word).
+fn encode_v1(sequence: u64, entry: &WalEntry) -> WalResult<Vec<u8>> {
+    let payload = bincode::serialize(entry)?;
+    let mut body = Vec::with_capacity(V1_HEADER_LEN + payload.len() + V1_CRC_LEN);
+    body.push(FORMAT_V1);
+    body.extend_from_slice(&sequence.to_le_bytes());
+    body.extend_from_slice(&payload);
+    let crc = crc32fast::hash(&body);
+    body.extend_from_slice(&crc.to_le_bytes());
+    Ok(body)
+}
+
+/// Why a record body could not be turned into an entry.
+enum DecodeError {
+    /// The checksum does not match: the bytes were damaged after being written.
+    Checksum,
+    /// Anything else (unknown format byte, undecodable entry).
+    Other(WalError),
+}
+
+/// Decode a record body. `versioned` is the length word's top bit.
+fn decode_body(versioned: bool, body: &[u8]) -> Result<(u64, WalEntry), DecodeError> {
+    if !versioned {
+        let record: LegacyWalRecord =
+            bincode::deserialize(body).map_err(|e| DecodeError::Other(e.into()))?;
+        if !record.verify_checksum() {
+            return Err(DecodeError::Checksum);
+        }
+        return Ok((record.sequence, record.entry));
+    }
+
+    if body.len() < V1_HEADER_LEN + V1_CRC_LEN {
+        // Too short to carry its own checksum: treat as damage, not as an
+        // unknown format -- a well-formed writer never produces this.
+        return Err(DecodeError::Checksum);
+    }
+    let (covered, crc_bytes) = body.split_at(body.len() - V1_CRC_LEN);
+    let stored = u32::from_le_bytes(crc_bytes.try_into().expect("4 bytes"));
+    if crc32fast::hash(covered) != stored {
+        return Err(DecodeError::Checksum);
+    }
+    if covered[0] != FORMAT_V1 {
+        return Err(DecodeError::Other(WalError::InvalidEntry(format!(
+            "unknown WAL record format {}",
+            covered[0]
+        ))));
+    }
+    let sequence = u64::from_le_bytes(covered[1..V1_HEADER_LEN].try_into().expect("8 bytes"));
+    let entry: WalEntry = bincode::deserialize(&covered[V1_HEADER_LEN..])
+        .map_err(|e| DecodeError::Other(e.into()))?;
+    Ok((sequence, entry))
 }
 
 /// Write-Ahead Log manager
@@ -235,11 +304,15 @@ impl Wal {
         self.sequence += 1;
         let sequence = self.sequence;
 
-        // Create WAL record
-        let record = WalRecord::new(sequence, entry);
-
-        // Serialize
-        let data = bincode::serialize(&record)?;
+        // Encode as a format-1 record (see the module docs).
+        let data = encode_v1(sequence, &entry)?;
+        if data.len() as u64 >= FORMAT_FLAG as u64 {
+            self.sequence -= 1;
+            return Err(WalError::InvalidEntry(format!(
+                "WAL record of {} bytes exceeds the 2 GiB record limit",
+                data.len()
+            )));
+        }
 
         // Ensure we have an open file
         if self.current_file.is_none() {
@@ -249,7 +322,7 @@ impl Wal {
         // Write to file
         if let Some(ref mut file) = self.current_file {
             // Write length prefix (4 bytes)
-            file.write_all(&(data.len() as u32).to_le_bytes())?;
+            file.write_all(&(data.len() as u32 | FORMAT_FLAG).to_le_bytes())?;
             // Write data
             file.write_all(&data)?;
 
@@ -294,6 +367,8 @@ impl Wal {
             let file = File::open(&file_path)?;
             let mut reader = BufReader::new(file);
             let mut buf = Vec::new();
+            // Byte offset of the current record's length word in this file.
+            let mut offset = 0u64;
 
             loop {
                 // Read length prefix
@@ -304,7 +379,9 @@ impl Wal {
                     Err(e) => return Err(e.into()),
                 }
 
-                let len = u32::from_le_bytes(len_bytes) as usize;
+                let word = u32::from_le_bytes(len_bytes);
+                let versioned = word & FORMAT_FLAG != 0;
+                let len = (word & !FORMAT_FLAG) as usize;
 
                 // Read record data.
                 //
@@ -341,24 +418,35 @@ impl Wal {
                     Err(e) => return Err(e.into()),
                 }
 
-                // Deserialize
-                let record: WalRecord = bincode::deserialize(&buf)?;
+                let record_offset = offset;
+                offset += 4 + len as u64;
 
-                // Verify checksum
-                if !record.verify_checksum() {
-                    warn!("WAL corruption detected at sequence {}", record.sequence);
-                    return Err(WalError::Corruption(record.sequence));
-                }
+                // Verify the checksum and decode. Format 1 checks the CRC
+                // before decoding, so damage anywhere in the body -- sequence
+                // included -- is reported as corruption.
+                let (sequence, entry) = match decode_body(versioned, &buf) {
+                    Ok(decoded) => decoded,
+                    Err(DecodeError::Checksum) => {
+                        warn!(
+                            "WAL {}: checksum mismatch in the record at byte {}; \
+                             stopping replay",
+                            file_path.display(),
+                            record_offset
+                        );
+                        return Err(WalError::Corruption(record_offset));
+                    }
+                    Err(DecodeError::Other(e)) => return Err(e),
+                };
 
                 // Skip if before from_sequence
-                if record.sequence < from_sequence {
+                if sequence < from_sequence {
                     continue;
                 }
 
                 // Apply entry
-                callback(&record.entry)?;
+                callback(&entry)?;
                 replayed += 1;
-                last_sequence = record.sequence;
+                last_sequence = sequence;
             }
         }
 
