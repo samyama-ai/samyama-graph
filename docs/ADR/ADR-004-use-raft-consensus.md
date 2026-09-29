@@ -3,6 +3,8 @@
 ## Status
 **Accepted** (Phase 3+)
 
+**Implementation, as of 2026-09-29: not built.** This ADR records the decision, not what runs. `RaftNode::write` applies to the local state machine only (`src/raft/node.rs:104-120`), `initialize` makes the node leader regardless of peers, and no protocol write path calls it. The quorum, replication and linearizability described below do not happen yet (#1309, [ACID_GUARANTEES §2](../ACID_GUARANTEES.md)).
+
 ## Date
 2025-10-14
 

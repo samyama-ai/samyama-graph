@@ -20,10 +20,10 @@ Key-value pairs attached to nodes or edges. Keys are strings, and values can be 
 ## Architecture
 
 ### Raft Consensus
-A distributed consensus algorithm used by Samyama to ensure data consistency and fault tolerance across the cluster. It manages leader election and log replication.
+A distributed consensus algorithm that manages leader election and log replication. Samyama's `src/raft/` has the configuration and membership types but not the protocol: `RaftNode::write` applies to the local node only, with no replication or quorum (see [ACID_GUARANTEES §2](./ACID_GUARANTEES.md)).
 
 ### WAL (Write-Ahead Log)
-A persistence technique where modifications are written to a log file before they are applied to the database. Ensures durability and crash recovery.
+In general, a persistence technique where modifications are written to a log file before they are applied to the database. Samyama's logical WAL is written *after* the in-memory mutation, is not fsynced unless `SAMYAMA_FSYNC=1` is set, and is not read at startup (see [ACID_GUARANTEES §1 and §4](./ACID_GUARANTEES.md)).
 
 ### RocksDB
 An embeddable persistent key-value store used by Samyama as the underlying storage engine for graph data.

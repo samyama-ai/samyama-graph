@@ -620,7 +620,7 @@ every example, starts a server, and runs each in turn with a pass/fail summary
 | Enterprise SOC | `cargo run --example enterprise_soc_demo` | MITRE ATT&CK, attack paths, threat intel |
 | Knowledge Graph | `cargo run --example knowledge_graph_demo` | Enterprise RAG + semantic search |
 | Agentic (GAK) | `cargo run --example agentic_enrichment_demo` | Generation-augmented enrichment (needs `claude` CLI) |
-| Raft Cluster | `cargo run --example cluster_demo` | 3-node HA consensus |
+| Raft Cluster | `cargo run --example cluster_demo` | Cluster configuration and membership API. Writes apply to the local node only; there is no replication or quorum ([ACID_GUARANTEES §2](docs/ACID_GUARANTEES.md)) |
 
 *19 demo examples + 15 data loaders in [`examples/`](examples); optimization/use-case
 demos: `grid_dispatch_demo`, `amr_stewardship_demo`, `healthcare_allocation_demo`,
@@ -664,7 +664,7 @@ samyama/
 │   ├── index/          Property, unique, composite, full-text, hierarchy (OEH) indexes
 │   ├── vector/         HNSW vector index
 │   ├── snapshot/       Portable .sgsnap v2 (CSR + ColumnStore)
-│   ├── raft/           Distributed consensus (openraft)
+│   ├── raft/           Cluster config and membership; writes apply locally, no consensus yet
 │   ├── sharding/       Tenant-level sharding (router, proxy)
 │   ├── rdf/            RDF triple/quad store and mapping
 │   ├── sparql/         SPARQL 1.1 parser, algebra, optimizer, executor

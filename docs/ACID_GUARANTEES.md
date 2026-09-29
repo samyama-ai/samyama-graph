@@ -1,6 +1,6 @@
 # Samyama ACID Guarantees
 
-**Last Updated:** 2026-09-18 (§1, §2 and §4 re-checked against the code and corrected — see #1309; §3 Isolation re-verified 2026-09-17)
+**Last Updated:** 2026-09-29 (§1, §2 and §4 re-checked against `main` at `28c46cf`: line references refreshed, the test that pins each claim named, and where no test pins it, said so — #1309. §3 Isolation re-verified 2026-09-17)
 
 Samyama provides ACID guarantees for both single-statement Cypher and multi-statement transactions. The MVCC transaction layer landed in v1.0.0 (ADR-020); the storage path is RocksDB + Samyama's logical WAL (ADR-023).
 
@@ -11,7 +11,7 @@ Samyama provides ACID guarantees for both single-statement Cypher and multi-stat
 | **Atomicity** | ✅ | RocksDB `WriteBatch` + WAL — see ADR-023 |
 | **Consistency** | ✅ | Schema-flexible with internal-identifier integrity. Single node only — the distributed claim is withdrawn, see §2 |
 | **Isolation** | ✅ | Session transactions (RESP, HTTP) hold the writer lock: serializable in effect. The Rust store API offers snapshot isolation with first-committer-wins. Anomaly table in §3 |
-| **Durability** | ⚠️ | Written, not **synced** *by default*: a committed write reaches the OS page cache, not the platter. It survives a process crash; it may not survive power loss or a host crash. `SAMYAMA_FSYNC=1` puts a real barrier on both the WAL and RocksDB, at two orders of magnitude in write throughput — measured, with the host it was measured on, in §4. A write that fails to reach disk at all is reported and stops further writes (#1274). See §4 |
+| **Durability** | ⚠️ | Written, not **synced** *by default*: a committed write reaches the OS page cache, not the platter. It may not survive power loss or a host crash. `SAMYAMA_FSYNC=1` puts a real barrier on both the WAL and RocksDB, at two orders of magnitude in write throughput — measured, with the host it was measured on, in §4. A write that fails to reach disk at all stops further writes (#1274); over RESP the failing statement is also told, over HTTP it is not. See §4 |
 
 ---
 
@@ -27,14 +27,20 @@ Any Cypher mutation (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, and combined 
 - Indexes (`IndexManager`, ADR-029): label, property, unique, composite
 - Label count and edge-type count caches
 
-Persistence path: the in-memory state is mutated first, and the **Samyama logical WAL** (ADR-023) is appended after, from a write log the statement collected (`src/protocol/command.rs:238-256` → `src/persistence/mod.rs:340`). That is write-*behind*, not write-ahead — this section claimed the opposite until 2026-09-18. A crash in the window between the two loses the write entirely, because there is nothing in the log to replay. RocksDB's internal WAL is separate; the two are not collapsed.
+Persistence path: the in-memory state is mutated first, and the **Samyama logical WAL** (ADR-023) and RocksDB are written after, from a write log the statement collected. Over RESP that is `enable_write_log` → `execute_mut_with_params` → `take_write_log` → `apply_mutations` (`src/protocol/command.rs:319-343`); over HTTP the same sequence runs inside `AppState::mutate` (`src/http/server.rs:551-582`). `apply_mutations` (`src/persistence/mod.rs:360`) appends each entity to the logical WAL and then puts it into RocksDB (`src/persistence/mod.rs:436-442` for a node). That is write-*behind*, not write-ahead — this section claimed the opposite until 2026-09-18. A crash in the window between the mutation and `apply_mutations` loses the write entirely.
 
-Within the in-memory structures the all-or-nothing claim holds: no dangling edges, no orphan index entries, no half-applied multi-label changes. **A single statement is not atomic if it fails partway.** The engine has no statement rollback (LANG-07), so a `CREATE` that fails on its tenth row keeps the nine before it, in memory and on disk. Multi-statement transactions do roll back, through the undo log (§3).
+**The logical WAL is not read at startup.** Recovery is `PersistenceManager::recover` (`src/persistence/mod.rs:561-580`), which scans nodes and edges out of RocksDB and nothing else; `Wal::replay` has no caller outside tests (the unit tests in `src/persistence/wal.rs` and `tests/wal_torn_tail.rs`). What a restart finds is what RocksDB holds. The module comment at `src/persistence/mod.rs:33-37` still describes a WAL-first write and a replay on startup; neither happens. RocksDB's internal WAL is separate; the two are not collapsed.
+
+*Pinned by:* `a_partial_failure_leaves_disk_agreeing_with_memory` (`tests/write_durability.rs:160`), for a statement that fails part-way. The write-behind window itself is not tested — it needs a crash between two lines — and is read from the code above.
+
+Within the in-memory structures the all-or-nothing claim holds: no dangling edges, no orphan index entries, no half-applied multi-label changes. **A single statement is not atomic if it fails partway.** The engine has no statement rollback (LANG-07), so a `CREATE` that fails on its tenth row keeps the nine before it, in memory and on disk. Multi-statement transactions do roll back, through the undo log (§3); `a_transaction_that_cannot_be_persisted_is_rolled_back_in_memory` (`tests/persist_failure_is_reported.rs:118`) pins that for a commit that cannot be persisted.
 
 ### 2. Consistency — "valid state transitions"
 
 - **Schema-flexible**, but internal invariants are enforced: a `NodeId` referenced from an edge must exist, label-interning IDs (ADR-028) are stable across reads, and the columnar property store maintains its column-aligned indexes.
-- **Distributed: not implemented.** This section claimed Raft quorum before acknowledgement until 2026-09-18. `RaftNode::write` applies to the **local** state machine and increments a counter (`src/raft/node.rs:104-119`); there is no log append, no peer contact and no quorum, and the file says so itself at line 47. `openraft` supplies a `Config` type and nothing more. No protocol write path reaches it — `ClusterManager` is used for tenant routing and proxying only. Treat the cluster as a single node for every guarantee on this page.
+- **Distributed: not implemented.** This section claimed Raft quorum before acknowledgement until 2026-09-18. `RaftNode::write` applies to the **local** state machine and increments a counter (`src/raft/node.rs:104-120`); there is no log append, no peer contact and no quorum, and the file says so itself at line 47. `RaftNode::initialize` ignores its peer list and makes the node leader unconditionally (`src/raft/node.rs:91-101`). `openraft` supplies `Config` and `SnapshotPolicy` (`src/raft/mod.rs:56`, `:92`) and nothing more. No protocol write path reaches it: `RaftNode::new` is called nowhere in `src/` outside `src/raft/`, and `ClusterManager` is used for tenant routing and proxying only (`src/protocol/server.rs:162`, `:379`). The one caller is `examples/cluster_demo.rs`, whose header still says "Quorum-based writes through consensus"; what it runs is the local apply above. Treat the cluster as a single node for every guarantee on this page.
+
+  *Pinned by:* nothing that asserts the absence of replication. The nearest test, `test_raft_node_write_after_init` (`src/raft/node.rs:244`), initialises one node with no peers and asserts only that the write returns a `QueryResult`. The claim above is read from the code.
 
 ### 3. Isolation — verified 2026-09-17 against v1.8.0+ main (`73e6733`)
 
@@ -80,15 +86,17 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 - Store transactions are not reachable over any protocol. Exposing them would give readers concurrency during a write transaction, at the price of write skew.
 - Conflicts are detected per entity, not per property. Two transactions setting different keys on one node conflict.
 - Old versions are not collected in production. Undo-log entries accumulate only while transactions write; a store with no transactions holds none (#1200 step 2).
-- **A COMMIT that cannot be persisted is refused** (#1275). The reply is an error, the in-memory state is rolled back from the undo log and what reached disk is repaired — pinned by `a_commit_that_cannot_be_persisted_is_refused_and_rolled_back` in `src/protocol/server.rs:507` and `src/http/transactions.rs:234`. This bullet said the opposite until 2026-09-18; it was written against `73e6733`, one commit before the fix landed.
-- **A single write statement outside a transaction still warns and succeeds** if persistence fails (`src/protocol/command.rs:255`, `src/http/server.rs:129`). That half of #1274 is open.
+- **A COMMIT that cannot be persisted is refused** (#1275). The reply is an error, the in-memory state is rolled back from the undo log and what reached disk is repaired — pinned by `a_commit_that_cannot_be_persisted_is_refused_and_rolled_back` in `src/protocol/server.rs:733` and `src/http/transactions.rs:245`. This bullet said the opposite until 2026-09-18; it was written against `73e6733`, one commit before the fix landed.
+- **A single write statement outside a transaction** whose persistence fails is handled differently by the two protocols. Over RESP the reply is an error saying the write is in memory and not on disk (`src/protocol/command.rs:341-369`). Over HTTP `POST /api/query` the failing statement still gets a success reply, because `AppState::mutate` returns the body's value and has no error channel (`src/http/server.rs:565-579`); the client sees the *next* write refused with 503 (`src/http/handler.rs:476-486`). Both mark the process degraded. This bullet said "still warns and succeeds" for both until 2026-09-29. `a_failed_persist_marks_the_process_degraded_and_says_why` (`tests/persist_failure_is_reported.rs:68`) calls `mark_degraded` itself, so it pins the flag and its message, not the wiring in either server; neither reply is pinned by a test.
 
 ### 4. Durability — "committed data survives"
 
-- **Nothing is fsynced by default.** Without `SAMYAMA_FSYNC` a write is appended to the logical WAL and, at best, flushed out of a `BufWriter` into the OS page cache, and RocksDB's `WriteOptions` carry `set_sync(false)`. `WalWriter::sync_mode` is read from the environment at construction (`WalWriter::sync_mode_from_env`) and is false unless the variable is set, so on a stock server both halves of the write path stop at the page cache.
+- **Nothing is fsynced by default.** Without `SAMYAMA_FSYNC` a WAL entry is written into a `BufWriter` and not flushed at all — the flush and the `sync_data` are both inside `if self.sync_mode` (`src/persistence/wal.rs:265-268`) — and RocksDB's `WriteOptions` carry `set_sync(false)` (`src/persistence/storage.rs:155`, from `fsync_enabled` at `:111`). The WAL's `sync_mode` is read from the environment once, at construction (`src/persistence/wal.rs:187`, `:201`), and is false unless the variable is set. So on a stock server the RocksDB write stops at the page cache and the WAL entry may still be in the process's buffer. Since the WAL is not read at startup (§1), it is the RocksDB write that recovery depends on.
+
+  *Pinned by* `tests/durability_is_a_choice.rs`: `the_default_is_off` (`:58`) and `the_wals_own_default_is_off_too` (`:72`) for the default, `the_flag_is_read_and_is_not_over_eager` (`:94`) for which values turn it on, `a_synced_write_still_lands_and_reads_back` (`:113`), `both_halves_of_the_write_path_move_together` (`:135`) and `the_level_is_fixed_for_the_life_of_a_process` (`:154`). None of them can observe whether `sync_data` reached the device; they pin the flag, not the barrier.
 
   *This bullet described a stronger claim until 2026-09-27: that the sync-mode setter had no callers, that the only call even when true was `flush()`, that `sync_data` appeared in `src/` solely in the snapshot writer, and that RocksDB was opened with no `WriteOptions` at all. All four were true when #1309 was written and none are true now — the barrier below fixed them — and the bullet contradicted the one directly under it for as long as it stood. A correction goes stale the same way the claim it corrected did.*
-  - **What survives:** the Samyama process being killed. The data is in the page cache and the kernel writes it out.
+  - **What should survive:** the Samyama process being killed. RocksDB's write is in the page cache and the kernel writes it out. This is not tested with a killed process: the restart in `tests/write_durability.rs:45-48` is a checkpoint and a `recover` inside the same process.
   - **What may not:** power loss, a kernel panic, a hard host reset, or a container host failure. A write acknowledged seconds earlier can be gone.
   - **`SAMYAMA_FSYNC=1` turns it on**, and it is off by default — that is
     unchanged, and this is a change to what an operator can *choose* rather
@@ -150,8 +158,9 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     still agree afterwards.
   - A **single statement** has no rollback — the engine has no statement-level
     undo (LANG-07) — so its rows stay in memory and the disk does not have
-    them. The client gets an error saying exactly that, and every later write
-    is refused, because once the store is ahead of the disk each further write
+    them. Over RESP the client gets an error saying exactly that; over HTTP it
+    gets a success reply and only the next write is refused (§3, last bullet).
+    Either way every later write is refused, because once the store is ahead of the disk each further write
     widens the gap and a restart replays a prefix that does not include the
     first failure. Reads continue; the in-memory graph is still the most
     complete thing anyone has.
@@ -166,7 +175,8 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 
 | Trade-off | Why |
 |---|---|
-| Write latency higher than a pure in-memory store | A WAL append and a RocksDB write per mutation. **Not** fsync, and not replication — neither happens (§4), so this trade-off is smaller than this table claimed until 2026-09-18 |
+| Write latency higher than a pure in-memory store | A WAL append and a RocksDB write per mutation. **Not** fsync unless `SAMYAMA_FSYNC=1` is set, and never replication (§2, §4), so by default this trade-off is smaller than this table claimed until 2026-09-18 |
+| `SAMYAMA_FSYNC=1` costs two orders of magnitude in write throughput | A `sync_data` on the WAL and a synced RocksDB write per mutation; the measured ratio, with its hosts, is in §4 |
 | An open session transaction blocks all other clients | It holds the writer lock; bounded by `SAMYAMA_TX_TIMEOUT_SECS` |
 | Snapshot import is bulk-only | `.sgsnap` import bypasses the WAL for speed; in-flight transactions see the imported tenant only after commit |
 
@@ -178,7 +188,7 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
 | **Atomicity** | Multi-statement (MVCC txn) | Operation-level | Multi-statement |
 | **Isolation** | Serializable-in-effect sessions (RESP/HTTP); SI in the Rust API | None (single-threaded) | Read Committed |
 | **Clustering** | none in effect (Raft is a stub, §2) | Master-replica | Raft / Causal Clustering (CP / CA) |
-| **Durability** | Logical WAL + RocksDB, **unsynced** (§4) | AOF / RDB (`appendfsync` configurable) | Transaction log, fsync per commit by default |
+| **Durability** | RocksDB, plus a logical WAL not read at startup; **unsynced by default**, `SAMYAMA_FSYNC=1` syncs both (§4) | AOF / RDB (`appendfsync` configurable) | Transaction log, fsync per commit by default |
 
 ## References
 

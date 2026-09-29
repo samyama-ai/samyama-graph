@@ -22,7 +22,7 @@ Required:
 - WAL versioning so that recovery rebuilds chain state correctly.
 
 Not required (yet):
-- Distributed transactions across the cluster (Raft handles single-tenant cluster-wide consistency via state-machine replication).
+- Distributed transactions across the cluster. (This line said Raft handled cluster-wide consistency via state-machine replication; it does not — Raft writes apply locally, see [ACID_GUARANTEES §2](../ACID_GUARANTEES.md), #1309.)
 - Serializable level (no observed user demand to date; the gap is documented).
 - Cross-tenant transactions.
 

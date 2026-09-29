@@ -20,8 +20,10 @@ cargo test <test name>
 
 Read this next to [`ACID_GUARANTEES.md`](ACID_GUARANTEES.md), which says what is
 guaranteed; this page says what is observed when the guarantee is tested. In
-particular: **nothing on the write path is fsynced** (§4 there, #1309), so every
-row below that says "survives a restart" means a clean restart, not a power cut.
+particular: **nothing on the write path is fsynced by default** (§4 there, #1309);
+`SAMYAMA_FSYNC=1` turns the barrier on for both the WAL and RocksDB. So on a
+stock server every row below that says "survives a restart" means a clean
+restart, not a power cut.
 
 ## Durability and restart
 
@@ -32,7 +34,7 @@ row below that says "survives a restart" means a clean restart, not a power cut.
 | 3 | Restart after a whole-graph delete, then one write | The restart finds exactly the one new node, not the deleted three | Id reuse after a delete does not resurrect data | None | `a_deleted_graph_does_not_come_back_around_the_next_write` (`tests/graph_delete.rs:70`) |
 | 4 | Restart after a snapshot import plus a later write | The recovered node carries the imported properties *and* the later write | An import and a write compose | None | `an_imported_node_keeps_the_properties_a_later_write_did_not_touch` (`tests/write_durability.rs:202`) |
 | 5 | Restart, then re-run every query | A query corpus answers identically before and after; every divergence is reported | Recovery is answer-preserving, not merely count-preserving | None | `every_query_answers_the_same_after_a_persistence_restart` (`tests/query_parity_after_import.rs:188`) |
-| 6 | **Power loss or host reset after COMMIT** | **Not tested — see the gaps below** | **None claimed.** The write is in the OS page cache, not on the platter (#1309) | Treat recent writes as at risk; snapshot for anything that must survive | — |
+| 6 | **Power loss or host reset after COMMIT** | **Not tested — see the gaps below** | **None claimed** by default. The write is in the OS page cache, not on the platter (#1309). With `SAMYAMA_FSYNC=1` both halves are synced before the reply, but no test cuts power to confirm it | Treat recent writes as at risk; snapshot for anything that must survive | — |
 
 ## Partial writes and corrupt files
 

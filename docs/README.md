@@ -42,7 +42,7 @@ eight of eighteen documents (#1450).
 
 ### Guarantees and behaviour under stress
 
-- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, Raft replication, and what each does not promise.
+- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, what durability `SAMYAMA_FSYNC` does and does not buy, and why there is no Raft replication to rely on.
 - **[FAILURE-MODES.md](./FAILURE-MODES.md)** — how the engine behaves when things go wrong.
 - **[BI-CONNECTIVITY.md](./BI-CONNECTIVITY.md)** — connecting BI tools.
 
