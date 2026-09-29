@@ -3,7 +3,7 @@
 What happens when something goes wrong, what the data guarantee is afterwards,
 and what the operator should do.
 
-**31 of the 32 rows name the test that observed the behaviour**, at the
+**32 of the 33 rows name the test that observed the behaviour**, at the
 `path:line` of the test's signature. A row without a test is a guess about the
 most important moment in a database's life, so the gaps are listed at the
 bottom as gaps rather than filled in with what ought to happen.
@@ -39,7 +39,8 @@ row below that says "survives a restart" means a clean restart, not a power cut.
 | # | Failure | Observed behaviour | Data guarantee | Operator action | Test |
 |---|---|---|---|---|---|
 | 7 | Killed mid-snapshot-flush: the file exists, the commit marker does not | The partial file is ignored; the store comes up empty rather than half-loaded | A snapshot is visible only once its marker is written | Re-run the snapshot | `restore_skips_partial_write_without_marker` (`tests/snapshot_persistence.rs:56`) |
-| 8 | Snapshot written successfully | `.sgsnap` and `.sgsnap.committed` exist; no `.tmp` is left behind | Write-then-mark, never a half-file | None | `persist_is_atomic_no_partial_file` (`tests/snapshot_persistence.rs:73`), `persist_writes_marker_last` (`src/snapshot/persist.rs:100`) |
+| 8 | Snapshot written successfully | `.sgsnap` and `.sgsnap.committed` exist; no `.tmp` is left behind | Write-then-mark, never a half-file | None | `persist_is_atomic_no_partial_file` (`tests/snapshot_persistence.rs:73`), `persist_writes_marker_last` (`src/snapshot/persist.rs:108`) |
+| 33 | A snapshot write fails (full disk, quota, `EIO`) after an earlier one committed | The persist returns the error, the tmp file is removed, and the previous `.sgsnap` and its `.committed` marker are untouched, so a restart restores it | A failed persist never costs the last committed snapshot (#1520) | Free space and re-run the snapshot | `a_failed_persist_keeps_the_last_good_snapshot` (`src/snapshot/persist.rs:121`) |
 | 9 | Importing a truncated snapshot | The import errors and the store is left with nothing | A failed import is a no-op | Fix the file and re-import | `a_failed_import_leaves_nothing_behind` (`tests/snapshot_import_rollback.rs:41`) |
 | 10 | Importing a truncated snapshot over live data | The existing rows are untouched and still queryable | A failed import cannot damage what was already there | Re-import when the file is good | `a_failed_import_does_not_disturb_existing_data` (`tests/snapshot_import_rollback.rs:56`) |
 | 11 | A restore that silently loses values | `verify` fails with `ValuesDiffer` even though the row counts match | A count-only check is not the check | Do not promote the restore | `properties_lost_by_a_restore_are_caught_as_values_differing` (`tests/snapshot_verify.rs:128`) |
@@ -98,7 +99,7 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 
 | Failure | Why it is not written down |
 |---|---|
-| **Disk full, or any IO error on a write path** | Nothing injects `ENOSPC`, a read-only directory or an `io::Error`. The two commit-refused tests in row 16 call `pm.fail_next_apply_for_test()`: injection at the apply layer, not real IO. They pin the rollback, not what a filesystem error does on the way to it |
+| **Disk full, or any IO error on a write path** | Only row 33 injects a real `io::Error` (a directory where the snapshot's tmp file goes). Nothing injects `ENOSPC` or a read-only directory on the WAL or RocksDB paths. The two commit-refused tests in row 16 call `pm.fail_next_apply_for_test()`: injection at the apply layer, not real IO. They pin the rollback, not what a filesystem error does on the way to it |
 | **Process killed mid-write (SIGKILL)** | No test spawns and kills a process. Rows 7 and 20 are the nearest proxies and neither is a real crash |
 | **WAL replay after a crash** | Every WAL test replays a WAL the same process just wrote and flushed. Row 32 truncates one deliberately, which is not the same as replaying one a killed process left behind |
 | **A WAL record damaged after being written in full** | The three tests in `tests/wal_torn_tail.rs` cut a record's body, cut its length prefix, and leave one intact. None flips a byte inside a complete record, so nothing observes a checksum failure |
