@@ -177,20 +177,10 @@ impl CommandHandler {
             Ok(p) => p,
             Err(e) => return RespValue::Error(format!("ERR {e}")),
         };
-        
-        // Auth checks
+        // Tenant binding and the statement's role (#1328).
         if let Some(user) = auth {
-            if let Some(t) = &user.tenant {
-                if *t != graph_name {
-                    return RespValue::Error(format!("ERR unauthorized: credential is bound to tenant '{}'", t));
-                }
-            }
-            let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
-            if is_write && !user.roles.contains(&crate::auth::Role::Write) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Write role".to_string());
-            }
-            if !is_write && !user.roles.contains(&crate::auth::Role::Read) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Read role".to_string());
+            if let Err(e) = user.authorize_statement(&graph_name, self.query_engine.statement_is_write(&query_str)) {
+                return RespValue::Error(format!("ERR {e}"));
             }
         }
 
@@ -315,19 +305,9 @@ impl CommandHandler {
                     crate::persistence::health::refusal()
                 ));
             }
-            
         if let Some(user) = auth {
-            if let Some(t) = &user.tenant {
-                if *t != graph_name {
-                    return RespValue::Error(format!("ERR unauthorized: credential is bound to tenant '{}'", t));
-                }
-            }
-            let is_write = self.query_engine.statement_is_write(&args.get(2).and_then(|v| v.as_string().ok().flatten()).unwrap_or_default()).unwrap_or(false);
-            if is_write && !user.roles.contains(&crate::auth::Role::Write) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Write role".to_string());
-            }
-            if !is_write && !user.roles.contains(&crate::auth::Role::Read) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Read role".to_string());
+            if let Err(e) = user.authorize_statement(&graph_name, self.query_engine.statement_is_write(&query_str)) {
+                return RespValue::Error(format!("ERR {e}"));
             }
         }
 
@@ -423,7 +403,7 @@ impl CommandHandler {
         // guarantee in the name was not one (#1111). Now that the parser decides
         // what a write is, refusing one here is a single check.
         if let Some(Ok(Some(query))) = args.get(2).map(|a| a.as_string()) {
-            if self.query_engine.statement_is_write(&args.get(2).and_then(|v| v.as_string().ok().flatten()).unwrap_or_default()).unwrap_or(false) {
+            if self.query_engine.statement_is_write(&query).unwrap_or(false) {
                 return RespValue::Error(
                     "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string(),
                 );
@@ -474,19 +454,13 @@ impl CommandHandler {
         // persistence: the durable half is `drop_graph` above, which removes the
         // rows outright. `clear()` journals nothing and does not need to -- one
         // journal entry per node of a dropped graph is the wrong shape for it.
-        
+        // Dropping a graph is a write whatever else is on the line.
         if let Some(user) = auth {
-            if let Some(t) = &user.tenant {
-                if *t != graph_name {
-                    return RespValue::Error(format!("ERR unauthorized: credential is bound to tenant '{}'", t));
-                }
-            }
-            let is_write = self.query_engine.statement_is_write(&args.get(2).and_then(|v| v.as_string().ok().flatten()).unwrap_or_default()).unwrap_or(false);
-            if is_write && !user.roles.contains(&crate::auth::Role::Write) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Write role".to_string());
-            }
-            if !is_write && !user.roles.contains(&crate::auth::Role::Read) && !user.roles.contains(&crate::auth::Role::Admin) {
-                return RespValue::Error("ERR unauthorized: missing Read role".to_string());
+            if let Err(e) = user
+                .authorize_graph(&graph_name)
+                .and_then(|()| user.authorize_role(crate::auth::Role::Write))
+            {
+                return RespValue::Error(format!("ERR {e}"));
             }
         }
 

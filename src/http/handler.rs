@@ -1,12 +1,11 @@
 //! HTTP handlers for the Visualizer API
 
 use crate::graph::PropertyValue;
-use crate::http::server::AppState;
+use crate::http::server::{AppState, Subject};
 use crate::query::Value;
 use axum::http::StatusCode;
 use axum::{
-    extract::Extension,
-    extract::{Json, Multipart, Query, State},
+    extract::{Extension, Json, Multipart, Query, State},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -127,8 +126,17 @@ fn default_export_format() -> String {
 /// ISO-8601 text rather than as Arrow timestamps.
 pub async fn export_handler(
     State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
     Json(payload): Json<ExportRequest>,
 ) -> impl IntoResponse {
+    // Export runs its statement, writes included, so it is checked the same
+    // way as `/api/query`.
+    if let Some(Extension(Subject(user))) = &subject {
+        let is_write = state.engine.statement_is_write(&payload.query);
+        if let Err(e) = user.authorize_statement(&payload.graph, is_write) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response();
+        }
+    }
     if payload.graph != default_graph() {
         return (
             StatusCode::BAD_REQUEST,
@@ -399,33 +407,17 @@ fn merged_node_properties(
 
 pub async fn query_handler(
     State(state): State<AppState>,
-    subject_opt: Option<axum::extract::Extension<crate::http::server::Subject>>,
+    subject: Option<Extension<Subject>>,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
-    
-    // Role & Tenant checks
-    if let Some(axum::extract::Extension(subject)) = subject_opt {
-        let user = subject.0;
-        if let Some(t) = &user.tenant {
-            if *t != payload.graph {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": format!("unauthorized: credential is bound to tenant '{}'", t)
-                    })),
-                ).into_response();
-            }
-        }
-        let is_write = state.engine.statement_is_write(&payload.query).unwrap_or(false);
-        if is_write && !user.roles.contains(&crate::auth::Role::Write) && !user.roles.contains(&crate::auth::Role::Admin) {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "unauthorized: missing Write role"}))).into_response();
-        }
-        if !is_write && !user.roles.contains(&crate::auth::Role::Read) && !user.roles.contains(&crate::auth::Role::Admin) {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "unauthorized: missing Read role"}))).into_response();
+    // Tenant binding and the statement's role (#1328). The route itself was
+    // let through at Read by `require_credential`.
+    if let Some(Extension(Subject(user))) = &subject {
+        let is_write = state.engine.statement_is_write(&payload.query);
+        if let Err(e) = user.authorize_statement(&payload.graph, is_write) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e }))).into_response();
         }
     }
-
-    // OSS serves exactly one graph...
 
     // OSS serves exactly one graph. The `graph` argument used to be accepted and then
     // ignored: every read and write landed in the same store, so two datasets loaded into
@@ -1894,7 +1886,6 @@ mod tests {
     use crate::graph::GraphStore;
     use crate::query::QueryEngine;
     use axum::{
-    extract::Extension,
         body::Body,
         http::{Request, StatusCode},
         routing::{get, post},

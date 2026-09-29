@@ -137,13 +137,14 @@ impl RespServer {
         self
     }
 
-    /// Start the server
-
+    /// Require `AUTH <name> <secret>` on every connection, checked against the
+    /// same credential file as the HTTP API.
     pub fn with_credentials(mut self, credentials: Arc<Vec<crate::auth::Credential>>) -> Self {
         self.credentials = Some(credentials);
         self
     }
 
+    /// Start the server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = format!("{}:{}", self.config.address, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
@@ -208,15 +209,14 @@ async fn respond(
         .map(|s| s.to_uppercase());
     let limit = GraphStore::session_transaction_timeout();
     
-    // REL-08: Check authentication before allowing commands
-    if let Some(creds) = credentials {
-        if txn.authenticated_as.is_none() {
-            let is_auth = name.as_deref() == Some("AUTH");
-            let is_ping = name.as_deref() == Some("PING") || name.as_deref() == Some("INFO");
-            if !is_auth && !is_ping {
-                return RespValue::Error("NOAUTH Authentication required.".to_string());
-            }
-        }
+    // REL-08 (#1328): with credentials configured, a connection may send only
+    // AUTH and PING until it has authenticated. INFO is not on the list: it
+    // describes the server to whoever asks.
+    if credentials.is_some()
+        && txn.authenticated_as.is_none()
+        && !matches!(name.as_deref(), Some("AUTH") | Some("PING"))
+    {
+        return RespValue::Error("NOAUTH Authentication required.".to_string());
     }
 
     match (name.as_deref(), txn.open.as_mut()) {

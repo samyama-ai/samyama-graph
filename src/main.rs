@@ -1360,7 +1360,13 @@ async fn start_server() {
         }
     });
 
-    let server = RespServer::new_with_tenants(config, store, persistence, shared_tenants);
+    let mut server = RespServer::new_with_tenants(config, store, persistence, shared_tenants);
+    // The RESP port answers the same graph as HTTP, so it takes the same
+    // credentials. Leaving it open while HTTP asks for a token would make the
+    // token a formality (#1328).
+    if !credentials.is_empty() {
+        server = server.with_credentials(Arc::new(credentials));
+    }
 
     println!("Server ready. Press Ctrl+C to stop.\n");
 

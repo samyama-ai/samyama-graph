@@ -9,7 +9,8 @@ use axum::{
 use crate::embed::EmbedPipeline;
 use crate::graph::GraphStore;
 use crate::persistence::TenantManager;
-use crate::auth::{Credential, Secret};
+// Re-exported: these lived here before `auth` was split out, and callers name this path.
+pub use crate::auth::{read_credentials, Credential, Secret};
 use crate::query::QueryEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -183,6 +184,31 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 /// Everything else is authenticated, `/metrics` and `/` included. An exemption
 /// list is the thing that quietly grows, and `/api/status` alone reports node
 /// and edge counts.
+/// The least role a route needs, by method and path.
+///
+/// Deny by default is not possible here -- an unknown route is a 404 either
+/// way -- so the rule is the other way round: everything is Read unless it is
+/// listed. A new mutating route has to be added here, and
+/// `every_mutating_route_needs_more_than_read` fails until it is.
+pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::auth::Role {
+    use crate::auth::Role;
+    use axum::http::Method;
+    if path.starts_with("/api/tenants")
+        || path == "/api/snapshot/import"
+        || path == "/api/enrich/policy"
+    {
+        return Role::Admin;
+    }
+    if *method == Method::POST
+        && (path.starts_with("/api/import/")
+            || path == "/api/enrich"
+            || path == "/api/vector/indexes")
+    {
+        return Role::Write;
+    }
+    Role::Read
+}
+
 async fn require_credential(
     credentials: Arc<Vec<Credential>>,
     req: axum::extract::Request,
@@ -211,6 +237,16 @@ async fn require_credential(
     let matched = header.as_deref().and_then(|h| authenticate(&credentials, h));
 
     if let Some(matched_cred) = matched {
+        // The floor each route needs, before the handler runs. Handlers that
+        // run a statement also check the statement itself (a read-only query
+        // on `/api/query` needs only Read); this is what keeps every other
+        // mutating endpoint -- imports, snapshot restore, tenants -- from being
+        // open to a read-only credential.
+        let needed = required_role(req.method(), req.uri().path());
+        if let Err(e) = matched_cred.authorize_role(needed) {
+            return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": e })))
+                .into_response();
+        }
         let mut req = req;
         req.extensions_mut().insert(Subject(matched_cred.clone()));
         let mut res = next.run(req).await;
