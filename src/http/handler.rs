@@ -1191,9 +1191,362 @@ pub async fn sample_handler(
     }))
 }
 
+/// A CSV cell as the property value it most plausibly is.
+///
+/// `None` for an empty cell: an empty field leaves the property unset rather
+/// than setting it to null. That is not what `LOAD CSV` does in other engines
+/// and it is kept deliberately: changing it would silently alter the shape of
+/// every node existing callers already import.
+fn csv_cell_value(value: &str) -> Option<PropertyValue> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(if let Ok(int_val) = trimmed.parse::<i64>() {
+        PropertyValue::Integer(int_val)
+    } else if let Ok(float_val) = trimmed.parse::<f64>() {
+        PropertyValue::Float(float_val)
+    } else if trimmed.eq_ignore_ascii_case("true") {
+        PropertyValue::Boolean(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        PropertyValue::Boolean(false)
+    } else {
+        PropertyValue::String(trimmed.to_string())
+    })
+}
+
+/// A JSON scalar as a property value; `None` for anything that is not one.
+fn json_scalar_value(val: &serde_json::Value) -> Option<PropertyValue> {
+    match val {
+        serde_json::Value::String(s) => Some(PropertyValue::String(s.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(PropertyValue::Integer(i))
+            } else {
+                n.as_f64().map(PropertyValue::Float)
+            }
+        }
+        serde_json::Value::Bool(b) => Some(PropertyValue::Boolean(*b)),
+        _ => None,
+    }
+}
+
+/// The text an endpoint key is matched on.
+///
+/// CSV node import stores `101` as an integer and an edge file carries it as
+/// the text `101`, so endpoints are matched on a rendering both sides share
+/// rather than on the typed value; otherwise every numeric key would miss.
+fn endpoint_key_text(v: &PropertyValue) -> Option<String> {
+    match v {
+        PropertyValue::String(s) => Some(s.clone()),
+        PropertyValue::Integer(i) => Some(i.to_string()),
+        PropertyValue::Float(f) => Some(f.to_string()),
+        PropertyValue::Boolean(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Refuse an import aimed at a graph the caller may not address, or that this
+/// build does not serve, or `None` to proceed (#336).
+///
+/// Both import handlers accepted a `graph` and then wrote to the one store this
+/// build has, while `mutate` persisted the rows under the *named* tenant -- so
+/// an import "into tenant B" was visible in the default graph and recorded on
+/// disk as B's. The same stance `/api/query` takes (#366): a loud refusal, not
+/// a silent merge. A credential bound to a tenant is held to it first, as on
+/// `/api/query` (#1328).
+fn refuse_import_graph(
+    subject: &Option<Extension<Subject>>,
+    graph: &str,
+) -> Option<axum::response::Response> {
+    if let Some(Extension(Subject(user))) = subject {
+        if let Err(e) = user.authorize_graph(graph) {
+            return Some((StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response());
+        }
+    }
+    reject_foreign_graph(graph)
+}
+
+/// `node` (the default, and the only mode before #336) or `edge`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ImportMode {
+    Node,
+    Edge,
+}
+
+fn parse_import_mode(s: &str) -> Result<ImportMode, axum::response::Response> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "node" | "nodes" => Ok(ImportMode::Node),
+        "edge" | "edges" => Ok(ImportMode::Edge),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unknown import_mode '{other}'; use 'node' or 'edge'")
+            })),
+        )
+            .into_response()),
+    }
+}
+
+/// How an edge import finds its endpoints (#336).
+#[derive(Default)]
+struct EdgeImportSpec {
+    source_label: String,
+    source_key_col: String,
+    target_label: String,
+    target_key_col: String,
+    edge_type: String,
+    /// The node property the source key is matched against, when it is not
+    /// named the same as its column -- which it cannot be for an edge between
+    /// two nodes of one label keyed on one property (`(:P {id})-->(:P {id})`),
+    /// since a file cannot have two columns called `id`.
+    source_key_prop: String,
+    target_key_prop: String,
+}
+
+impl EdgeImportSpec {
+    fn source_prop(&self) -> &str {
+        if self.source_key_prop.trim().is_empty() {
+            self.source_key_col.trim()
+        } else {
+            self.source_key_prop.trim()
+        }
+    }
+
+    fn target_prop(&self) -> &str {
+        if self.target_key_prop.trim().is_empty() {
+            self.target_key_col.trim()
+        } else {
+            self.target_key_prop.trim()
+        }
+    }
+
+    /// Every field but the two `*_key_prop`s is required: an edge import that guessed a label or a key
+    /// would connect whatever happened to match.
+    fn validate(&self) -> Result<(), axum::response::Response> {
+        let missing: Vec<&str> = [
+            ("source_label", &self.source_label),
+            ("source_key_col", &self.source_key_col),
+            ("target_label", &self.target_label),
+            ("target_key_col", &self.target_key_col),
+            ("edge_type", &self.edge_type),
+        ]
+        .iter()
+        .filter(|(_, v)| v.trim().is_empty())
+        .map(|(k, _)| *k)
+        .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("edge import is missing: {}", missing.join(", ")),
+            })),
+        )
+            .into_response())
+    }
+}
+
+/// One edge to create. A key is `None` when the record had no usable value.
+struct EdgeRow {
+    source: Option<String>,
+    target: Option<String>,
+    props: Vec<(String, PropertyValue)>,
+}
+
+#[derive(Default, Serialize)]
+struct EdgeImportStats {
+    processed: usize,
+    created: usize,
+    skipped: usize,
+    failed: usize,
+    missing_sources: usize,
+    missing_targets: usize,
+    ambiguous: usize,
+    /// The first few problems, each naming its record. Capped so a file of a
+    /// million dangling rows does not produce a response of the same size.
+    errors: Vec<String>,
+}
+
+const MAX_REPORTED_ERRORS: usize = 20;
+
+impl EdgeImportStats {
+    fn note(&mut self, msg: String) {
+        if self.errors.len() < MAX_REPORTED_ERRORS {
+            self.errors.push(msg);
+        }
+    }
+}
+
+type EndpointIndex = HashMap<String, Vec<crate::graph::NodeId>>;
+
+/// `key text -> nodes` for every node of `label`, built once per import.
+///
+/// One pass over the label rather than a scan per record: the issue's case is
+/// tens of millions of edges, and a per-row scan is quadratic in that.
+fn endpoint_index(store: &crate::graph::GraphStore, label: &str, key: &str) -> EndpointIndex {
+    let mut index = EndpointIndex::new();
+    for node in store.get_nodes_by_label(&label.into()) {
+        if let Some(k) = store
+            .node_property(node.id, key)
+            .as_ref()
+            .and_then(endpoint_key_text)
+        {
+            index.entry(k).or_default().push(node.id);
+        }
+    }
+    index
+}
+
+/// `Ok` for exactly one match; `Err(true)` for several, `Err(false)` for none.
+fn resolve_endpoint(
+    index: &EndpointIndex,
+    key: &Option<String>,
+) -> Result<crate::graph::NodeId, bool> {
+    match key.as_ref().and_then(|k| index.get(k)) {
+        Some(ids) if ids.len() == 1 => Ok(ids[0]),
+        Some(_) => Err(true),
+        None => Err(false),
+    }
+}
+
+/// Create the edges `rows` describe, or none of them.
+///
+/// Every endpoint is resolved before the first edge is written. With `strict`
+/// (the default) a record whose source or target is missing, or matches more
+/// than one node, refuses the whole file -- the stance the node import takes on
+/// a ragged row. Without it such records are skipped and counted. Either way no
+/// edge is created with a dangling endpoint (#1143).
+fn import_edges(
+    store: &mut crate::graph::GraphStore,
+    spec: &EdgeImportSpec,
+    rows: Vec<EdgeRow>,
+    strict: bool,
+) -> Result<EdgeImportStats, EdgeImportStats> {
+    let sources = endpoint_index(store, &spec.source_label, spec.source_prop());
+    let separate_targets =
+        if spec.source_label == spec.target_label && spec.source_prop() == spec.target_prop() {
+            None
+        } else {
+            Some(endpoint_index(
+                store,
+                &spec.target_label,
+                spec.target_prop(),
+            ))
+        };
+    let targets = separate_targets.as_ref().unwrap_or(&sources);
+
+    let mut stats = EdgeImportStats::default();
+    let mut resolved = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        stats.processed += 1;
+        let record = i + 1;
+        let src = resolve_endpoint(&sources, &row.source);
+        let tgt = resolve_endpoint(targets, &row.target);
+        if let (Ok(s), Ok(t)) = (src, tgt) {
+            resolved.push((s, t, row.props));
+            continue;
+        }
+        stats.skipped += 1;
+        for (is_source, res, label, key) in [
+            (true, src, &spec.source_label, &row.source),
+            (false, tgt, &spec.target_label, &row.target),
+        ] {
+            let end = if is_source { "source" } else { "target" };
+            match res {
+                Ok(_) => {}
+                Err(true) => {
+                    stats.ambiguous += 1;
+                    stats.note(format!(
+                        "record {record}: {end} key {key:?} matches more than one :{label}"
+                    ));
+                }
+                Err(false) => {
+                    if is_source {
+                        stats.missing_sources += 1;
+                    } else {
+                        stats.missing_targets += 1;
+                    }
+                    stats.note(format!(
+                        "record {record}: no :{label} with {end} key {key:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    if strict && stats.skipped > 0 {
+        return Err(stats);
+    }
+
+    for (s, t, props) in resolved {
+        match store.create_edge(s, t, spec.edge_type.as_str()) {
+            Ok(edge_id) => {
+                for (k, v) in props {
+                    let _ = store.set_edge_property(edge_id, k, v);
+                }
+                stats.created += 1;
+            }
+            Err(e) => {
+                stats.failed += 1;
+                stats.note(format!("{e}"));
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// The response for an edge import, success or refusal alike.
+fn edge_import_response(
+    graph: &str,
+    spec: &EdgeImportSpec,
+    strict: bool,
+    outcome: Result<EdgeImportStats, EdgeImportStats>,
+) -> axum::response::Response {
+    let (status, ok, stats) = match outcome {
+        Ok(s) => (StatusCode::OK, true, s),
+        Err(s) => (StatusCode::BAD_REQUEST, false, s),
+    };
+    let mut body = json!({
+        "status": if ok { "ok" } else { "error" },
+        "graph": graph,
+        "import_mode": "edge",
+        "edge_type": spec.edge_type,
+        "strict": strict,
+    });
+    if let (Some(obj), Ok(serde_json::Value::Object(s))) =
+        (body.as_object_mut(), serde_json::to_value(&stats))
+    {
+        obj.extend(s);
+    }
+    if !ok {
+        body["error"] = json!(format!(
+            "{} of {} records have a missing or ambiguous endpoint; nothing was imported \
+             (send strict=false to skip them instead)",
+            stats.skipped, stats.processed
+        ));
+    }
+    (status, Json(body)).into_response()
+}
+
+fn parse_bool_field(s: &str) -> bool {
+    !matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
 /// Handler for CSV file upload and import
+///
+/// `import_mode=node` (the default) creates one `label` node per row.
+/// `import_mode=edge` creates one `edge_type` relationship per row, from the
+/// `source_label` node whose `source_key_col` property (or `source_key_prop`,
+/// if given) equals that column's value to the `target_label` node matched the
+/// same way; the remaining columns become the relationship's properties (#336).
 pub async fn import_csv_handler(
     State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let mut csv_data: Option<String> = None;
@@ -1201,6 +1554,9 @@ pub async fn import_csv_handler(
     let mut id_column: Option<String> = None;
     let mut delimiter = b',';
     let mut graph = "default".to_string();
+    let mut import_mode = String::new();
+    let mut spec = EdgeImportSpec::default();
+    let mut strict = true;
 
     loop {
         let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> =
@@ -1208,8 +1564,8 @@ pub async fn import_csv_handler(
         match field_result {
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_string();
-                match name.as_str() {
-                    "file" => match field.text().await {
+                if name == "file" {
+                    match field.text().await {
                         Ok(text) => csv_data = Some(text),
                         Err(e) => {
                             return (
@@ -1218,29 +1574,30 @@ pub async fn import_csv_handler(
                             )
                                 .into_response()
                         }
-                    },
-                    "label" => {
-                        if let Ok(text) = field.text().await {
-                            label = text;
-                        }
                     }
-                    "id_column" => {
-                        if let Ok(text) = field.text().await {
-                            id_column = Some(text);
-                        }
-                    }
+                    continue;
+                }
+                let Ok(text) = field.text().await else {
+                    continue;
+                };
+                match name.as_str() {
+                    "label" => label = text,
+                    "id_column" => id_column = Some(text),
                     "delimiter" => {
-                        if let Ok(text) = field.text().await {
-                            if let Some(&ch) = text.as_bytes().first() {
-                                delimiter = ch;
-                            }
+                        if let Some(&ch) = text.as_bytes().first() {
+                            delimiter = ch;
                         }
                     }
-                    "graph" => {
-                        if let Ok(text) = field.text().await {
-                            graph = text;
-                        }
-                    }
+                    "graph" => graph = text,
+                    "import_mode" => import_mode = text,
+                    "source_label" => spec.source_label = text,
+                    "source_key_col" => spec.source_key_col = text,
+                    "target_label" => spec.target_label = text,
+                    "target_key_col" => spec.target_key_col = text,
+                    "edge_type" => spec.edge_type = text,
+                    "source_key_prop" => spec.source_key_prop = text,
+                    "target_key_prop" => spec.target_key_prop = text,
+                    "strict" => strict = parse_bool_field(&text),
                     _ => {}
                 }
             }
@@ -1248,6 +1605,14 @@ pub async fn import_csv_handler(
             Err(_) => break,
         }
     }
+
+    if let Some(refusal) = refuse_import_graph(&subject, &graph) {
+        return refusal;
+    }
+    let mode = match parse_import_mode(&import_mode) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
 
     let csv_text = match csv_data {
         Some(data) => data,
@@ -1260,12 +1625,20 @@ pub async fn import_csv_handler(
         }
     };
 
-    if label.is_empty() {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Missing 'label' field" })),
-        )
-            .into_response();
+    match mode {
+        ImportMode::Node if label.is_empty() => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing 'label' field" })),
+            )
+                .into_response();
+        }
+        ImportMode::Edge => {
+            if let Err(r) = spec.validate() {
+                return r;
+            }
+        }
+        _ => {}
     }
 
     // RFC 4180, not `split(delimiter)`. The hand-rolled version had no quote
@@ -1318,6 +1691,54 @@ pub async fn import_csv_handler(
         }
     }
 
+    if mode == ImportMode::Edge {
+        let col = |name: &str| headers.iter().position(|h| h == name.trim());
+        let (Some(src_idx), Some(tgt_idx)) = (col(&spec.source_key_col), col(&spec.target_key_col))
+        else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "the CSV header {:?} must name both source_key_col '{}' and \
+                         target_key_col '{}'",
+                        headers, spec.source_key_col, spec.target_key_col
+                    ),
+                })),
+            )
+                .into_response();
+        };
+        if let Some(e) = state.quota_refuses(&graph, 0, records.len() as u64) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": e, "created": 0 })),
+            )
+                .into_response();
+        }
+        let key = |r: &csv::StringRecord, i: usize| {
+            r.get(i)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let rows: Vec<EdgeRow> = records
+            .iter()
+            .map(|r| EdgeRow {
+                source: key(r, src_idx),
+                target: key(r, tgt_idx),
+                props: headers
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != src_idx && *i != tgt_idx)
+                    .filter_map(|(i, h)| r.get(i).and_then(csv_cell_value).map(|v| (h.clone(), v)))
+                    .collect(),
+            })
+            .collect();
+        let outcome = state
+            .mutate(&graph, |store| import_edges(store, &spec, rows, strict))
+            .await;
+        return edge_import_response(&graph, &spec, strict, outcome);
+    }
+
     // Whole file or none, the same stance the ragged-row check above takes. A
     // bulk load used to be admitted into memory and refused at persist time,
     // which took the process read-only rather than returning an error (#1483).
@@ -1351,35 +1772,16 @@ pub async fn import_csv_handler(
                 // nothing from `db.index.fulltext.queryNodes` — no error, no
                 // warning. The two-step exists because `get_node_mut` borrows
                 // the store mutably and `set_node_property` needs it again.
-                let mut props: Vec<(String, PropertyValue)> = Vec::new();
-                {
-                    for (i, header) in headers.iter().enumerate() {
-                        if let Some(value) = record.get(i) {
-                            let trimmed = value.trim();
-                            // An empty field leaves the property unset rather than setting
-                            // it to null. That is not what `LOAD CSV` does in other engines
-                            // and it is kept deliberately: changing it would silently alter
-                            // the shape of every node existing callers already import.
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-
-                            let prop_val = if let Ok(int_val) = trimmed.parse::<i64>() {
-                                PropertyValue::Integer(int_val)
-                            } else if let Ok(float_val) = trimmed.parse::<f64>() {
-                                PropertyValue::Float(float_val)
-                            } else if trimmed.eq_ignore_ascii_case("true") {
-                                PropertyValue::Boolean(true)
-                            } else if trimmed.eq_ignore_ascii_case("false") {
-                                PropertyValue::Boolean(false)
-                            } else {
-                                PropertyValue::String(trimmed.to_string())
-                            };
-
-                            props.push((header.to_string(), prop_val));
-                        }
-                    }
-                }
+                let props: Vec<(String, PropertyValue)> = headers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, header)| {
+                        record
+                            .get(i)
+                            .and_then(csv_cell_value)
+                            .map(|v| (header.to_string(), v))
+                    })
+                    .collect();
                 for (k, v) in props {
                     let _ = store_guard.set_node_property(&graph, node_id, k, v);
                 }
@@ -1391,6 +1793,7 @@ pub async fn import_csv_handler(
 
     Json(json!({
         "status": "ok",
+        "import_mode": "node",
         "nodes_created": count,
         "label": label,
         "graph": graph,
@@ -1400,19 +1803,108 @@ pub async fn import_csv_handler(
 }
 
 /// Request for JSON import
+///
+/// `import_mode: "node"` (the default) takes `label` and `nodes`;
+/// `import_mode: "edge"` takes `edges` plus the same endpoint fields as the CSV
+/// edge import (#336).
 #[derive(Deserialize)]
 pub struct JsonImportRequest {
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub nodes: Vec<serde_json::Value>,
     #[serde(default = "default_graph")]
     pub graph: String,
+    #[serde(default)]
+    pub import_mode: String,
+    #[serde(default)]
+    pub edges: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default)]
+    pub source_key_col: String,
+    #[serde(default)]
+    pub target_label: String,
+    #[serde(default)]
+    pub target_key_col: String,
+    #[serde(default)]
+    pub edge_type: String,
+    #[serde(default)]
+    pub source_key_prop: String,
+    #[serde(default)]
+    pub target_key_prop: String,
+    #[serde(default)]
+    pub strict: Option<bool>,
 }
 
-/// Handler for JSON node import
+/// Handler for JSON node and edge import
 pub async fn import_json_handler(
     State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
     Json(payload): Json<JsonImportRequest>,
 ) -> impl IntoResponse {
+    if let Some(refusal) = refuse_import_graph(&subject, &payload.graph) {
+        return refusal;
+    }
+    let mode = match parse_import_mode(&payload.import_mode) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+
+    if mode == ImportMode::Edge {
+        let spec = EdgeImportSpec {
+            source_label: payload.source_label.clone(),
+            source_key_col: payload.source_key_col.clone(),
+            target_label: payload.target_label.clone(),
+            target_key_col: payload.target_key_col.clone(),
+            edge_type: payload.edge_type.clone(),
+            source_key_prop: payload.source_key_prop.clone(),
+            target_key_prop: payload.target_key_prop.clone(),
+        };
+        if let Err(r) = spec.validate() {
+            return r;
+        }
+        let strict = payload.strict.unwrap_or(true);
+        if let Some(e) = state.quota_refuses(&payload.graph, 0, payload.edges.len() as u64) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": e, "created": 0 })),
+            )
+                .into_response();
+        }
+        let key = |obj: Option<&serde_json::Map<String, serde_json::Value>>, k: &str| {
+            obj.and_then(|o| o.get(k))
+                .and_then(json_scalar_value)
+                .as_ref()
+                .and_then(endpoint_key_text)
+        };
+        let rows: Vec<EdgeRow> = payload
+            .edges
+            .iter()
+            .map(|e| {
+                let obj = e.as_object();
+                EdgeRow {
+                    source: key(obj, &spec.source_key_col),
+                    target: key(obj, &spec.target_key_col),
+                    props: obj
+                        .into_iter()
+                        .flatten()
+                        .filter(|(k, _)| {
+                            k.as_str() != spec.source_key_col && k.as_str() != spec.target_key_col
+                        })
+                        .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.clone(), v)))
+                        .collect(),
+                }
+            })
+            .collect();
+        let outcome = state
+            .mutate(&payload.graph, |store| {
+                import_edges(store, &spec, rows, strict)
+            })
+            .await;
+        return edge_import_response(&payload.graph, &spec, strict, outcome);
+    }
+
     if payload.label.is_empty() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -1437,26 +1929,12 @@ pub async fn import_json_handler(
 
                 // Through `set_node_property`, not the `&mut Node` (#1505) —
                 // see the CSV handler above for why.
-                let mut props: Vec<(String, PropertyValue)> = Vec::new();
-                if let Some(obj) = node_json.as_object() {
-                    for (key, val) in obj {
-                        let prop_val = match val {
-                            serde_json::Value::String(s) => PropertyValue::String(s.clone()),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    PropertyValue::Integer(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    PropertyValue::Float(f)
-                                } else {
-                                    continue;
-                                }
-                            }
-                            serde_json::Value::Bool(b) => PropertyValue::Boolean(*b),
-                            _ => continue,
-                        };
-                        props.push((key.to_string(), prop_val));
-                    }
-                }
+                let props: Vec<(String, PropertyValue)> = node_json
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.to_string(), v)))
+                    .collect();
                 for (k, v) in props {
                     let _ = store_guard.set_node_property(&payload.graph, node_id, k, v);
                 }
@@ -1467,8 +1945,10 @@ pub async fn import_json_handler(
 
     Json(json!({
         "status": "ok",
+        "import_mode": "node",
         "nodes_created": count,
         "label": payload.label,
+        "graph": payload.graph,
     }))
     .into_response()
 }
@@ -3078,6 +3558,330 @@ mod tests {
             state.store.read().await.node_count(),
             0,
             "the rows before the ragged one were committed anyway"
+        );
+    }
+
+    /// Post a multipart CSV upload with arbitrary text fields beside `file`.
+    async fn post_csv_fields(
+        app: Router,
+        fields: &[(&str, &str)],
+        csv: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        const B: &str = "X-BOUNDARY";
+        let mut body = String::new();
+        for (k, v) in fields {
+            body.push_str(&format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"
+            ));
+        }
+        body.push_str(&format!(
+            "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.csv\"\r\n\r\n{csv}\r\n--{B}--\r\n"
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/import/csv")
+                    .header("content-type", format!("multipart/form-data; boundary={B}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn post_json_import(
+        app: Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/import/json")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn import_router(state: AppState) -> Router {
+        Router::new()
+            .route("/api/import/csv", post(import_csv_handler))
+            .route("/api/import/json", post(import_json_handler))
+            .with_state(state)
+    }
+
+    /// An import "into tenant B" wrote to the one store this build serves --
+    /// the default graph -- and `mutate` persisted it under B, so the rows were
+    /// visible where they were not sent and recorded where they were not
+    /// visible (#336). It is refused, as `/api/query` refuses it (#366), and
+    /// neither graph is touched.
+    #[tokio::test]
+    async fn csv_import_into_another_tenant_does_not_land_in_the_default_graph() {
+        let (state, pm, _dir) = state_with_persistence();
+        let (status, json) = post_csv_fields(
+            import_router(state.clone()),
+            &[("label", "Person"), ("graph", "tenant_b")],
+            "name\nada\n",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            0,
+            "an import sent to tenant_b landed in the default graph"
+        );
+        pm.checkpoint().unwrap();
+        let on_disk = pm.recover("tenant_b").map(|(n, _)| n.len()).unwrap_or(0);
+        assert_eq!(on_disk, 0, "tenant_b's storage holds rows it never served");
+    }
+
+    #[tokio::test]
+    async fn json_import_into_another_tenant_does_not_land_in_the_default_graph() {
+        let (state, pm, _dir) = state_with_persistence();
+        let (status, json) = post_json_import(
+            import_router(state.clone()),
+            serde_json::json!({"label": "Person", "graph": "tenant_b", "nodes": [{"name": "ada"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(state.store.read().await.node_count(), 0);
+        pm.checkpoint().unwrap();
+        let on_disk = pm.recover("tenant_b").map(|(n, _)| n.len()).unwrap_or(0);
+        assert_eq!(on_disk, 0);
+    }
+
+    /// A credential bound to a tenant may not import into another graph --
+    /// the default one included -- the check `/api/query` already makes (#1328).
+    #[tokio::test]
+    async fn a_tenant_bound_credential_cannot_import_into_the_default_graph() {
+        const D: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let cred = crate::auth::Credential::parse(&format!("bob:{D}:tenant=acme:roles=write"))
+            .unwrap()
+            .unwrap();
+        let (state, _pm, _dir) = state_with_persistence();
+        let app =
+            import_router(state.clone()).layer(axum::Extension(crate::http::server::Subject(cred)));
+
+        let (status, json) =
+            post_csv_fields(app.clone(), &[("label", "Person")], "name\nada\n").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        let (status, json) = post_json_import(
+            app,
+            serde_json::json!({"label": "Person", "nodes": [{"name": "ada"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert_eq!(state.store.read().await.node_count(), 0);
+    }
+
+    /// Nodes, then the edges between them, the way the issue's loader does it:
+    /// numeric keys imported as integers are matched by the text in the edge
+    /// file, the other columns become the relationship's properties, and the
+    /// edges reach storage.
+    #[tokio::test]
+    async fn csv_edge_import_connects_existing_nodes() {
+        let (state, pm, _dir) = state_with_persistence();
+        let app = import_router(state.clone());
+        let (s, j) = post_csv_fields(
+            app.clone(),
+            &[("label", "Customer")],
+            "c_custkey,name\n101,ada\n102,grace\n",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+        let (s, j) = post_csv_fields(
+            app.clone(),
+            &[("label", "Order")],
+            "o_orderkey\n50001\n50002\n50003\n",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+
+        let (status, json) = post_csv_fields(
+            app,
+            &[
+                ("import_mode", "edge"),
+                ("source_label", "Customer"),
+                ("source_key_col", "c_custkey"),
+                ("target_label", "Order"),
+                ("target_key_col", "o_orderkey"),
+                ("edge_type", "PLACED"),
+            ],
+            "c_custkey,o_orderkey,channel\n101,50001,web\n101,50002,web\n102,50003,phone\n",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["import_mode"], "edge");
+        assert_eq!(json["processed"], 3);
+        assert_eq!(json["created"], 3);
+        assert_eq!(json["skipped"], 0);
+
+        let store = state.store.read().await;
+        assert_eq!(store.edge_count(), 3);
+        let placed = store.get_edges_by_type(&"PLACED".into());
+        assert_eq!(placed.len(), 3);
+        for e in &placed {
+            assert!(store
+                .get_node(e.source)
+                .unwrap()
+                .has_label(&"Customer".into()));
+            assert!(store.get_node(e.target).unwrap().has_label(&"Order".into()));
+        }
+        let ada = store
+            .get_nodes_by_label(&"Customer".into())
+            .into_iter()
+            .find(|n| {
+                store.node_property(n.id, "name") == Some(PropertyValue::String("ada".into()))
+            })
+            .unwrap()
+            .id;
+        let from_ada: Vec<_> = placed.iter().filter(|e| e.source == ada).collect();
+        assert_eq!(from_ada.len(), 2);
+        assert_eq!(
+            store.edge_property(from_ada[0].id, "channel"),
+            Some(PropertyValue::String("web".into())),
+            "the non-key column did not become an edge property"
+        );
+        assert!(store.check_integrity().is_empty());
+        drop(store);
+
+        pm.checkpoint().unwrap();
+        let (_, edges) = pm.recover("default").unwrap();
+        assert_eq!(edges.len(), 3, "the edges did not reach storage");
+    }
+
+    /// A record whose endpoint does not exist never becomes a dangling edge
+    /// (#1143). Strict, the default, refuses the whole file and writes nothing;
+    /// `strict=false` skips and counts the bad records and imports the rest.
+    #[tokio::test]
+    async fn csv_edge_import_refuses_dangling_endpoints() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = import_router(state.clone());
+        let (s, j) = post_csv_fields(app.clone(), &[("label", "P")], "id\na\nb\n").await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+        // Both ends are `:P` keyed on `id`, which one file cannot name twice,
+        // so the columns are `from`/`to` and the property is given explicitly.
+        let fields = [
+            ("import_mode", "edge"),
+            ("source_label", "P"),
+            ("source_key_col", "from"),
+            ("source_key_prop", "id"),
+            ("target_label", "P"),
+            ("target_key_col", "to"),
+            ("target_key_prop", "id"),
+            ("edge_type", "KNOWS"),
+        ];
+        let csv = "from,to\na,b\na,zzz\nqqq,b\n";
+
+        let (status, json) = post_csv_fields(app.clone(), &fields, csv).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["missing_sources"], 1, "{json}");
+        assert_eq!(json["missing_targets"], 1, "{json}");
+        assert_eq!(json["created"], 0);
+        assert_eq!(
+            state.store.read().await.edge_count(),
+            0,
+            "a strict import with a dangling record wrote the good ones anyway"
+        );
+
+        let mut lenient = fields.to_vec();
+        lenient.push(("strict", "false"));
+        let (status, json) = post_csv_fields(app, &lenient, csv).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["processed"], 3);
+        assert_eq!(json["created"], 1);
+        assert_eq!(json["skipped"], 2);
+        let store = state.store.read().await;
+        assert_eq!(store.edge_count(), 1);
+        assert!(store.check_integrity().is_empty());
+    }
+
+    /// Two nodes carrying the same key make the key ambiguous: the edge is not
+    /// attached to whichever one a hash map happened to keep.
+    #[tokio::test]
+    async fn an_ambiguous_endpoint_key_is_refused() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = import_router(state.clone());
+        post_csv_fields(app.clone(), &[("label", "P")], "id\na\na\nb\n").await;
+        let (status, json) = post_csv_fields(
+            app,
+            &[
+                ("import_mode", "edge"),
+                ("source_label", "P"),
+                ("source_key_col", "from"),
+                ("source_key_prop", "id"),
+                ("target_label", "P"),
+                ("target_key_col", "to"),
+                ("target_key_prop", "id"),
+                ("edge_type", "KNOWS"),
+            ],
+            "from,to\na,b\n",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["ambiguous"], 1, "{json}");
+        assert_eq!(state.store.read().await.edge_count(), 0);
+    }
+
+    /// The JSON importer takes the same edge mode, and its keys may be numbers.
+    #[tokio::test]
+    async fn json_edge_import_connects_existing_nodes() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let app = import_router(state.clone());
+        let (s, j) = post_json_import(
+            app.clone(),
+            serde_json::json!({"label": "City", "nodes": [{"id": 1}, {"id": 2}, {"id": 3}]}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{j}");
+
+        let (status, json) = post_json_import(
+            app,
+            serde_json::json!({
+                "import_mode": "edge",
+                "source_label": "City", "source_key_col": "from", "source_key_prop": "id",
+                "target_label": "City", "target_key_col": "to", "target_key_prop": "id",
+                "edge_type": "ROAD",
+                "strict": false,
+                "edges": [
+                    {"from": 1, "to": 2, "km": 12.5},
+                    {"from": 2, "to": 3, "km": 4},
+                    {"from": 3, "to": 99}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["created"], 2, "{json}");
+        assert_eq!(json["missing_targets"], 1, "{json}");
+        let store = state.store.read().await;
+        assert_eq!(store.get_edges_by_type(&"ROAD".into()).len(), 2);
+        assert!(store.check_integrity().is_empty());
+    }
+
+    /// An edge import with a field missing is refused rather than guessed.
+    #[tokio::test]
+    async fn an_edge_import_without_its_endpoint_fields_is_refused() {
+        let (state, _pm, _dir) = state_with_persistence();
+        let (status, json) = post_json_import(
+            import_router(state),
+            serde_json::json!({"import_mode": "edge", "edge_type": "R", "edges": [{}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"].as_str().unwrap().contains("source_label"),
+            "{json}"
         );
     }
 
